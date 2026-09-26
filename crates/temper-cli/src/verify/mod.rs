@@ -373,7 +373,7 @@ name = "AddTask"
 kind = "input"
 from = ["Active"]
 params = ["title"]
-effect = [{ type = "spawn", entity_type = "Task", entity_id_source = "{uuid}", initial_action = "Create" }]
+effect = ["spawn('Task', 'Create')"]
 "#;
         let task = r#"
 [automaton]

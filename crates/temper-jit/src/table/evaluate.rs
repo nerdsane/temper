@@ -163,8 +163,7 @@ mod tests {
         let r = result.unwrap();
         assert!(r.success);
         assert_eq!(r.new_state, "Submitted");
-        assert!(r.effects.contains(&Effect::SetState("Submitted".into())));
-        assert!(r.effects.contains(&Effect::EmitEvent("SubmitOrder".into())));
+        assert_eq!(r.effects, vec![Effect::SetState("Submitted".into())]);
     }
 
     #[test]

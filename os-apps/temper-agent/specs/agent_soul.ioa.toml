@@ -48,7 +48,7 @@ kind = "input"
 from = ["Draft"]
 to = "Active"
 hint = "Make the soul available for agent assignment. Only supervisors/humans."
-effect = [{ type = "increment", var = "version" }]
+effect = ["version += 1"]
 
 [[action]]
 name = "Update"
@@ -56,7 +56,7 @@ kind = "input"
 from = ["Active"]
 params = ["content_file_id", "description"]
 hint = "Update soul content. Increments version."
-effect = [{ type = "increment", var = "version" }]
+effect = ["version += 1"]
 
 [[action]]
 name = "Archive"

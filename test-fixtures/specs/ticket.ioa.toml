@@ -37,7 +37,7 @@ name = "ReplyToCustomer"
 kind = "internal"
 from = ["InProgress"]
 to = "WaitingOnCustomer"
-effect = "increment replies"
+effect = ["replies += 1"]
 hint = "Agent sends a reply and waits for customer response."
 
 [[action]]
@@ -45,7 +45,7 @@ name = "CustomerReply"
 kind = "input"
 from = ["WaitingOnCustomer"]
 to = "InProgress"
-effect = "set customer_responded true"
+effect = ["customer_responded = true"]
 hint = "Customer responds to the agent's reply."
 
 [[action]]

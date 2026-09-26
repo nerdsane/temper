@@ -305,11 +305,15 @@ name = "Order"
 states = ["Draft", "Done"]
 initial = "Draft"
 
+[[state]]
+name = "mood"
+type = "emotion"
+initial = "calm"
+
 [[action]]
 name = "Complete"
 from = ["Draft"]
 to = "Done"
-effect = "set phantom true"
 "#,
     )
     .expect("write ioa");

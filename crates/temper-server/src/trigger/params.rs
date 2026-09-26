@@ -20,7 +20,7 @@ use super::types::ReactionTarget;
 ///   is inserted at `target_key`. A `None` source field logs a warning and
 ///   skips that key — the reaction still fires with a partial param map.
 /// * `params` and `params_from` keys must not collide; that is enforced at
-///   parse time in `registry::parse_reactions`, so a collision at runtime
+///   spec parse time (`[[action.triggers]]` validation), so a collision at runtime
 ///   would indicate a bug. If one is observed here, `params_from` wins and we
 ///   log an error.
 pub(crate) fn build_effective_params(

@@ -2,7 +2,7 @@
 //!
 //! Provides:
 //! - IOA specs for Agent, ContextManager, ToolRouter, Compactor (embedded)
-//! - Reaction rules wiring all actors (embedded)
+//! - Entity-kind `[[action.triggers]]` in each spec wiring the actors
 //! - LlmIntegrationActor — AI Gateway via reqwest, streams via Bus actor
 //! - ToolExecutorActor — dispatches tools via Bus actor (transport-agnostic)
 //! - ToolRegistryActor — maps (session, tool_name) → client_id
@@ -20,8 +20,7 @@ use std::sync::Arc;
 
 use temper_actor_runtime::spec_actor::SpecMessage;
 use temper_actor_runtime::{Actor, ActorContext, ActorError, Message};
-use temper_actor_runtime::{ActorSystem, SpecDrivenActor, build_actor_routing};
-use temper_runtime::reaction::parse_reactions;
+use temper_actor_runtime::{ActorSystem, SpecDrivenActor};
 
 pub use llm::LlmIntegrationActor;
 pub use tool_executor::{ToolDriver, ToolExecutorActor, ToolResult};
@@ -36,8 +35,6 @@ pub const AGENT_SPEC: &str = PROCESS_SPEC; // legacy alias
 pub const CONTEXT_MANAGER_SPEC: &str = include_str!("../specs/context_manager.ioa.toml");
 pub const TOOL_ROUTER_SPEC: &str = include_str!("../specs/tool_router.ioa.toml");
 pub const COMPACTOR_SPEC: &str = include_str!("../specs/compactor.ioa.toml");
-pub const PROCESS_REACTIONS: &str = include_str!("../specs/process.reactions.toml");
-pub const AGENT_REACTIONS: &str = PROCESS_REACTIONS; // legacy alias
 
 // ─── Agent system setup ───────────────────────────────────────────────────────
 
@@ -46,66 +43,47 @@ pub const AGENT_REACTIONS: &str = PROCESS_REACTIONS; // legacy alias
 pub async fn register_agent_actors(
     system: &Arc<ActorSystem>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let rules = parse_reactions(PROCESS_REACTIONS)
-        .map_err(|e| format!("failed to parse reactions: {e}"))?;
-
     // Process (renamed from Agent) — the orchestrator state machine.
     system
         .register(Arc::new(
-            SpecDrivenActor::from_ioa(PROCESS_SPEC, build_actor_routing("Process", &rules))?
-                .with_input_field_resets(
-                    ["StartProcess", "SendInput"]
-                        .into_iter()
-                        .map(|action| {
-                            (
-                                action.to_string(),
-                                [
-                                    "tool_calls",
-                                    "tool_results",
-                                    "child_result",
-                                    "response",
-                                    "error",
-                                ]
-                                .into_iter()
-                                .map(str::to_string)
-                                .collect(),
-                            )
-                        })
-                        .collect(),
-                ),
+            SpecDrivenActor::from_ioa(PROCESS_SPEC)?.with_input_field_resets(
+                ["StartProcess", "SendInput"]
+                    .into_iter()
+                    .map(|action| {
+                        (
+                            action.to_string(),
+                            [
+                                "tool_calls",
+                                "tool_results",
+                                "child_result",
+                                "response",
+                                "error",
+                            ]
+                            .into_iter()
+                            .map(str::to_string)
+                            .collect(),
+                        )
+                    })
+                    .collect(),
+            ),
         ))
         .await?;
     // AgentDefinition — config template, spawns Process instances.
     system
-        .register(Arc::new(SpecDrivenActor::from_ioa(
-            AGENT_DEFINITION_SPEC,
-            build_actor_routing("AgentDefinition", &rules),
-        )?))
+        .register(Arc::new(SpecDrivenActor::from_ioa(AGENT_DEFINITION_SPEC)?))
         .await?;
     // Message — conversation history, written by Process/LLM actors.
     system
-        .register(Arc::new(SpecDrivenActor::from_ioa(
-            MESSAGE_SPEC,
-            build_actor_routing("Message", &rules),
-        )?))
+        .register(Arc::new(SpecDrivenActor::from_ioa(MESSAGE_SPEC)?))
         .await?;
     system
-        .register(Arc::new(SpecDrivenActor::from_ioa(
-            CONTEXT_MANAGER_SPEC,
-            build_actor_routing("ContextManager", &rules),
-        )?))
+        .register(Arc::new(SpecDrivenActor::from_ioa(CONTEXT_MANAGER_SPEC)?))
         .await?;
     system
-        .register(Arc::new(SpecDrivenActor::from_ioa(
-            TOOL_ROUTER_SPEC,
-            build_actor_routing("ToolRouter", &rules),
-        )?))
+        .register(Arc::new(SpecDrivenActor::from_ioa(TOOL_ROUTER_SPEC)?))
         .await?;
     system
-        .register(Arc::new(SpecDrivenActor::from_ioa(
-            COMPACTOR_SPEC,
-            build_actor_routing("Compactor", &rules),
-        )?))
+        .register(Arc::new(SpecDrivenActor::from_ioa(COMPACTOR_SPEC)?))
         .await?;
 
     // Mock integrations — override with real actors for production use.
@@ -261,25 +239,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn process_reactions_route_core_effects() {
-        let rules = parse_reactions(PROCESS_REACTIONS).expect("parse reactions");
-        let routing = build_actor_routing("Process", &rules);
-        assert_eq!(routing.get("PrepareContext").unwrap().0, "ContextManager");
-        assert_eq!(
-            routing.get("ToolCallBatchRequested").unwrap().0,
-            "ToolRouter"
-        );
-        assert_eq!(
-            routing.get("spawn_child").unwrap().0,
-            "ChildSpawnerIntegration"
-        );
-        assert_eq!(
-            routing.get("schedule_wakeup").unwrap().0,
-            "WakeupSchedulerIntegration"
-        );
-        assert_eq!(
-            routing.get("notify_parent").unwrap().0,
-            "ChildCompletionIntegration"
-        );
+    fn process_triggers_route_core_actions() {
+        let actor = SpecDrivenActor::from_ioa(PROCESS_SPEC).expect("process spec");
+        let target = |action: &str| actor.routing()[action][0].0.clone();
+        assert_eq!(target("StartProcess"), "ContextManager");
+        assert_eq!(target("InferenceCompleteToolCalls"), "ToolRouter");
+        assert_eq!(target("SpawnChild"), "ChildSpawnerIntegration");
+        assert_eq!(target("SleepProcess"), "WakeupSchedulerIntegration");
+        assert_eq!(target("CompleteProcess"), "ChildCompletionIntegration");
     }
 }

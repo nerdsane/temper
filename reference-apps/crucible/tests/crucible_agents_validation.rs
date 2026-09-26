@@ -71,7 +71,7 @@ permit(principal, action in [Action::"list", Action::"read", Action::"create", A
 fn build_crucible_state() -> ServerState {
     let csdl = parse_csdl(MODEL_CSDL).expect("crucible CSDL should parse");
     let mut registry = SpecRegistry::new();
-    registry.register_tenant_with_reactions_and_constraints(
+    registry.register_tenant_with_constraints(
         "default",
         csdl,
         MODEL_CSDL.to_string(),
@@ -87,7 +87,6 @@ fn build_crucible_state() -> ServerState {
             ("AgentVersion", AGENT_VERSION_IOA),
             ("CallableAgent", CALLABLE_AGENT_IOA),
         ],
-        Vec::new(),
         Some(CROSS_INVARIANTS_TOML.to_string()),
     );
 

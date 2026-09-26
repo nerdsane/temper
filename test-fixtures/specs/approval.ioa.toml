@@ -29,7 +29,7 @@ name = "AssignReviewer"
 kind = "input"
 from = ["Drafted"]
 to = "Drafted"
-effect = "set has_reviewer true"
+effect = ["has_reviewer = true"]
 hint = "Assign a reviewer before submission."
 
 [[action]]
@@ -45,7 +45,7 @@ name = "Approve"
 kind = "internal"
 from = ["PendingApproval"]
 to = "Approved"
-effect = "increment approvals"
+effect = ["approvals += 1"]
 hint = "Reviewer approves the document."
 
 [[action]]
@@ -67,7 +67,7 @@ name = "Revise"
 kind = "input"
 from = ["Rejected"]
 to = "Drafted"
-effect = "set has_reviewer false"
+effect = ["has_reviewer = false"]
 hint = "Author revises after rejection. Must reassign reviewer."
 
 # --- Safety Invariants ---

@@ -23,7 +23,7 @@ name = "Complete"
 kind = "input"
 from = ["Open"]
 to = "Done"
-effect = "set is_done true"
+effect = ["is_done = true"]
 "#;
     let result = parse_automaton(spec);
     assert!(
@@ -132,7 +132,12 @@ initial = "Active"
 name = "Activate"
 from = ["Refreshing"]
 to = "Active"
-effect = [{ type = "schedule", action = "Refresh", delay_seconds = 2700 }]
+effect = ["schedule('Refresh', 2700)"]
+
+[[action]]
+name = "Refresh"
+from = ["Active"]
+to = "Refreshing"
 "#;
 
     let automaton = parse_automaton(spec).expect("should parse schedule effect");
@@ -155,38 +160,40 @@ effect = [{ type = "schedule", action = "Refresh", delay_seconds = 2700 }]
 }
 
 #[test]
-fn test_parse_set_counter_from_param_effect() {
+fn test_parse_counter_assignment_from_param() {
     let spec = r#"
 [automaton]
 name = "Upload"
 states = ["Pending", "Ready"]
 initial = "Pending"
 
+[[state]]
+name = "size_bytes"
+type = "counter"
+initial = "0"
+
 [[action]]
 name = "Complete"
 from = ["Pending"]
 to = "Ready"
-effect = [{ type = "set_counter_from_param", var = "size_bytes", param = "payload_size" }]
+effect = ["size_bytes = params.payload_size"]
 "#;
 
-    let automaton = parse_automaton(spec).expect("should parse set_counter_from_param effect");
+    let automaton = parse_automaton(spec).expect("should parse a param assignment");
     let complete = automaton
         .actions
         .iter()
         .find(|action| action.name == "Complete")
         .unwrap();
     assert_eq!(complete.effect.len(), 1);
-    match &complete.effect[0] {
-        Effect::SetCounterFromParam { var, param } => {
-            assert_eq!(var, "size_bytes");
-            assert_eq!(param, "payload_size");
-        }
-        other => panic!("expected SetCounterFromParam, got: {other:?}"),
-    }
+    assert_eq!(
+        complete.effect[0].to_string(),
+        "size_bytes = params.payload_size"
+    );
 }
 
 #[test]
-fn test_unknown_inline_effect_type_rejected() {
+fn test_schedule_of_an_unknown_action_is_rejected() {
     let spec = r#"
 [automaton]
 name = "Broken"
@@ -197,42 +204,14 @@ initial = "Draft"
 name = "Complete"
 from = ["Draft"]
 to = "Done"
-effect = [{ type = "mystery_effect", value = "x" }]
+effect = ["schedule('Expire', 60)"]
 "#;
-    let err = parse_automaton(spec).expect_err("unknown inline effect type should fail");
+    let err = parse_automaton(spec).expect_err("scheduling an undeclared action should fail");
     assert!(
         err.to_string()
-            .contains("unsupported effect type 'mystery_effect'")
+            .contains("schedules unknown action 'Expire'"),
+        "{err}"
     );
-}
-
-#[test]
-fn test_legacy_inline_effect_aliases_supported() {
-    let spec = r#"
-[automaton]
-name = "Plan"
-states = ["Active"]
-initial = "Active"
-
-[[action]]
-name = "AddTask"
-from = ["Active"]
-effect = [
-  { type = "spawn_entity", entity_type = "Task", entity_id_source = "{uuid}", initial_action = "Create" },
-  { type = "emit_event", event = "TaskAdded" }
-]
-"#;
-    let automaton = parse_automaton(spec).expect("legacy aliases should parse");
-    let add_task = automaton
-        .actions
-        .iter()
-        .find(|action| action.name == "AddTask")
-        .expect("AddTask action should exist");
-    assert!(matches!(
-        add_task.effect.first(),
-        Some(Effect::Spawn { .. })
-    ));
-    assert!(matches!(add_task.effect.get(1), Some(Effect::Emit { .. })));
 }
 
 #[test]

@@ -85,14 +85,14 @@ kind = "input"
 from = ["Scheduled"]
 params = ["agent_id", "org_id", "wake_reason", "max_turns", "adapter_type"]
 hint = "Initialize heartbeat run context before budget approval."
-effect = [{ type = "set_bool", var = "agent_bound", value = "true" }]
+effect = ["agent_bound = true"]
 
 [[action]]
 name = "ApproveBudget"
 kind = "input"
 from = ["Scheduled"]
 hint = "Approve execution budget for this run."
-effect = [{ type = "set_bool", var = "budget_approved", value = "true" }]
+effect = ["budget_approved = true"]
 
 [[action]]
 name = "CheckIn"
@@ -108,7 +108,13 @@ kind = "input"
 from = ["CheckingIn"]
 to = "Working"
 hint = "Start execution and trigger the configured adapter integration."
-effect = [{ type = "trigger", name = "execute_agent" }]
+
+[[action.triggers]]
+name = "execute_agent"
+kind = "adapter"
+adapter = "{field:adapter_type}"
+on_success = "RecordResult"
+on_failure = "Fail"
 
 [[action]]
 name = "RecordTurn"
@@ -122,9 +128,7 @@ params = [
   "cost_cents"
 ]
 hint = "Record a completed execution turn with caller-provided cumulative token and cost totals."
-effect = [
-  { type = "increment", var = "turn_count" }
-]
+effect = ["turn_count += 1"]
 
 [[action]]
 name = "SaveCheckpoint"
@@ -139,7 +143,7 @@ kind = "input"
 from = ["Working"]
 params = ["result"]
 hint = "Record execution output payload."
-effect = [{ type = "set_bool", var = "has_result", value = "true" }]
+effect = ["has_result = true"]
 
 [[action]]
 name = "Complete"
@@ -177,23 +181,3 @@ assert = "status in ['CheckingIn', 'Working', 'Completed'] => budget_approved"
 [[invariant]]
 name = "CompletedHasResult"
 assert = "status in ['Completed'] => has_result"
-
-# --- Integrations ---
-
-[[integration]]
-name = "execute_agent"
-trigger = "execute_agent"
-type = "adapter"
-adapter = "{field:adapter_type}"
-on_success = "RecordResult"
-on_failure = "Fail"
-
-[[integration]]
-name = "notify_completed"
-trigger = "Complete"
-type = "webhook"
-
-[[integration]]
-name = "notify_failed"
-trigger = "Fail"
-type = "webhook"

@@ -57,6 +57,7 @@ initial = ""
 name = "AddItem"
 kind = "input"
 from = ["Draft"]
+effect = ["items += 1"]
 
 [[action]]
 name = "SubmitOrder"
@@ -175,7 +176,7 @@ name = "IncrementUsage"
 kind = "input"
 from = ["Active"]
 to = "Active"
-effect = [{ type = "increment", var = "used_bytes", amount = "size_bytes" }]
+effect = ["used_bytes += params.size_bytes"]
 params = ["size_bytes"]
 "#;
 
@@ -186,12 +187,13 @@ fn build_state(tenant: &str, tenant_policy: &str) -> ServerState {
     let mut registry = SpecRegistry::new();
     let csdl = parse_csdl(CSDL_XML).expect("CSDL should parse");
     registry
-        .try_register_tenant_with_reactions(
+        .try_register_tenant_with_constraints(
             tenant,
             csdl,
             CSDL_XML.to_string(),
             &[("Order", ORDER_IOA), ("Payment", PAYMENT_IOA)],
-            Vec::new(), // No external reactions.toml — triggers are inline.
+            None,
+            false,
         )
         .expect("tenant registration should succeed with inline triggers");
 
@@ -209,12 +211,13 @@ fn build_file_workspace_state(tenant: &str, tenant_policy: &str) -> ServerState 
     let mut registry = SpecRegistry::new();
     let csdl = parse_csdl(FILE_WORKSPACE_CSDL_XML).expect("filesystem CSDL should parse");
     registry
-        .try_register_tenant_with_reactions(
+        .try_register_tenant_with_constraints(
             tenant,
             csdl,
             FILE_WORKSPACE_CSDL_XML.to_string(),
             &[("File", FILE_IOA), ("Workspace", WORKSPACE_IOA)],
-            Vec::new(),
+            None,
+            false,
         )
         .expect("tenant registration should succeed with inline triggers");
 
@@ -334,52 +337,40 @@ permit(
 ///
 /// The path exercised here is the one that failed: registry registration, then
 /// `rebuild_reaction_dispatcher`, then a real dispatch that must move a second
-/// entity. The rules come in as `reactions.toml` rules, the way an app that
-/// crowds a tenant supplies them.
+/// entity. The filler rules are inline triggers on an action the test never
+/// dispatches, the shape of many apps sharing one tenant.
 #[tokio::test]
 async fn a_tenant_past_the_advisory_threshold_boots_and_still_fires_its_trigger() {
-    use temper_server::trigger::types::{
-        MAX_REACTIONS_PER_TENANT, ReactionRule, ReactionTarget, ReactionTrigger, TargetResolver,
-    };
+    use temper_server::trigger::types::MAX_REACTIONS_PER_TENANT;
 
     let tenant_name = "trigger-e2e-crowded";
     let tenant = TenantId::new(tenant_name);
 
-    // Inert filler rules on entity types this tenant never dispatches, purely
+    // Inert filler triggers on an action this test never dispatches, purely
     // to carry the count past the threshold - the shape of a tenant hosting
     // many apps, where no single app is at fault for the total.
-    let filler: Vec<ReactionRule> = (0..MAX_REACTIONS_PER_TENANT + 9)
-        .map(|i| ReactionRule {
-            name: format!("filler_{i}"),
-            when: ReactionTrigger {
-                entity_type: format!("Filler{i}"),
-                action: Some("Poke".to_string()),
-                to_state: None,
-                guard: None,
-            },
-            then: ReactionTarget {
-                entity_type: "Payment".to_string(),
-                action: "AuthorizePayment".to_string(),
-                params: serde_json::json!({}),
-                params_from: std::collections::BTreeMap::new(),
-            },
-            resolve_target: TargetResolver::SameId,
-            principal: None,
-        })
-        .collect();
-    assert!(filler.len() > MAX_REACTIONS_PER_TENANT);
+    let mut order =
+        format!("{ORDER_IOA}\n[[action]]\nname = \"Poke\"\nkind = \"input\"\nfrom = [\"Draft\"]\n");
+    for i in 0..MAX_REACTIONS_PER_TENANT + 9 {
+        order.push_str(&format!(
+            "\n[[action.triggers]]\nname = \"filler_{i}\"\nkind = \"entity\"\ntarget_entity = \"Payment\"\ntarget_action = \"AuthorizePayment\"\nresolve_target = {{ type = \"same_id\" }}\n"
+        ));
+    }
 
     let mut registry = SpecRegistry::new();
     let csdl = parse_csdl(CSDL_XML).expect("CSDL should parse");
     registry
-        .try_register_tenant_with_reactions(
+        .try_register_tenant(
             tenant_name,
             csdl,
             CSDL_XML.to_string(),
-            &[("Order", ORDER_IOA), ("Payment", PAYMENT_IOA)],
-            filler,
+            &[("Order", order.as_str()), ("Payment", PAYMENT_IOA)],
         )
         .expect("registration should succeed past the advisory threshold");
+    assert!(
+        registry.build_reaction_registry().rule_count(&tenant) > MAX_REACTIONS_PER_TENANT,
+        "the fillers must carry the tenant past the advisory threshold"
+    );
 
     let system = ActorSystem::new("trigger-e2e-crowded");
     let state = ServerState::from_registry(system, registry);

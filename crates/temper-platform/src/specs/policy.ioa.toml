@@ -51,7 +51,6 @@ from = ["Draft"]
 to = "Proposed"
 params = ["name", "description", "cedar_statement", "proposed_by"]
 hint = "Propose a Cedar policy for human approval."
-effect = [{ type = "emit", event = "PolicyProposed" }]
 
 [[action]]
 name = "Approve"
@@ -74,7 +73,6 @@ kind = "input"
 from = ["Approved"]
 to = "Active"
 hint = "Install the Cedar policy into the authorization engine."
-effect = [{ type = "emit", event = "PolicyActivated" }]
 
 [[action]]
 name = "Revoke"
@@ -83,4 +81,3 @@ from = ["Active"]
 to = "Revoked"
 params = ["reason"]
 hint = "Revoke an active policy. Removes it from the authorization engine."
-effect = [{ type = "emit", event = "PolicyRevoked" }]

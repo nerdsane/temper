@@ -23,7 +23,7 @@ pub(crate) fn scalar_string(value: &Value) -> Option<String> {
 }
 
 /// Render any value as a string: scalars as written, arrays and tables as TOML.
-pub(super) fn any_string(value: &Value) -> String {
+pub(crate) fn any_string(value: &Value) -> String {
     scalar_string(value).unwrap_or_else(|| value.to_string())
 }
 

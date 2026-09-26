@@ -404,6 +404,7 @@ mod tests {
                 to_state: Some("B".to_string()),
                 guard: Expr::always(),
                 effects: vec![],
+                params: BTreeMap::new(),
             }],
             invariants: vec![ResolvedInvariant {
                 name: "OnlyA".to_string(),
@@ -418,6 +419,7 @@ mod tests {
             initial_lists: BTreeMap::new(),
             counter_bounds: BTreeMap::new(),
             default_max_counter: 2,
+            list_literals: BTreeMap::new(),
         }
     }
 }

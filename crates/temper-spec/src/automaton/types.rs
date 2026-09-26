@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use super::field_invariant::FieldInvariant;
+pub use crate::predicate::Effect;
 use crate::predicate::Expr;
 
 /// Return whether a field name is owned by the runtime rather than an action.
@@ -44,8 +45,8 @@ pub struct Automaton {
     /// Liveness properties (something eventually happens).
     #[serde(default, rename = "liveness")]
     pub liveness: Vec<Liveness>,
-    /// Integration declarations (external triggers).
-    #[serde(default, rename = "integration")]
+    /// Dispatch records derived from external `[[action.triggers]]` blocks.
+    #[serde(default)]
     pub integrations: Vec<Integration>,
     /// Inbound webhook declarations (external callback receivers).
     #[serde(default, rename = "webhook")]
@@ -323,64 +324,6 @@ pub struct SubWriteSpec {
     pub generated_from: Option<String>,
 }
 
-/// An effect (state change in the post-state).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum Effect {
-    /// Increment a counter variable.
-    #[serde(rename = "increment")]
-    Increment {
-        var: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        amount: Option<String>,
-    },
-    /// Decrement a counter variable.
-    #[serde(rename = "decrement")]
-    Decrement {
-        var: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        amount: Option<String>,
-    },
-    /// Set a counter variable from an action param.
-    #[serde(rename = "set_counter_from_param")]
-    SetCounterFromParam { var: String, param: String },
-    /// Set a boolean variable.
-    #[serde(rename = "set_bool")]
-    SetBool { var: String, value: bool },
-    /// Emit a named event (output action).
-    #[serde(rename = "emit")]
-    Emit { event: String },
-    /// Append a value to a list variable (value comes from action params).
-    #[serde(rename = "list_append")]
-    ListAppend { var: String },
-    /// Remove a value from a list variable by index (index from action params).
-    #[serde(rename = "list_remove_at")]
-    ListRemoveAt { var: String },
-    /// Trigger a named WASM integration (post-transition async execution).
-    #[serde(rename = "trigger")]
-    Trigger { name: String },
-    /// Schedule a delayed action on the same entity.
-    #[serde(rename = "schedule")]
-    Schedule { action: String, delay_seconds: u64 },
-    /// Schedule an action at an absolute timestamp read from an entity field.
-    #[serde(rename = "schedule_at")]
-    ScheduleAt { action: String, field: String },
-    /// Spawn a child entity as a post-transition effect.
-    #[serde(rename = "spawn")]
-    Spawn {
-        /// The child entity type to create.
-        entity_type: String,
-        /// Source for the child entity ID: field name from params, or "{uuid}" for auto-generated.
-        entity_id_source: String,
-        /// Optional action to dispatch on the child after creation.
-        initial_action: Option<String>,
-        /// Optional field on the parent to store the child's ID.
-        store_id_in: Option<String>,
-        /// Optional list of field names to copy from parent state into child's initial_action params.
-        copy_fields: Option<Vec<String>>,
-    },
-}
-
 /// A safety invariant, proven by the verification cascade.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Invariant {
@@ -409,11 +352,10 @@ pub struct Liveness {
     pub has_actions: Option<bool>,
 }
 
-/// An integration declaration (external system trigger).
-///
-/// Integrations declare that a state machine event should trigger an external
-/// action (e.g., a webhook call or WASM module invocation). They are metadata
-/// only — they do not affect state transitions or verification.
+/// A dispatch record the runtime's WASM and adapter dispatchers look up by
+/// name. Not written in specs: derived at parse time from each external
+/// `[[action.triggers]]` block (see `parse_automaton`). They do not affect
+/// state transitions or verification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Integration {
     /// Integration name (e.g., "notify_fulfillment", "charge_payment").
@@ -609,6 +551,8 @@ pub enum TriggerKind {
     /// Outbound HTTP webhook. Optionally dispatches `on_success` / `on_failure`
     /// actions on the source entity afterwards.
     Webhook,
+    /// A platform hook registered by the host (for example `DispatchCallback`).
+    Hook,
 }
 
 /// Liveness expectation for a trigger (ADR-0046, minimal hook).
@@ -772,6 +716,11 @@ pub struct ActionTrigger {
     /// resolved from the source entity's post-action fields.
     #[serde(default)]
     pub body_template: Option<String>,
+
+    // ─── Hook-kind fields ───────────────────────────────────────────────
+    /// Name of the platform hook to run (required for `Hook` kind).
+    #[serde(default)]
+    pub hook: Option<String>,
 }
 
 #[cfg(test)]

@@ -245,6 +245,14 @@ type = "counter"
 initial = "0"
 
 [[action]]
+name = "AddItem"
+kind = "input"
+from = ["Draft"]
+params = ["ProductId"]
+effect = ["items += 1"]
+hint = "Add an item to a draft order."
+
+[[action]]
 name = "SubmitOrder"
 kind = "internal"
 from = ["Draft"]
@@ -270,10 +278,12 @@ assert = "status in ['Submitted'] => items > 0"
 
 1. `[automaton]`: Define `name`, `states` (all valid status values), `initial` state, and optional `terminal` states (no action may leave them).
 2. `[[state]]`: Declare state variables with `name`, `type` (`counter`, `bool`, `string`, `set`), and `initial` value.
-3. `[[action]]`: Define actions with `name`, `kind` (`input`/`output`/`internal`), `from` states, `to` state, optional `guard`, `params`, and `hint`.
+3. `[[action]]`: Define actions with `name`, `kind` (`input`/`output`/`internal`), `from` states, `to` state, optional `guard`, `params`, `effect`, and `hint`.
 4. `[[invariant]]`: Define safety invariants with `name` and one `assert` expression, proven over every reachable state.
-6. Every `guard` and `assert` is one expression in the predicate grammar (`&&`, `||`, `!`, `=>`, comparisons, `in`, `empty()`, `len()`, `Type[ref].status`); see [predicates.md](predicates.md).
-5. Action kinds: `input` = from environment (HTTP), always enabled in from-states; `output` = emitted events; `internal` = private state transitions.
+5. Every `guard` and `assert` is one expression in the predicate grammar (`&&`, `||`, `!`, `=>`, comparisons, `in`, `empty()`, `len()`, `Type[ref].status`); see [predicates.md](predicates.md).
+6. `effect` is a list of statements in the same grammar: `items += 1`, `retries -= 1`, `quota = params.quota`, `ready = true`, `append(tags, params.tag)`, `remove_at(tags, params.i)`, `schedule('Expire', 3600)`, `schedule_at('Expire', expires_at)`, `spawn('Task', 'Create', last_task_id)`. Statements are type-checked at load, and effects reading `params.p` are verified with `p` unknown. An action's name implies nothing: `AddItem` without an `effect` changes only `status`. See [predicates.md#effects](predicates.md#effects).
+7. `[[action.triggers]]`: the only way an action causes work elsewhere — `kind = "entity"` (another entity's action), `"wasm"`, `"adapter"`, `"webhook"`, or `"hook"` (a platform hook registered by the host). See [Section 9](#9-integration-engine).
+8. Action kinds: `input` = from environment (HTTP), always enabled in from-states; `output` = emitted events; `internal` = private state transitions.
 
 ### 3.3 Cedar (Access Control)
 
@@ -349,7 +359,7 @@ guard reads, and the statuses of related entities it reads:
 1. Find matching rule by action name
 2. Check `from_states` (is current status valid for this action?)
 3. Evaluate the `guard` expression
-4. If guards pass: apply effects (`SetState`, `IncrementCounter`, `SetBool`, `EmitEvent`, `Custom`), record event. `EmitEvent` feeds the Integration Engine for external webhooks (see [Section 9](#9-integration-engine)).
+4. If guards pass: apply the effect statements (status, counter, bool and list updates, `schedule`/`schedule_at`, `spawn`), record event. After commit, the action's `[[action.triggers]]` fire (see [Section 9](#9-integration-engine)).
 5. If guards fail: return 409 Conflict with error message
 
 **Critical**: `TransitionTable::from_ioa_source(ioa_toml)` is the sole production constructor. The TLA+ code path has been fully removed.
@@ -583,62 +593,59 @@ Evolution records reference these as portable SQL. Swapping providers doesn't br
 
 ## 9. Integration Engine
 
-Two mechanisms fire work after an action commits:
+Work outside the entity is declared as `[[action.triggers]]` on the action that causes it, and fires after that action commits. Effects never reach outside the entity. `[[integration]]` blocks, `trigger`/`emit` effects and `reactions.toml` are retired (ADR-0046, ADR-0180); `temper migrate-predicates` converts old specs.
 
-- **Cross-entity reactions** — in-system choreography (another entity's action). Declarative TOML, no code. Fire-and-forget, bounded cascade, deterministic under `SimReactionSystem`. Use reactions when both source and target are Temper entities. See [`docs/reactions.md`](reactions.md) for the full reference and [ADR-0045](adrs/0045-reactions-first-class-app-primitive.md) for the design.
-- **WASM integrations** — out-of-system work (external HTTP, LLM calls, third-party APIs). Described below. Use integrations when you need computation, I/O beyond the Temper cluster, or explicit retry / timeout semantics.
+| `kind` | Does | Required fields |
+|---|---|---|
+| `entity` | Dispatches an action on another Temper entity (a *reaction*) | `target_entity`, `target_action`, `resolve_target` |
+| `wasm` | Runs a sandboxed WASM module, then optionally `on_success` / `on_failure` on this entity | `module` (`config = { ... }` is passed to it) |
+| `adapter` | Runs a native platform adapter, then `on_success` / `on_failure` | `adapter`, `config` |
+| `webhook` | Outbound HTTP call (parses and installs, but no runtime dispatcher delivers it yet — ADR-0046 known gap; use `webhooks.toml` below) | `url`, `method` (optional `headers`, `body_template`) |
+| `hook` | A platform hook registered by the host | `hook` (e.g. `"DispatchCallback"`) |
 
-Integrations follow the **Outbox Pattern**: the state machine stays pure and deterministically verifiable; external calls happen out-of-band. `[[integration]]` declarations in IOA TOML are metadata — they don't affect state transitions or verification.
+- **Reactions** (`kind = "entity"`) — in-system choreography. Fire-and-forget, bounded cascade, deterministic under `SimReactionSystem`. Use them when both source and target are Temper entities. See [`docs/reactions.md`](reactions.md) for the full reference and [ADR-0045](adrs/0045-reactions-first-class-app-primitive.md) for the design.
+- **WASM, adapter and webhook triggers** — out-of-system work (external HTTP, LLM calls, third-party APIs). Use them when you need computation, I/O beyond the Temper cluster, or explicit retry / timeout semantics.
+
+Every trigger is authorized by Cedar under the invoking principal, or under the service identity named by its optional `principal`.
 
 ### Spec Syntax
 
-Declare integrations alongside your automaton:
-
 ```toml
-[[integration]]
-name = "notify_fulfillment"
-trigger = "SubmitOrder"
-type = "webhook"
+[[action]]
+name = "RefreshToken"
+from = ["Active"]
+to = "Refreshing"
+
+[[action.triggers]]
+name = "refresh_token"
+kind = "wasm"
+module = "http_fetch"
+on_success = "RefreshSucceeded"
+on_failure = "RefreshFailed"
+config = { method = "POST", url = "https://oauth2.googleapis.com/token" }
 ```
 
-The `trigger` names an action. When that action fires, the integration engine picks it up asynchronously.
+`on_success` / `on_failure` are ordinary actions on the same entity, so the callback path is a verified transition.
 
-### Runtime Architecture
+### Deployment-level webhooks
 
-```
-Entity Actor transition
-  → Effect::EmitEvent("SubmitOrder")
-  → mpsc channel
-  → IntegrationEngine (background tokio task)
-  → IntegrationRegistry.lookup("SubmitOrder")
-  → WebhookDispatcher.dispatch(config, event)
-```
-
-- **`IntegrationRegistry`** maps trigger event names to `IntegrationConfig` entries (built once at tenant registration from specs + deployment config).
-- **`WebhookDispatcher`** handles HTTP dispatch with configurable timeout and retry with exponential backoff.
-- **`IntegrationEngine`** runs as a background tokio task, receives `IntegrationEvent` messages via an `mpsc` channel, and dispatches to all registered webhooks for each trigger concurrently.
-
-### Deployment Configuration
-
-Webhook URLs are deployment-specific and live outside the IOA spec. See `reference-apps/ecommerce/integration.toml`:
+Each action also emits its own name implicitly. Deployment-specific webhooks key on those names from a `webhooks.toml` next to the app's specs, handled by `temper-server`'s `WebhookDispatcher`:
 
 ```toml
 [[webhook]]
 name = "notify_fulfillment"
 url = "https://fulfillment.example.com/orders"
-method = "POST"
-timeout_ms = 5000
-max_retries = 3
+actions = ["SubmitOrder"]
+entity_types = ["Order"]
 ```
 
-Each entry specifies the HTTP endpoint, method, timeout, and retry policy.
+Delivery is fire-and-forget; failures are logged and never affect the action response.
 
 ### Key Design Decisions
 
-- **Not inline in the state machine.** Integrations are side effects, not transitions. The verification cascade (L0-L3) works on the pure state machine unchanged.
-- **At-least-once delivery.** Trigger events originate from the Postgres event journal, so they survive crashes.
-- **Retry with exponential backoff.** Configurable per integration via `RetryPolicy`.
-- **DST-safe.** Deterministic simulation ignores `EmitEvent` effects — no HTTP calls during testing.
+- **Outbox pattern.** Triggers fire after the transition commits. The state machine stays pure, and the verification cascade (L0-L3) works on it unchanged; `liveness = "required"` asks the composite verifier to prove the target (or `on_success`) action eventually fires.
+- **Not inline in the state machine.** External calls are never effects or guards.
+- **DST-safe.** Deterministic simulation dispatches entity triggers through `SimReactionSystem`; external triggers make no network calls during testing.
 
 ---
 
@@ -921,7 +928,7 @@ any of these causes silent failures that are hard to diagnose after the fact.
 - [ ] `model.csdl.xml` entity types match IOA spec names and states
 - [ ] Cedar policies exist for each entity type in `specs/policies/`
 - [ ] No warnings from L0 SMT (dead guards, unreachable states)
-- [ ] If specs contain `[[integration]]` sections, `integration.toml` exists with webhook URLs and retry config
+- [ ] Every WASM / adapter / webhook `[[action.triggers]]` entry names a module, adapter or `url` that exists in the deployment, and its `on_success` / `on_failure` actions are declared
 
 **Persistence (events survive restart):**
 - [ ] `DATABASE_URL` is set and points to a running Postgres instance
@@ -983,7 +990,7 @@ any of these causes silent failures that are hard to diagnose after the fact.
 | Putting guards inline in action params | Guards are separate from action parameters | Use `guard = "items > 0"` for preconditions, `params = [...]` for action inputs |
 | Deploying without `DATABASE_URL` | Server runs fine but events are lost on restart — silent data loss | Always set `DATABASE_URL`, verify "Postgres connected" in startup log |
 | Not querying Postgres after first deploy | No way to know if persistence is actually working | Run `SELECT COUNT(*) FROM events` after dispatching actions |
-| Putting webhook calls inside state machine guards or effects | Breaks deterministic verification, introduces network into the transition | Use `[[integration]]` declarations — external calls happen out-of-band via the Integration Engine |
+| Putting webhook calls inside state machine guards or effects | Breaks deterministic verification, introduces network into the transition | Use `[[action.triggers]]` — external calls happen after commit, out of the transition |
 
 ---
 

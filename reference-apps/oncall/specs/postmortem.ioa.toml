@@ -28,7 +28,7 @@ initial = "0"
 name = "AddRootCause"
 kind = "input"
 from = ["Draft"]
-effect = "set has_root_cause true"
+effect = ["has_root_cause = true"]
 params = ["RootCauseDescription"]
 hint = "Agent adds root cause analysis to the postmortem draft."
 
@@ -45,7 +45,7 @@ name = "RequestRevision"
 kind = "input"
 from = ["InReview"]
 to = "Draft"
-effect = "increment review_rounds"
+effect = ["review_rounds += 1"]
 params = ["Feedback"]
 hint = "Human requests changes to the postmortem."
 
@@ -54,7 +54,7 @@ name = "ApprovePostmortem"
 kind = "input"
 from = ["InReview"]
 to = "Approved"
-effect = "increment review_rounds"
+effect = ["review_rounds += 1"]
 hint = "Human approves the postmortem after review."
 
 [[action]]

@@ -53,10 +53,7 @@ kind = "input"
 from = ["Current"]
 to = "Current"
 params = ["file_id", "version_number", "content_hash", "mime_type", "size_bytes", "previous_version_id", "created_by"]
-effect = [
-  { type = "set_counter_from_param", var = "version_number", param = "version_number" },
-  { type = "set_counter_from_param", var = "size_bytes", param = "size_bytes" },
-]
+effect = ["version_number = params.version_number", "size_bytes = params.size_bytes"]
 hint = "Create a new file version record with content metadata."
 
 [[action.triggers]]

@@ -171,16 +171,20 @@ When a spec needs external API calls (payments, email, notifications), use WASM 
 ### In the IOA spec
 
 ```toml
-[[integration]]
+[[action]]
+name = "ChargeCard"
+from = ["Pending"]
+to = "Charging"
+
+[[action.triggers]]
 name = "stripe_charge"
-trigger = "stripe_charge"
-type = "wasm"
+kind = "wasm"
 module = "stripe_charge"
 on_success = "ChargeSucceeded"
 on_failure = "ChargeFailed"
 ```
 
-The `trigger` matches an action's `effect = "trigger stripe_charge"`. When that action fires, the engine invokes the named WASM module. The module calls the external API and returns a result that dispatches either the `on_success` or `on_failure` callback action.
+The trigger is declared on the action that causes it (`[[integration]]` blocks and `trigger` effects are retired). When `ChargeCard` commits, the engine invokes the named WASM module. The module calls the external API and returns a result that dispatches either the `on_success` or `on_failure` callback action.
 
 ### Upload a WASM module
 

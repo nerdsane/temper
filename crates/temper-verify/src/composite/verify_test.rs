@@ -395,7 +395,7 @@ initial = "0"
 name = "Inc"
 from = ["Counting"]
 to = "Counting"
-effect = "increment n"
+effect = ["n += 1"]
 "#,
     );
     for i in 1..6 {
@@ -433,7 +433,7 @@ initial = "0"
 name = "Inc"
 from = ["Counting"]
 to = "Counting"
-effect = "increment n"
+effect = ["n += 1"]
 "#
         ));
     }

@@ -15,7 +15,14 @@ kind = "input"
 from = ["AwaitingAuth"]
 to = "Exchanging"
 params = ["code"]
-effect = [{ type = "trigger", name = "exchange_code" }]
+
+[[action.triggers]]
+name = "exchange_code"
+kind = "wasm"
+module = "http_fetch"
+on_success = "ExchangeSucceeded"
+on_failure = "ExchangeFailed"
+config = { headers = '{"Content-Type": "application/x-www-form-urlencoded"}', method = "POST", url = "https://oauth2.googleapis.com/token" }
 
 [[action]]
 name = "ExchangeSucceeded"
@@ -23,7 +30,7 @@ kind = "input"
 from = ["Exchanging"]
 to = "Authenticated"
 params = ["access_token", "refresh_token"]
-effect = [{ type = "schedule", action = "RefreshToken", delay_seconds = 2700 }]
+effect = ["schedule('RefreshToken', 2700)"]
 
 [[action]]
 name = "ExchangeFailed"
@@ -36,42 +43,27 @@ name = "RefreshToken"
 kind = "input"
 from = ["Authenticated"]
 to = "Refreshing"
-effect = [{ type = "trigger", name = "refresh_token" }]
+
+[[action.triggers]]
+name = "refresh_token"
+kind = "wasm"
+module = "http_fetch"
+on_success = "RefreshSucceeded"
+on_failure = "RefreshFailed"
+config = { headers = '{"Authorization": "Bearer {secret:gmail_refresh_token}"}', method = "POST", url = "https://oauth2.googleapis.com/token" }
 
 [[action]]
 name = "RefreshSucceeded"
 kind = "input"
 from = ["Refreshing"]
 to = "Authenticated"
-effect = [{ type = "schedule", action = "RefreshToken", delay_seconds = 2700 }]
+effect = ["schedule('RefreshToken', 2700)"]
 
 [[action]]
 name = "RefreshFailed"
 kind = "input"
 from = ["Refreshing"]
 to = "Expired"
-
-[[integration]]
-name = "exchange_code"
-trigger = "exchange_code"
-type = "wasm"
-module = "http_fetch"
-on_success = "ExchangeSucceeded"
-on_failure = "ExchangeFailed"
-url = "https://oauth2.googleapis.com/token"
-method = "POST"
-headers = '{"Content-Type": "application/x-www-form-urlencoded"}'
-
-[[integration]]
-name = "refresh_token"
-trigger = "refresh_token"
-type = "wasm"
-module = "http_fetch"
-on_success = "RefreshSucceeded"
-on_failure = "RefreshFailed"
-url = "https://oauth2.googleapis.com/token"
-method = "POST"
-headers = '{"Authorization": "Bearer {secret:gmail_refresh_token}"}'
 
 [[webhook]]
 name = "oauth_callback"

@@ -17,7 +17,6 @@ kind = "input"
 from = ["Pending"]
 to = "InReview"
 hint = "Start the code review process."
-effect = [{ type = "emit_event", event = "ReviewStarted" }]
 
 [[action]]
 name = "Approve"
@@ -26,7 +25,6 @@ from = ["InReview"]
 to = "Approved"
 params = ["reviewer", "comments"]
 hint = "Reviewer approves the change."
-effect = [{ type = "emit_event", event = "ReviewApproved" }]
 
 [[action]]
 name = "RequestChanges"
@@ -35,7 +33,6 @@ from = ["InReview"]
 to = "ChangesRequested"
 params = ["reviewer", "change_requests"]
 hint = "Reviewer requests changes before approval."
-effect = [{ type = "emit_event", event = "ChangesRequested" }]
 
 [[action]]
 name = "Reject"
@@ -44,7 +41,6 @@ from = ["InReview"]
 to = "Rejected"
 params = ["reviewer", "reason"]
 hint = "Reviewer rejects the change entirely."
-effect = [{ type = "emit_event", event = "ReviewRejected" }]
 
 [[action]]
 name = "ReSubmit"

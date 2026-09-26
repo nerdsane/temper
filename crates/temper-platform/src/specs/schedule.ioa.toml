@@ -62,11 +62,7 @@ kind = "input"
 from = ["Active"]
 params = ["last_run", "role", "goal", "model", "agent_type_id"]
 hint = "Fire the schedule — spawns an Agent child. Stays Active unless max_runs reached."
-effect = [
-  { type = "spawn", entity_type = "Agent", entity_id_source = "{uuid}", initial_action = "Assign", store_id_in = "last_agent_id" },
-  { type = "increment", var = "run_count" },
-  { type = "emit", event = "ScheduleFired" }
-]
+effect = ["spawn('Agent', 'Assign', last_agent_id)", "run_count += 1"]
 
 [[action]]
 name = "Complete"

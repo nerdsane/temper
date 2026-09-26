@@ -51,7 +51,6 @@ impl TransitionTable {
                 for e in a.effects {
                     effects.push(convert_effect(e));
                 }
-                effects.push(Effect::EmitEvent(a.name.clone()));
 
                 TransitionRule {
                     name: a.name,
@@ -179,24 +178,13 @@ impl TransitionTable {
 /// Convert a shared [`ResolvedEffect`] to the JIT [`Effect`] type.
 fn convert_effect(effect: ResolvedEffect) -> Effect {
     match effect {
-        ResolvedEffect::IncrementCounter(ref var) if var == "items" => Effect::IncrementItems,
-        ResolvedEffect::DecrementCounter(ref var) if var == "items" => Effect::DecrementItems,
-        ResolvedEffect::IncrementCounter(var) => Effect::IncrementCounter(var),
-        ResolvedEffect::IncrementCounterByParam { var, param } => {
-            Effect::IncrementCounterByParam { var, param }
-        }
-        ResolvedEffect::DecrementCounter(var) => Effect::DecrementCounter(var),
-        ResolvedEffect::DecrementCounterByParam { var, param } => {
-            Effect::DecrementCounterByParam { var, param }
-        }
-        ResolvedEffect::SetCounterFromParam { var, param } => {
-            Effect::SetCounterFromParam { var, param }
-        }
+        ResolvedEffect::SetCounter { var, value } => Effect::SetCounter { var, value },
+        ResolvedEffect::AddCounter { var, value } => Effect::AddCounter { var, value },
+        ResolvedEffect::SubCounter { var, value } => Effect::SubCounter { var, value },
         ResolvedEffect::SetBool { var, value } => Effect::SetBool { var, value },
-        ResolvedEffect::ListAppend(var) => Effect::ListAppend(var),
-        ResolvedEffect::ListRemoveAt(var) => Effect::ListRemoveAt(var),
-        ResolvedEffect::Emit(event) => Effect::EmitEvent(event),
-        ResolvedEffect::Trigger(name) => Effect::Custom(name),
+        ResolvedEffect::ListAppend { var, value } => Effect::ListAppend { var, value },
+        ResolvedEffect::ListRemoveAt { var, index } => Effect::ListRemoveAt { var, index },
+        ResolvedEffect::Dispatch(name) => Effect::Custom(name),
         ResolvedEffect::Schedule {
             action,
             delay_seconds,
@@ -207,16 +195,14 @@ fn convert_effect(effect: ResolvedEffect) -> Effect {
         ResolvedEffect::ScheduleAt { action, field } => Effect::ScheduleAtAction { action, field },
         ResolvedEffect::Spawn {
             entity_type,
-            entity_id_source,
             initial_action,
             store_id_in,
-            copy_fields,
+            id,
         } => Effect::SpawnEntity {
             entity_type,
-            entity_id_source,
             initial_action,
             store_id_in,
-            copy_fields,
+            id,
         },
     }
 }
@@ -237,7 +223,12 @@ initial = "Active"
 name = "Activate"
 from = ["Refreshing"]
 to = "Active"
-effect = [{ type = "schedule", action = "Refresh", delay_seconds = 2700 }]
+effect = ["schedule('Refresh', 2700)"]
+
+[[action]]
+name = "Refresh"
+from = ["Active"]
+to = "Refreshing"
 "#;
 
         let table = TransitionTable::from_ioa_source(spec);
@@ -383,66 +374,20 @@ initial = "Idle"
 name = "Start"
 from = ["Idle"]
 to = "Active"
-effect = [{ type = "spawn", entity_type = "SubTask", entity_id_source = "{uuid}", initial_action = "Begin", store_id_in = "subtask_id" }]
+effect = ["spawn('SubTask', 'Begin', subtask_id)"]
 "#;
 
         let table = TransitionTable::from_ioa_source(spec);
         let rule = table.rules.iter().find(|r| r.name == "Start").unwrap();
 
-        let has_spawn = rule.effects.iter().any(|e| {
-            matches!(
-                e,
-                Effect::SpawnEntity {
-                    entity_type,
-                    entity_id_source,
-                    initial_action,
-                    store_id_in,
-                    ..
-                } if entity_type == "SubTask"
-                    && entity_id_source == "{uuid}"
-                    && initial_action.as_deref() == Some("Begin")
-                    && store_id_in.as_deref() == Some("subtask_id")
-            )
-        });
         assert!(
-            has_spawn,
+            rule.effects.contains(&Effect::SpawnEntity {
+                entity_type: "SubTask".into(),
+                initial_action: "Begin".into(),
+                store_id_in: Some("subtask_id".into()),
+                id: None,
+            }),
             "expected SpawnEntity effect, got: {:?}",
-            rule.effects
-        );
-    }
-
-    #[test]
-    fn test_spawn_with_copy_fields_passes_through() {
-        let spec = r#"
-[automaton]
-name = "Parent"
-states = ["Idle", "Active"]
-initial = "Idle"
-
-[[action]]
-name = "Start"
-from = ["Idle"]
-to = "Active"
-effect = [{ type = "spawn", entity_type = "Session", entity_id_source = "{uuid}", initial_action = "Configure", store_id_in = "last_session_id", copy_fields = "system_prompt,model,tools_enabled" }]
-"#;
-
-        let table = TransitionTable::from_ioa_source(spec);
-        let rule = table.rules.iter().find(|r| r.name == "Start").unwrap();
-
-        let has_spawn = rule.effects.iter().any(|e| {
-            matches!(
-                e,
-                Effect::SpawnEntity {
-                    entity_type,
-                    copy_fields: Some(fields),
-                    ..
-                } if entity_type == "Session"
-                    && fields == &vec!["system_prompt".to_string(), "model".to_string(), "tools_enabled".to_string()]
-            )
-        });
-        assert!(
-            has_spawn,
-            "expected SpawnEntity with copy_fields, got: {:?}",
             rule.effects
         );
     }

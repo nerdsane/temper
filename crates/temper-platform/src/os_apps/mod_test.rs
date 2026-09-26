@@ -695,12 +695,11 @@ async fn test_reconcile_os_app_repairs_spec_content_drift_despite_matching_diges
             .map(|(entity_type, ioa_source)| (entity_type.as_str(), ioa_source.as_str()))
             .collect();
         registry
-            .try_register_tenant_with_reactions_and_constraints(
+            .try_register_tenant_with_constraints(
                 tenant.clone(),
                 parsed,
                 csdl,
                 &specs,
-                Vec::new(),
                 bundle.cross_invariants_toml.clone(),
                 true,
             )
@@ -798,12 +797,11 @@ async fn test_reconcile_os_app_repairs_entity_set_map_from_matching_digest() {
             .map(|(entity_type, ioa_source)| (entity_type.as_str(), ioa_source.as_str()))
             .collect();
         registry
-            .try_register_tenant_with_reactions_and_constraints(
+            .try_register_tenant_with_constraints(
                 tenant.clone(),
                 parsed,
                 broken_csdl,
                 &specs,
-                Vec::new(),
                 None,
                 false,
             )
@@ -1248,12 +1246,11 @@ async fn test_reinstall_of_skipped_specs_repairs_entity_set_map() {
             .map(|(entity_type, ioa_source)| (entity_type.as_str(), ioa_source.as_str()))
             .collect();
         registry
-            .try_register_tenant_with_reactions_and_constraints(
+            .try_register_tenant_with_constraints(
                 tenant.clone(),
                 parsed,
                 broken_csdl,
                 &specs,
-                Vec::new(),
                 None,
                 false,
             )
@@ -1711,12 +1708,11 @@ async fn test_runtime_recovery_heals_missing_entity_set_map_from_matching_digest
             .map(|(entity_type, ioa_source)| (entity_type.as_str(), ioa_source.as_str()))
             .collect();
         registry
-            .try_register_tenant_with_reactions_and_constraints(
+            .try_register_tenant_with_constraints(
                 tenant.clone(),
                 parsed,
                 broken_csdl,
                 &specs,
-                Vec::new(),
                 None,
                 false,
             )

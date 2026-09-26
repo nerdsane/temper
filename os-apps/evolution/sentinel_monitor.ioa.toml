@@ -46,7 +46,7 @@ name = "CheckSentinel"
 kind = "input"
 from = ["Active"]
 to = "Checking"
-effect = "increment check_count"
+effect = ["check_count += 1"]
 hint = "Trigger a sentinel check. Scheduled automatically via schedule effects."
 
 [[action]]
@@ -54,7 +54,7 @@ name = "AlertsFound"
 kind = "input"
 from = ["Checking"]
 to = "Triggering"
-effect = [{ type = "set_bool", var = "has_alerts", value = "true" }, { type = "increment", var = "alert_count" }]
+effect = ["has_alerts = true", "alert_count += 1"]
 params = ["AlertDetails", "SuggestedTarget"]
 hint = "Sentinel detected trajectory failure clusters."
 
@@ -63,7 +63,7 @@ name = "NoAlerts"
 kind = "input"
 from = ["Checking"]
 to = "Active"
-effect = "set has_alerts false"
+effect = ["has_alerts = false"]
 hint = "No alerts found, return to active monitoring."
 
 [[action]]
@@ -71,7 +71,7 @@ name = "CreateEvolutionRun"
 kind = "input"
 from = ["Triggering"]
 to = "Active"
-effect = [{ type = "increment", var = "evolution_runs_created" }, { type = "set_bool", var = "has_alerts", value = "false" }]
+effect = ["evolution_runs_created += 1", "has_alerts = false"]
 params = ["EvolutionRunId", "SkillName", "TargetEntityType"]
 hint = "Created an EvolutionRun entity for the affected skill."
 

@@ -18,6 +18,6 @@ pub mod types;
 
 pub use builder::{build_model_from_automaton, build_model_from_ioa};
 pub use types::{
-    LivenessKind, ModelEffect, ResolvedInvariant, ResolvedLiveness, ResolvedTransition,
+    LivenessKind, ModelEffect, ParamValue, ResolvedInvariant, ResolvedLiveness, ResolvedTransition,
     TemperModel, TemperModelAction, TemperModelState,
 };

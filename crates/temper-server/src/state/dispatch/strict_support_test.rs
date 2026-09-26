@@ -29,7 +29,7 @@ field = "revision"
 name = "Rollover"
 from = ["Running"]
 params = []
-effect = [{type="increment", var="revision"}]
+effect = ["revision += 1"]
 [[action]]
 name = "Fail"
 from = ["Running"]
@@ -39,7 +39,7 @@ params = ["error"]
 name = "Schedule"
 from = ["Running"]
 params = []
-effect = [{type="schedule", action="Poll", delay_seconds=10}]
+effect = ["schedule('Poll', 10)"]
 [[action]]
 name = "Poll"
 from = ["Running"]

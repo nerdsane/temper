@@ -21,7 +21,7 @@ name = "ClaimWorkItem"
 kind = "input"
 from = ["Queued"]
 to = "Claimed"
-effect = "set claimed true"
+effect = ["claimed = true"]
 params = ["WorkerId", "ClaimedBy"]
 hint = "Claim a work item for local execution."
 
@@ -39,7 +39,6 @@ name = "SucceedWorkItem"
 kind = "input"
 from = ["Running"]
 to = "Succeeded"
-effect = [{ type = "trigger", name = "work_item_succeeded" }]
 params = ["ResultJson", "EvidenceArtifactId", "Summary"]
 hint = "Record successful work item completion."
 
@@ -59,7 +58,6 @@ name = "FailWorkItem"
 kind = "input"
 from = ["Claimed", "Running"]
 to = "Failed"
-effect = [{ type = "trigger", name = "work_item_failed" }]
 params = ["FailureReason", "EvidenceArtifactId"]
 hint = "Record work item failure."
 

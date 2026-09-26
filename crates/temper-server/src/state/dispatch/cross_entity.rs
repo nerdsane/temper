@@ -110,7 +110,6 @@ impl crate::state::ServerState {
             let initial_action = req.initial_action.clone();
             let parent_params = action_params.clone();
             let agent = agent_ctx.clone();
-            let copied_fields = req.copied_field_values.clone();
             let workflow_root_entity_type = agent
                 .workflow_root_entity_type
                 .clone()
@@ -181,7 +180,6 @@ impl crate::state::ServerState {
                     let initializer = if let Some(action) = initial_action {
                         let mut params = parent_params.as_object().cloned().unwrap_or_default();
                         params.extend(parent_fields.clone());
-                        params.extend(copied_fields);
                         match state.prepare_generated_action_params(
                             &t,
                             &child_type,

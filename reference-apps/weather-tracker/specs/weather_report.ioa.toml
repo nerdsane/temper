@@ -11,9 +11,6 @@ from = ["Collecting"]
 to = "Fetching"
 hint = "Initiate weather data fetch from Open-Meteo API for this report's location."
 
-# ADR-0046: inline trigger — replaces the top-level [[integration]] block
-# below. Post-parse expansion synthesizes an Integration + trigger effect,
-# so the existing WASM runtime picks it up with zero behavioral change.
 [[action.triggers]]
 name = "fetch_open_meteo"
 kind = "wasm"
@@ -47,7 +44,3 @@ hint = "Move this report to historical archives."
 name = "EventuallyReady"
 from = ["Collecting"]
 reaches = ["Ready", "Archived"]
-
-# ADR-0046: [[integration]] block removed; replaced by [[action.triggers]]
-# on FetchWeatherData above. Post-parse expansion synthesizes the
-# equivalent integration automatically.

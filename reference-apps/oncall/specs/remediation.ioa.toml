@@ -29,7 +29,7 @@ name = "Approve"
 kind = "input"
 from = ["Proposed"]
 to = "Approved"
-effect = "set human_approved true"
+effect = ["human_approved = true"]
 params = ["ApproverId"]
 hint = "Human approves the proposed remediation."
 
@@ -46,7 +46,7 @@ name = "AutoApprove"
 kind = "input"
 from = ["Proposed"]
 to = "Approved"
-effect = "set human_approved true"
+effect = ["human_approved = true"]
 hint = "Auto-approve safe remediation actions (e.g., restart pod, scale up)."
 
 [[action]]
@@ -54,7 +54,7 @@ name = "Execute"
 kind = "internal"
 from = ["Approved"]
 to = "Executing"
-effect = "increment attempts"
+effect = ["attempts += 1"]
 hint = "Begin executing the approved remediation."
 
 [[action]]

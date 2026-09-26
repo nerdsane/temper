@@ -23,7 +23,7 @@ pub use cascade::{ActorSimResult, CascadeLevel, CascadeResult, LevelResult, Veri
 pub use checker::{VerificationResult, check_model};
 pub use composite::{CompositePlanError, CompositeVerificationPlan};
 pub use model::{
-    ModelEffect, ResolvedTransition, TemperModel, TemperModelAction, TemperModelState,
+    ModelEffect, ParamValue, ResolvedTransition, TemperModel, TemperModelAction, TemperModelState,
     build_model_from_ioa,
 };
 pub use paths::{

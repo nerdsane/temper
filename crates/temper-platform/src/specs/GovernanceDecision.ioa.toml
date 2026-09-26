@@ -97,7 +97,11 @@ from = ["Pending", "Approved", "Denied"]
 kind = "input"
 params = ["callback_tenant", "callback_entity_set", "callback_entity_id", "callback_on_approve", "callback_on_deny"]
 hint = "Register entity callback for decision resolution. Self-loop — does not change state. Late registration after approval/denial immediately replays DispatchCallback."
-effect = "trigger DispatchCallback"
+
+[[action.triggers]]
+name = "DispatchCallback"
+kind = "hook"
+hook = "DispatchCallback"
 
 [[action]]
 name = "Approve"
@@ -105,7 +109,16 @@ from = ["Pending"]
 to = "Approved"
 kind = "input"
 params = ["decided_by", "scope", "generated_policy"]
-effect = [{ type = "trigger", name = "GenerateCedarPolicy" }, { type = "trigger", name = "DispatchCallback" }]
+
+[[action.triggers]]
+name = "GenerateCedarPolicy"
+kind = "hook"
+hook = "GenerateCedarPolicy"
+
+[[action.triggers]]
+name = "DispatchCallback"
+kind = "hook"
+hook = "DispatchCallback"
 
 [[action]]
 name = "Deny"
@@ -113,7 +126,11 @@ from = ["Pending"]
 to = "Denied"
 kind = "input"
 params = ["decided_by", "denial_reason"]
-effect = "trigger DispatchCallback"
+
+[[action.triggers]]
+name = "DispatchCallback"
+kind = "hook"
+hook = "DispatchCallback"
 
 [[action]]
 name = "Expire"

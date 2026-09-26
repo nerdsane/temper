@@ -123,11 +123,8 @@ kind = "input"
 from = ["Active"]
 params = ["last_run_at"]
 hint = "Fire the cron job — creates and provisions a TemperAgent."
-effect = [{ type = "increment", var = "run_count" }, { type = "trigger", name = "cron_trigger" }]
+effect = ["run_count += 1"]
 
-# ADR-0046: inline trigger — migrated from [[integration]] below.
-# Post-parse expansion re-synthesizes the equivalent Integration so
-# the existing WASM/webhook runtime handles execution unchanged.
 [[action.triggers]]
 name = "cron_trigger"
 kind = "wasm"

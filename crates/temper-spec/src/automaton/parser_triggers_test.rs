@@ -1,6 +1,7 @@
 use super::super::*;
 #[allow(unused_imports)]
 use super::ORDER_IOA;
+use crate::automaton::{ResolvedEffect, dispatch_effects};
 
 // ADR-0046: `[[agent_trigger]]` retired along with the AgentTrigger struct.
 // The equivalent behavior is now an `[[action.triggers]]` block with
@@ -230,7 +231,7 @@ to = "Failed"
     let integration = automaton
         .integrations
         .iter()
-        .find(|ig| ig.name == "__trigger__:RecordDataset:propose_mutation")
+        .find(|ig| ig.trigger == "__trigger__:RecordDataset:propose_mutation")
         .expect("adapter trigger should synthesize integration");
     assert_eq!(integration.integration_type, "adapter");
     assert_eq!(integration.on_success.as_deref(), Some("RecordMutation"));
@@ -244,11 +245,13 @@ to = "Failed"
         Some("/tmp/mock-claude")
     );
 
-    let has_effect = automaton.actions[0].effect.iter().any(|effect| {
-        matches!(effect, Effect::Trigger { name }
-            if name == "__trigger__:RecordDataset:propose_mutation")
-    });
-    assert!(has_effect, "source action should gain trigger effect");
+    assert_eq!(
+        dispatch_effects(&automaton.actions[0]),
+        [ResolvedEffect::Dispatch(
+            "__trigger__:RecordDataset:propose_mutation".into()
+        )],
+        "source action should dispatch the synthesized record"
+    );
 }
 
 #[test]
@@ -725,7 +728,6 @@ initial = "Draft"
 name = "ConfirmOrder"
 from = ["Draft"]
 to = "Confirmed"
-effect = [{ type = "trigger", name = "charge_payment" }]
 
 [[action.triggers]]
 name = "charge_payment"
@@ -750,37 +752,29 @@ to = "Failed"
     let ig = automaton
         .integrations
         .iter()
-        .find(|i| i.name == "__trigger__:ConfirmOrder:charge_payment")
+        .find(|i| i.trigger == "__trigger__:ConfirmOrder:charge_payment")
         .expect("synthesized integration");
     assert_eq!(ig.integration_type, "wasm");
     assert_eq!(ig.module.as_deref(), Some("stripe_charge"));
     assert_eq!(ig.on_success.as_deref(), Some("ChargeSucceeded"));
     assert_eq!(ig.on_failure.as_deref(), Some("ChargeFailed"));
 
-    // The source action should gain a `trigger` effect pointing at the
-    // synthesized integration name.
+    // The source action dispatches the synthesized record by name.
     let confirm = automaton
         .actions
         .iter()
         .find(|a| a.name == "ConfirmOrder")
         .unwrap();
-    let has_effect = confirm.effect.iter().any(|e| {
-        matches!(e, Effect::Trigger { name }
-            if name == "__trigger__:ConfirmOrder:charge_payment")
-    });
-    assert!(has_effect, "source action should have trigger effect");
-    let has_bare_effect = confirm.effect.iter().any(|e| {
-        matches!(e, Effect::Trigger { name }
-            if name == "charge_payment")
-    });
-    assert!(
-        !has_bare_effect,
-        "source action should not retain the bare trigger name after expansion"
+    assert_eq!(
+        dispatch_effects(confirm),
+        [ResolvedEffect::Dispatch(
+            "__trigger__:ConfirmOrder:charge_payment".into()
+        )]
     );
 }
 
 #[test]
-fn bare_effect_trigger_reuses_unique_inline_trigger_declared_on_other_action() {
+fn each_action_dispatches_its_own_copy_of_a_shared_trigger() {
     let spec = r#"
 [automaton]
 name = "Session"
@@ -791,7 +785,6 @@ initial = "Ready"
 name = "Prepare"
 from = ["Ready"]
 to = "Waiting"
-effect = [{ type = "trigger", name = "prepare_context" }]
 
 [[action.triggers]]
 name = "prepare_context"
@@ -806,7 +799,13 @@ temper_api_url = "{secret:temper_api_url}"
 name = "Continue"
 from = ["Executing"]
 to = "Waiting"
-effect = [{ type = "trigger", name = "prepare_context" }]
+
+[[action.triggers]]
+name = "prepare_context"
+kind = "wasm"
+module = "context_preparer"
+on_failure = "Fail"
+config = { temper_api_url = "{secret:temper_api_url}" }
 
 [[action]]
 name = "Fail"
@@ -814,68 +813,65 @@ from = ["Ready", "Executing", "Waiting"]
 to = "Ready"
 "#;
 
-    let automaton = parse_automaton(spec).expect("cross-action trigger reuse should parse");
+    let automaton = parse_automaton(spec).expect("a trigger declared on two actions should parse");
     let continue_action = automaton
         .actions
         .iter()
         .find(|a| a.name == "Continue")
         .expect("Continue action");
-    let has_rewritten_effect = continue_action.effect.iter().any(|e| {
-        matches!(e, Effect::Trigger { name }
-            if name == "__trigger__:Prepare:prepare_context")
-    });
-    assert!(
-        has_rewritten_effect,
-        "bare trigger reference should resolve to the unique inline trigger definition"
+    assert_eq!(
+        dispatch_effects(continue_action),
+        [ResolvedEffect::Dispatch(
+            "__trigger__:Continue:prepare_context".into()
+        )]
     );
+    assert_eq!(automaton.integrations.len(), 2);
 }
 
 #[test]
-fn bare_effect_trigger_rejects_ambiguous_inline_trigger_name() {
-    let spec = r#"
+fn trigger_and_emit_effects_point_at_action_triggers() {
+    for effect in ["trigger('prepare_context')", "emit('Prepared')"] {
+        let spec = format!(
+            r#"
 [automaton]
 name = "Session"
-states = ["A", "B", "C"]
+states = ["A"]
 initial = "A"
 
 [[action]]
-name = "PrepareA"
+name = "Prepare"
 from = ["A"]
-to = "B"
-effect = [{ type = "trigger", name = "prepare_context" }]
-
-[[action.triggers]]
-name = "prepare_context"
-kind = "wasm"
-module = "context_preparer_a"
-
-[[action]]
-name = "PrepareB"
-from = ["B"]
-to = "C"
-effect = [{ type = "trigger", name = "prepare_context" }]
-
-[[action.triggers]]
-name = "prepare_context"
-kind = "wasm"
-module = "context_preparer_b"
-
-[[action]]
-name = "Continue"
-from = ["C"]
-to = "B"
-effect = [{ type = "trigger", name = "prepare_context" }]
-"#;
-
-    let err = parse_automaton(spec).expect_err("ambiguous inline trigger reuse must fail");
-    assert!(
-        err.to_string().contains("ambiguous"),
-        "expected ambiguous trigger reference error, got: {err}"
-    );
+effect = ["{effect}"]
+"#
+        );
+        let err = parse_automaton(&spec).expect_err("trigger/emit effects are gone");
+        assert!(
+            err.to_string().contains("[[action.triggers]]"),
+            "{effect}: {err}"
+        );
+    }
 }
 
 #[test]
-fn bare_effect_trigger_allows_platform_custom_effect_name() {
+fn integration_blocks_are_rejected() {
+    let spec = r#"
+[automaton]
+name = "Session"
+states = ["A"]
+initial = "A"
+
+[[integration]]
+name = "prepare"
+trigger = "prepare"
+type = "wasm"
+module = "context_preparer"
+"#;
+    let err = parse_automaton(spec).expect_err("[[integration]] is gone");
+    assert!(err.to_string().contains("[[action.triggers]]"), "{err}");
+}
+
+#[test]
+fn hook_triggers_dispatch_platform_hooks() {
     let spec = r#"
 [automaton]
 name = "GovernanceDecision"
@@ -886,31 +882,36 @@ initial = "Pending"
 name = "Approve"
 from = ["Pending"]
 to = "Approved"
-effect = [{ type = "trigger", name = "GenerateCedarPolicy" }, { type = "trigger", name = "DispatchCallback" }]
+
+[[action.triggers]]
+name = "GenerateCedarPolicy"
+kind = "hook"
+hook = "GenerateCedarPolicy"
+
+[[action.triggers]]
+name = "DispatchCallback"
+kind = "hook"
+hook = "DispatchCallback"
 "#;
 
-    let automaton = parse_automaton(spec).expect("CamelCase platform custom effects should parse");
+    let automaton = parse_automaton(spec).expect("hook triggers should parse");
     let approve = automaton
         .actions
         .iter()
         .find(|a| a.name == "Approve")
         .unwrap();
-    let has_generate = approve
-        .effect
-        .iter()
-        .any(|effect| matches!(effect, Effect::Trigger { name } if name == "GenerateCedarPolicy"));
-    let has_dispatch = approve
-        .effect
-        .iter()
-        .any(|effect| matches!(effect, Effect::Trigger { name } if name == "DispatchCallback"));
-    assert!(
-        has_generate,
-        "GenerateCedarPolicy should remain as a custom effect"
+    assert_eq!(
+        dispatch_effects(approve),
+        [
+            ResolvedEffect::Dispatch("GenerateCedarPolicy".into()),
+            ResolvedEffect::Dispatch("DispatchCallback".into()),
+        ]
     );
-    assert!(
-        has_dispatch,
-        "DispatchCallback should remain as a custom effect"
-    );
+    assert!(automaton.integrations.is_empty());
+
+    let missing = spec.replace("hook = \"DispatchCallback\"\n", "");
+    let err = parse_automaton(&missing).expect_err("a hook trigger names its hook");
+    assert!(err.to_string().contains("missing 'hook'"), "{err}");
 }
 
 #[test]
@@ -945,7 +946,7 @@ to = "Notified"
     let ig = automaton
         .integrations
         .iter()
-        .find(|i| i.name == "__trigger__:ConfirmOrder:notify_slack")
+        .find(|i| i.trigger == "__trigger__:ConfirmOrder:notify_slack")
         .expect("synthesized integration");
     assert_eq!(ig.integration_type, "webhook");
     assert_eq!(
@@ -990,13 +991,8 @@ type = "same_id"
         automaton.integrations.is_empty(),
         "entity-kind triggers must not synthesize integrations"
     );
-    // The source action should NOT have a synthesized trigger effect.
-    let action = &automaton.actions[0];
-    let has_synthesized_effect = action.effect.iter().any(|e| {
-        matches!(e, Effect::Trigger { name }
-            if name.starts_with("__trigger__:"))
-    });
-    assert!(!has_synthesized_effect);
+    // The source action dispatches nothing by name.
+    assert!(dispatch_effects(&automaton.actions[0]).is_empty());
 }
 
 // test_agent_trigger_section_does_not_overwrite_previous_action removed —

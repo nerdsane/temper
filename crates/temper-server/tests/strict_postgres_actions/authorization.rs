@@ -49,7 +49,13 @@ params = ["Notes"]
 name = "Observe"
 from = ["Draft"]
 params = []
-effect = [{type="increment",var="observations"},{type="emit",event="Observed"}]
+effect = ["observations += 1"]
+[[action.triggers]]
+name = "observed"
+kind = "entity"
+target_entity = "Sink"
+target_action = "Record"
+resolve_target = { type = "same_id" }
 "#
     .replace(
         "strict_action_params = true",
@@ -58,13 +64,7 @@ effect = [{type="increment",var="observations"},{type="emit",event="Observed"}]
     let (pool, _container) = pool().await;
     let actors = Arc::new(ActorSystem::new(pool.clone(), SchedulerConfig::default()));
     actors
-        .register(Arc::new(
-            SpecDrivenActor::from_ioa(
-                &spec,
-                HashMap::from([("Observed".into(), ("Sink".into(), "Record".into()))]),
-            )
-            .unwrap(),
-        ))
+        .register(Arc::new(SpecDrivenActor::from_ioa(&spec).unwrap()))
         .await
         .unwrap();
     let mut registry = SpecRegistry::new();

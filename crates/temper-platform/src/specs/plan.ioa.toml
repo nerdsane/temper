@@ -44,11 +44,7 @@ kind = "input"
 from = ["Active"]
 params = ["title", "description"]
 hint = "Add a new task to the active plan. Spawns a Task child entity and increments task_count."
-effect = [
-  { type = "spawn", entity_type = "Task", entity_id_source = "{uuid}", initial_action = "Create", store_id_in = "last_task_id" },
-  { type = "increment", var = "task_count" },
-  { type = "emit", event = "TaskAdded" }
-]
+effect = ["spawn('Task', 'Create', last_task_id)", "task_count += 1"]
 
 [[action]]
 name = "Pause"
@@ -72,7 +68,6 @@ to = "Completed"
 params = ["summary"]
 guard = "task_count > 0"
 hint = "Mark the plan as successfully completed. Requires at least one task."
-effect = [{ type = "emit", event = "PlanCompleted" }]
 
 [[action]]
 name = "Fail"
@@ -81,4 +76,3 @@ from = ["Active", "Paused"]
 to = "Failed"
 params = ["reason"]
 hint = "Mark the plan as failed from Active or Paused state."
-effect = [{ type = "emit", event = "PlanFailed" }]

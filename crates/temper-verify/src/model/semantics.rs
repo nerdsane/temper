@@ -2,9 +2,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use temper_spec::predicate::{Env, Expr, Operand, Set, Truth, Val, VarKind, eval};
+use temper_spec::predicate::{
+    Arg, Env, Expr, Literal, Operand, ParamKind, Set, Truth, Val, VarKind, eval,
+};
 
-use super::types::{ModelEffect, TemperModelState};
+use super::types::{ModelEffect, ParamValue, ResolvedTransition, TemperModel, TemperModelState};
+
+/// Parameter assignments explored per step for one transition, at most
+/// (TigerStyle budget: `successors` materializes every assignment).
+pub const MAX_PARAM_ASSIGNMENTS: usize = 4096;
 
 /// A model state as a predicate environment. Status, counters, booleans and
 /// lists are modeled; declared counters, booleans and lists missing from the
@@ -78,34 +84,172 @@ pub fn guard_may_hold(
     truth(guard, kinds, state).may_hold()
 }
 
-/// Apply model effects to the provided state.
+/// Every state `t` can step to from `state`, with the parameter values
+/// chosen for it. The caller has checked `t`'s status and guard.
 ///
-/// `action_name` is used to generate deterministic symbolic list elements.
+/// A parameter is an unknown value, so each candidate is explored:
+/// counts `0..=bound`, both booleans, and for list elements every literal a
+/// guard or invariant compares that list against plus one fresh string.
+/// Assignments that grow a counter past its bound (or a list past the
+/// default bound) are pruned, as in bounded exploration.
+pub fn successors(
+    model: &TemperModel,
+    t: &ResolvedTransition,
+    state: &TemperModelState,
+) -> Vec<(BTreeMap<String, ParamValue>, TemperModelState)> {
+    let mut out = Vec::new();
+    for params in param_assignments(model, t) {
+        let mut next = state.clone();
+        if let Some(to) = &t.to_state {
+            next.status = to.clone();
+        }
+        apply_effects(&t.effects, &mut next, &t.name, &params);
+        if within_bounds(model, state, &next) {
+            out.push((params, next));
+        }
+    }
+    out
+}
+
+/// The cartesian product of each parameter's candidate values.
+fn param_assignments(
+    model: &TemperModel,
+    t: &ResolvedTransition,
+) -> Vec<BTreeMap<String, ParamValue>> {
+    let count_bound = model
+        .counter_bounds
+        .values()
+        .copied()
+        .max()
+        .unwrap_or(0)
+        .max(model.default_max_counter);
+    let mut assignments = vec![BTreeMap::new()];
+    for (name, kind) in &t.params {
+        let candidates: Vec<ParamValue> = match kind {
+            ParamKind::Count => (0..=count_bound).map(ParamValue::Count).collect(),
+            ParamKind::Bool => vec![ParamValue::Bool(false), ParamValue::Bool(true)],
+            ParamKind::Str => {
+                let mut values: BTreeSet<String> = BTreeSet::new();
+                for effect in &t.effects {
+                    if let ModelEffect::ListAppend {
+                        var,
+                        value: Arg::Param(p),
+                    } = effect
+                        && p == name
+                        && let Some(literals) = model.list_literals.get(var)
+                    {
+                        values.extend(literals.iter().cloned());
+                    }
+                }
+                values
+                    .into_iter()
+                    .map(ParamValue::Str)
+                    .chain(std::iter::once(ParamValue::Fresh))
+                    .collect()
+            }
+        };
+        assert!(
+            assignments.len() * candidates.len() <= MAX_PARAM_ASSIGNMENTS,
+            "transition '{}' has more than {MAX_PARAM_ASSIGNMENTS} parameter assignments",
+            t.name
+        );
+        assignments = assignments
+            .into_iter()
+            .flat_map(|assignment| {
+                candidates.iter().map(move |value| {
+                    let mut next = assignment.clone();
+                    next.insert(name.clone(), value.clone());
+                    next
+                })
+            })
+            .collect();
+    }
+    assignments
+}
+
+/// Whether `next` stays within the exploration bounds, or at least grew no
+/// counter or list beyond them.
+fn within_bounds(model: &TemperModel, before: &TemperModelState, next: &TemperModelState) -> bool {
+    let counters_ok = next.counters.iter().all(|(var, value)| {
+        let bound = model
+            .counter_bounds
+            .get(var)
+            .copied()
+            .unwrap_or(model.default_max_counter);
+        *value <= bound || *value <= before.counters.get(var).copied().unwrap_or(0)
+    });
+    let lists_ok = next.lists.iter().all(|(var, items)| {
+        items.len() <= model.default_max_counter
+            || items.len() <= before.lists.get(var).map_or(0, Vec::len)
+    });
+    counters_ok && lists_ok
+}
+
+/// Apply model effects to the provided state, reading `params.p` from
+/// `params`. Mirrors the runtime: `-=` stops at 0 and `remove_at` out of
+/// range is a no-op.
+///
+/// `action_name` is used to generate deterministic fresh list elements.
 /// Third interpreter. Production apply is `temper-server` `entity_actor/effects.rs`.
-pub fn apply_effects(effects: &[ModelEffect], state: &mut TemperModelState, action_name: &str) {
+pub fn apply_effects(
+    effects: &[ModelEffect],
+    state: &mut TemperModelState,
+    action_name: &str,
+    params: &BTreeMap<String, ParamValue>,
+) {
+    let count = |arg: &Arg, state: &TemperModelState| -> usize {
+        match arg {
+            Arg::Lit(Literal::Int(n)) => usize::try_from(*n).unwrap_or(0),
+            Arg::Var(name) => state.counters.get(name).copied().unwrap_or(0),
+            Arg::Param(name) => match params.get(name) {
+                Some(ParamValue::Count(n)) => *n,
+                _ => 0,
+            },
+            Arg::Lit(_) => 0,
+        }
+    };
     for effect in effects {
         match effect {
-            ModelEffect::IncrementCounter(var) => {
-                let entry = state.counters.entry(var.clone()).or_insert(0);
-                *entry += 1;
+            ModelEffect::SetCounter { var, value } => {
+                let value = count(value, state);
+                state.counters.insert(var.clone(), value);
             }
-            ModelEffect::DecrementCounter(var) => {
+            ModelEffect::AddCounter { var, value } => {
+                let delta = count(value, state);
+                *state.counters.entry(var.clone()).or_insert(0) += delta;
+            }
+            ModelEffect::SubCounter { var, value } => {
+                let delta = count(value, state);
                 let entry = state.counters.entry(var.clone()).or_insert(0);
-                *entry = entry.saturating_sub(1);
+                *entry = entry.saturating_sub(delta);
             }
             ModelEffect::SetBool { var, value } => {
-                state.booleans.insert(var.clone(), *value);
+                let value = match value {
+                    Arg::Lit(Literal::Bool(b)) => *b,
+                    Arg::Var(name) => state.booleans.get(name).copied().unwrap_or(false),
+                    Arg::Param(name) => matches!(params.get(name), Some(ParamValue::Bool(true))),
+                    Arg::Lit(_) => false,
+                };
+                state.booleans.insert(var.clone(), value);
             }
-            ModelEffect::ListAppend(var) => {
+            ModelEffect::ListAppend { var, value } => {
                 let entry = state.lists.entry(var.clone()).or_default();
-                let next_idx = entry.len() + 1;
-                entry.push(format!("{action_name}#{next_idx}"));
+                let element = match value {
+                    Arg::Lit(Literal::Str(text)) => text.clone(),
+                    Arg::Param(name) => match params.get(name) {
+                        Some(ParamValue::Str(text)) => text.clone(),
+                        _ => format!("{action_name}#{}", entry.len() + 1),
+                    },
+                    _ => format!("{action_name}#{}", entry.len() + 1),
+                };
+                entry.push(element);
             }
-            ModelEffect::ListRemoveAt(var) => {
+            ModelEffect::ListRemoveAt { var, index } => {
+                let index = count(index, state);
                 if let Some(entry) = state.lists.get_mut(var)
-                    && !entry.is_empty()
+                    && index < entry.len()
                 {
-                    entry.remove(0);
+                    entry.remove(index);
                 }
             }
         }

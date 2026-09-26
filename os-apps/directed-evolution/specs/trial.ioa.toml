@@ -14,7 +14,7 @@ name = "StartTrial"
 kind = "input"
 from = ["Planned"]
 to = "Running"
-effect = "set has_agent true"
+effect = ["has_agent = true"]
 params = ["EpisodeId", "VariantId", "SimulatedUserId", "Goal", "WorkItemId"]
 hint = "Start an AI simulated user trial against a variant."
 

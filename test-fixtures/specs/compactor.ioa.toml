@@ -16,14 +16,27 @@ name = "CompactionNeeded"
 kind = "input"
 from = ["Idle"]
 to = "Compacting"
-effect = [{ type = "trigger", name = "run_compaction" }]
+
+[[action.triggers]]
+name = "compaction_run_trigger"
+kind = "entity"
+target_entity = "CompactionIntegration"
+target_action = "run_compaction"
+resolve_target = { type = "same_id" }
 
 [[action]]
 name = "CompactionComplete"
 kind = "input"
 from = ["Compacting"]
 to = "Idle"
-effect = [{ type = "increment", var = "compactions_done" }]
+effect = ["compactions_done += 1"]
+
+[[action.triggers]]
+name = "compaction_complete_to_agent"
+kind = "entity"
+target_entity = "Process"
+target_action = "CompactionComplete"
+resolve_target = { type = "same_id" }
 
 [[action]]
 name = "CompactionFailed"
@@ -31,8 +44,9 @@ kind = "input"
 from = ["Compacting"]
 to = "Failed"
 
-[[integration]]
-name = "run_compaction"
-trigger = "run_compaction"
-type = "compaction_llm"
-emits = ["CompactionComplete", "CompactionFailed"]
+[[action.triggers]]
+name = "compaction_failed_to_agent"
+kind = "entity"
+target_entity = "Process"
+target_action = "CompactionFailed"
+resolve_target = { type = "same_id" }

@@ -2,6 +2,7 @@ use readers_writers_reference::{MODEL_CSDL, READERS_WRITERS_IOA};
 use temper_jit::table::{Effect, Expr, TransitionTable};
 use temper_spec::automaton::{lint_automaton, parse_automaton};
 use temper_spec::csdl::parse_csdl;
+use temper_spec::predicate::parse_arg;
 use temper_verify::cascade::{CascadeLevel, VerificationCascade};
 
 #[test]
@@ -75,16 +76,14 @@ fn transition_table_encodes_safety_critical_callbacks() {
         &writer_started.guard,
         &expr("wasm_in_flight")
     ));
-    assert!(
-        writer_started
-            .effects
-            .contains(&Effect::IncrementCounter("writer_count".to_string()))
-    );
-    assert!(
-        writer_started
-            .effects
-            .contains(&Effect::DecrementCounter("waiting_count".to_string()))
-    );
+    assert!(writer_started.effects.contains(&Effect::AddCounter {
+        var: "writer_count".into(),
+        value: parse_arg("1").unwrap(),
+    }));
+    assert!(writer_started.effects.contains(&Effect::SubCounter {
+        var: "waiting_count".into(),
+        value: parse_arg("1").unwrap(),
+    }));
 
     let reader_started = table
         .rules
@@ -93,11 +92,10 @@ fn transition_table_encodes_safety_critical_callbacks() {
         .expect("ReaderStartedFromReading rule");
     assert_eq!(reader_started.from_states, vec!["Reading".to_string()]);
     assert_eq!(reader_started.to_state.as_deref(), Some("Reading"));
-    assert!(
-        reader_started
-            .effects
-            .contains(&Effect::IncrementCounter("reader_count".to_string()))
-    );
+    assert!(reader_started.effects.contains(&Effect::AddCounter {
+        var: "reader_count".into(),
+        value: parse_arg("1").unwrap(),
+    }));
 }
 
 #[test]
@@ -117,7 +115,7 @@ fn transition_table_encodes_wasm_in_flight_guard() {
         assert!(
             rule.effects.contains(&Effect::SetBool {
                 var: "wasm_in_flight".to_string(),
-                value: true,
+                value: parse_arg("true").unwrap(),
             }),
             "{action_name} should set wasm_in_flight before invoking WASM"
         );
@@ -147,7 +145,7 @@ fn transition_table_encodes_wasm_in_flight_guard() {
         assert!(
             rule.effects.contains(&Effect::SetBool {
                 var: "wasm_in_flight".to_string(),
-                value: false,
+                value: parse_arg("false").unwrap(),
             }),
             "{action_name} should clear wasm_in_flight"
         );

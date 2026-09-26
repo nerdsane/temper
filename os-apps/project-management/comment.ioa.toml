@@ -35,7 +35,7 @@ name = "Edit"
 kind = "input"
 from = ["Active", "Edited"]
 to = "Edited"
-effect = "increment edit_count"
+effect = ["edit_count += 1"]
 params = ["body"]
 hint = "Edit the comment body."
 

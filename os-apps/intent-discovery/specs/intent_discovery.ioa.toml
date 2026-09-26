@@ -40,12 +40,8 @@ kind = "input"
 from = ["Triggered"]
 to = "Gathering"
 params = ["reason", "source", "trigger_context_json"]
-effect = [{ type = "trigger", name = "gather_signals" }]
 hint = "Begin one intent-discovery cycle and gather current system signals."
 
-# ADR-0046: inline trigger — migrated from [[integration]] below.
-# Post-parse expansion re-synthesizes the equivalent Integration so
-# the existing WASM/webhook runtime handles execution unchanged.
 [[action.triggers]]
 name = "gather_signals"
 kind = "wasm"
@@ -63,15 +59,9 @@ kind = "input"
 from = ["Gathering"]
 to = "Analyzing"
 params = ["signal_summary_json", "signal_sources_json", "signal_count"]
-effect = [
-  { type = "set_bool", var = "signal_summary_present", value = "true" },
-  { type = "trigger", name = "spawn_analyst" }
-]
+effect = ["signal_summary_present = true"]
 hint = "Persist gathered signals and spawn the analyst TemperAgent."
 
-# ADR-0046: inline trigger — migrated from [[integration]] below.
-# Post-parse expansion re-synthesizes the equivalent Integration so
-# the existing WASM/webhook runtime handles execution unchanged.
 [[action.triggers]]
 name = "spawn_analyst"
 kind = "wasm"
@@ -98,16 +88,9 @@ kind = "input"
 from = ["Analyzing"]
 to = "Proposing"
 params = ["analyst_agent_id", "analysis_json", "finding_count"]
-effect = [
-  { type = "set_bool", var = "analysis_present", value = "true" },
-  { type = "increment", var = "finding_count" },
-  { type = "trigger", name = "create_proposals" }
-]
+effect = ["analysis_present = true", "finding_count += 1"]
 hint = "Store analyst output and materialize proposals."
 
-# ADR-0046: inline trigger — migrated from [[integration]] below.
-# Post-parse expansion re-synthesizes the equivalent Integration so
-# the existing WASM/webhook runtime handles execution unchanged.
 [[action.triggers]]
 name = "create_proposals"
 kind = "wasm"
@@ -125,7 +108,7 @@ kind = "input"
 from = ["Proposing"]
 to = "Complete"
 params = ["records_created_count", "issues_created_count", "record_ids_json", "issue_ids_json", "materialization_report_json"]
-effect = [{ type = "set_bool", var = "proposal_present", value = "true" }]
+effect = ["proposal_present = true"]
 hint = "Finish the cycle after records and PM issues are created."
 
 [[action]]

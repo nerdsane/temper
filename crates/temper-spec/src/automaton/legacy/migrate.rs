@@ -27,6 +27,10 @@ pub struct Migration {
 ///   dropped; an assertion the verifier cannot model becomes a
 ///   `[[field_invariant]]` (checked on writes instead)
 /// - `[[field_invariant]]` `when` + `require` becomes one `assert`
+/// - verb and table effects become effect statements; `trigger` effects and
+///   `[[integration]]` blocks become `[[action.triggers]]`; `emit` effects
+///   are dropped; an action named like `AddItem` / `RemoveItem` gets the
+///   counter effects its name used to imply
 ///
 /// The result is parsed with the current parser before it is returned.
 pub fn migrate_source(source: &str) -> Result<Migration, String> {
@@ -39,6 +43,7 @@ pub fn migrate_source(source: &str) -> Result<Migration, String> {
             migrate_action(action)?;
         }
     }
+    super::migrate_effects::migrate_effects(&mut doc, &kinds, &mut notes)?;
 
     let mut terminal = Vec::new();
     let mut moved = Vec::new();
@@ -100,7 +105,7 @@ fn state_kinds(doc: &DocumentMut) -> BTreeMap<String, VarKind> {
 }
 
 /// An inline value or sub-table as a `toml::Value`, for the legacy readers.
-fn to_toml(item: &Item) -> Result<toml::Value, String> {
+pub(super) fn to_toml(item: &Item) -> Result<toml::Value, String> {
     let text = match item {
         Item::Value(v) => format!("v = {v}"),
         Item::Table(t) => format!("[v]\n{t}"),

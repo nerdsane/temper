@@ -7,8 +7,8 @@ use std::collections::{HashSet, VecDeque};
 
 use stateright::{Checker, Model};
 
-use crate::model::semantics::{apply_effects, guard_may_hold};
-use crate::model::{ModelEffect, ResolvedTransition};
+use crate::model::ResolvedTransition;
+use crate::model::semantics::{guard_may_hold, successors};
 use crate::model::{TemperModel, TemperModelAction, TemperModelState};
 
 /// A counterexample discovered during model checking.
@@ -85,14 +85,15 @@ fn find_dead_transitions(model: &TemperModel) -> Vec<String> {
 
     while let Some(state) = queue.pop_front() {
         for (index, transition) in model.transitions.iter().enumerate() {
-            if !is_transition_enabled(model, transition, &state) {
+            let next_states = step(model, transition, &state);
+            if next_states.is_empty() {
                 continue;
             }
             covered[index] = true;
-
-            let next = apply_transition(&state, transition);
-            if visited_states.insert(next.clone()) {
-                queue.push_back(next);
+            for next in next_states {
+                if visited_states.insert(next.clone()) {
+                    queue.push_back(next);
+                }
             }
         }
     }
@@ -111,11 +112,13 @@ fn find_dead_transitions(model: &TemperModel) -> Vec<String> {
         .collect()
 }
 
-fn is_transition_enabled(
+/// The states `transition` reaches from `state`: none when it is not
+/// enabled, one per explored parameter assignment otherwise.
+fn step(
     model: &TemperModel,
     transition: &ResolvedTransition,
     state: &TemperModelState,
-) -> bool {
+) -> Vec<TemperModelState> {
     let status_ok = transition.from_states.is_empty()
         || transition
             .from_states
@@ -125,42 +128,12 @@ fn is_transition_enabled(
     // are walked during reachability BFS: a cross-entity guard is a free
     // boolean, so the gated target state is genuinely reachable in the model.
     if !status_ok || !guard_may_hold(&transition.guard, &model.var_kinds, state) {
-        return false;
+        return Vec::new();
     }
-
-    for effect in &transition.effects {
-        match effect {
-            ModelEffect::IncrementCounter(var) => {
-                let current = state.counters.get(var).copied().unwrap_or(0);
-                let bound = model
-                    .counter_bounds
-                    .get(var)
-                    .copied()
-                    .unwrap_or(model.default_max_counter);
-                if current >= bound {
-                    return false;
-                }
-            }
-            ModelEffect::ListAppend(var) => {
-                let current_len = state.lists.get(var).map_or(0, Vec::len);
-                if current_len >= model.default_max_counter {
-                    return false;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    true
-}
-
-fn apply_transition(state: &TemperModelState, transition: &ResolvedTransition) -> TemperModelState {
-    let mut next = state.clone();
-    if let Some(to_state) = &transition.to_state {
-        next.status = to_state.clone();
-    }
-    apply_effects(&transition.effects, &mut next, &transition.name);
-    next
+    successors(model, transition, state)
+        .into_iter()
+        .map(|(_, next)| next)
+        .collect()
 }
 
 fn render_transition_label(transition: &ResolvedTransition) -> String {
@@ -177,231 +150,5 @@ fn render_transition_label(transition: &ResolvedTransition) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::model::build_model_from_ioa;
-
-    const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
-
-    #[test]
-    fn test_check_model_completes() {
-        let model = build_model_from_ioa(ORDER_IOA, 2).unwrap();
-        let result = check_model(&model);
-        assert!(result.is_complete, "checker should complete");
-        assert!(
-            result.states_explored > 0,
-            "should explore at least one state"
-        );
-    }
-
-    #[test]
-    fn test_check_model_all_properties_hold() {
-        let model = build_model_from_ioa(ORDER_IOA, 2).unwrap();
-        let result = check_model(&model);
-        assert!(
-            result.all_properties_hold,
-            "all properties should hold, but got counterexamples: {:?}",
-            result.counterexamples,
-        );
-    }
-
-    #[test]
-    fn test_check_model_finds_dead_transitions() {
-        let src = r#"
-[automaton]
-name = "Plan"
-states = ["Draft", "Active", "Completed"]
-initial = "Draft"
-
-[[state]]
-name = "task_count"
-type = "counter"
-initial = "0"
-
-[[action]]
-name = "Activate"
-from = ["Draft"]
-to = "Active"
-
-[[action]]
-name = "Complete"
-from = ["Active"]
-to = "Completed"
-guard = "task_count > 0"
-"#;
-        let model = build_model_from_ioa(src, 2).unwrap();
-        let result = check_model(&model);
-        assert!(!result.all_properties_hold);
-        assert!(
-            result
-                .dead_transitions
-                .iter()
-                .any(|transition| transition.contains("Complete")),
-            "expected dead transition for Complete, got {:?}",
-            result.dead_transitions
-        );
-    }
-
-    #[test]
-    fn test_cross_entity_guard_does_not_break_local_terminal_proof() {
-        let src = r#"
-[automaton]
-name = "Parent"
-states = ["Waiting", "Ready"]
-initial = "Waiting"
-terminal = ["Waiting"]
-
-[[action]]
-name = "ProceedWhenChildDone"
-from = ["Waiting"]
-to = "Ready"
-guard = "empty(child_id) || Child[child_id].status in ['Done']"
-"#;
-        let model = build_model_from_ioa(src, 2).unwrap();
-        let result = check_model(&model);
-        assert!(
-            result.all_properties_hold,
-            "abstract cross-entity guard must not be treated as a locally enabled transition: {result:?}"
-        );
-        assert!(
-            result.dead_transitions.is_empty(),
-            "abstract cross-entity transitions should not be reported as dead: {:?}",
-            result.dead_transitions
-        );
-        // The local-terminal proof still holds (`terminal` states use
-        // local enablement, where the gate is false), AND the gated edge is now
-        // genuinely explored: Ready is reachable, so the model is not silently
-        // pruning the state behind the gate.
-        assert!(
-            states_contains_status(&model, "Ready"),
-            "cross-entity gated target state must be reachable in the explored model"
-        );
-    }
-
-    /// Walk the model's reachable states (mirroring the checker BFS) and report
-    /// whether `status` is among them.
-    fn states_contains_status(model: &TemperModel, status: &str) -> bool {
-        let mut visited = HashSet::new();
-        let mut queue = VecDeque::new();
-        for init in model.init_states() {
-            if visited.insert(init.clone()) {
-                queue.push_back(init);
-            }
-        }
-        while let Some(state) = queue.pop_front() {
-            if state.status == status {
-                return true;
-            }
-            for transition in &model.transitions {
-                if !is_transition_enabled(model, transition, &state) {
-                    continue;
-                }
-                let next = apply_transition(&state, transition);
-                if visited.insert(next.clone()) {
-                    queue.push_back(next);
-                }
-            }
-        }
-        false
-    }
-
-    #[test]
-    fn test_cross_entity_gated_only_target_is_reachable_not_dead() {
-        // Published is reachable ONLY through a cross-entity file-ready gate
-        // (mirrors a publish transition gated on a related file entity). Before
-        // the free-boolean fix the gate lowered to constant-false, so this edge
-        // was vacuously dead and Published was never reached. It must now be
-        // both reachable and not reported dead.
-        let src = r#"
-[automaton]
-name = "DesignLanguage"
-states = ["Draft", "Published"]
-initial = "Draft"
-
-[[action]]
-name = "Publish"
-from = ["Draft"]
-to = "Published"
-guard = "empty(file_id) || File[file_id].status in ['Ready']"
-"#;
-        let model = build_model_from_ioa(src, 2).unwrap();
-        let result = check_model(&model);
-
-        assert!(
-            result.dead_transitions.is_empty(),
-            "Publish gated by a cross-entity guard must not be dead: {:?}",
-            result.dead_transitions
-        );
-        assert!(
-            result.all_properties_hold,
-            "free-boolean cross-entity guard should keep L1 green: {result:?}"
-        );
-        assert!(
-            states_contains_status(&model, "Published"),
-            "Published must be reachable through the free-boolean cross-entity edge"
-        );
-    }
-
-    #[test]
-    fn test_liveness_reaches_state_through_cross_entity_gate() {
-        // A liveness "eventually reaches Published" property can only be proven
-        // if the gated edge is explored. With the free-boolean treatment the
-        // ReachesTerminal property holds.
-        let src = r#"
-[automaton]
-name = "DesignLanguage"
-states = ["Draft", "Published"]
-initial = "Draft"
-
-[[action]]
-name = "Publish"
-from = ["Draft"]
-to = "Published"
-guard = "empty(file_id) || File[file_id].status in ['Ready']"
-
-[[liveness]]
-name = "EventuallyPublished"
-from = ["Draft"]
-reaches = ["Published"]
-"#;
-        let model = build_model_from_ioa(src, 2).unwrap();
-        let result = check_model(&model);
-        assert!(
-            result.all_properties_hold,
-            "liveness toward a cross-entity gated state must be provable: {result:?}"
-        );
-    }
-
-    #[test]
-    fn test_cross_entity_transition_dead_when_status_precondition_unreachable() {
-        // The free boolean only relaxes the cross-entity conjunct; a transition
-        // whose from-state is genuinely never reached is still (correctly) dead.
-        let src = r#"
-[automaton]
-name = "Orphan"
-states = ["Start", "Stranded", "End"]
-initial = "Start"
-
-[[action]]
-name = "Finish"
-from = ["Start"]
-to = "End"
-
-[[action]]
-name = "GatedFromStranded"
-from = ["Stranded"]
-to = "End"
-guard = "empty(other_id) || Other[other_id].status in ['Ok']"
-"#;
-        let model = build_model_from_ioa(src, 2).unwrap();
-        let result = check_model(&model);
-        assert!(
-            result
-                .dead_transitions
-                .iter()
-                .any(|t| t.contains("GatedFromStranded")),
-            "a cross-entity transition out of an unreachable state must still be reported dead: {:?}",
-            result.dead_transitions
-        );
-    }
-}
+#[path = "checker_test.rs"]
+mod tests;

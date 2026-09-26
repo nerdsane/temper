@@ -6,7 +6,9 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use temper_spec::predicate::Expr;
+use std::collections::BTreeSet;
+
+use temper_spec::predicate::{Arg, Expr, ParamKind};
 
 /// The state tracked by the Temper model during verification.
 ///
@@ -59,6 +61,32 @@ impl fmt::Display for TemperModelState {
     }
 }
 
+/// The value the model chose for an action parameter in one step.
+#[derive(
+    Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+pub enum ParamValue {
+    /// A non-negative integer.
+    Count(usize),
+    /// A boolean.
+    Bool(bool),
+    /// A string some guard or invariant compares a list against.
+    Str(String),
+    /// A string no guard or invariant mentions.
+    Fresh,
+}
+
+impl fmt::Display for ParamValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ParamValue::Count(n) => write!(f, "{n}"),
+            ParamValue::Bool(b) => write!(f, "{b}"),
+            ParamValue::Str(s) => write!(f, "'{s}'"),
+            ParamValue::Fresh => f.write_str("<fresh>"),
+        }
+    }
+}
+
 /// An action that the model can take, corresponding to a specification transition.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TemperModelAction {
@@ -66,14 +94,26 @@ pub struct TemperModelAction {
     pub name: String,
     /// The target status after taking this action (if deterministic).
     pub target_state: Option<String>,
+    /// The values chosen for the parameters the transition's effects read.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, ParamValue>,
 }
 
 impl fmt::Display for TemperModelAction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.target_state {
-            Some(target) => write!(f, "{} -> {}", self.name, target),
-            None => write!(f, "{}", self.name),
+        f.write_str(&self.name)?;
+        if !self.params.is_empty() {
+            let pairs: Vec<String> = self
+                .params
+                .iter()
+                .map(|(name, value)| format!("{name}={value}"))
+                .collect();
+            write!(f, "({})", pairs.join(", "))?;
         }
+        if let Some(target) = &self.target_state {
+            write!(f, " -> {target}")?;
+        }
+        Ok(())
     }
 }
 
@@ -81,19 +121,22 @@ impl fmt::Display for TemperModelAction {
 // Guards and effects — self-contained in temper-verify (mirror JIT types)
 // ---------------------------------------------------------------------------
 
-/// A state effect applied when a transition fires.
+/// A state effect applied when a transition fires. `params.p` values are
+/// chosen per step (see [`TemperModelAction::params`]).
 #[derive(Clone, Debug)]
 pub enum ModelEffect {
-    /// Increment a counter variable by 1.
-    IncrementCounter(String),
-    /// Decrement a counter variable by 1 (saturating).
-    DecrementCounter(String),
-    /// Set a boolean variable to a value.
-    SetBool { var: String, value: bool },
-    /// Append a value to a list variable.
-    ListAppend(String),
-    /// Remove one value from a list variable.
-    ListRemoveAt(String),
+    /// `var = value` on a counter.
+    SetCounter { var: String, value: Arg },
+    /// `var += value` on a counter.
+    AddCounter { var: String, value: Arg },
+    /// `var -= value` on a counter (saturating).
+    SubCounter { var: String, value: Arg },
+    /// `var = value` on a bool.
+    SetBool { var: String, value: Arg },
+    /// `append(var, value)`.
+    ListAppend { var: String, value: Arg },
+    /// `remove_at(var, index)`; out of range is a no-op.
+    ListRemoveAt { var: String, index: Arg },
 }
 
 /// A resolved transition used internally by the model, pre-computed from a
@@ -110,6 +153,8 @@ pub struct ResolvedTransition {
     pub guard: Expr,
     /// Effects applied when the transition fires.
     pub effects: Vec<ModelEffect>,
+    /// The action parameters the effects read, by kind.
+    pub params: BTreeMap<String, ParamKind>,
 }
 
 /// A safety invariant: `assert` must not be false in any reachable state.
@@ -181,6 +226,9 @@ pub struct TemperModel {
     pub(crate) counter_bounds: BTreeMap<String, usize>,
     /// Default upper bound for counters not in counter_bounds.
     pub(crate) default_max_counter: usize,
+    /// String literals each list is compared against (`'x' in list`) in any
+    /// guard or invariant: the values worth choosing for `append(list, params.p)`.
+    pub(crate) list_literals: BTreeMap<String, BTreeSet<String>>,
 }
 
 #[cfg(test)]
@@ -258,8 +306,14 @@ mod tests {
         let a = TemperModelAction {
             name: "Submit".into(),
             target_state: Some("Active".into()),
+            params: BTreeMap::new(),
         };
         assert_eq!(a.to_string(), "Submit -> Active");
+        let a = TemperModelAction {
+            params: BTreeMap::from([("n".into(), ParamValue::Count(2))]),
+            ..a
+        };
+        assert_eq!(a.to_string(), "Submit(n=2) -> Active");
     }
 
     #[test]
@@ -267,6 +321,7 @@ mod tests {
         let a = TemperModelAction {
             name: "AddItem".into(),
             target_state: None,
+            params: BTreeMap::new(),
         };
         assert_eq!(a.to_string(), "AddItem");
     }
@@ -289,6 +344,7 @@ mod tests {
         let a = TemperModelAction {
             name: "Submit".into(),
             target_state: Some("Active".into()),
+            params: BTreeMap::from([("tag".into(), ParamValue::Fresh)]),
         };
         let json = serde_json::to_string(&a).unwrap();
         let back: TemperModelAction = serde_json::from_str(&json).unwrap();

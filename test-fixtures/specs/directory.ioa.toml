@@ -48,7 +48,7 @@ name = "AddChild"
 kind = "input"
 from = ["Active"]
 to = "Active"
-effect = "increment item_count"
+effect = ["item_count += 1"]
 hint = "Register a child item (file or subdirectory) in this directory."
 
 [[action]]
@@ -57,7 +57,7 @@ kind = "input"
 from = ["Active"]
 to = "Active"
 guard = "item_count >= 1"
-effect = "decrement item_count"
+effect = ["item_count -= 1"]
 hint = "Remove a child item from this directory. Requires at least one child."
 
 [[action]]

@@ -6,10 +6,10 @@
 
 use stateright::{Model, Property};
 
-use super::semantics::{apply_effects, evaluate_guard, guard_may_hold, truth};
+use super::semantics::{apply_effects, evaluate_guard, guard_may_hold, successors, truth};
 use temper_spec::predicate::Truth;
 
-use super::types::{LivenessKind, ModelEffect, TemperModel, TemperModelAction, TemperModelState};
+use super::types::{LivenessKind, TemperModel, TemperModelAction, TemperModelState};
 
 // -- Property condition functions (bare fn pointers) -------------------------
 
@@ -123,37 +123,15 @@ impl Model for TemperModel {
                 continue;
             }
 
-            // Check counter bounds: increment effects must not exceed bounds
-            let mut within_bounds = true;
-            for effect in &t.effects {
-                if let ModelEffect::IncrementCounter(var) = effect {
-                    let current = state.counters.get(var).copied().unwrap_or(0);
-                    let bound = self
-                        .counter_bounds
-                        .get(var)
-                        .copied()
-                        .unwrap_or(self.default_max_counter);
-                    if current >= bound {
-                        within_bounds = false;
-                        break;
-                    }
-                }
-                if let ModelEffect::ListAppend(var) = effect {
-                    let current_len = state.lists.get(var).map_or(0, Vec::len);
-                    if current_len >= self.default_max_counter {
-                        within_bounds = false;
-                        break;
-                    }
-                }
+            // One action per parameter assignment whose step stays within
+            // the exploration bounds.
+            for (params, _) in successors(self, t, state) {
+                actions.push(TemperModelAction {
+                    name: t.name.clone(),
+                    target_state: t.to_state.clone(),
+                    params,
+                });
             }
-            if !within_bounds {
-                continue;
-            }
-
-            actions.push(TemperModelAction {
-                name: t.name.clone(),
-                target_state: t.to_state.clone(),
-            });
         }
     }
 
@@ -163,7 +141,7 @@ impl Model for TemperModel {
         let new_status = action.target_state.unwrap_or_else(|| state.status.clone());
         let mut next = state.clone();
         next.status = new_status;
-        apply_effects(&resolved.effects, &mut next, &action.name);
+        apply_effects(&resolved.effects, &mut next, &action.name, &action.params);
         Some(next)
     }
 

@@ -38,7 +38,7 @@ hint = "Associate this cycle with a project."
 name = "AddIssueToCycle"
 kind = "input"
 from = ["Planning", "Active"]
-effect = "increment issue_count"
+effect = ["issue_count += 1"]
 params = ["IssueId"]
 hint = "Add an issue to this cycle."
 
@@ -54,7 +54,7 @@ hint = "Start the cycle. Requires at least one issue."
 name = "MarkIssueComplete"
 kind = "input"
 from = ["Active"]
-effect = "increment completed_count"
+effect = ["completed_count += 1"]
 params = ["IssueId"]
 hint = "Record that an issue within this cycle has been completed."
 

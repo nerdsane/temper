@@ -416,12 +416,11 @@ pub(super) async fn load_specs_from_directory(
     {
         let mut registry = state.registry.write().unwrap(); // ci-ok: infallible lock
         registry
-            .try_register_tenant_with_reactions_and_constraints(
+            .try_register_tenant_with_constraints(
                 body.tenant.as_str(),
                 csdl,
                 csdl_xml,
                 &ioa_pairs,
-                Vec::new(),
                 cross_invariants_toml.clone(),
                 body.merge,
             )

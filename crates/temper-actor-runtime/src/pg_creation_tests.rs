@@ -6,9 +6,7 @@ async fn public_spawn_with_fields_validates_strict_creation_before_writing() {
     let (pool, _container) = pool().await;
     let system = crate::ActorSystem::new(pool.clone(), crate::SchedulerConfig::default());
     system
-        .register(Arc::new(
-            SpecDrivenActor::from_ioa(SPEC, HashMap::new()).unwrap(),
-        ))
+        .register(Arc::new(SpecDrivenActor::from_ioa(SPEC).unwrap()))
         .await
         .unwrap();
     let namespace = format!("creation-{}", Uuid::new_v4());
@@ -98,9 +96,7 @@ async fn context_spawn_persists_strict_child_defaults_before_activation() {
         "[[state]]\nname = \"attempts\"\ntype = \"counter\"\ninitial = \"5\"\n[[action]]",
     );
     system
-        .register(Arc::new(
-            SpecDrivenActor::from_ioa(&spec, HashMap::new()).unwrap(),
-        ))
+        .register(Arc::new(SpecDrivenActor::from_ioa(&spec).unwrap()))
         .await
         .unwrap();
     let namespace = format!("context-child-{}", Uuid::new_v4());
@@ -168,9 +164,7 @@ param = "expected_id"
 field = "id"
 "#;
     system
-        .register(Arc::new(
-            SpecDrivenActor::from_ioa(&spec, HashMap::new()).unwrap(),
-        ))
+        .register(Arc::new(SpecDrivenActor::from_ioa(&spec).unwrap()))
         .await
         .unwrap();
     for alias in ["Id", "id"] {

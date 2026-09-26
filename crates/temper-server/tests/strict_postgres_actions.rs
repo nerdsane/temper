@@ -1,7 +1,6 @@
 //! Strict OData requests use the actual HTTP router and PostgreSQL actor runtime.
 #[path = "strict_postgres_actions/authorization.rs"]
 mod authorization;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::{body::Body, http::Request, middleware::Next};
@@ -89,9 +88,7 @@ async fn strict_postgres_http_preserves_the_contract_and_acknowledges_only_enque
     let (pool, _container) = pool().await;
     let actors = Arc::new(ActorSystem::new(pool.clone(), SchedulerConfig::default()));
     actors
-        .register(Arc::new(
-            SpecDrivenActor::from_ioa(SPEC, HashMap::new()).unwrap(),
-        ))
+        .register(Arc::new(SpecDrivenActor::from_ioa(SPEC).unwrap()))
         .await
         .unwrap();
     let mut registry = SpecRegistry::new();
@@ -321,9 +318,7 @@ async fn repeated_process_creation_preserves_existing_fields_and_defaults() {
         let (pool, _container) = pool().await;
         let actors = Arc::new(ActorSystem::new(pool.clone(), SchedulerConfig::default()));
         actors
-            .register(Arc::new(
-                SpecDrivenActor::from_ioa(&spec, HashMap::new()).unwrap(),
-            ))
+            .register(Arc::new(SpecDrivenActor::from_ioa(&spec).unwrap()))
             .await
             .unwrap();
         let mut registry = SpecRegistry::new();
@@ -405,9 +400,7 @@ async fn custom_strict_process_creation_does_not_spawn_unrelated_registered_acto
     let process_spec = SPEC.replace("Order", "Process");
     for source in [&process_spec, &SPEC.replace("Order", "Unrelated")] {
         actors
-            .register(Arc::new(
-                SpecDrivenActor::from_ioa(source, HashMap::new()).unwrap(),
-            ))
+            .register(Arc::new(SpecDrivenActor::from_ioa(source).unwrap()))
             .await
             .unwrap();
     }

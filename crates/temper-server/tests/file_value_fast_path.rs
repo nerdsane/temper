@@ -141,11 +141,7 @@ from = ["Created", "Ready"]
 to = "Ready"
 params = ["content_hash", "size_bytes", "mime_type", "version_number", "previous_version_id", "created_by"]
 guard = "empty(workspace_id) || Workspace[workspace_id].status in ['Active']"
-effect = [
-  { type = "increment", var = "version_count" },
-  { type = "set_counter_from_param", var = "size_bytes", param = "size_bytes" },
-  { type = "set_bool", var = "has_content", value = "true" },
-]
+effect = ["version_count += 1", "size_bytes = params.size_bytes", "has_content = true"]
 "#;
 
 const FILE_IOA: &str = r#"
@@ -192,11 +188,7 @@ kind = "input"
 from = ["Created", "Ready"]
 to = "Ready"
 params = ["content_hash", "size_bytes", "mime_type", "version_number", "previous_version_id", "created_by"]
-effect = [
-  { type = "increment", var = "version_count" },
-  { type = "set_counter_from_param", var = "size_bytes", param = "size_bytes" },
-  { type = "set_bool", var = "has_content", value = "true" },
-]
+effect = ["version_count += 1", "size_bytes = params.size_bytes", "has_content = true"]
 "#;
 
 async fn build_turso_state(test_name: &str) -> (ServerState, TursoEventStore) {

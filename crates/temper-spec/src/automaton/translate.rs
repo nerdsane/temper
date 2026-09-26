@@ -5,68 +5,65 @@
 //! `temper-verify` (model checking) consume this intermediate form,
 //! eliminating duplicated translation logic and preventing semantic drift.
 
-use super::types::{Automaton, Effect};
-use crate::predicate::Expr;
+use std::collections::BTreeMap;
+
+use super::types::{Action, Automaton, Effect, TriggerKind};
+use crate::predicate::{Arg, AssignOp, Expr, VarKind};
 
 // ---------------------------------------------------------------------------
 // Intermediate effect representation
 // ---------------------------------------------------------------------------
 
-/// Canonical effect produced by shared translation.
+/// Canonical effect produced by shared translation: an effect statement
+/// resolved against the declared variable types, or a post-commit dispatch.
 ///
-/// Classified into verifiable (state-modifying) and runtime-only categories.
-/// `temper-verify` filters out runtime-only effects; `temper-jit` keeps all.
+/// State effects (counters, bools, lists) are applied by the runtime and
+/// modeled by the verifier; the rest only the runtime performs.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResolvedEffect {
-    // -- Verifiable effects (both runtime and verification) --
-    /// Increment a counter variable by 1.
-    IncrementCounter(String),
-    /// Decrement a counter variable by 1.
-    DecrementCounter(String),
-    /// Increment a counter variable by a numeric action parameter.
-    IncrementCounterByParam { var: String, param: String },
-    /// Decrement a counter variable by a numeric action parameter.
-    DecrementCounterByParam { var: String, param: String },
-    /// Set a counter variable from an action param.
-    SetCounterFromParam { var: String, param: String },
-    /// Set a boolean variable.
-    SetBool { var: String, value: bool },
-    /// Append a value to a list variable.
-    ListAppend(String),
-    /// Remove a value from a list variable by index.
-    ListRemoveAt(String),
+    // -- State effects (runtime and verification) --
+    /// `var = value` on a counter.
+    SetCounter { var: String, value: Arg },
+    /// `var += value` on a counter.
+    AddCounter { var: String, value: Arg },
+    /// `var -= value` on a counter; stops at 0.
+    SubCounter { var: String, value: Arg },
+    /// `var = value` on a bool.
+    SetBool { var: String, value: Arg },
+    /// `append(var, value)`.
+    ListAppend { var: String, value: Arg },
+    /// `remove_at(var, index)`; out of range is a no-op.
+    ListRemoveAt { var: String, index: Arg },
 
-    // -- Runtime-only effects (filtered out during verification) --
-    /// Emit a named event.
-    Emit(String),
-    /// Trigger a named WASM integration.
-    Trigger(String),
+    // -- Runtime-only effects --
+    /// Post-commit dispatch by name: an external trigger's dispatch record
+    /// (`__trigger__:{action}:{trigger}`) or a platform hook.
+    Dispatch(String),
     /// Schedule a delayed action.
     Schedule { action: String, delay_seconds: u64 },
     /// Schedule an action at an absolute timestamp from an entity field.
     ScheduleAt { action: String, field: String },
-    /// Spawn a child entity.
+    /// Spawn a child entity; its id is `id` when given and present,
+    /// otherwise fresh.
     Spawn {
         entity_type: String,
-        entity_id_source: String,
-        initial_action: Option<String>,
+        initial_action: String,
         store_id_in: Option<String>,
-        copy_fields: Option<Vec<String>>,
+        id: Option<Arg>,
     },
 }
 
 impl ResolvedEffect {
-    /// Returns true if this effect modifies verifiable state (counters, booleans, lists).
-    ///
-    /// Runtime-only effects (Emit, Trigger, Schedule, ScheduleAt, Spawn) return false.
-    pub fn is_verifiable(&self) -> bool {
+    /// Whether this effect writes modeled state (counters, bools, lists).
+    pub fn is_state_effect(&self) -> bool {
         matches!(
             self,
-            ResolvedEffect::IncrementCounter(_)
-                | ResolvedEffect::DecrementCounter(_)
+            ResolvedEffect::SetCounter { .. }
+                | ResolvedEffect::AddCounter { .. }
+                | ResolvedEffect::SubCounter { .. }
                 | ResolvedEffect::SetBool { .. }
-                | ResolvedEffect::ListAppend(_)
-                | ResolvedEffect::ListRemoveAt(_)
+                | ResolvedEffect::ListAppend { .. }
+                | ResolvedEffect::ListRemoveAt { .. }
         )
     }
 }
@@ -89,7 +86,7 @@ pub struct ResolvedAction {
     pub to_state: Option<String>,
     /// Precondition beyond `from_states`.
     pub guard: Expr,
-    /// Effects (combined from `to` state change + explicit effects + heuristics).
+    /// The action's effect statements, then its dispatches.
     pub effects: Vec<ResolvedEffect>,
 }
 
@@ -103,11 +100,10 @@ pub struct ResolvedAction {
 /// Both JIT and verification builders should call this instead of implementing
 /// their own guard/effect matching.
 pub fn translate_actions(automaton: &Automaton) -> Vec<ResolvedAction> {
-    let counter_vars: Vec<String> = automaton
+    let kinds: BTreeMap<&str, VarKind> = automaton
         .state
         .iter()
-        .filter(|s| s.var_type == "counter")
-        .map(|s| s.name.clone())
+        .map(|s| (s.name.as_str(), VarKind::from_type(&s.var_type)))
         .collect();
 
     automaton
@@ -115,8 +111,9 @@ pub fn translate_actions(automaton: &Automaton) -> Vec<ResolvedAction> {
         .iter()
         .filter(|a| a.kind != "output")
         .map(|a| {
-            let effects = translate_effects(a.to.as_deref(), &a.effect, &a.name, &counter_vars);
-
+            let mut effects: Vec<ResolvedEffect> =
+                a.effect.iter().map(|e| resolve_effect(e, &kinds)).collect();
+            effects.extend(dispatch_effects(a));
             ResolvedAction {
                 name: a.name.clone(),
                 from_states: a.from.clone(),
@@ -128,112 +125,61 @@ pub fn translate_actions(automaton: &Automaton) -> Vec<ResolvedAction> {
         .collect()
 }
 
-/// Translate effects, including state change, explicit effects, and name heuristics.
-fn translate_effects(
-    _to_state: Option<&str>,
-    effects: &[Effect],
-    action_name: &str,
-    counter_vars: &[String],
-) -> Vec<ResolvedEffect> {
-    let mut resolved = Vec::new();
-
-    // Explicit effects
-    if !effects.is_empty() {
-        for e in effects {
-            resolved.push(translate_single_effect(e));
+/// Resolve one (already type-checked) effect statement.
+fn resolve_effect(effect: &Effect, kinds: &BTreeMap<&str, VarKind>) -> ResolvedEffect {
+    match effect.clone() {
+        Effect::Assign { var, op, value } => {
+            if kinds.get(var.as_str()) == Some(&VarKind::Bool) {
+                debug_assert_eq!(op, AssignOp::Set, "checked at load");
+                return ResolvedEffect::SetBool { var, value };
+            }
+            match op {
+                AssignOp::Set => ResolvedEffect::SetCounter { var, value },
+                AssignOp::Add => ResolvedEffect::AddCounter { var, value },
+                AssignOp::Sub => ResolvedEffect::SubCounter { var, value },
+            }
         }
-    } else {
-        // Name-heuristic fallback when no explicit effects are declared.
-        apply_name_heuristics(action_name, counter_vars, &mut resolved);
-    }
-
-    // Emit event for action (appended by JIT, not by verification).
-    // This is left to the consumer since it's a JIT-specific convention.
-
-    resolved
-}
-
-/// Translate a single IOA effect to its resolved form.
-fn translate_single_effect(effect: &Effect) -> ResolvedEffect {
-    match effect {
-        Effect::Increment { var, amount } => match amount {
-            Some(param) => ResolvedEffect::IncrementCounterByParam {
-                var: var.clone(),
-                param: param.clone(),
-            },
-            None => ResolvedEffect::IncrementCounter(var.clone()),
-        },
-        Effect::Decrement { var, amount } => match amount {
-            Some(param) => ResolvedEffect::DecrementCounterByParam {
-                var: var.clone(),
-                param: param.clone(),
-            },
-            None => ResolvedEffect::DecrementCounter(var.clone()),
-        },
-        Effect::SetCounterFromParam { var, param } => ResolvedEffect::SetCounterFromParam {
-            var: var.clone(),
-            param: param.clone(),
-        },
-        Effect::SetBool { var, value } => ResolvedEffect::SetBool {
-            var: var.clone(),
-            value: *value,
-        },
-        Effect::Emit { event } => ResolvedEffect::Emit(event.clone()),
-        Effect::ListAppend { var } => ResolvedEffect::ListAppend(var.clone()),
-        Effect::ListRemoveAt { var } => ResolvedEffect::ListRemoveAt(var.clone()),
-        Effect::Trigger { name } => ResolvedEffect::Trigger(name.clone()),
+        Effect::Append { list, value } => ResolvedEffect::ListAppend { var: list, value },
+        Effect::RemoveAt { list, index } => ResolvedEffect::ListRemoveAt { var: list, index },
         Effect::Schedule {
             action,
             delay_seconds,
         } => ResolvedEffect::Schedule {
-            action: action.clone(),
-            delay_seconds: *delay_seconds,
+            action,
+            delay_seconds,
         },
-        Effect::ScheduleAt { action, field } => ResolvedEffect::ScheduleAt {
-            action: action.clone(),
-            field: field.clone(),
-        },
+        Effect::ScheduleAt { action, field } => ResolvedEffect::ScheduleAt { action, field },
         Effect::Spawn {
             entity_type,
-            entity_id_source,
             initial_action,
             store_id_in,
-            copy_fields,
+            id,
         } => ResolvedEffect::Spawn {
-            entity_type: entity_type.clone(),
-            entity_id_source: entity_id_source.clone(),
-            initial_action: initial_action.clone(),
-            store_id_in: store_id_in.clone(),
-            copy_fields: copy_fields.clone(),
+            entity_type,
+            initial_action,
+            store_id_in,
+            id,
         },
     }
 }
 
-/// Apply name-based heuristics for counter effects.
-///
-/// When an action has no explicit effects, infers counter increment/decrement
-/// from the action name (e.g., "AddItem" → increment all counters).
-fn apply_name_heuristics(
-    action_name: &str,
-    counter_vars: &[String],
-    effects: &mut Vec<ResolvedEffect>,
-) {
-    let name_lower = action_name.to_lowercase();
-    if name_lower.contains("additem") || name_lower.contains("add_item") {
-        effects.push(ResolvedEffect::IncrementCounter("items".to_string()));
-        for var in counter_vars {
-            if var != "items" {
-                effects.push(ResolvedEffect::IncrementCounter(var.clone()));
+/// The post-commit dispatches an action's `[[action.triggers]]` produce, in
+/// declaration order. Entity-kind triggers dispatch through the reaction
+/// system instead.
+pub fn dispatch_effects(action: &Action) -> Vec<ResolvedEffect> {
+    action
+        .triggers
+        .iter()
+        .filter_map(|trigger| match trigger.kind {
+            TriggerKind::Entity => None,
+            TriggerKind::Hook => trigger.hook.clone().map(ResolvedEffect::Dispatch),
+            TriggerKind::Wasm | TriggerKind::Adapter | TriggerKind::Webhook => {
+                Some(ResolvedEffect::Dispatch(
+                    super::parser::synthesized_trigger_name(&action.name, &trigger.name),
+                ))
             }
-        }
-    } else if name_lower.contains("removeitem") || name_lower.contains("remove_item") {
-        effects.push(ResolvedEffect::DecrementCounter("items".to_string()));
-        for var in counter_vars {
-            if var != "items" {
-                effects.push(ResolvedEffect::DecrementCounter(var.clone()));
-            }
-        }
-    }
+        })
+        .collect()
 }
 
 #[cfg(test)]

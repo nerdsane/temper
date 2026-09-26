@@ -20,7 +20,7 @@ use temper_store_turso::TursoEventStore;
 const ECHO_WASM: &[u8] =
     include_bytes!("../../../crates/temper-wasm/tests/fixtures/echo_integration.wasm");
 
-/// IOA spec with a `trigger echo_call` effect and WASM integration.
+/// IOA spec with an inline WASM trigger.
 const ECHO_IOA: &str = r#"
 [automaton]
 name = "EchoTest"
@@ -32,8 +32,14 @@ name = "TriggerEcho"
 kind = "input"
 from = ["Idle"]
 to = "Pending"
-effect = "trigger echo_call"
 hint = "Kicks off the echo integration."
+
+[[action.triggers]]
+name = "echo_integration"
+kind = "wasm"
+module = "echo_integration"
+on_success = "EchoSucceeded"
+on_failure = "EchoFailed"
 
 [[action]]
 name = "EchoSucceeded"
@@ -48,14 +54,6 @@ kind = "input"
 from = ["Pending"]
 to = "Failed"
 hint = "Callback from failed echo WASM module."
-
-[[integration]]
-name = "echo_integration"
-trigger = "echo_call"
-type = "wasm"
-module = "echo_integration"
-on_success = "EchoSucceeded"
-on_failure = "EchoFailed"
 "#;
 
 /// Minimal CSDL with EchoTest entity type.
@@ -278,7 +276,7 @@ async fn wasm_integration_dispatches_callback() {
         wasm_reg.register(&tenant, "echo_integration", &hash);
     }
 
-    // Dispatch TriggerEcho — should succeed and emit custom effect "echo_call".
+    // Dispatch TriggerEcho — should succeed and dispatch the trigger's record.
     let response = state
         .dispatch_tenant_action(
             &tenant,
@@ -294,8 +292,10 @@ async fn wasm_integration_dispatches_callback() {
     assert!(response.success, "TriggerEcho should succeed");
     assert_eq!(response.state.status, "Pending");
     assert!(
-        response.custom_effects.contains(&"echo_call".to_string()),
-        "should emit echo_call effect, got: {:?}",
+        response
+            .custom_effects
+            .contains(&"__trigger__:TriggerEcho:echo_integration".to_string()),
+        "should dispatch the echo trigger, got: {:?}",
         response.custom_effects
     );
 

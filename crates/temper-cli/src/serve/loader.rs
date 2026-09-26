@@ -9,7 +9,6 @@ use anyhow::{Context, Result};
 use crate::util::to_pascal_case;
 use temper_runtime::tenant::TenantId;
 use temper_server::registry::SpecRegistry;
-use temper_server::trigger::registry::parse_reactions;
 use temper_spec::automaton::{LintSeverity, lint_automata_bundle, lint_automaton, parse_automaton};
 use temper_spec::cross_invariant::{
     CrossInvariantLintSeverity, lint_cross_invariants, parse_cross_invariants,
@@ -139,7 +138,7 @@ pub(super) fn load_into_registry(
 
     // Read IOA TOML specs
     let ioa_sources = read_ioa_sources(specs_path)?;
-    let reactions = read_reactions(specs_path)?;
+    reject_legacy_reactions(specs_path)?;
     let cross_invariants_toml = read_cross_invariants_toml(specs_path)?;
     let cedar_policy_text = build_tenant_cedar_policy(specs_path, ioa_sources.keys())?;
 
@@ -197,12 +196,11 @@ pub(super) fn load_into_registry(
         .collect();
 
     registry
-        .try_register_tenant_with_reactions_and_constraints(
+        .try_register_tenant_with_constraints(
             tenant,
             csdl,
             csdl_xml,
             &ioa_pairs,
-            reactions,
             cross_invariants_toml.clone(),
             false,
         )
@@ -248,19 +246,17 @@ pub(super) fn read_ioa_sources(specs_dir: &Path) -> Result<HashMap<String, Strin
     Ok(sources)
 }
 
-/// Read optional `reactions.toml` and parse it into reaction rules.
-pub(super) fn read_reactions(
-    specs_dir: &Path,
-) -> Result<Vec<temper_server::trigger::ReactionRule>> {
+/// A `reactions.toml` is no longer read: cross-entity reactions are
+/// entity-kind `[[action.triggers]]` on the source action.
+pub(super) fn reject_legacy_reactions(specs_dir: &Path) -> Result<()> {
     let reactions_path = specs_dir.join("reactions.toml");
-    if !reactions_path.exists() {
-        return Ok(Vec::new());
+    if reactions_path.exists() {
+        anyhow::bail!(
+            "{} is no longer supported; declare each reaction as a kind = \"entity\" [[action.triggers]] block on its source action",
+            reactions_path.display()
+        );
     }
-
-    let source = fs::read_to_string(&reactions_path)
-        .with_context(|| format!("Failed to read {}", reactions_path.display()))?;
-    parse_reactions(&source)
-        .map_err(|e| anyhow::anyhow!("Failed to parse {}: {e}", reactions_path.display()))
+    Ok(())
 }
 
 /// Read optional `cross-invariants.toml` source from a specs directory.
@@ -364,11 +360,15 @@ name = "items"
 type = "counter"
 initial = "0"
 
+[[state]]
+name = "mood"
+type = "emotion"
+initial = "calm"
+
 [[action]]
 name = "Complete"
 from = ["Draft"]
 to = "Done"
-effect = "set phantom true"
 "#
             .to_string(),
         );
@@ -377,7 +377,7 @@ effect = "set phantom true"
         assert!(
             findings
                 .iter()
-                .any(|f| f.code == "effect_unknown_var" && f.severity == LintSeverity::Error)
+                .any(|f| f.code == "unknown_state_var_type" && f.severity == LintSeverity::Error)
         );
     }
 
@@ -394,11 +394,15 @@ name = "Order"
 states = ["Draft", "Done"]
 initial = "Draft"
 
+[[state]]
+name = "mood"
+type = "emotion"
+initial = "calm"
+
 [[action]]
 name = "Complete"
 from = ["Draft"]
 to = "Done"
-effect = "set phantom true"
 "#,
         )
         .expect("write ioa");

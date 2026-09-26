@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::guard::GuardFailure;
-use temper_spec::predicate::Expr;
+use temper_spec::predicate::{Arg, Expr};
 
 // ---------------------------------------------------------------------------
 // Core types
@@ -217,33 +217,27 @@ pub struct TransitionRule {
 }
 
 /// An effect applied after a transition fires.
+///
+/// Mirrors [`temper_spec::automaton::ResolvedEffect`] plus the status change.
+/// Values are [`Arg`]s; resolve them with [`super::effect_args`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Effect {
     /// Change the entity status.
     SetState(String),
-    /// Add an item (legacy alias for `IncrementCounter("items")`).
-    IncrementItems,
-    /// Remove an item (legacy alias for `DecrementCounter("items")`).
-    DecrementItems,
-    /// Increment a named counter variable.
-    IncrementCounter(String),
-    /// Increment a named counter variable by a numeric action parameter.
-    IncrementCounterByParam { var: String, param: String },
-    /// Decrement a named counter variable.
-    DecrementCounter(String),
-    /// Decrement a named counter variable by a numeric action parameter.
-    DecrementCounterByParam { var: String, param: String },
-    /// Set a named counter variable from an action param.
-    SetCounterFromParam { var: String, param: String },
-    /// Set a named boolean variable.
-    SetBool { var: String, value: bool },
-    /// Emit a named event.
-    EmitEvent(String),
-    /// Append a value to a named list variable (value from action params).
-    ListAppend(String),
-    /// Remove a value from a named list variable by index (index from action params).
-    ListRemoveAt(String),
-    /// Domain-specific custom effect (e.g., "DeploySpecs", "NotifyAdmin").
+    /// `var = value` on a counter.
+    SetCounter { var: String, value: Arg },
+    /// `var += value` on a counter.
+    AddCounter { var: String, value: Arg },
+    /// `var -= value` on a counter; stops at 0.
+    SubCounter { var: String, value: Arg },
+    /// `var = value` on a bool.
+    SetBool { var: String, value: Arg },
+    /// `append(var, value)`.
+    ListAppend { var: String, value: Arg },
+    /// `remove_at(var, index)`; out of range is a no-op.
+    ListRemoveAt { var: String, index: Arg },
+    /// Post-commit dispatch by name: an external trigger's dispatch record
+    /// or a platform hook (e.g. "DispatchCallback").
     ///
     /// Dispatched by post-transition hooks registered at startup.
     /// The actor runtime ignores unknown custom effects — they are only
@@ -253,13 +247,13 @@ pub enum Effect {
     ScheduleAction { action: String, delay_seconds: u64 },
     /// Schedule an action at an absolute timestamp read from an entity field.
     ScheduleAtAction { action: String, field: String },
-    /// Spawn a child entity as a post-transition effect.
+    /// Spawn a child entity as a post-transition effect; its id is `id`
+    /// when given and present, otherwise fresh.
     SpawnEntity {
         entity_type: String,
-        entity_id_source: String,
-        initial_action: Option<String>,
+        initial_action: String,
         store_id_in: Option<String>,
-        copy_fields: Option<Vec<String>>,
+        id: Option<Arg>,
     },
 }
 

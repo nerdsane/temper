@@ -88,7 +88,7 @@ pub(super) async fn dispatch_json_value(ctx: &mut RuntimeContext, raw: Value) ->
                 },
                 "instructions": "Temper is an operating layer for governed applications, not a general-purpose API. \
             When you need a capability (weather, task management, etc.), generate an IOA spec \
-            that declares [[integration]] sections for external APIs, then submit it via \
+            that declares [[action.triggers]] blocks for external APIs, then submit it via \
             the execute tool. Use execute to start the server, submit specs, create entities, \
             and invoke actions — all governed by Cedar policies. If an action is denied, the \
             decision surfaces to the human developer for approval. When the tool result \

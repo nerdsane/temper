@@ -254,11 +254,7 @@ kind = "input"
 from = ["Created"]
 to = "Provisioning"
 hint = "Start sandbox provisioning. Triggers provision_sandbox WASM integration."
-effect = [{ type = "trigger", name = "provision_sandbox" }]
 
-# ADR-0046: inline trigger — migrated from [[integration]] below.
-# Post-parse expansion re-synthesizes the equivalent Integration so
-# the existing WASM/webhook runtime handles execution unchanged.
 [[action.triggers]]
 name = "provision_sandbox"
 kind = "wasm"
@@ -278,11 +274,7 @@ from = ["Provisioning"]
 to = "Thinking"
 params = ["sandbox_url", "sandbox_id", "workspace_id", "conversation_file_id", "file_manifest_id", "session_file_id", "session_leaf_id"]
 hint = "Callback from sandbox provisioner. Sets sandbox connection, TemperFS workspace/file/manifest/session, and starts think loop."
-effect = [{ type = "trigger", name = "call_llm" }]
 
-# ADR-0046: inline trigger — migrated from [[integration]] below.
-# Post-parse expansion re-synthesizes the equivalent Integration so
-# the existing WASM/webhook runtime handles execution unchanged.
 [[action.triggers]]
 name = "call_llm"
 kind = "wasm"
@@ -310,16 +302,8 @@ from = ["Thinking"]
 to = "Executing"
 params = ["pending_tool_calls", "conversation", "input_tokens", "output_tokens", "session_leaf_id", "context_tokens"]
 hint = "LLM returned tool_use blocks. Record token usage, transition to Executing, and run tools."
-effect = [
-  { type = "increment", var = "input_tokens" },
-  { type = "increment", var = "output_tokens" },
-  { type = "increment", var = "context_tokens" },
-  { type = "trigger", name = "run_tools" }
-]
+effect = ["input_tokens += 1", "output_tokens += 1", "context_tokens += 1"]
 
-# ADR-0046: inline trigger — migrated from [[integration]] below.
-# Post-parse expansion re-synthesizes the equivalent Integration so
-# the existing WASM/webhook runtime handles execution unchanged.
 [[action.triggers]]
 name = "run_tools"
 kind = "wasm"
@@ -342,10 +326,14 @@ to = "Thinking"
 params = ["pending_tool_calls", "conversation", "session_leaf_id"]
 guard = "turn_count < 100"
 hint = "Tool results received. Increment turn, transition to Thinking, and call LLM again. Static safety ceiling at 100 turns; dynamic max_turns enforced by llm_caller at runtime."
-effect = [
-  { type = "increment", var = "turn_count" },
-  { type = "trigger", name = "call_llm" }
-]
+effect = ["turn_count += 1"]
+
+[[action.triggers]]
+name = "call_llm"
+kind = "wasm"
+module = "llm_caller"
+on_failure = "Fail"
+config = { api_key = "{secret:anthropic_api_key}", anthropic_api_key = "{secret:anthropic_api_key}", openrouter_api_key = "{secret:openrouter_api_key}", anthropic_api_url = "https://api.anthropic.com/v1/messages", openrouter_api_url = "https://openrouter.ai/api/v1/chat/completions", anthropic_auth_mode = "auto", openrouter_site_url = "", openrouter_app_name = "temper-agent", temper_api_url = "{secret:temper_api_url}", timeout_secs = "300", max_response_bytes = "4194304" }
 
 # --- Actions: Compaction (Phase 3) ---
 
@@ -356,15 +344,8 @@ from = ["Thinking"]
 to = "Compacting"
 params = ["input_tokens", "output_tokens"]
 hint = "LLM caller detected context tokens exceeds window minus reserve. Trigger compaction."
-effect = [
-  { type = "increment", var = "input_tokens" },
-  { type = "increment", var = "output_tokens" },
-  { type = "trigger", name = "compact_context" }
-]
+effect = ["input_tokens += 1", "output_tokens += 1"]
 
-# ADR-0046: inline trigger — migrated from [[integration]] below.
-# Post-parse expansion re-synthesizes the equivalent Integration so
-# the existing WASM/webhook runtime handles execution unchanged.
 [[action.triggers]]
 name = "compact_context"
 kind = "wasm"
@@ -384,10 +365,14 @@ from = ["Compacting"]
 to = "Thinking"
 params = ["session_leaf_id", "context_tokens"]
 hint = "Compaction finished. Resume LLM call with compacted context."
-effect = [
-  { type = "increment", var = "compaction_count" },
-  { type = "trigger", name = "call_llm" }
-]
+effect = ["compaction_count += 1"]
+
+[[action.triggers]]
+name = "call_llm"
+kind = "wasm"
+module = "llm_caller"
+on_failure = "Fail"
+config = { api_key = "{secret:anthropic_api_key}", anthropic_api_key = "{secret:anthropic_api_key}", openrouter_api_key = "{secret:openrouter_api_key}", anthropic_api_url = "https://api.anthropic.com/v1/messages", openrouter_api_url = "https://openrouter.ai/api/v1/chat/completions", anthropic_auth_mode = "auto", openrouter_site_url = "", openrouter_app_name = "temper-agent", temper_api_url = "{secret:temper_api_url}", timeout_secs = "300", max_response_bytes = "4194304" }
 
 # --- Actions: Steering (Phase 4) ---
 
@@ -398,16 +383,8 @@ from = ["Thinking"]
 to = "Steering"
 params = ["input_tokens", "output_tokens", "session_leaf_id", "context_tokens"]
 hint = "LLM returned end_turn. Check for queued steering messages before completing."
-effect = [
-  { type = "increment", var = "input_tokens" },
-  { type = "increment", var = "output_tokens" },
-  { type = "increment", var = "context_tokens" },
-  { type = "trigger", name = "check_steering" }
-]
+effect = ["input_tokens += 1", "output_tokens += 1", "context_tokens += 1"]
 
-# ADR-0046: inline trigger — migrated from [[integration]] below.
-# Post-parse expansion re-synthesizes the equivalent Integration so
-# the existing WASM/webhook runtime handles execution unchanged.
 [[action.triggers]]
 name = "check_steering"
 kind = "wasm"
@@ -426,11 +403,14 @@ to = "Thinking"
 params = ["session_leaf_id", "steering_messages", "conversation"]
 guard = "follow_up_count < 100"
 hint = "Steering message found. Inject into conversation and continue. Dynamic max_follow_ups enforced by steering_checker."
-effect = [
-  { type = "increment", var = "turn_count" },
-  { type = "increment", var = "follow_up_count" },
-  { type = "trigger", name = "call_llm" }
-]
+effect = ["turn_count += 1", "follow_up_count += 1"]
+
+[[action.triggers]]
+name = "call_llm"
+kind = "wasm"
+module = "llm_caller"
+on_failure = "Fail"
+config = { api_key = "{secret:anthropic_api_key}", anthropic_api_key = "{secret:anthropic_api_key}", openrouter_api_key = "{secret:openrouter_api_key}", anthropic_api_url = "https://api.anthropic.com/v1/messages", openrouter_api_url = "https://openrouter.ai/api/v1/chat/completions", anthropic_auth_mode = "auto", openrouter_site_url = "", openrouter_app_name = "temper-agent", temper_api_url = "{secret:temper_api_url}", timeout_secs = "300", max_response_bytes = "4194304" }
 
 [[action]]
 name = "FinalizeResult"
@@ -439,9 +419,7 @@ from = ["Steering"]
 to = "Completed"
 params = ["result", "conversation", "session_leaf_id"]
 hint = "No steering messages queued. Set result and complete."
-effect = [
-  { type = "set_bool", var = "has_result", value = "true" }
-]
+effect = ["has_result = true"]
 
 [[action]]
 name = "Steer"
@@ -459,11 +437,7 @@ from = ["Thinking"]
 to = "Completed"
 params = ["result", "conversation", "input_tokens", "output_tokens", "session_leaf_id"]
 hint = "LLM returned end_turn in non-steering mode (max_follow_ups=0). Record token usage, set result, and complete."
-effect = [
-  { type = "increment", var = "input_tokens" },
-  { type = "increment", var = "output_tokens" },
-  { type = "set_bool", var = "has_result", value = "true" }
-]
+effect = ["input_tokens += 1", "output_tokens += 1", "has_result = true"]
 
 # --- Actions: Heartbeat (Phase 8) ---
 
@@ -506,13 +480,9 @@ from = ["Created"]
 to = "Provisioning"
 params = ["sandbox_url", "sandbox_id", "workspace_id", "conversation_file_id", "file_manifest_id", "session_file_id", "session_leaf_id"]
 hint = "Resume agent from saved state. Transitions to Provisioning for workspace restore."
-effect = [{ type = "trigger", name = "restore_workspace" }]
 
 # --- Invariants ---
 
-# ADR-0046: inline trigger — migrated from [[integration]] below.
-# Post-parse expansion re-synthesizes the equivalent Integration so
-# the existing WASM/webhook runtime handles execution unchanged.
 [[action.triggers]]
 name = "restore_workspace"
 kind = "wasm"

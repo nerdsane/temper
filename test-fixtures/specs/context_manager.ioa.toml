@@ -16,14 +16,27 @@ name = "PrepareContext"
 kind = "input"
 from = ["Idle"]
 to = "Assembling"
-effect = [{ type = "trigger", name = "assemble_context" }]
+
+[[action.triggers]]
+name = "context_assemble_trigger"
+kind = "entity"
+target_entity = "ContextAssemblerIntegration"
+target_action = "assemble_context"
+resolve_target = { type = "same_id" }
 
 [[action]]
 name = "ContextReady"
 kind = "input"
 from = ["Assembling"]
 to = "Idle"
-effect = [{ type = "increment", var = "preparations_done" }]
+effect = ["preparations_done += 1"]
+
+[[action.triggers]]
+name = "context_ready_to_agent"
+kind = "entity"
+target_entity = "Process"
+target_action = "ContextReady"
+resolve_target = { type = "same_id" }
 
 [[action]]
 name = "ContextOverflow"
@@ -31,14 +44,15 @@ kind = "input"
 from = ["Assembling"]
 to = "Idle"
 
+[[action.triggers]]
+name = "context_overflow_to_agent"
+kind = "entity"
+target_entity = "Process"
+target_action = "ContextOverflow"
+resolve_target = { type = "same_id" }
+
 [[action]]
 name = "AssemblyFailed"
 kind = "input"
 from = ["Assembling"]
 to = "Failed"
-
-[[integration]]
-name = "assemble_context"
-trigger = "assemble_context"
-type = "context_assembler"
-emits = ["ContextReady", "ContextOverflow", "AssemblyFailed"]

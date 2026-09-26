@@ -1,17 +1,22 @@
 //! The predicate language shared by every condition in an IOA spec: action
-//! guards, trigger guards, `[[invariant]]` and `[[field_invariant]]` asserts.
+//! guards, trigger guards, `[[invariant]]` and `[[field_invariant]]` asserts;
+//! and the effect statements actions write with ([`parse_effect`]).
 //!
 //! One grammar ([`parse`]), one tree ([`Expr`]), one evaluator ([`eval`]).
-//! Expressions serialize as their canonical source text.
+//! Expressions and effects serialize as their canonical source text.
 
 mod ast;
 mod check;
+mod effect;
 mod eval;
 mod parse;
 mod print;
 
 pub use ast::{CmpOp, Expr, Literal, Name, Operand, Set};
 pub use check::{Scope, VarKind, check, unmodelable};
+pub use effect::{
+    Arg, AssignOp, Effect, ParamKind, check_effect, check_effects, parse_arg, parse_effect,
+};
 pub use eval::{Env, JsonEnv, Truth, Val, eval, explain};
 pub use parse::{MAX_DEPTH, ParseError, is_keyword, parse};
 

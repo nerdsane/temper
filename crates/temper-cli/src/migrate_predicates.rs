@@ -1,9 +1,10 @@
 //! `temper migrate-predicates` subcommand.
 //!
-//! Converts IOA specs written in the old predicate syntax (guard tables and
-//! clauses, `when` + `assert`, `no_further_transitions`, trigger-guard and
-//! field-predicate tables) to the current grammar. Files are rewritten in
-//! place with comments and layout kept; `-` converts stdin to stdout.
+//! Converts IOA specs written in the old syntax (guard tables and clauses,
+//! `when` + `assert`, `no_further_transitions`, trigger-guard and
+//! field-predicate tables, verb and table effects, `[[integration]]` blocks,
+//! `trigger` and `emit` effects) to the current grammar. Files are rewritten
+//! in place with comments and layout kept; `-` converts stdin to stdout.
 
 use std::io::{Read as _, Write as _};
 

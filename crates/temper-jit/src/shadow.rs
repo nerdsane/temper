@@ -123,20 +123,14 @@ mod tests {
                     from_states: vec!["Draft".into()],
                     to_state: Some("Submitted".into()),
                     guard: parse("status == 'Draft'").unwrap(),
-                    effects: vec![
-                        Effect::SetState("Submitted".into()),
-                        Effect::EmitEvent("SubmitOrder".into()),
-                    ],
+                    effects: vec![Effect::SetState("Submitted".into())],
                 },
                 TransitionRule {
                     name: "CancelOrder".into(),
                     from_states: vec!["Draft".into(), "Submitted".into()],
                     to_state: Some("Cancelled".into()),
                     guard: parse("status in ['Draft', 'Submitted']").unwrap(),
-                    effects: vec![
-                        Effect::SetState("Cancelled".into()),
-                        Effect::EmitEvent("CancelOrder".into()),
-                    ],
+                    effects: vec![Effect::SetState("Cancelled".into())],
                 },
             ],
             state_var_metadata: Default::default(),
@@ -200,10 +194,7 @@ mod tests {
         // New table: SubmitOrder now goes to "Confirmed" instead of "Submitted".
         let mut new = base_table();
         new.rules[0].to_state = Some("Confirmed".into());
-        new.rules[0].effects = vec![
-            Effect::SetState("Confirmed".into()),
-            Effect::EmitEvent("SubmitOrder".into()),
-        ];
+        new.rules[0].effects = vec![Effect::SetState("Confirmed".into())];
 
         let result = shadow_test(&old, &new, &test_cases());
 
@@ -231,7 +222,10 @@ mod tests {
             from_states: vec!["Submitted".into()],
             to_state: Some("Submitted".into()),
             guard: parse("status == 'Submitted'").unwrap(),
-            effects: vec![Effect::EmitEvent("ExpediteOrder".into())],
+            effects: vec![Effect::ScheduleAction {
+                action: "ExpediteOrder".into(),
+                delay_seconds: 60,
+            }],
         });
         new.rebuild_index();
 

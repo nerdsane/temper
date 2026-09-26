@@ -8,7 +8,6 @@ allow_indefinite_states = ["Recorded", "Linked", "Ignored", "ObservationFailed"]
 name = "RecordSignal"
 kind = "input"
 from = ["Recorded"]
-effect = [{ type = "trigger", name = "signal_recorded" }]
 params = ["Source", "SignalKind", "OrganismId", "Summary", "EvidenceArtifactId", "CorrelationJson"]
 hint = "Record a raw observation before brain interpretation."
 

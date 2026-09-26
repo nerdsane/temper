@@ -34,7 +34,7 @@ kind = "input"
 from = ["Active"]
 to = "Active"
 params = ["name", "quota_limit"]
-effect = [{ type = "set_counter_from_param", var = "quota_limit", param = "quota_limit" }]
+effect = ["quota_limit = params.quota_limit"]
 hint = "Create a new workspace with a name and storage quota."
 
 [[action]]
@@ -43,7 +43,7 @@ kind = "input"
 from = ["Active"]
 to = "Active"
 params = ["quota_limit"]
-effect = [{ type = "set_counter_from_param", var = "quota_limit", param = "quota_limit" }]
+effect = ["quota_limit = params.quota_limit"]
 hint = "Update the workspace storage quota limit."
 
 [[action]]
@@ -51,16 +51,16 @@ name = "IncrementUsage"
 kind = "input"
 from = ["Active"]
 to = "Active"
-effect = [{ type = "increment", var = "used_bytes", amount = "size_bytes" }]
+effect = ["used_bytes += params.size_bytes"]
 params = ["size_bytes"]
-hint = "Record additional storage usage. Rejected if it would exceed quota."
+hint = "Record additional storage usage. Does not check the quota."
 
 [[action]]
 name = "DecrementUsage"
 kind = "input"
 from = ["Active"]
 to = "Active"
-effect = [{ type = "decrement", var = "used_bytes", amount = "size_bytes" }]
+effect = ["used_bytes -= params.size_bytes"]
 params = ["size_bytes"]
 hint = "Release storage usage when files are removed or shrink."
 
@@ -69,7 +69,7 @@ name = "IncrementFileCount"
 kind = "input"
 from = ["Active"]
 to = "Active"
-effect = "increment file_count"
+effect = ["file_count += 1"]
 hint = "Increment the workspace file count when a new file is created."
 
 [[action]]
@@ -77,7 +77,7 @@ name = "DecrementFileCount"
 kind = "input"
 from = ["Active"]
 to = "Active"
-effect = "decrement file_count"
+effect = ["file_count -= 1"]
 hint = "Decrement the workspace file count when a file is archived."
 
 [[action]]
@@ -108,9 +108,9 @@ name = "WorkspaceArchivedEvent"
 kind = "output"
 hint = "Emitted when workspace transitions to Archived."
 
-[[invariant]]
-name = "UsageBelowQuota"
-assert = "status in ['Active'] => used_bytes <= quota_limit"
+# No `used_bytes <= quota_limit` invariant: IncrementUsage adds a caller-chosen
+# size_bytes, which no guard can read, so nothing here keeps usage under the
+# quota (ADR-0180).
 
 [[invariant]]
 name = "FileCountNonNegative"

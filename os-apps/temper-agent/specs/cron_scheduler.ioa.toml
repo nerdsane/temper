@@ -29,11 +29,7 @@ kind = "input"
 from = ["Idle"]
 to = "Checking"
 hint = "Begin checking for due cron jobs."
-effect = [{ type = "trigger", name = "check_due_jobs" }]
 
-# ADR-0046: inline trigger — migrated from [[integration]] below.
-# Post-parse expansion re-synthesizes the equivalent Integration so
-# the existing WASM/webhook runtime handles execution unchanged.
 [[action.triggers]]
 name = "check_due_jobs"
 kind = "wasm"
@@ -51,11 +47,8 @@ from = ["Checking"]
 to = "Idle"
 params = ["last_check_at", "jobs_triggered"]
 hint = "Check finished. Schedule next check."
-effect = [{ type = "increment", var = "jobs_triggered" }, { type = "trigger", name = "schedule_next_check" }]
+effect = ["jobs_triggered += 1"]
 
-# ADR-0046: inline trigger — migrated from [[integration]] below.
-# Post-parse expansion re-synthesizes the equivalent Integration so
-# the existing WASM/webhook runtime handles execution unchanged.
 [[action.triggers]]
 name = "schedule_next_check"
 kind = "wasm"
@@ -72,7 +65,13 @@ kind = "input"
 from = ["Idle"]
 to = "Checking"
 hint = "Scheduled check triggered."
-effect = [{ type = "trigger", name = "check_due_jobs" }]
+
+[[action.triggers]]
+name = "check_due_jobs"
+kind = "wasm"
+module = "cron_scheduler_check"
+on_failure = "CheckFailed"
+config = { temper_api_url = "{secret:temper_api_url}" }
 
 [[action]]
 name = "CheckFailed"

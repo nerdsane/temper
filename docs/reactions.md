@@ -1,8 +1,10 @@
 # Cross-Entity Reactions
 
-Reactions are Temper's declarative layer for cross-entity choreography. When a source entity completes an action, a reaction rule dispatches a target action on another entity — no WASM module required.
+Reactions are Temper's declarative layer for cross-entity choreography. When a source entity completes an action, a reaction dispatches a target action on another entity — no WASM module required.
 
-This document is the developer reference. For architectural rationale see [ADR-0045](adrs/0045-reactions-first-class-app-primitive.md).
+A reaction is an `[[action.triggers]]` entry with `kind = "entity"`, declared on the source action. `[[action.triggers]]` is the only way an action causes work elsewhere: the other kinds are `wasm`, `adapter`, `webhook` and `hook` (a platform hook registered by the host, e.g. `hook = "DispatchCallback"`). Standalone `reactions.toml` files, `[[integration]]` blocks and `trigger`/`emit` effects are retired; an app that still ships a `reactions.toml` fails to install.
+
+This document is the developer reference. For architectural rationale see [ADR-0045](adrs/0045-reactions-first-class-app-primitive.md), [ADR-0046](adrs/0046-unified-action-triggers.md) and [ADR-0180](adrs/0180-unified-effect-syntax.md).
 
 ---
 
@@ -12,7 +14,7 @@ This document is the developer reference. For architectural rationale see [ADR-0
 |---|---|---|
 | What triggers it | Another entity's action committing | Another entity's action committing |
 | Where it runs | Temper dispatcher (Rust, in-process) | Wasmtime sandbox |
-| Authorization | `AgentContext::system()` | Configured principal |
+| Authorization | Invoking principal, or the trigger's `principal` | Invoking principal, or the trigger's `principal` |
 | Failure mode | Fire-and-forget (non-transactional) | Configurable retry / timeout |
 | Cascade bound | `MAX_REACTION_DEPTH = 8` | None (bounded by wall-clock timeout) |
 | Observable as | Tracing span + `ReactionResult` | Tracing span + integration config |
@@ -33,41 +35,39 @@ This document is the developer reference. For architectural rationale see [ADR-0
 
 ## TOML schema
 
-Reactions live in `reactions.toml` at the app's specs directory. Example structure:
+A reaction is declared on the source action in its `.ioa.toml`:
 
 ```toml
-[[reaction]]
+[[action]]
+name = "ConfirmOrder"
+from = ["Submitted"]
+to = "Confirmed"
+
+[[action.triggers]]
 name = "order_confirmed_triggers_payment"
-
-[reaction.when]
-entity_type = "Order"
-action = "ConfirmOrder"
+kind = "entity"
 to_state = "Confirmed"
-
-[reaction.then]
-entity_type = "Payment"
-action = "AuthorizePayment"
+target_entity = "Payment"
+target_action = "AuthorizePayment"
 params = { requested_by = "system" }
-
-[reaction.resolve_target]
-type = "same_id"
+resolve_target = { type = "same_id" }
 ```
 
-### `[reaction.when]` — trigger
+### When it fires
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
-| `entity_type` | string | yes | Source entity type (e.g., `Order`) |
-| `action` | string | no | Action name — omit to match any action |
+| (enclosing `[[action]]`) | — | — | The source entity type and action |
 | `to_state` | string | no | Required source post-state — omit to match any |
 | `guard` | string | no | Conditional predicate (see below) |
 
-### `[reaction.then]` — target action
+### Target action
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
-| `entity_type` | string | yes | Target entity type |
-| `action` | string | yes | Action to dispatch |
+| `target_entity` | string | yes | Target entity type |
+| `target_action` | string | yes | Action to dispatch |
+| `principal` | string | no | Registered `AgentType` to dispatch as; omit to inherit the invoking principal |
 | `params` | inline table | no | Static parameters, merged into the target action's param payload |
 | `params_from` | inline table | no | Dynamic params: `target_key = "source_field_name"` — at dispatch, read the named source field and bind it to the target param |
 
@@ -75,7 +75,7 @@ type = "same_id"
 
 If a `params_from` source field is missing on the source entity at dispatch time, the key is logged (`tracing::warn!`) and skipped; the reaction still fires with a partial param map.
 
-### `[reaction.resolve_target]` — how to pick the target entity ID
+### `resolve_target` — how to pick the target entity ID
 
 | `type` | Required fields | Behavior |
 |---|---|---|
@@ -92,10 +92,13 @@ If a `params_from` source field is missing on the source entity at dispatch time
 `guard` is an optional predicate, in the same grammar as every spec condition ([predicates.md](predicates.md)), that gates firing. It reads the source entity's fields and post-action `status`, and related entities' statuses. Guard-skipped rules do **not** emit a `ReactionResult` — they never fired.
 
 ```toml
-[reaction.when]
-entity_type = "Session"
-action = "Complete"
+[[action.triggers]]
+name = "complete_ranks_session"
+kind = "entity"
 guard = "ready && job_type in ['rank', 'source_search'] && Workspace[workspace_id].status == 'Active'"
+target_entity = "CurationJob"
+target_action = "Submit"
+resolve_target = { type = "create" }
 ```
 
 - A missing source field reads as `null`: `ready` is false, and `ready == false` is false too.
@@ -107,73 +110,50 @@ guard = "ready && job_type in ['rank', 'source_search'] && Workspace[workspace_i
 
 ### 1. Pipeline chaining
 
-Each `CurationJob` completion spawns the next stage as a new job:
+Each `CurationJob` completion spawns the next stage as a new job (on `CurationJob`'s `Complete` action):
 
 ```toml
-[[reaction]]
+[[action.triggers]]
 name = "source_search_complete_triggers_rank"
-
-[reaction.when]
-entity_type = "CurationJob"
-action = "Complete"
+kind = "entity"
 guard = "job_type == 'source_search'"
-
-[reaction.then]
-entity_type = "CurationJob"
-action = "Submit"
+target_entity = "CurationJob"
+target_action = "Submit"
 params = { job_type = "rank" }
 params_from = { input = "output" }
-
-[reaction.resolve_target]
-type = "create"
+resolve_target = { type = "create" }
 ```
 
 Fresh UUID for the new job, `output` from the source piped into the target's `input`.
 
 ### 2. Session-completion callback
 
-When a child `Session` completes, Ack the parent — but only if the parent is still Active:
+When a child `Session` completes, Ack the parent — but only if the parent is still Active (on `Session`'s `Complete` action):
 
 ```toml
-[[reaction]]
+[[action.triggers]]
 name = "session_complete_acks_parent"
-
-[reaction.when]
-entity_type = "Session"
-action = "Complete"
+kind = "entity"
 guard = "Workspace[workspace_id].status == 'Active'"
-
-[reaction.then]
-entity_type = "Workspace"
-action = "AckSession"
+target_entity = "Workspace"
+target_action = "AckSession"
 params_from = { session_id = "id" }
-
-[reaction.resolve_target]
-type = "field"
-field = "workspace_id"
+resolve_target = { type = "field", field = "workspace_id" }
 ```
 
 ### 3. Cleanup-on-failed
 
-When an entity enters Failed, clean up its related resources:
+When an entity enters Failed, clean up its related resources (on `Order`'s `FailOrder` action):
 
 ```toml
-[[reaction]]
+[[action.triggers]]
 name = "order_failed_releases_inventory"
-
-[reaction.when]
-entity_type = "Order"
-action = "FailOrder"
+kind = "entity"
 to_state = "Failed"
-
-[reaction.then]
-entity_type = "InventoryHold"
-action = "Release"
+target_entity = "InventoryHold"
+target_action = "Release"
 params_from = { order_id = "id" }
-
-[reaction.resolve_target]
-type = "field"
-field = "hold_id"
+resolve_target = { type = "field", field = "hold_id" }
 ```
 
 ---
@@ -185,7 +165,7 @@ These properties are load-bearing and unchanged by any of the four Phase additio
 - **Fire-and-forget.** A failing reaction does NOT roll back the source transition. The source action is already committed by the time the dispatcher runs.
 - **Cascade bound.** `MAX_REACTION_DEPTH = 8` caps the depth of recursive reaction chains. Beyond 8, further reactions are dropped with a warning.
 - **Tenant isolation.** Reactions only fire for rules registered under the same tenant as the source action.
-- **System principal.** Target actions dispatched by reactions run under `AgentContext::system()`, not the source action's principal.
+- **Cedar on every dispatch.** Target actions run under the invoking principal, or under the service identity named by the trigger's `principal`. There is no system-principal bypass.
 - **Determinism under `SimReactionSystem`.** Two seeded runs with the same inputs produce the same reaction firing order and the same `create`-resolver IDs.
 - **Guard nesting bound.** The predicate parser caps nesting at `MAX_DEPTH = 64` levels.
 
@@ -198,8 +178,34 @@ A tenant's reaction-rule count is deliberately **not** on this list. `MAX_REACTI
 Reactions are the *composition* layer. Actions are the *contract* layer.
 
 - **Actions** are the entity's verified surface — preconditions, guards, effects, invariants. Each entity is a closed I/O Automaton, which is why `temper-verify` can model-check each action in isolation.
-- **Reactions** are how apps wire entities together. They fire *after* actions commit, elevated to the system principal, non-transactional, bounded.
+- **Reactions** are how apps wire entities together. They fire *after* actions commit, authorized by Cedar, non-transactional, bounded. Effects never reach another entity; only triggers do.
 
-Keeping the layers separate is what makes verification tractable (each entity stays a closed automaton), authorization coherent (the user who submitted an Order doesn't inherit authority over Payment), and cascades bounded. See [ADR-0045 Sub-Decision 5](adrs/0045-reactions-first-class-app-primitive.md#sub-decision-5-keep-reactions-separate-from-actions-architectural-reaffirmation) for the full rationale.
+Keeping the layers separate is what makes verification tractable (each entity stays a closed automaton), authorization coherent (a trigger that needs more authority than its caller names a service `principal`), and cascades bounded. See [ADR-0045 Sub-Decision 5](adrs/0045-reactions-first-class-app-primitive.md#sub-decision-5-keep-reactions-separate-from-actions-architectural-reaffirmation) for the full rationale.
 
-The only production consumer of hand-authored reactions today is `os-apps/temper-fs/reactions/reactions.toml`. Apps that need cross-entity choreography should prefer reactions over WASM integrations unless they need computation, external I/O, or retries.
+`os-apps/temper-fs/specs/file.ioa.toml` and `file_version.ioa.toml` are production examples. Apps that need cross-entity choreography should prefer entity triggers over WASM triggers unless they need computation, external I/O, or retries.
+
+## Converting a `reactions.toml` rule
+
+Each `[[reaction]]` becomes an entity trigger on the action named in `[reaction.when]`: `[reaction.then] entity_type`/`action` become `target_entity`/`target_action`, and `to_state`, `guard`, `params`, `params_from` and `resolve_target` carry over unchanged.
+
+```toml
+# before (reactions.toml)
+[[reaction]]
+name = "order_confirmed_authorizes_payment"
+[reaction.when]
+entity_type = "Order"
+action = "ConfirmOrder"
+[reaction.then]
+entity_type = "Payment"
+action = "AuthorizePayment"
+[reaction.resolve_target]
+type = "same_id"
+
+# after: on Order's ConfirmOrder action
+[[action.triggers]]
+name = "order_confirmed_authorizes_payment"
+kind = "entity"
+target_entity = "Payment"
+target_action = "AuthorizePayment"
+resolve_target = { type = "same_id" }
+```

@@ -62,11 +62,7 @@ kind = "input"
 from = ["Created"]
 to = "Connecting"
 hint = "Start channel connection."
-effect = [{ type = "trigger", name = "channel_connect" }]
 
-# ADR-0046: inline trigger — migrated from [[integration]] below.
-# Post-parse expansion re-synthesizes the equivalent Integration so
-# the existing WASM/webhook runtime handles execution unchanged.
 [[action.triggers]]
 name = "channel_connect"
 kind = "wasm"
@@ -90,11 +86,8 @@ kind = "input"
 from = ["Connected"]
 params = ["message_id", "author_id", "thread_id", "content"]
 hint = "Receive an incoming message from the channel platform."
-effect = [{ type = "increment", var = "message_count" }, { type = "trigger", name = "route_message" }]
+effect = ["message_count += 1"]
 
-# ADR-0046: inline trigger — migrated from [[integration]] below.
-# Post-parse expansion re-synthesizes the equivalent Integration so
-# the existing WASM/webhook runtime handles execution unchanged.
 [[action.triggers]]
 name = "route_message"
 kind = "wasm"
@@ -111,11 +104,7 @@ kind = "input"
 from = ["Connected"]
 params = ["thread_id", "content", "agent_entity_id"]
 hint = "Send a reply back to the channel."
-effect = [{ type = "trigger", name = "send_reply" }]
 
-# ADR-0046: inline trigger — migrated from [[integration]] below.
-# Post-parse expansion re-synthesizes the equivalent Integration so
-# the existing WASM/webhook runtime handles execution unchanged.
 [[action.triggers]]
 name = "send_reply"
 kind = "wasm"
@@ -146,7 +135,13 @@ kind = "input"
 from = ["Disconnected"]
 to = "Connecting"
 hint = "Reconnect the channel."
-effect = [{ type = "trigger", name = "channel_connect" }]
+
+[[action.triggers]]
+name = "channel_connect"
+kind = "wasm"
+module = "channel_connect"
+on_failure = "ConnectFailed"
+config = { temper_api_url = "{secret:temper_api_url}" }
 
 [[action]]
 name = "Archive"

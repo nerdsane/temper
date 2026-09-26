@@ -256,8 +256,7 @@ kind = "wasm"
 module = "http_fetch"
 on_success = "FetchSucceeded"
 on_failure = "FetchFailed"
-url = "https://wttr.in/{city}?format=j1"
-method = "GET"
+config = { url = "https://wttr.in/{city}?format=j1", method = "GET" }
 
 [[action]]
 name = "FetchSucceeded"
@@ -531,6 +530,8 @@ await temper.install_app("project-management")
 **CRITICAL: Use `[automaton]` table header (NOT `automaton WeatherQuery` bare text).** Use `initial` (NOT `initial_state`).
 
 > **ADR-0046 (April 2026):** `[[integration]]` and `[[agent_trigger]]` are gone. All outgoing effects of an action — cross-entity dispatch, WASM modules, webhooks — are unified under `[[action.triggers]]` nested directly inside `[[action]]`. The `is_system → Allow` Cedar bypass is also removed: every trigger goes through Cedar with either the inherited principal or an explicit named principal.
+>
+> **ADR-0180:** `effect` is a list of statements in the guard grammar (`"counter_var += 1"`, `"ready = true"`, `"append(tags, params.tag)"`, `"schedule('Expire', 3600)"`, `"spawn('Task', 'Create', last_task_id)"`); table and verb-string effects, `trigger`/`emit` effects and `reactions.toml` are gone, and nothing is implied by an action's name. `temper migrate-predicates <files>` converts old specs. Full statement list: `docs/predicates.md#effects`.
 
 ```toml
 [automaton]
@@ -552,6 +553,7 @@ kind = "input"          # "input" | "internal" | "output"
 from = ["State1"]       # states this can fire from
 to = "State2"           # target state
 guard = "counter_var > 0"  # optional precondition (one expression)
+effect = ["counter_var -= 1"]  # optional statements; params.p reads action param p
 params = ["Param1"]     # optional parameters
 hint = "Description."   # optional
 
@@ -561,7 +563,7 @@ hint = "Description."   # optional
 # Name an explicit service to elevate (must match a registered AgentType).
 [[action.triggers]]
 name = "trigger_name"
-kind = "entity"               # "entity" | "wasm" | "webhook"
+kind = "entity"               # "entity" | "wasm" | "adapter" | "webhook" | "hook"
 principal = "my-service"      # optional elevation
 guard = "status == 'State2'"  # optional; reads the entity after the action
 target_entity = "OtherEntity"
@@ -615,16 +617,15 @@ kind = "wasm"
 module = "http_fetch"
 on_success = "FetchSucceeded"   # action on this entity if module returns Ok
 on_failure = "FetchFailed"      # action on this entity on failure
-url = "https://wttr.in/{city}?format=j1"
-method = "GET"
+config = { url = "https://wttr.in/{city}?format=j1", method = "GET" }
 ```
 
 | Key | Required | Description |
 |-----|----------|-------------|
 | `module` | Yes | WASM module name (`http_fetch` is built-in) |
-| `url` | http_fetch | URL template (`{param}` substitution from action params) |
-| `method` | http_fetch | `GET` / `POST` / `PUT` / `DELETE` |
-| `body` | No | Request body template for POST/PUT |
+| `config.url` | http_fetch | URL template (`{param}` substitution from action params) |
+| `config.method` | http_fetch | `GET` / `POST` / `PUT` / `DELETE` |
+| `config.body` | No | Request body template for POST/PUT |
 | `on_success` | No | Action on the source entity if module returns Ok |
 | `on_failure` | No | Action on the source entity on failure |
 
@@ -633,6 +634,14 @@ Callback actions receive `{"status_code": "200", "body": "..."}` as params.
 #### `kind = "webhook"` — outbound HTTP (parse-only today)
 
 Currently parsed and expanded but **no runtime dispatcher matches it**. Until the webhook dispatcher lands, use `kind = "wasm"` with the `http_fetch` module instead.
+
+#### `kind = "adapter"` — native platform adapter
+
+Run a host adapter (`adapter = "<key>"`, optional `config = { ... }`), then `on_success` / `on_failure` on this entity, like a WASM trigger.
+
+#### `kind = "hook"` — platform hook
+
+Run a hook the host registered by name: `kind = "hook"`, `hook = "DispatchCallback"`. The platform's `GovernanceDecision` spec uses `DispatchCallback` and `GenerateCedarPolicy`; app specs rarely need it.
 
 ### Principal semantics (no more `is_system` bypass)
 

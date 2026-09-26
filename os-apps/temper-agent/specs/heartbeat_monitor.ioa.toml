@@ -29,11 +29,7 @@ kind = "input"
 from = ["Idle"]
 to = "Scanning"
 hint = "Begin scanning for stale agents."
-effect = [{ type = "trigger", name = "scan_agents" }]
 
-# ADR-0046: inline trigger — migrated from [[integration]] below.
-# Post-parse expansion re-synthesizes the equivalent Integration so
-# the existing WASM/webhook runtime handles execution unchanged.
 [[action.triggers]]
 name = "scan_agents"
 kind = "wasm"
@@ -51,11 +47,8 @@ from = ["Scanning"]
 to = "Idle"
 params = ["last_scan_at", "stale_agents_found"]
 hint = "Scan finished. Schedule next scan."
-effect = [{ type = "increment", var = "stale_agents_found" }, { type = "trigger", name = "schedule_next_scan" }]
+effect = ["stale_agents_found += 1"]
 
-# ADR-0046: inline trigger — migrated from [[integration]] below.
-# Post-parse expansion re-synthesizes the equivalent Integration so
-# the existing WASM/webhook runtime handles execution unchanged.
 [[action.triggers]]
 name = "schedule_next_scan"
 kind = "wasm"
@@ -72,7 +65,13 @@ kind = "input"
 from = ["Idle"]
 to = "Scanning"
 hint = "Scheduled scan triggered."
-effect = [{ type = "trigger", name = "scan_agents" }]
+
+[[action.triggers]]
+name = "scan_agents"
+kind = "wasm"
+module = "heartbeat_scan"
+on_failure = "ScanFailed"
+config = { temper_api_url = "{secret:temper_api_url}" }
 
 [[action]]
 name = "ScanFailed"
