@@ -43,6 +43,19 @@ fn early_outbound_response_closes_the_request_reader() {
     let addr = listener.local_addr().expect("listener addr");
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept request");
+        // Reject after receiving the headers, but before consuming any body.
+        // Closing with unread request headers can reset the TCP connection and
+        // race the 413 response, turning this into a transport-failure test.
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .expect("bound request header read");
+        let mut headers = Vec::new();
+        while !headers.ends_with(b"\r\n\r\n") {
+            assert!(headers.len() < 16 * 1024, "request headers too large");
+            let mut byte = [0];
+            stream.read_exact(&mut byte).expect("read request header");
+            headers.push(byte[0]);
+        }
         stream
             .write_all(
                 b"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",

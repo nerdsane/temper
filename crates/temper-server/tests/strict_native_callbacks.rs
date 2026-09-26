@@ -9,6 +9,11 @@ use temper_server::{
 };
 use temper_spec::csdl::parse_csdl;
 
+// These independent end-to-end loads have wall-clock deadlines. In particular,
+// the 240-callback workload must not consume the shorter budget tests' CPU
+// headroom. Acquire before starting each case; keep every deadline and callback.
+static CALLBACK_TEST_SLOT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+
 const SPEC: &str = r#"
 [automaton]
 name="Job"
@@ -64,6 +69,7 @@ const CSDL: &str = r#"<?xml version="1.0"?><edmx:Edmx Version="4.0" xmlns:edmx="
 
 #[tokio::test]
 async fn strict_native_callbacks_run_through_the_actual_wasm_engine() {
+    let _slot = CALLBACK_TEST_SLOT.acquire().await.unwrap();
     for (success, expected_revision, status) in [
         (true, 1, "Done"),
         (true, 0, "Pending"),

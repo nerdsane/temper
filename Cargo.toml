@@ -174,6 +174,40 @@ tikv-jemallocator = { version = "0.6", features = ["stats"] }
 lru = "0.12"
 libc = "0.2"
 
+# Keep useful file/line backtraces without copying full type/variable debug
+# information into every workspace integration-test executable. The test
+# profile inherits these settings; incremental compilation remains enabled.
+[profile.dev]
+debug = "line-tables-only"
+
+# Keep workspace backtraces, but do not duplicate third-party dependency debug
+# sections in every test executable. See docs/testing.md for the debugger opt-in.
+[profile.dev.package."*"]
+debug = false
+
+# These dependencies are compilers executed by the tests, not just build-time
+# dependencies. Optimizing them makes runtime WASM compilation substantially
+# cheaper without optimizing application code or removing debug assertions.
+[profile.dev.package.cranelift-codegen]
+opt-level = 3
+
+[profile.dev.package.regalloc2]
+opt-level = 3
+
+# Parsing and hashing are hot paths in full-seed simulations. Level 1 keeps
+# generic code sharing and a modest compile cost; application code stays at 0.
+[profile.dev.package.toml]
+opt-level = 1
+
+[profile.dev.package.toml_edit]
+opt-level = 1
+
+[profile.dev.package.quick-xml]
+opt-level = 1
+
+[profile.dev.package.sha2]
+opt-level = 1
+
 [profile.release]
 lto = true
 codegen-units = 1

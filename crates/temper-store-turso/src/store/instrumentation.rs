@@ -51,7 +51,7 @@ impl InstrumentedConnection {
     pub(crate) async fn query(
         &self,
         sql: &str,
-        params: impl turso_serverless::params::IntoParams,
+        params: impl turso_serverless::params::IntoParams + Send,
     ) -> Result<crate::driver::Rows, crate::driver::DriverError> {
         let start = Instant::now();
         let result = self.inner.query(sql, params).await;
@@ -62,7 +62,7 @@ impl InstrumentedConnection {
     pub(crate) async fn execute(
         &self,
         sql: &str,
-        params: impl turso_serverless::params::IntoParams,
+        params: impl turso_serverless::params::IntoParams + Send,
     ) -> Result<u64, crate::driver::DriverError> {
         let start = Instant::now();
         let result = self.inner.execute(sql, params).await;
