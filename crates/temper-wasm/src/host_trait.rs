@@ -21,9 +21,11 @@ use crate::workflow_headers::add_workflow_observability_headers;
 use temper_observe::wide_event::{self, EventKind, WideEvent};
 
 mod guest_progress;
+mod http_clients;
 mod internal_http;
 pub(crate) mod span_hints;
 
+pub use http_clients::HttpClientCache;
 pub use internal_http::{InternalHttpCapability, InternalHttpCapabilityIssuerFn};
 
 /// Re-exported so every channel that records guest-supplied `gen_ai.*` metadata
@@ -467,39 +469,6 @@ fn blob_transport_semaphore() -> &'static Semaphore {
     SEMAPHORE.get_or_init(|| Semaphore::new(blob_transport_max_concurrency()))
 }
 
-fn build_production_http_client(
-    secrets: &BTreeMap<String, String>,
-    timeout: std::time::Duration,
-    disable_redirects: bool,
-) -> reqwest::Client {
-    let mut builder = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(timeout);
-    if disable_redirects {
-        builder = builder
-            .redirect(reqwest::redirect::Policy::none())
-            .no_proxy();
-    }
-
-    for (key, pem) in secrets {
-        if !key.starts_with("ca_cert:") {
-            continue;
-        }
-        match reqwest::Certificate::from_pem(pem.as_bytes()) {
-            Ok(cert) => {
-                builder = builder.add_root_certificate(cert);
-            }
-            Err(error) => {
-                tracing::warn!(key, error = %error, "failed to parse CA certificate from secret");
-            }
-        }
-    }
-
-    builder
-        .build()
-        .expect("production HTTP client configuration must be valid")
-}
-
 fn remote_blob_backend<'a>(secrets: &'a BTreeMap<String, String>, url: &str) -> Option<&'a str> {
     let endpoint = secrets.get("blob_endpoint")?.trim_end_matches('/');
     if endpoint.is_empty() || !url.starts_with(endpoint) {
@@ -584,9 +553,16 @@ impl ProductionWasmHost {
         secrets: BTreeMap<String, String>,
         http_streams: Arc<crate::http_stream::HttpStreamRegistry>,
     ) -> Self {
-        let mut host = Self::new(secrets);
-        host.http_streams = http_streams;
-        host
+        Self::new(secrets).with_http_streams(http_streams)
+    }
+
+    /// Attach the dispatcher's stream registry without replacing cached clients.
+    pub fn with_http_streams(
+        mut self,
+        http_streams: Arc<crate::http_stream::HttpStreamRegistry>,
+    ) -> Self {
+        self.http_streams = http_streams;
+        self
     }
 
     /// Borrow the host's shared stream registry. Used by the HTTP
@@ -602,12 +578,29 @@ impl ProductionWasmHost {
     /// lets operators provision private CA trust via the same secret store
     /// that WASM modules already use, with no filesystem or env var coupling.
     pub fn with_timeout(secrets: BTreeMap<String, String>, timeout: std::time::Duration) -> Self {
-        let client = build_production_http_client(&secrets, timeout, false);
-        let internal_client = build_production_http_client(&secrets, timeout, true);
+        let clients = http_clients::HttpClients::build(&secrets, timeout);
+        Self::with_clients(secrets, &clients)
+    }
 
+    /// Create an invocation host using its engine's reusable transport clients.
+    ///
+    /// Secrets, capabilities and streams remain private to this invocation.
+    pub fn with_client_cache(
+        secrets: BTreeMap<String, String>,
+        timeout: std::time::Duration,
+        cache: &HttpClientCache,
+    ) -> Self {
+        let clients = cache.get(&secrets, timeout);
+        Self::with_clients(secrets, &clients)
+    }
+
+    fn with_clients(
+        secrets: BTreeMap<String, String>,
+        clients: &http_clients::HttpClients,
+    ) -> Self {
         Self {
-            client,
-            internal_client,
+            client: clients.client.clone(),
+            internal_client: clients.internal_client.clone(),
             secrets,
             secret_resolver: None,
             internal_api_base_url: None,

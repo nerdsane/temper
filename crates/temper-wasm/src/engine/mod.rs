@@ -26,7 +26,7 @@ use wasmtime::{Config, Engine, Linker, Module, ProfilingStrategy, ResourceLimite
 use wasmtime_wasi::preview1::WasiP1Ctx;
 use wasmtime_wasi::{WasiCtxBuilder, preview1};
 
-use crate::host_trait::WasmHost;
+use crate::host_trait::{HttpClientCache, WasmHost};
 use crate::stream::StreamRegistry;
 use crate::types::{
     MAX_MODULE_SIZE, WasmInvocationContext, WasmInvocationResult, WasmResourceLimits,
@@ -261,6 +261,8 @@ pub struct WasmEngine {
     _epoch_ticker: Arc<EpochTicker>,
     /// Compiled module cache: SHA-256 hash -> compiled module.
     cache: RwLock<BTreeMap<String, Arc<CachedModule>>>,
+    /// Runtime-local transport pools; never part of the shared test compiler.
+    http_clients: HttpClientCache,
     /// Optional test-only code cache; never contains guest or registration state.
     #[cfg(any(test, feature = "test-shared-compilation"))]
     shared_compiler: Option<Arc<compilation::SharedCompiler>>,
@@ -305,9 +307,15 @@ impl WasmEngine {
             engine,
             _epoch_ticker: Arc::new(epoch_ticker),
             cache: RwLock::new(BTreeMap::new()),
+            http_clients: HttpClientCache::default(),
             #[cfg(any(test, feature = "test-shared-compilation"))]
             shared_compiler: None,
         })
+    }
+
+    /// HTTP clients shared by invocation hosts within this engine's runtime.
+    pub fn http_clients(&self) -> &HttpClientCache {
+        &self.http_clients
     }
 
     /// Compute SHA-256 hash of WASM bytes.
