@@ -89,17 +89,14 @@ hint = "Permanently stop trusting this issuer."
 
 # --- Safety Invariants ---
 
-[[invariant]]
+[[field_invariant]]
 name = "ActiveRequiresIssuer"
-when = ["Active"]
-assert = "issuer != ''"
+assert = "status in ['Active'] => issuer != ''"
 
-[[invariant]]
+[[field_invariant]]
 name = "ActiveRequiresJwks"
-when = ["Active"]
-assert = "jwks_json != ''"
+assert = "status in ['Active'] => jwks_json != ''"
 
-[[invariant]]
+[[field_invariant]]
 name = "ActiveRequiresAudience"
-when = ["Active"]
-assert = "audience != ''"
+assert = "status in ['Active'] => audience != ''"

@@ -8,6 +8,7 @@
 name = "Issue"
 states = ["Backlog", "InProgress", "Review", "Done", "Archived"]
 initial = "Backlog"
+terminal = ["Archived"]
 
 # --- State Variables ---
 
@@ -44,7 +45,7 @@ name = "StartWork"
 kind = "internal"
 from = ["Backlog"]
 to = "InProgress"
-guard = "is_true assignee_set"
+guard = "assignee_set"
 hint = "Begin work on the issue. Requires an assignee."
 
 [[action]]
@@ -83,11 +84,4 @@ kind = "input"
 from = ["Done"]
 to = "InProgress"
 hint = "Reopen a completed issue for further work."
-
-# --- Safety Invariants ---
-
-[[invariant]]
-name = "ArchivedIsFinal"
-when = ["Archived"]
-assert = "no_further_transitions"
 

@@ -387,7 +387,7 @@ pub fn to_state_machine(automaton: &Automaton) -> StateMachine {
                 name: a.name.clone(),
                 from_states,
                 to_state: a.to.clone(),
-                guard_expr: format_guards(&a.guard),
+                guard_expr: a.guard.to_string(),
                 has_parameters: !a.params.is_empty(),
                 effect_expr: format_effects(&a.effect),
             }
@@ -397,24 +397,9 @@ pub fn to_state_machine(automaton: &Automaton) -> StateMachine {
     let invariants = automaton
         .invariants
         .iter()
-        .map(|inv| {
-            // Encode `when` states as a trigger prefix so the model builder
-            // can extract trigger_states via extract_trigger_states().
-            let trigger = if inv.when.is_empty() {
-                String::new()
-            } else {
-                let states = inv
-                    .when
-                    .iter()
-                    .map(|s| format!("\"{s}\""))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("status \\in {{{states}}} => ")
-            };
-            TlaInvariant {
-                name: inv.name.clone(),
-                expr: format!("{trigger}{}", inv.assert),
-            }
+        .map(|inv| TlaInvariant {
+            name: inv.name.clone(),
+            expr: inv.assert.to_string(),
         })
         .collect();
 
@@ -427,64 +412,6 @@ pub fn to_state_machine(automaton: &Automaton) -> StateMachine {
         constants: vec![],
         variables: automaton.state.iter().map(|s| s.name.clone()).collect(),
     }
-}
-
-fn format_guards(guards: &[Guard]) -> String {
-    guards
-        .iter()
-        .map(|g| match g {
-            Guard::StateIn { values } => {
-                format!(
-                    "status \\in {{{}}}",
-                    values
-                        .iter()
-                        .map(|s| format!("\"{s}\""))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            }
-            Guard::MinCount { var, min } => format!("{var} >= {min}"),
-            Guard::MaxCount { var, max } => format!("{var} < {max}"),
-            Guard::IsTrue { var } => format!("{var} = TRUE"),
-            Guard::IsFalse { var } => format!("{var} = FALSE"),
-            Guard::ListContains { var, value } => format!("{value} \\in {var}"),
-            Guard::ListLengthMin { var, min } => format!("Len({var}) >= {min}"),
-            Guard::CrossEntityState {
-                entity_type,
-                entity_id_source,
-                required_status,
-                forbidden_status,
-                ..
-            } => {
-                let set = |statuses: &[String]| {
-                    statuses
-                        .iter()
-                        .map(|s| format!("\"{s}\""))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                };
-                let mut conjuncts = Vec::new();
-                if !required_status.is_empty() {
-                    conjuncts.push(format!(
-                        "{entity_type}[{entity_id_source}].status \\in {{{}}}",
-                        set(required_status)
-                    ));
-                }
-                if !forbidden_status.is_empty() {
-                    conjuncts.push(format!(
-                        "{entity_type}[{entity_id_source}].status \\notin {{{}}}",
-                        set(forbidden_status)
-                    ));
-                }
-                if conjuncts.is_empty() {
-                    "TRUE".to_string()
-                } else {
-                    conjuncts.join(" /\\ ")
-                }
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" /\\ ")
 }
 
 fn format_effects(effects: &[Effect]) -> String {
@@ -562,6 +489,7 @@ fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError> {
     }
 
     super::contracts::validate(automaton)?;
+    validate_predicates(automaton)?;
 
     // 3. All `from` and `to` states in actions must be declared states.
     for action in &automaton.actions {
@@ -684,6 +612,62 @@ fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError> {
     Ok(())
 }
 
+/// Name- and type-check every predicate, and check `terminal` states exist.
+fn validate_predicates(automaton: &Automaton) -> Result<(), AutomatonParseError> {
+    use crate::predicate::{Scope, VarKind, check};
+
+    let vars: std::collections::BTreeMap<String, VarKind> = automaton
+        .state
+        .iter()
+        .map(|sv| (sv.name.clone(), VarKind::from_type(&sv.var_type)))
+        .collect();
+    let invalid =
+        |slot: String, error: String| AutomatonParseError::Validation(format!("{slot}: {error}"));
+    for action in &automaton.actions {
+        check(&action.guard, Scope::State(&vars))
+            .map_err(|e| invalid(format!("action '{}' guard", action.name), e))?;
+        for trigger in &action.triggers {
+            if let Some(guard) = &trigger.guard {
+                check(guard, Scope::Fields).map_err(|e| {
+                    invalid(
+                        format!(
+                            "trigger '{}' on action '{}' guard",
+                            trigger.name, action.name
+                        ),
+                        e,
+                    )
+                })?;
+            }
+        }
+    }
+    for inv in &automaton.invariants {
+        let slot = format!("invariant '{}'", inv.name);
+        check(&inv.assert, Scope::State(&vars)).map_err(|e| invalid(slot.clone(), e))?;
+        if let Some(culprit) = crate::predicate::unmodelable(&inv.assert, &vars) {
+            return Err(invalid(
+                slot,
+                format!(
+                    "`{culprit}` reads a value the verification cascade cannot model \
+                     (a string, number, field or related entity); state it as a \
+                     [[field_invariant]], which is checked on writes"
+                ),
+            ));
+        }
+    }
+    for inv in &automaton.field_invariants {
+        check(&inv.assert, Scope::Fields)
+            .map_err(|e| invalid(format!("field_invariant '{}'", inv.name), e))?;
+    }
+    for state in &automaton.automaton.terminal {
+        if !automaton.automaton.states.contains(state) {
+            return Err(AutomatonParseError::Validation(format!(
+                "terminal references undeclared state '{state}'"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Validate all `[[vector]]` access-path declarations per ADR-0155.
 fn validate_vector_decls(automaton: &Automaton) -> Result<(), AutomatonParseError> {
     const METRICS: [&str; 3] = ["cosine", "dot", "l2"];
@@ -731,7 +715,6 @@ fn validate_vector_decls(automaton: &Automaton) -> Result<(), AutomatonParseErro
 /// target-action existence happen at registry load time):
 /// - Kind-specific required fields present.
 /// - `to_state` (if set) is a declared state.
-/// - Trigger guard nesting depth ≤ `MAX_TRIGGER_GUARD_DEPTH`.
 /// - `params` and `params_from` keys must not collide.
 /// - For `Wasm`/`Adapter`/`Webhook` kinds: `on_success`/`on_failure` reference
 ///   actions declared on the same source entity.
@@ -841,18 +824,6 @@ fn validate_action_triggers(
                     "trigger '{}' on action '{}' on_failure references unknown action '{cb}'",
                     trigger.name, action.name
                 )));
-            }
-
-            // Guard depth bound.
-            if let Some(ref guard) = trigger.guard {
-                let depth = guard.depth();
-                if depth > MAX_TRIGGER_GUARD_DEPTH {
-                    return Err(AutomatonParseError::Validation(format!(
-                        "trigger '{}' on action '{}' has guard nesting depth {depth} exceeding \
-                         MAX_TRIGGER_GUARD_DEPTH ({MAX_TRIGGER_GUARD_DEPTH})",
-                        trigger.name, action.name
-                    )));
-                }
             }
 
             // params / params_from key collision.

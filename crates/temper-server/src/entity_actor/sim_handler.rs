@@ -10,8 +10,8 @@ use futures_util::FutureExt;
 use std::sync::Arc;
 
 use temper_jit::table::{EvalContext, TransitionTable};
-use temper_runtime::scheduler::{CompareOp, SimActorHandler, SpecAssert, SpecInvariant};
-use temper_spec::automaton::StateVar;
+use temper_runtime::scheduler::{SimActorHandler, SpecInvariant};
+use temper_spec::predicate::{VarKind, unmodelable};
 
 use super::effects::{FieldSyncMode, ScheduledAction};
 use super::types::EntityState;
@@ -25,6 +25,7 @@ pub struct EntityActorHandler {
     table: Arc<TransitionTable>,
     state: EntityState,
     invariants: Vec<SpecInvariant>,
+    terminal: Vec<String>,
     /// Custom effects from the last successful action (integration triggers).
     last_custom_effects: Vec<String>,
     /// Scheduled actions from the last successful action (timer requests).
@@ -53,6 +54,7 @@ impl EntityActorHandler {
             table,
             state,
             invariants: Vec::new(),
+            terminal: Vec::new(),
             last_custom_effects: Vec::new(),
             last_scheduled_actions: Vec::new(),
             field_sync_mode: FieldSyncMode::InlineTruncate,
@@ -68,7 +70,7 @@ impl EntityActorHandler {
 
     /// Build an [`EvalContext`] from the current entity state.
     fn eval_context(&self) -> EvalContext {
-        super::effects::build_eval_context(&self.state)
+        super::effects::build_eval_context(&self.state, &self.table, None)
     }
 
     /// Attach spec invariants parsed from I/O Automaton TOML source.
@@ -78,92 +80,25 @@ impl EntityActorHandler {
     pub fn with_ioa_invariants(mut self, ioa_toml: &str) -> Self {
         let automaton = temper_spec::automaton::parse_automaton(ioa_toml)
             .expect("failed to parse I/O Automaton TOML for invariants");
-        let declared_bools: std::collections::BTreeSet<_> = automaton
+        let kinds: std::collections::BTreeMap<String, VarKind> = automaton
             .state
             .iter()
-            .filter(|state| is_declared_bool(state))
-            .map(|state| state.name.clone())
+            .map(|sv| (sv.name.clone(), VarKind::from_type(&sv.var_type)))
             .collect();
-
+        // Check what the verification cascade checks; invariants over values
+        // it cannot model are reported there as unverifiable.
         self.invariants = automaton
             .invariants
             .iter()
-            .filter_map(|inv| {
-                let assert_kind = parse_assert_expr(&inv.assert, &declared_bools)?;
-                Some(SpecInvariant {
-                    name: inv.name.clone(),
-                    when: inv.when.clone(),
-                    assert: assert_kind,
-                })
+            .filter(|inv| unmodelable(&inv.assert, &kinds).is_none())
+            .map(|inv| SpecInvariant {
+                name: inv.name.clone(),
+                assert: inv.assert.clone(),
             })
             .collect();
-
+        self.terminal = automaton.automaton.terminal.clone();
         self
     }
-}
-
-/// Map a shared [`ParsedAssert`] to the runtime [`SpecAssert`].
-///
-/// Uses [`temper_spec::automaton::parse_assert_expr`] as the single parser,
-/// then maps the result to the runtime type. Returns `None` for expressions
-/// that the framework cannot check automatically.
-fn parse_assert_expr(
-    expr: &str,
-    declared_bools: &std::collections::BTreeSet<String>,
-) -> Option<SpecAssert> {
-    use temper_spec::automaton::parse_assert_expr as parse;
-    translate_parsed(parse(expr)?, declared_bools)
-}
-
-fn translate_parsed(
-    parsed: temper_spec::automaton::ParsedAssert,
-    declared_bools: &std::collections::BTreeSet<String>,
-) -> Option<SpecAssert> {
-    use temper_spec::automaton::{AssertCompareOp, ParsedAssert};
-
-    match parsed {
-        ParsedAssert::CounterPositive { var } => Some(SpecAssert::CounterPositive { var }),
-        ParsedAssert::NoFurtherTransitions => Some(SpecAssert::NoFurtherTransitions),
-        ParsedAssert::OrderingConstraint { before, after } => {
-            Some(SpecAssert::OrderingConstraint { before, after })
-        }
-        ParsedAssert::NeverState { state } => Some(SpecAssert::NeverState { state }),
-        ParsedAssert::CounterCompare { var, op, value } => {
-            let runtime_op = match op {
-                AssertCompareOp::Gt => CompareOp::Gt,
-                AssertCompareOp::Gte => CompareOp::Gte,
-                AssertCompareOp::Lt => CompareOp::Lt,
-                AssertCompareOp::Lte => CompareOp::Lte,
-                AssertCompareOp::Eq => CompareOp::Eq,
-            };
-            Some(SpecAssert::CounterCompare {
-                var,
-                op: runtime_op,
-                value,
-            })
-        }
-        ParsedAssert::BoolRequired { var, expect } => declared_bools
-            .contains(&var)
-            .then_some(SpecAssert::BoolRequired { var, expect }),
-        ParsedAssert::And(parts) => {
-            let mapped: Option<Vec<_>> = parts
-                .into_iter()
-                .map(|part| translate_parsed(part, declared_bools))
-                .collect();
-            mapped.map(SpecAssert::And)
-        }
-        ParsedAssert::Or(parts) => {
-            let mapped: Option<Vec<_>> = parts
-                .into_iter()
-                .map(|part| translate_parsed(part, declared_bools))
-                .collect();
-            mapped.map(SpecAssert::Or)
-        }
-    }
-}
-
-fn is_declared_bool(state: &StateVar) -> bool {
-    state.var_type == "bool"
 }
 
 fn retain_current_blobs(
@@ -268,7 +203,7 @@ impl SimActorHandler for EntityActorHandler {
                 if !state_ok {
                     return false;
                 }
-                rule.guard.check(&self.state.status, &ctx)
+                self.table.guard_holds(rule, &self.state.status, &ctx)
             })
             .map(|rule| rule.name.clone())
             .collect()
@@ -282,8 +217,25 @@ impl SimActorHandler for EntityActorHandler {
         &self.invariants
     }
 
-    fn bool_field(&self, var: &str) -> Option<bool> {
-        self.state.booleans.get(var).copied()
+    fn terminal_states(&self) -> &[String] {
+        &self.terminal
+    }
+
+    fn state_value(&self, name: &str) -> Option<serde_json::Value> {
+        let state = &self.state;
+        if name == "items" && !state.counters.contains_key(name) {
+            return Some(serde_json::Value::from(state.item_count));
+        }
+        if let Some(value) = state.counters.get(name) {
+            return Some(serde_json::Value::from(*value));
+        }
+        if let Some(value) = state.booleans.get(name) {
+            return Some(serde_json::Value::Bool(*value));
+        }
+        if let Some(value) = state.lists.get(name) {
+            return Some(serde_json::Value::from(value.clone()));
+        }
+        state.fields.get(name).cloned()
     }
 
     fn pending_callbacks(&self) -> Vec<String> {

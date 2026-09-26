@@ -11,6 +11,6 @@ pub mod table;
 pub use shadow::{Mismatch, ShadowResult, TestCase, shadow_test};
 pub use swap::{SwapController, SwapResult};
 pub use table::{
-    Effect, EvalContext, Guard, GuardFailure, GuardFailureKind, TransitionResult, TransitionRule,
+    Effect, EvalContext, Expr, GuardFailure, Related, RelatedMap, TransitionResult, TransitionRule,
     TransitionTable,
 };

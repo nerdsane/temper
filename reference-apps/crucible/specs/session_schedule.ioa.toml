@@ -17,6 +17,7 @@
 name = "SessionSchedule"
 states = ["Draft", "Active", "Paused", "Expired"]
 initial = "Draft"
+terminal = ["Expired"]
 
 # --- State variables ---
 
@@ -94,36 +95,21 @@ from = ["Active"]
 to = "Expired"
 hint = "Mark this schedule as expired (max_runs reached or manual)."
 
-# --- Safety ---
-
-[[invariant]]
-name = "ExpiredIsFinal"
-when = ["Expired"]
-assert = "no_further_transitions"
-
 # --- Field invariants ---
 
 [[field_invariant]]
 name = "CronExpressionRequired"
-when = { not = { field = "CronExpression", absent = true } }
-require = { not = { field = "CronExpression", empty = true } }
 message = "SessionSchedule.CronExpression must not be empty"
+assert = "CronExpression != null => !empty(CronExpression)"
 
 [[field_invariant]]
 name = "MessageTemplateRequired"
-when = { not = { field = "MessageTemplate", absent = true } }
-require = { not = { field = "MessageTemplate", empty = true } }
 message = "SessionSchedule.MessageTemplate must not be empty"
+assert = "MessageTemplate != null => !empty(MessageTemplate)"
 
 [[field_invariant]]
 name = "StatusMustBeKnown"
-when = { not = { field = "Status", absent = true } }
-require = { any_of = [
-  { field = "Status", equals = "Draft" },
-  { field = "Status", equals = "Active" },
-  { field = "Status", equals = "Paused" },
-  { field = "Status", equals = "Expired" },
-]}
 message = "SessionSchedule.Status must be Draft, Active, Paused, or Expired"
+assert = "Status != null => Status in ['Draft', 'Active', 'Paused', 'Expired']"
 
 # --- Integration ---

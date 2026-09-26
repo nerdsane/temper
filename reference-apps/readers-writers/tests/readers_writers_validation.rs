@@ -1,5 +1,5 @@
 use readers_writers_reference::{MODEL_CSDL, READERS_WRITERS_IOA};
-use temper_jit::table::{Effect, Guard, TransitionTable};
+use temper_jit::table::{Effect, Expr, TransitionTable};
 use temper_spec::automaton::{lint_automaton, parse_automaton};
 use temper_spec::csdl::parse_csdl;
 use temper_verify::cascade::{CascadeLevel, VerificationCascade};
@@ -71,7 +71,10 @@ fn transition_table_encodes_safety_critical_callbacks() {
         .expect("WriterStarted rule");
     assert_eq!(writer_started.from_states, vec!["Idle".to_string()]);
     assert_eq!(writer_started.to_state.as_deref(), Some("Writing"));
-    assert!(matches!(writer_started.guard, Guard::And(_)));
+    assert!(guard_contains(
+        &writer_started.guard,
+        &expr("wasm_in_flight")
+    ));
     assert!(
         writer_started
             .effects
@@ -108,7 +111,7 @@ fn transition_table_encodes_wasm_in_flight_guard() {
             .find(|rule| rule.name == action_name)
             .unwrap_or_else(|| panic!("{action_name} rule"));
         assert!(
-            guard_contains(&rule.guard, &Guard::BoolFalse("wasm_in_flight".to_string())),
+            guard_contains(&rule.guard, &expr("!wasm_in_flight")),
             "{action_name} should be guarded by wasm_in_flight == false"
         );
         assert!(
@@ -138,7 +141,7 @@ fn transition_table_encodes_wasm_in_flight_guard() {
             .find(|rule| rule.name == action_name)
             .unwrap_or_else(|| panic!("{action_name} rule"));
         assert!(
-            guard_contains(&rule.guard, &Guard::BoolTrue("wasm_in_flight".to_string())),
+            guard_contains(&rule.guard, &expr("wasm_in_flight")),
             "{action_name} should only run while a WASM step is in flight"
         );
         assert!(
@@ -151,9 +154,13 @@ fn transition_table_encodes_wasm_in_flight_guard() {
     }
 }
 
-fn guard_contains(actual: &Guard, expected: &Guard) -> bool {
-    actual == expected
-        || matches!(actual, Guard::And(parts) if parts.iter().any(|guard| guard_contains(guard, expected)))
+fn expr(source: &str) -> Expr {
+    temper_spec::predicate::parse(source).unwrap()
+}
+
+/// Whether `expected` is `actual` or one of its top-level conjuncts.
+fn guard_contains(actual: &Expr, expected: &Expr) -> bool {
+    actual == expected || matches!(actual, Expr::And(parts) if parts.contains(expected))
 }
 
 #[test]

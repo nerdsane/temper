@@ -107,13 +107,11 @@ fn handler_with_ioa_invariants_parses_spec() {
         names.contains(&"SubmitRequiresItems"),
         "should have SubmitRequiresItems, got: {names:?}"
     );
+    // `no_further_transitions` invariants are the spec's terminal states.
     assert!(
-        names.contains(&"CancelledIsFinal"),
-        "should have CancelledIsFinal, got: {names:?}"
-    );
-    assert!(
-        !names.contains(&"ShipRequiresPayment"),
-        "undeclared bool invariants should be skipped in simulation, got: {names:?}"
+        handler.terminal_states().contains(&"Cancelled".to_string()),
+        "Cancelled should be terminal, got: {:?}",
+        handler.terminal_states()
     );
 }
 

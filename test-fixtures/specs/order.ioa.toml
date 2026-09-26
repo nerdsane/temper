@@ -8,6 +8,7 @@
 name = "Order"
 states = ["Draft", "Submitted", "Confirmed", "Processing", "Shipped", "Delivered", "Cancelled", "ReturnRequested", "Returned", "Refunded"]
 initial = "Draft"
+terminal = ["Cancelled", "Refunded"]
 
 # --- Declared keys (ADR-0153) ---
 # A declared alternate key the kernel indexes for O(log n) present/absent reads.
@@ -125,20 +126,4 @@ hint = "Emitted when order is cancelled."
 
 [[invariant]]
 name = "SubmitRequiresItems"
-when = ["Submitted", "Confirmed", "Processing", "Shipped", "Delivered"]
-assert = "items > 0"
-
-[[invariant]]
-name = "ShipRequiresPayment"
-when = ["Shipped"]
-assert = "payment_captured"
-
-[[invariant]]
-name = "CancelledIsFinal"
-when = ["Cancelled"]
-assert = "no_further_transitions"
-
-[[invariant]]
-name = "RefundedIsFinal"
-when = ["Refunded"]
-assert = "no_further_transitions"
+assert = "status in ['Submitted', 'Confirmed', 'Processing', 'Shipped', 'Delivered'] => items > 0"

@@ -23,84 +23,52 @@ initial = "Active"
 
 [[field_invariant]]
 name = "KindMustBeKnown"
-when = { not = { field = "Kind", absent = true } }
-require = { any_of = [
-  { field = "Kind", equals = "github_repository" },
-  { field = "Kind", equals = "file" },
-  { field = "Kind", equals = "memory_store" },
-]}
 message = "SessionResource.Kind must be `github_repository`, `file`, or `memory_store`"
+assert = "Kind != null => Kind in ['github_repository', 'file', 'memory_store']"
 
 [[field_invariant]]
 name = "GithubResourceRequiresUrl"
-when = { field = "Kind", equals = "github_repository" }
-require = { not = { field = "Url", empty = true } }
 message = "github_repository resources must have a non-empty Url"
+assert = "Kind == 'github_repository' => !empty(Url)"
 
 [[field_invariant]]
 name = "GithubResourceForbidsFileId"
-when = { field = "Kind", equals = "github_repository" }
-require = { field = "FileId", absent = true }
 message = "github_repository resources must not set FileId"
+assert = "Kind == 'github_repository' => FileId == null"
 
 [[field_invariant]]
 name = "FileResourceRequiresFileId"
-when = { field = "Kind", equals = "file" }
-require = { not = { field = "FileId", empty = true } }
 message = "file resources must have a non-empty FileId"
+assert = "Kind == 'file' => !empty(FileId)"
 
 [[field_invariant]]
 name = "FileResourceForbidsGithubFields"
-when = { field = "Kind", equals = "file" }
-require = { all_of = [
-  { field = "Url", absent = true },
-  { field = "CheckoutKind", absent = true },
-  { field = "CheckoutRef", absent = true },
-]}
 message = "file resources must not set Url/CheckoutKind/CheckoutRef"
+assert = "Kind == 'file' => Url == null && CheckoutKind == null && CheckoutRef == null"
 
 [[field_invariant]]
 name = "CheckoutKindMustBeKnown"
-when = { not = { field = "CheckoutKind", absent = true } }
-require = { any_of = [
-  { field = "CheckoutKind", equals = "branch" },
-  { field = "CheckoutKind", equals = "commit" },
-]}
 message = "SessionResource.CheckoutKind must be `branch` or `commit`"
+assert = "CheckoutKind != null => CheckoutKind in ['branch', 'commit']"
 
 [[field_invariant]]
 name = "CheckoutRefRequiresCheckoutKind"
-when = { not = { field = "CheckoutRef", absent = true } }
-require = { not = { field = "CheckoutKind", absent = true } }
 message = "SessionResource.CheckoutRef requires CheckoutKind to be set"
+assert = "CheckoutRef != null => CheckoutKind != null"
 
 # --- memory_store kind ---
 
 [[field_invariant]]
 name = "MemoryStoreResourceRequiresMemoryStoreId"
-when = { field = "Kind", equals = "memory_store" }
-require = { not = { field = "MemoryStoreId", empty = true } }
 message = "memory_store resources must have a non-empty MemoryStoreId"
+assert = "Kind == 'memory_store' => !empty(MemoryStoreId)"
 
 [[field_invariant]]
 name = "MemoryStoreAccessMustBeKnown"
-when = { all_of = [
-  { field = "Kind", equals = "memory_store" },
-  { not = { field = "Access", absent = true } },
-]}
-require = { any_of = [
-  { field = "Access", equals = "read_write" },
-  { field = "Access", equals = "read_only" },
-]}
 message = "SessionResource.Access must be read_write or read_only"
+assert = "Kind == 'memory_store' && Access != null => Access in ['read_write', 'read_only']"
 
 [[field_invariant]]
 name = "MemoryStoreResourceForbidsFileFields"
-when = { field = "Kind", equals = "memory_store" }
-require = { all_of = [
-  { field = "Url", absent = true },
-  { field = "CheckoutKind", absent = true },
-  { field = "CheckoutRef", absent = true },
-  { field = "FileId", absent = true },
-]}
 message = "memory_store resources must not set Url/CheckoutKind/CheckoutRef/FileId"
+assert = "Kind == 'memory_store' => Url == null && CheckoutKind == null && CheckoutRef == null && FileId == null"

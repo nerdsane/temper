@@ -177,7 +177,25 @@ fn populate_registry<R: SpecRowLike>(
             continue;
         };
 
-        let ioa_owned: Vec<(String, String)> = tenant_rows.iter().map(&get_ioa).collect();
+        // A stored spec that no longer parses (for example, one still in the
+        // old predicate syntax) disables only its own entity type, not the
+        // tenant or the server.
+        let ioa_owned: Vec<(String, String)> = tenant_rows
+            .iter()
+            .map(&get_ioa)
+            .filter(|(entity_type, ioa)| match temper_spec::automaton::parse_automaton(ioa) {
+                Ok(_) => true,
+                Err(error) => {
+                    tracing::error!(
+                        tenant = %tenant,
+                        entity_type = %entity_type,
+                        %error,
+                        "skipping stored spec that does not parse; convert it with `temper migrate-predicates` and redeploy"
+                    );
+                    false
+                }
+            })
+            .collect();
         let ioa_pairs: Vec<(&str, &str)> = ioa_owned
             .iter()
             .map(|(entity_type, ioa)| (entity_type.as_str(), ioa.as_str()))
@@ -197,11 +215,14 @@ fn populate_registry<R: SpecRowLike>(
             .map_err(|e| format!("Failed to restore tenant '{tenant}' into registry: {e}"))?;
         let tenant_id = TenantId::new(&tenant);
         for row in &tenant_rows {
-            registry.set_verification_status(
-                &tenant_id,
-                &get_ioa(row).0,
-                row_to_registry_status(row),
-            );
+            let entity_type = get_ioa(row).0;
+            if !ioa_owned
+                .iter()
+                .any(|(restored, _)| *restored == entity_type)
+            {
+                continue;
+            }
+            registry.set_verification_status(&tenant_id, &entity_type, row_to_registry_status(row));
             restored_specs += 1;
         }
     }

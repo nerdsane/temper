@@ -10,7 +10,7 @@
 //! Each level produces a pass/fail result. All levels run independently.
 
 use crate::checker::{self, VerificationResult};
-use crate::model::{self, InvariantKind, TemperModel};
+use crate::model::{self, TemperModel};
 use crate::proptest_gen::{self, PropTestResult};
 use crate::simulation::{self, SimConfig, SimulationResult};
 use crate::smt::{self, SmtResult};
@@ -86,7 +86,7 @@ pub struct CascadeResult {
     pub all_passed: bool,
     /// Per-level results.
     pub levels: Vec<LevelResult>,
-    /// Warnings about invariants that could not be verified at model level.
+    /// Warnings raised while verifying (for example, composite-plan issues).
     pub warnings: Vec<String>,
     /// Reachable paths extracted after L1 model check (if path extraction was configured).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -244,8 +244,7 @@ impl VerificationCascade {
         let mut levels = Vec::new();
         let model = self.build_temper_model();
 
-        // Collect warnings for Unverifiable invariants.
-        let mut warnings = collect_unverifiable_warnings(&model);
+        let mut warnings = Vec::new();
 
         // Level 0: SMT symbolic verification
         let l0 = self.run_symbolic_verification();
@@ -571,24 +570,6 @@ impl VerificationCascade {
     }
 }
 
-/// Collect warnings for invariants classified as `Unverifiable`.
-fn collect_unverifiable_warnings(model: &TemperModel) -> Vec<String> {
-    model
-        .invariants
-        .iter()
-        .filter_map(|inv| {
-            if let InvariantKind::Unverifiable { expression } = &inv.kind {
-                Some(format!(
-                    "invariant '{}' has unverifiable assertion '{}' — skipped at model level",
-                    inv.name, expression,
-                ))
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
 /// Build a [`CompositeCascadeReport`] from the configured scope, appending
 /// any build-time warnings (e.g. missing seed) to the cascade's warning
 /// list. Returns `None` if the plan cannot be built — the cascade still
@@ -681,29 +662,6 @@ mod tests {
         let l3 = result.level_result(CascadeLevel::PropertyTest).unwrap();
         assert!(l3.summary.contains("L3"), "Should have L3 prefix");
         assert!(l3.passed);
-    }
-
-    #[test]
-    fn test_cascade_warnings_for_unverifiable_invariants() {
-        let cascade = VerificationCascade::from_ioa(ORDER_IOA)
-            .with_sim_seeds(3)
-            .with_prop_test_cases(50);
-
-        let result = cascade.run();
-        // Order spec has "payment_captured" which is not a declared bool,
-        // so ShipRequiresPayment becomes Unverifiable.
-        assert!(
-            !result.warnings.is_empty(),
-            "Should have warnings for unverifiable invariants"
-        );
-        assert!(
-            result
-                .warnings
-                .iter()
-                .any(|w| w.contains("ShipRequiresPayment")),
-            "Should warn about ShipRequiresPayment, got: {:?}",
-            result.warnings,
-        );
     }
 
     #[test]

@@ -9,7 +9,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::guard::{Guard, GuardFailure};
+use super::guard::GuardFailure;
+use temper_spec::predicate::Expr;
 
 // ---------------------------------------------------------------------------
 // Core types
@@ -209,8 +210,8 @@ pub struct TransitionRule {
     pub from_states: Vec<String>,
     /// Target state after the transition (if deterministic).
     pub to_state: Option<String>,
-    /// Guard condition evaluated before the transition fires.
-    pub guard: Guard,
+    /// Precondition beyond `from_states`, evaluated before the transition fires.
+    pub guard: Expr,
     /// Effects applied after the transition fires.
     pub effects: Vec<Effect>,
 }
@@ -281,6 +282,49 @@ impl TransitionTable {
     ///
     /// Called automatically during construction. Must be called explicitly
     /// after deserialization (since `rule_index` is `#[serde(skip)]`).
+    /// Entity fields the guards of `action` (or of every rule, for `None`)
+    /// read directly: every name that is not a declared counter, boolean or
+    /// list. The server copies only these into the [`super::EvalContext`].
+    pub fn guard_field_names(&self, action: Option<&str>) -> std::collections::BTreeSet<String> {
+        let mut names = std::collections::BTreeSet::new();
+        let declared = &self.initial_values;
+        for rule in self.rules_for(action) {
+            rule.guard.for_each_name(&mut |name| {
+                if let temper_spec::predicate::Name::Var(var) = name
+                    && !declared.counters.contains_key(var)
+                    && !declared.booleans.contains_key(var)
+                    && !declared.lists.contains_key(var)
+                {
+                    names.insert(var.to_string());
+                }
+            });
+        }
+        names
+    }
+
+    /// Related-entity references `(entity_type, id_field)` the guards of
+    /// `action` read, deduplicated in rule order.
+    pub fn guard_related_refs(&self, action: &str) -> Vec<(String, String)> {
+        let mut refs = Vec::new();
+        for rule in self.rules_for(Some(action)) {
+            for reference in rule.guard.cross_refs() {
+                if !refs.contains(&reference) {
+                    refs.push(reference);
+                }
+            }
+        }
+        refs
+    }
+
+    fn rules_for<'a>(
+        &'a self,
+        action: Option<&'a str>,
+    ) -> impl Iterator<Item = &'a TransitionRule> {
+        self.rules
+            .iter()
+            .filter(move |rule| action.is_none_or(|action| rule.name == action))
+    }
+
     pub fn rebuild_index(&mut self) {
         self.rule_index.clear();
         for (i, rule) in self.rules.iter().enumerate() {
@@ -294,7 +338,6 @@ impl TransitionTable {
 
 #[cfg(test)]
 mod tests {
-    use super::super::guard::Guard;
     use super::*;
     use std::collections::BTreeMap;
 
@@ -311,21 +354,21 @@ mod tests {
                     name: "Submit".to_string(),
                     from_states: vec!["Draft".to_string()],
                     to_state: Some("Active".to_string()),
-                    guard: Guard::Always,
+                    guard: Expr::always(),
                     effects: vec![],
                 },
                 TransitionRule {
                     name: "Submit".to_string(),
                     from_states: vec!["Active".to_string()],
                     to_state: Some("Draft".to_string()),
-                    guard: Guard::Always,
+                    guard: Expr::always(),
                     effects: vec![],
                 },
                 TransitionRule {
                     name: "Cancel".to_string(),
                     from_states: vec!["Draft".to_string()],
                     to_state: Some("Draft".to_string()),
-                    guard: Guard::Always,
+                    guard: Expr::always(),
                     effects: vec![],
                 },
             ],

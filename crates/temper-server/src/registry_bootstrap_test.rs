@@ -130,6 +130,66 @@ fn populate_registry_merges_csdl_fragments_from_all_restored_rows() {
 }
 
 #[test]
+fn populate_registry_skips_a_stored_spec_that_no_longer_parses() {
+    let order_ioa = include_str!("../../../test-fixtures/specs/order.ioa.toml").to_string();
+    // A spec stored before the predicate grammar: an old-syntax guard table.
+    let legacy_ioa = r#"
+[automaton]
+name = "Task"
+states = ["Open", "Done"]
+initial = "Open"
+
+[[state]]
+name = "ready"
+type = "bool"
+initial = "false"
+
+[[action]]
+name = "Finish"
+from = ["Open"]
+to = "Done"
+guard = [{ type = "is_true", var = "ready" }]
+"#
+    .to_string();
+    let rows = vec![
+        MockSpecRow {
+            entity_type: "Order".to_string(),
+            ioa_source: order_ioa,
+            csdl_xml: csdl_xml_for("Order", "Orders"),
+            status: "passed".to_string(),
+            verified: true,
+        },
+        MockSpecRow {
+            entity_type: "Task".to_string(),
+            ioa_source: legacy_ioa,
+            csdl_xml: csdl_xml_for("Task", "Tasks"),
+            status: "passed".to_string(),
+            verified: true,
+        },
+    ];
+    let mut grouped = BTreeMap::new();
+    grouped.insert("default".to_string(), rows);
+    let mut registry = SpecRegistry::new();
+
+    let restored = populate_registry(
+        &mut registry,
+        grouped,
+        &mut BTreeMap::new(),
+        |row| Some(row.csdl_xml.clone()),
+        |row| (row.entity_type.clone(), row.ioa_source.clone()),
+    )
+    .expect("one bad stored spec must not fail the restore");
+
+    let tenant = TenantId::new("default");
+    assert_eq!(restored, 1);
+    assert!(registry.get_table(&tenant, "Order").is_some());
+    assert!(
+        registry.get_table(&tenant, "Task").is_none(),
+        "the unparseable spec is skipped"
+    );
+}
+
+#[test]
 fn row_to_registry_status_pending() {
     let status = row_to_registry_status(&MockRow {
         status: "pending".into(),

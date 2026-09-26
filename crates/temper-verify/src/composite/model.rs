@@ -23,7 +23,9 @@ use std::fmt;
 use stateright::{Model, Property};
 use temper_spec::automaton::TriggerEdge;
 
-use crate::model::{ModelGuard, TemperModel, TemperModelAction, TemperModelState};
+use crate::model::semantics::ModelEnv;
+use crate::model::{TemperModel, TemperModelAction, TemperModelState};
+use temper_spec::predicate::{Env, Expr, Val, eval};
 
 use super::CompositeVerificationPlan;
 
@@ -255,7 +257,7 @@ impl CompositeTemperModel {
     /// Whether every cross-entity guard on `action_name` (a transition of
     /// `source_entity`) is satisfied by the current joint state.
     ///
-    /// In a single-entity [`TemperModel`] a [`ModelGuard::CrossEntityState`]
+    /// In a single-entity [`TemperModel`] a related-entity status
     /// is abstract: the local checker treats it as a free boolean (guard-true
     /// branch always offered). In the joint model the referenced entity is in
     /// scope, so the guard becomes concrete — the action is enabled only when
@@ -285,39 +287,18 @@ impl CompositeTemperModel {
         else {
             return true;
         };
-        self.guard_cross_entity_ok(&transition.guard, state)
-    }
-
-    /// Recursively evaluate the cross-entity portion of a [`ModelGuard`]
-    /// against the joint state. Non-cross-entity leaves are ignored here
-    /// (the per-entity model already evaluated them against local state).
-    fn guard_cross_entity_ok(&self, guard: &ModelGuard, state: &CompositeState) -> bool {
-        match guard {
-            ModelGuard::CrossEntityState {
-                entity_type,
-                required_status,
-                forbidden_status,
-                ..
-            } => match state.entities.get(entity_type) {
-                // Target in scope: resolve concretely against its slice. The
-                // action is enabled iff the target is allowed by the allowlist
-                // (empty ⇒ unconstrained) AND not in the denylist (empty ⇒
-                // unconstrained). A denylist of e.g. `["Frozen","Archived"]`
-                // disables the action exactly when the container is in one of
-                // those states — identical drop-suppression to an allowlist of
-                // the complementary states, but without enumerating them.
-                Some(target) => {
-                    let allowed = required_status.is_empty()
-                        || required_status.iter().any(|s| s == &target.status);
-                    let not_forbidden = !forbidden_status.iter().any(|s| s == &target.status);
-                    allowed && not_forbidden
-                }
-                // Target outside scope: cannot resolve — leave abstract.
-                None => true,
+        let Some(local) = state.entities.get(source_entity) else {
+            return true;
+        };
+        let env = CompositeEnv {
+            local: ModelEnv {
+                kinds: &source_model.var_kinds,
+                state: local,
             },
-            ModelGuard::And(guards) => guards.iter().all(|g| self.guard_cross_entity_ok(g, state)),
-            _ => true,
-        }
+            joint: state,
+            in_scope_refs: in_scope_ref_fields(&transition.guard, state),
+        };
+        eval(&transition.guard, &env).may_hold()
     }
 
     /// Enumerate **every distinct** dropped reaction reachable in the joint
@@ -527,3 +508,42 @@ impl Model for CompositeTemperModel {
 #[cfg(test)]
 #[path = "model_test.rs"]
 mod tests;
+
+/// Id fields of related-entity references whose entity type is in the joint
+/// state. The joint model holds one instance per type, so these are set.
+fn in_scope_ref_fields(guard: &Expr, state: &CompositeState) -> Vec<String> {
+    guard
+        .cross_refs()
+        .into_iter()
+        .filter(|(entity_type, _)| state.entities.contains_key(entity_type))
+        .map(|(_, id_field)| id_field)
+        .collect()
+}
+
+/// A source entity's slice plus the joint state: related entities in scope
+/// read as their concrete status, others stay unknown.
+struct CompositeEnv<'a> {
+    local: ModelEnv<'a>,
+    joint: &'a CompositeState,
+    in_scope_refs: Vec<String>,
+}
+
+impl Env for CompositeEnv<'_> {
+    fn status(&self) -> Val<'_> {
+        self.local.status()
+    }
+
+    fn var(&self, name: &str) -> Val<'_> {
+        if self.in_scope_refs.iter().any(|field| field == name) {
+            return Val::Str("<in-scope reference>");
+        }
+        self.local.var(name)
+    }
+
+    fn cross_statuses(&self, entity_type: &str, _id_field: &str) -> Option<Vec<Val<'_>>> {
+        self.joint
+            .entities
+            .get(entity_type)
+            .map(|target| vec![Val::Str(&target.status)])
+    }
+}

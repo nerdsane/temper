@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use super::field_invariant::FieldInvariant;
+use crate::predicate::Expr;
 
 /// Return whether a field name is owned by the runtime rather than an action.
 ///
@@ -134,6 +135,10 @@ pub struct AutomatonMeta {
     /// Restrict writes to declared action parameters and guarded actions.
     #[serde(default)]
     pub strict_action_params: bool,
+    /// States no action may leave. The verifier checks that no action lists
+    /// them in `from`.
+    #[serde(default)]
+    pub terminal: Vec<String>,
 }
 
 /// A state variable declaration.
@@ -218,9 +223,9 @@ pub struct Action {
     pub from: Vec<String>,
     /// Effect: the target state after this action fires.
     pub to: Option<String>,
-    /// Additional guard conditions.
-    #[serde(default)]
-    pub guard: Vec<Guard>,
+    /// Precondition over the pre-state, beyond `from`. `true` when absent.
+    #[serde(default = "Expr::always", skip_serializing_if = "Expr::is_always")]
+    pub guard: Expr,
     /// Effects beyond state change.
     #[serde(default)]
     pub effect: Vec<Effect>,
@@ -318,72 +323,6 @@ pub struct SubWriteSpec {
     pub generated_from: Option<String>,
 }
 
-/// A guard condition (precondition predicate on pre-state).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum Guard {
-    /// Status must be one of these values.
-    #[serde(rename = "state_in")]
-    StateIn { values: Vec<String> },
-    /// A counter variable must be >= this value.
-    #[serde(rename = "min_count")]
-    MinCount { var: String, min: usize },
-    /// A counter variable must be < this value.
-    #[serde(rename = "max_count")]
-    MaxCount { var: String, max: usize },
-    /// A boolean variable must be true.
-    #[serde(rename = "is_true")]
-    IsTrue { var: String },
-    /// A boolean variable must be false.
-    #[serde(rename = "is_false")]
-    IsFalse { var: String },
-    /// A list variable must contain a specific value.
-    #[serde(rename = "list_contains")]
-    ListContains { var: String, value: String },
-    /// A list variable must have at least N elements.
-    #[serde(rename = "list_length_min")]
-    ListLengthMin { var: String, min: usize },
-    /// A cross-entity status precondition on a *related* entity.
-    ///
-    /// Combines an allowlist (`required_status`) and a denylist
-    /// (`forbidden_status`). For a *present, resolvable* target the guard holds
-    /// iff the target's status is allowed AND not forbidden:
-    /// - `required_status` empty ⇒ no allowlist constraint (any status allowed);
-    ///   non-empty ⇒ the status must be one of them.
-    /// - `forbidden_status` empty ⇒ no denylist constraint; non-empty ⇒ the
-    ///   status must NOT be one of them.
-    ///
-    /// A denylist expresses "reject only when the container is in a *specific*
-    /// bad state" without having to enumerate every good state — e.g. a write
-    /// is refused only when its owning Workspace is `Frozen`/`Archived`, while a
-    /// missing or not-yet-resolved Workspace still allows the write (see
-    /// `required` for the empty/missing-ref semantics).
-    #[serde(rename = "cross_entity_state")]
-    CrossEntityState {
-        /// The target entity type (e.g., "TestWorkflow").
-        entity_type: String,
-        /// Field name on the current entity holding the target entity ID.
-        entity_id_source: String,
-        /// Allowlist: target must be in one of these statuses (any match
-        /// passes). Empty ⇒ no allowlist constraint.
-        #[serde(default)]
-        required_status: Vec<String>,
-        /// Denylist: target must NOT be in any of these statuses. Empty ⇒ no
-        /// denylist constraint.
-        #[serde(default)]
-        forbidden_status: Vec<String>,
-        /// Whether the `entity_id_source` ref must be present (ARN-92 #2).
-        ///
-        /// When `false` (default), an empty/missing scalar ref or an empty list
-        /// relation passes the guard vacuously — the legacy blast radius. When
-        /// `true`, an empty/missing scalar or empty list ref *fails* the guard:
-        /// a required relationship that was never set cannot satisfy a
-        /// cross-entity status precondition.
-        #[serde(default)]
-        required: bool,
-    },
-}
-
 /// An effect (state change in the post-state).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -442,17 +381,13 @@ pub enum Effect {
     },
 }
 
-/// A safety invariant.
+/// A safety invariant, proven by the verification cascade.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Invariant {
     /// Invariant name.
     pub name: String,
-    /// States in which this invariant is checked (trigger states).
-    /// If empty, checked in all states.
-    #[serde(default)]
-    pub when: Vec<String>,
-    /// The assertion (a simple expression).
-    pub assert: String,
+    /// Must hold in every reachable state.
+    pub assert: Expr,
 }
 
 /// A liveness property.
@@ -655,9 +590,6 @@ pub struct Admission {
 /// Maximum cascade depth for recursive trigger dispatch (TigerStyle budget).
 pub const MAX_TRIGGER_DEPTH: u32 = 8;
 
-/// Maximum nesting depth for composite trigger guards (AllOf/AnyOf/Not).
-pub const MAX_TRIGGER_GUARD_DEPTH: u32 = 4;
-
 /// Maximum number of triggers a tenant can register across all entities
 /// (TigerStyle budget).
 pub const MAX_TRIGGERS_PER_TENANT: usize = 1024;
@@ -724,91 +656,6 @@ pub enum TargetResolver {
     Create,
 }
 
-/// Conditional firing predicate for a trigger.
-///
-/// Evaluated post-commit against the source entity's post-action fields
-/// (sync variants) or another entity's current state (`CrossEntityStateIn`).
-/// Guard-skipped triggers do not emit a dispatch record — they never fired.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum TriggerGuard {
-    /// Source field equals the given JSON value.
-    FieldEquals {
-        /// Field name on the source entity.
-        field: String,
-        /// Expected value (string, number, bool, null).
-        value: serde_json::Value,
-    },
-    /// Source field is one of the given JSON values.
-    FieldIn {
-        /// Field name on the source entity.
-        field: String,
-        /// Allowed values.
-        values: Vec<serde_json::Value>,
-    },
-    /// Source field is a JSON boolean `true`.
-    BoolTrue {
-        /// Field name on the source entity.
-        field: String,
-    },
-    /// Source field is a JSON boolean `false`.
-    BoolFalse {
-        /// Field name on the source entity.
-        field: String,
-    },
-    /// Source entity's post-action status is one of the given values.
-    StateIn {
-        /// Allowed states.
-        values: Vec<String>,
-    },
-    /// Another entity's current status must be one of the given values.
-    CrossEntityStateIn {
-        /// Target entity type.
-        entity_type: String,
-        /// Source-entity field name holding the target entity id.
-        entity_id_source: String,
-        /// Target entity statuses that satisfy the guard.
-        required_status: Vec<String>,
-    },
-    /// All child guards must pass. Bounded by `MAX_TRIGGER_GUARD_DEPTH`.
-    AllOf {
-        /// Child guards.
-        guards: Vec<TriggerGuard>,
-    },
-    /// At least one child guard must pass. Bounded by `MAX_TRIGGER_GUARD_DEPTH`.
-    AnyOf {
-        /// Child guards.
-        guards: Vec<TriggerGuard>,
-    },
-    /// Inverted child guard. Bounded by `MAX_TRIGGER_GUARD_DEPTH`.
-    Not {
-        /// Inner guard.
-        guard: Box<TriggerGuard>,
-    },
-}
-
-impl TriggerGuard {
-    /// Compute the maximum composite nesting depth of this guard.
-    ///
-    /// Leaf variants are depth 1. `AllOf` / `AnyOf` / `Not` add one level.
-    /// Used at parse time to reject guards deeper than
-    /// `MAX_TRIGGER_GUARD_DEPTH`.
-    pub fn depth(&self) -> u32 {
-        match self {
-            TriggerGuard::FieldEquals { .. }
-            | TriggerGuard::FieldIn { .. }
-            | TriggerGuard::BoolTrue { .. }
-            | TriggerGuard::BoolFalse { .. }
-            | TriggerGuard::StateIn { .. }
-            | TriggerGuard::CrossEntityStateIn { .. } => 1,
-            TriggerGuard::AllOf { guards } | TriggerGuard::AnyOf { guards } => {
-                1 + guards.iter().map(Self::depth).max().unwrap_or(0)
-            }
-            TriggerGuard::Not { guard } => 1 + guard.depth(),
-        }
-    }
-}
-
 /// An outgoing trigger declared inline on an `Action` (ADR-0046).
 ///
 /// Unifies cross-entity dispatch (former `reactions.toml`), WASM execution
@@ -841,9 +688,9 @@ pub struct ActionTrigger {
     /// fire on any outcome.
     #[serde(default)]
     pub to_state: Option<String>,
-    /// Optional firing predicate evaluated post-commit.
+    /// Optional firing predicate over the source entity's post-action state.
     #[serde(default)]
-    pub guard: Option<TriggerGuard>,
+    pub guard: Option<Expr>,
     /// Liveness expectation (see `TriggerLiveness`).
     #[serde(default)]
     pub liveness: TriggerLiveness,

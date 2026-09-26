@@ -7,6 +7,7 @@
 name = "TestWorkflow"
 states = ["Pending", "Running", "Passed", "Failed"]
 initial = "Pending"
+terminal = ["Passed", "Failed"]
 
 # --- Actions: Test Lifecycle ---
 
@@ -35,15 +36,3 @@ to = "Failed"
 params = ["failures", "error_log"]
 hint = "Record a failed test run with failure details."
 effect = [{ type = "emit_event", event = "TestsFailed" }]
-
-# --- Safety Invariants ---
-
-[[invariant]]
-name = "PassedIsFinal"
-when = ["Passed"]
-assert = "no_further_transitions"
-
-[[invariant]]
-name = "FailedIsFinal"
-when = ["Failed"]
-assert = "no_further_transitions"

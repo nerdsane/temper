@@ -31,7 +31,7 @@ to = "Done"
 }
 
 #[test]
-fn lint_rejects_unknown_guard_and_effect_variables() {
+fn unknown_guard_variables_fail_to_load_and_effect_variables_lint() {
     let src = r#"
 [automaton]
 name = "Task"
@@ -47,17 +47,17 @@ initial = "false"
 name = "Complete"
 from = ["Draft"]
 to = "Done"
-guard = "is_true phantom"
+guard = "phantom"
 effect = "set ghost true"
 "#;
-    let automaton = parse_automaton(src).expect("parse");
-    let findings = lint_automaton(&automaton);
+    let err = parse_automaton(src).expect_err("unknown guard variable");
     assert!(
-        findings
-            .iter()
-            .any(|finding| finding.code == "guard_unknown_var"
-                && finding.severity == LintSeverity::Error)
+        err.to_string().contains("unknown state variable 'phantom'"),
+        "{err}"
     );
+    let automaton = parse_automaton(&src.replace("guard = \"phantom\"", "guard = \"approved\""))
+        .expect("parse");
+    let findings = lint_automaton(&automaton);
     assert!(
         findings
             .iter()

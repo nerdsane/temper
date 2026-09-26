@@ -9,6 +9,7 @@
 name = "ToolCall"
 states = ["Pending", "Authorized", "Denied", "Executing", "Completed", "Failed"]
 initial = "Pending"
+terminal = ["Completed", "Failed"]
 
 # --- State Variables ---
 
@@ -106,17 +107,6 @@ hint = "Human approved the denied decision. ToolCall returns to Pending for re-a
 
 # --- Safety Invariants ---
 
-[[invariant]]
+[[field_invariant]]
 name = "RequiresAgentId"
-when = ["Pending", "Authorized", "Denied", "Executing", "Completed", "Failed"]
-assert = "agent_id != ''"
-
-[[invariant]]
-name = "CompletedIsFinal"
-when = ["Completed"]
-assert = "no_further_transitions"
-
-[[invariant]]
-name = "FailedIsFinal"
-when = ["Failed"]
-assert = "no_further_transitions"
+assert = "status in ['Pending', 'Authorized', 'Denied', 'Executing', 'Completed', 'Failed'] => agent_id != ''"

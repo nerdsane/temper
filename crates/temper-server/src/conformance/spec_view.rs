@@ -7,7 +7,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use temper_spec::automaton::{Action, Automaton, Guard};
+use temper_spec::automaton::{Action, Automaton};
+use temper_spec::predicate::{CmpOp, Expr, Literal, Operand, Set};
 
 use super::{KERNEL_PLATFORM_ACTIONS, ViolationKind};
 
@@ -46,15 +47,7 @@ fn legal_sources(action: &Action) -> SourceStates<'_> {
     // An action written with a `state_in` guard instead of a `from` list still
     // restricts its source states; read the guard rather than treating the
     // action as unconstrained.
-    let guarded: BTreeSet<&str> = action
-        .guard
-        .iter()
-        .filter_map(|guard| match guard {
-            Guard::StateIn { values } => Some(values.iter().map(String::as_str)),
-            _ => None,
-        })
-        .flatten()
-        .collect();
+    let guarded: BTreeSet<&str> = guard_status_constraint(&action.guard);
     if !guarded.is_empty() {
         return SourceStates::Declared(guarded);
     }
@@ -68,6 +61,37 @@ fn legal_sources(action: &Action) -> SourceStates<'_> {
     // kernel's transition table. That is a spec-authoring fault rather than a
     // run fault, so the row is reported as unchecked instead of condemned.
     SourceStates::Unevaluable
+}
+
+/// States a guard's top-level `status in [...]` / `status == '...'`
+/// conjuncts allow.
+fn guard_status_constraint(guard: &Expr) -> BTreeSet<&str> {
+    let conjuncts = match guard {
+        Expr::And(parts) => parts.as_slice(),
+        other => std::slice::from_ref(other),
+    };
+    let mut states = BTreeSet::new();
+    for conjunct in conjuncts {
+        match conjunct {
+            Expr::In {
+                value: Operand::Status,
+                set: Set::List(items),
+                negated: false,
+            } => states.extend(items.iter().filter_map(|item| match item {
+                Literal::Str(state) => Some(state.as_str()),
+                _ => None,
+            })),
+            Expr::Compare {
+                lhs: Operand::Status,
+                op: CmpOp::Eq,
+                rhs: Operand::Lit(Literal::Str(state)),
+            } => {
+                states.insert(state.as_str());
+            }
+            _ => {}
+        }
+    }
+    states
 }
 
 /// States no action can fire from.

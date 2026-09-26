@@ -13,15 +13,16 @@ pub mod cross_invariant;
 pub mod csdl;
 pub mod model;
 pub mod naming;
+pub mod predicate;
 
 /// TLA+ specification extractor (legacy — prefer [`automaton`] for new specs).
 pub mod tlaplus;
 
 // Re-export primary public API at crate root.
 pub use automaton::{
-    Automaton, FieldInvariant, FieldPredicate, LintFinding, LintSeverity, lint_automaton,
-    parse_automaton, parse_bool_initial, parse_counter_initial_usize, parse_list_initial,
-    parse_var_initial_json, to_state_machine,
+    Automaton, FieldInvariant, LintFinding, LintSeverity, lint_automaton, parse_automaton,
+    parse_bool_initial, parse_counter_initial_usize, parse_list_initial, parse_var_initial_json,
+    to_state_machine,
 };
 pub use cross_invariant::{
     CrossInvariant, CrossInvariantLintFinding, CrossInvariantLintSeverity, CrossInvariantOperator,

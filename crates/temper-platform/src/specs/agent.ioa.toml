@@ -164,9 +164,7 @@ from = ["Working"]
 to = "Completed"
 params = ["result"]
 hint = "Agent finished the goal successfully with a result summary."
-guard = [
-  { type = "cross_entity_state", entity_type = "Agent", entity_id_source = "child_agent_ids", required_status = ["Completed", "Failed"] }
-]
+guard = "empty(child_agent_ids) || Agent[child_agent_ids].status in ['Completed', 'Failed']"
 
 [[action]]
 name = "Fail"
@@ -185,7 +183,6 @@ hint = "Reset the agent for reuse. Clears all state variables."
 
 # --- Safety Invariants ---
 
-[[invariant]]
+[[field_invariant]]
 name = "AssignedRequiresGoal"
-when = ["Assigned", "Working", "Blocked", "Completed", "Failed"]
-assert = "goal != ''"
+assert = "status in ['Assigned', 'Working', 'Blocked', 'Completed', 'Failed'] => goal != ''"

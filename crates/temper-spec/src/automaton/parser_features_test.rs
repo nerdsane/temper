@@ -41,23 +41,33 @@ name = "Ticket"
 states = ["Open", "Queued", "Closed"]
 initial = "Open"
 
+[[state]]
+name = "retries"
+type = "counter"
+initial = "0"
+
+[[state]]
+name = "labels"
+type = "list"
+initial = "[]"
+
 [[action]]
 name = "Queue"
 from = ["Open"]
 to = "Queued"
-guard = "max retries 3"
+guard = "retries < 3"
 
 [[action]]
 name = "Escalate"
 from = ["Queued"]
 to = "Queued"
-guard = "list_contains labels urgent"
+guard = "'urgent' in labels"
 
 [[action]]
 name = "Close"
 from = ["Queued"]
 to = "Closed"
-guard = "list_length_min labels 1"
+guard = "len(labels) >= 1"
 "#;
 
     let automaton = parse_automaton(spec).expect("extended guard forms should parse");
@@ -66,30 +76,21 @@ guard = "list_length_min labels 1"
         .iter()
         .find(|action| action.name == "Queue")
         .unwrap();
-    assert!(matches!(
-        queue.guard.as_slice(),
-        [Guard::MaxCount { var, max }] if var == "retries" && *max == 3
-    ));
+    assert_eq!(queue.guard.to_string(), "retries < 3");
 
     let escalate = automaton
         .actions
         .iter()
         .find(|action| action.name == "Escalate")
         .unwrap();
-    assert!(matches!(
-        escalate.guard.as_slice(),
-        [Guard::ListContains { var, value }] if var == "labels" && value == "urgent"
-    ));
+    assert_eq!(escalate.guard.to_string(), "'urgent' in labels");
 
     let close = automaton
         .actions
         .iter()
         .find(|action| action.name == "Close")
         .unwrap();
-    assert!(matches!(
-        close.guard.as_slice(),
-        [Guard::ListLengthMin { var, min }] if var == "labels" && *min == 1
-    ));
+    assert_eq!(close.guard.to_string(), "len(labels) >= 1");
 }
 
 #[test]
@@ -100,6 +101,11 @@ name = "Order"
 states = ["Draft", "Submitted"]
 initial = "Draft"
 
+[[state]]
+name = "items"
+type = "counter"
+initial = "0"
+
 [[action]]
 name = "SubmitOrder"
 from = ["Draft"]
@@ -108,7 +114,10 @@ guard = "items > nope"
 "#;
 
     let err = parse_automaton(spec).expect_err("invalid numeric guard should fail");
-    assert!(err.to_string().contains("right side must be an integer"));
+    assert!(
+        err.to_string().contains("unknown state variable 'nope'"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -243,9 +252,8 @@ hint = "Archive the session."
 
 [[field_invariant]]
 name = "ClosedRequiresArchivedAt"
-when = { field = "Status", equals = "Closed" }
-require = { not = { field = "ArchivedAt", absent = true } }
 message = "Closed sessions must set ArchivedAt"
+assert = "Status == 'Closed' => ArchivedAt != null"
 "#;
 
     let automaton = parse_automaton(spec).expect("should parse field invariants");

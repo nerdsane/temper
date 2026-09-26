@@ -18,9 +18,5 @@ initial = "Active"
 
 [[field_invariant]]
 name = "PermissionPolicyMustBeKnown"
-when = { not = { field = "PermissionPolicy", absent = true } }
-require = { any_of = [
-  { field = "PermissionPolicy", equals = "always_allow" },
-  { field = "PermissionPolicy", equals = "always_ask" },
-]}
 message = "AgentToolConfig.PermissionPolicy must be `always_allow` or `always_ask`"
+assert = "PermissionPolicy != null => PermissionPolicy in ['always_allow', 'always_ask']"

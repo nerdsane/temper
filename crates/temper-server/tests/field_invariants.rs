@@ -44,9 +44,8 @@ to = "Submitted"
 
 [[field_invariant]]
 name = "UsdOrdersCannotHaveNotes"
-when = { field = "Currency", equals = "USD" }
-require = { field = "Notes", absent = true }
 message = "USD orders cannot carry notes"
+assert = "Currency == 'USD' => Notes == null"
 "#;
 
 fn authenticate(mut request: Request<Body>) -> Request<Body> {

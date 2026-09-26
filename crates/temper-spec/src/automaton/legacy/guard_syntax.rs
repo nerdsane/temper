@@ -1,11 +1,14 @@
-use super::AutomatonParseError;
-use super::values::{scalar_string, unsigned};
-use crate::automaton::Guard;
+//! The pre-grammar action-guard syntax: `"is_true x"`, `"min x 3"`,
+//! `{ type = "min_count", ... }` tables and arrays of either.
+
+use super::syntax::Guard;
+use crate::automaton::parser::AutomatonParseError;
+use crate::automaton::toml_parser::values::{scalar_string, unsigned};
 use toml::{Table, Value};
 
 /// Parse an action `guard` value: one string clause, or an array whose
 /// entries are string clauses or `{ type = ... }` tables.
-pub(super) fn parse_guard_value(
+pub(crate) fn parse_guard_value(
     value: &Value,
     guards: &mut Vec<Guard>,
 ) -> Result<(), AutomatonParseError> {
@@ -32,7 +35,7 @@ fn invalid_guard_value(value: &Value) -> AutomatonParseError {
     ))
 }
 
-pub(super) fn parse_guard_clause(value: &str) -> Result<Guard, AutomatonParseError> {
+pub(crate) fn parse_guard_clause(value: &str) -> Result<Guard, AutomatonParseError> {
     let trimmed = value.trim();
 
     for &(operator, is_min_guard) in &[(">=", true), ("<=", false), (">", true), ("<", false)] {
@@ -249,4 +252,88 @@ fn parse_usize_arg(
 
 fn invalid_guard(trimmed: &str, message: &str) -> AutomatonParseError {
     AutomatonParseError::Validation(format!("invalid guard '{trimmed}' ({message})"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guard_gt() {
+        let g = parse_guard_clause("items > 3").unwrap();
+        assert!(matches!(g, Guard::MinCount { ref var, min: 4 } if var == "items"));
+    }
+
+    #[test]
+    fn guard_gte() {
+        let g = parse_guard_clause("items >= 5").unwrap();
+        assert!(matches!(g, Guard::MinCount { ref var, min: 5 } if var == "items"));
+    }
+
+    #[test]
+    fn guard_lt() {
+        let g = parse_guard_clause("items < 10").unwrap();
+        assert!(matches!(g, Guard::MaxCount { ref var, max: 10 } if var == "items"));
+    }
+
+    #[test]
+    fn guard_lte() {
+        let g = parse_guard_clause("items <= 10").unwrap();
+        assert!(matches!(g, Guard::MaxCount { ref var, max: 11 } if var == "items"));
+    }
+
+    #[test]
+    fn guard_prefix_min() {
+        let g = parse_guard_clause("min items 3").unwrap();
+        assert!(matches!(g, Guard::MinCount { ref var, min: 3 } if var == "items"));
+    }
+
+    #[test]
+    fn guard_prefix_max() {
+        let g = parse_guard_clause("max items 10").unwrap();
+        assert!(matches!(g, Guard::MaxCount { ref var, max: 10 } if var == "items"));
+    }
+
+    #[test]
+    fn guard_is_true() {
+        let g = parse_guard_clause("is_true approved").unwrap();
+        assert!(matches!(g, Guard::IsTrue { ref var } if var == "approved"));
+    }
+
+    #[test]
+    fn guard_list_contains() {
+        let g = parse_guard_clause("list_contains tags vip").unwrap();
+        assert!(
+            matches!(g, Guard::ListContains { ref var, ref value } if var == "tags" && value == "vip")
+        );
+    }
+
+    #[test]
+    fn guard_list_length_min() {
+        let g = parse_guard_clause("list_length_min tags 2").unwrap();
+        assert!(matches!(g, Guard::ListLengthMin { ref var, min: 2 } if var == "tags"));
+    }
+
+    #[test]
+    fn guard_bare_boolean() {
+        let g = parse_guard_clause("has_mutation").unwrap();
+        assert!(matches!(g, Guard::IsTrue { ref var } if var == "has_mutation"));
+    }
+
+    #[test]
+    fn guard_negation_prefix() {
+        let g = parse_guard_clause("!needs_approval").unwrap();
+        assert!(matches!(g, Guard::IsFalse { ref var } if var == "needs_approval"));
+    }
+
+    #[test]
+    fn guard_is_false_prefix() {
+        let g = parse_guard_clause("is_false budget_exhausted").unwrap();
+        assert!(matches!(g, Guard::IsFalse { ref var } if var == "budget_exhausted"));
+    }
+
+    #[test]
+    fn guard_unsupported_syntax() {
+        assert!(parse_guard_clause("two words bad").is_err());
+    }
 }

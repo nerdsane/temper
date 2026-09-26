@@ -915,7 +915,7 @@ async fn e2e_gepa_hotdeploy_and_verify() {
 name = "Reassign"
 kind = "input"
 from = ["Backlog", "Triage", "Todo", "InProgress", "InReview", "Planning", "Planned"]
-guard = "is_true assignee_set"
+guard = "assignee_set"
 params = ["NewAssigneeId"]
 hint = "Reassign the issue to a different implementer."
 "#;
@@ -1178,7 +1178,7 @@ async fn e2e_gepa_full_loop() {
 name = "Reassign"
 kind = "input"
 from = ["Backlog", "Triage", "Todo", "InProgress", "InReview", "Planning", "Planned"]
-guard = "is_true assignee_set"
+guard = "assignee_set"
 params = ["NewAssigneeId"]
 hint = "Reassign the issue to a different implementer."
 "#;

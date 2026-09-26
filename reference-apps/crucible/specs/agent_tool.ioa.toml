@@ -24,45 +24,30 @@ initial = "Active"
 
 [[field_invariant]]
 name = "KindMustBeKnown"
-when = { not = { field = "Kind", absent = true } }
-require = { any_of = [
-  { field = "Kind", equals = "agent_toolset" },
-  { field = "Kind", equals = "mcp_toolset" },
-  { field = "Kind", equals = "custom" },
-]}
 message = "AgentTool.Kind must be `agent_toolset`, `mcp_toolset`, or `custom`"
+assert = "Kind != null => Kind in ['agent_toolset', 'mcp_toolset', 'custom']"
 
 [[field_invariant]]
 name = "CustomToolRequiresName"
-when = { field = "Kind", equals = "custom" }
-require = { not = { field = "Name", empty = true } }
 message = "Custom tools must have a non-empty Name"
+assert = "Kind == 'custom' => !empty(Name)"
 
 [[field_invariant]]
 name = "CustomToolRequiresDescription"
-when = { field = "Kind", equals = "custom" }
-require = { not = { field = "Description", empty = true } }
 message = "Custom tools must have a non-empty Description"
+assert = "Kind == 'custom' => !empty(Description)"
 
 [[field_invariant]]
 name = "CustomToolRequiresInputSchema"
-when = { field = "Kind", equals = "custom" }
-require = { not = { field = "InputSchema", empty = true } }
 message = "Custom tools must have a non-empty InputSchema"
+assert = "Kind == 'custom' => !empty(InputSchema)"
 
 [[field_invariant]]
 name = "McpToolsetRequiresMcpServerName"
-when = { field = "Kind", equals = "mcp_toolset" }
-require = { not = { field = "McpServerName", empty = true } }
 message = "mcp_toolset tools must reference an McpServerName"
+assert = "Kind == 'mcp_toolset' => !empty(McpServerName)"
 
 [[field_invariant]]
 name = "AgentToolsetForbidsKindSpecificFields"
-when = { field = "Kind", equals = "agent_toolset" }
-require = { all_of = [
-  { field = "Name", absent = true },
-  { field = "Description", absent = true },
-  { field = "InputSchema", absent = true },
-  { field = "McpServerName", absent = true },
-]}
 message = "agent_toolset tools must not set Name/Description/InputSchema/McpServerName"
+assert = "Kind == 'agent_toolset' => Name == null && Description == null && InputSchema == null && McpServerName == null"

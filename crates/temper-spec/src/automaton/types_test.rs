@@ -34,7 +34,7 @@ from = ["A"]
     assert_eq!(automaton.actions.len(), 1);
     assert_eq!(automaton.actions[0].kind, "internal");
     assert!(automaton.actions[0].to.is_none());
-    assert!(automaton.actions[0].guard.is_empty());
+    assert!(automaton.actions[0].guard.is_always());
     assert!(automaton.actions[0].effect.is_empty());
 }
 
@@ -50,24 +50,13 @@ initial = "A"
 name = "G1"
 from = ["A"]
 to = "B"
-guard = [
-    { type = "min_count", var = "items", min = 1 },
-    { type = "max_count", var = "items", max = 10 },
-    { type = "is_true", var = "ready" },
-    { type = "list_contains", var = "tags", value = "vip" },
-    { type = "list_length_min", var = "tags", min = 2 },
-]
+guard = "items >= 1 && items < 10 && ready && 'vip' in tags && len(tags) >= 2"
 "#;
     let automaton: Automaton = toml::from_str(toml_src).unwrap();
-    let guards = &automaton.actions[0].guard;
-    assert_eq!(guards.len(), 5);
-    assert!(matches!(&guards[0], Guard::MinCount { var, min: 1 } if var == "items"));
-    assert!(matches!(&guards[1], Guard::MaxCount { var, max: 10 } if var == "items"));
-    assert!(matches!(&guards[2], Guard::IsTrue { var } if var == "ready"));
-    assert!(
-        matches!(&guards[3], Guard::ListContains { var, value } if var == "tags" && value == "vip")
+    assert_eq!(
+        automaton.actions[0].guard.to_string(),
+        "items >= 1 && items < 10 && ready && 'vip' in tags && len(tags) >= 2"
     );
-    assert!(matches!(&guards[4], Guard::ListLengthMin { var, min: 2 } if var == "tags"));
 }
 
 #[test]
@@ -161,8 +150,7 @@ initial = "A"
 
 [[invariant]]
 name = "NonNeg"
-when = ["B"]
-assert = "count >= 0"
+assert = "status in ['B'] => count >= 0"
 
 [[liveness]]
 name = "Progress"
@@ -172,8 +160,10 @@ reaches = ["C"]
     let automaton: Automaton = toml::from_str(toml_src).unwrap();
     assert_eq!(automaton.invariants.len(), 1);
     assert_eq!(automaton.invariants[0].name, "NonNeg");
-    assert_eq!(automaton.invariants[0].when, vec!["B"]);
-    assert_eq!(automaton.invariants[0].assert, "count >= 0");
+    assert_eq!(
+        automaton.invariants[0].assert.to_string(),
+        "status in ['B'] => count >= 0"
+    );
 
     assert_eq!(automaton.liveness.len(), 1);
     assert_eq!(automaton.liveness[0].name, "Progress");
@@ -244,30 +234,17 @@ initial = "A"
 name = "Act"
 from = ["A"]
 to = "B"
-guard = [{ type = "cross_entity_state", entity_type = "Parent", entity_id_source = "parent_id", required_status = ["Done", "Approved"] }]
+guard = "empty(parent_id) || Parent[parent_id].status in ['Done', 'Approved']"
 "#;
-    let automaton: Automaton = toml::from_str(toml_src).unwrap();
-    match &automaton.actions[0].guard[0] {
-        Guard::CrossEntityState {
-            entity_type,
-            entity_id_source,
-            required_status,
-            forbidden_status,
-            required,
-        } => {
-            assert_eq!(entity_type, "Parent");
-            assert_eq!(entity_id_source, "parent_id");
-            assert_eq!(
-                required_status,
-                &vec!["Done".to_string(), "Approved".to_string()]
-            );
-            // `forbidden_status` defaults to empty when omitted.
-            assert!(forbidden_status.is_empty());
-            // `required` defaults to false when omitted (ARN-92 #2).
-            assert!(!*required);
-        }
-        other => panic!("expected CrossEntityState, got {other:?}"),
-    }
+    let automaton = super::super::parse_automaton_with_liveness(
+        toml_src,
+        super::super::LivenessEnforcement::WarnOnly,
+    )
+    .unwrap();
+    assert_eq!(
+        automaton.actions[0].guard.to_string(),
+        "empty(parent_id) || Parent[parent_id].status in ['Done', 'Approved']"
+    );
 }
 
 #[test]
@@ -282,15 +259,17 @@ initial = "A"
 name = "Act"
 from = ["A"]
 to = "B"
-guard = [{ type = "cross_entity_state", entity_type = "Parent", entity_id_source = "parent_id", required_status = ["Done"], required = true }]
+guard = "Parent[parent_id].status in ['Done']"
 "#;
-    let automaton: Automaton = toml::from_str(toml_src).unwrap();
-    match &automaton.actions[0].guard[0] {
-        Guard::CrossEntityState { required, .. } => {
-            assert!(*required, "explicit required = true must parse as true");
-        }
-        other => panic!("expected CrossEntityState, got {other:?}"),
-    }
+    let automaton = super::super::parse_automaton_with_liveness(
+        toml_src,
+        super::super::LivenessEnforcement::WarnOnly,
+    )
+    .unwrap();
+    assert_eq!(
+        automaton.actions[0].guard.to_string(),
+        "Parent[parent_id].status in ['Done']"
+    );
 }
 
 #[test]
@@ -305,30 +284,17 @@ initial = "A"
 name = "Act"
 from = ["A"]
 to = "B"
-guard = [{ type = "cross_entity_state", entity_type = "Workspace", entity_id_source = "workspace_id", forbidden_status = ["Frozen", "Archived"] }]
+guard = "Workspace[workspace_id].status not in ['Frozen', 'Archived']"
 "#;
-    let automaton: Automaton = toml::from_str(toml_src).unwrap();
-    match &automaton.actions[0].guard[0] {
-        Guard::CrossEntityState {
-            entity_type,
-            entity_id_source,
-            required_status,
-            forbidden_status,
-            required,
-        } => {
-            assert_eq!(entity_type, "Workspace");
-            assert_eq!(entity_id_source, "workspace_id");
-            // A denylist-only guard: no allowlist constraint.
-            assert!(required_status.is_empty());
-            assert_eq!(
-                forbidden_status,
-                &vec!["Frozen".to_string(), "Archived".to_string()]
-            );
-            // The ref is optional by default, so a missing Workspace passes.
-            assert!(!*required);
-        }
-        other => panic!("expected CrossEntityState, got {other:?}"),
-    }
+    let automaton = super::super::parse_automaton_with_liveness(
+        toml_src,
+        super::super::LivenessEnforcement::WarnOnly,
+    )
+    .unwrap();
+    assert_eq!(
+        automaton.actions[0].guard.to_string(),
+        "Workspace[workspace_id].status not in ['Frozen', 'Archived']"
+    );
 }
 
 #[test]

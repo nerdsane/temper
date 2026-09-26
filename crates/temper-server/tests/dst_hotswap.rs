@@ -17,6 +17,11 @@ name = "Order"
 initial = "Draft"
 states = ["Draft", "Submitted", "Confirmed", "Processing", "Shipped", "Delivered", "Cancelled", "Archived"]
 
+[[state]]
+name = "item_count"
+type = "counter"
+initial = "0"
+
 [[action]]
 name = "AddItem"
 from = ["Draft"]
@@ -32,11 +37,7 @@ name = "SubmitOrder"
 from = ["Draft"]
 to = "Submitted"
 kind = "input"
-
-[[action.guard]]
-type = "min_count"
-var = "item_count"
-min = 1
+guard = "item_count >= 1"
 
 [[action]]
 name = "ConfirmOrder"

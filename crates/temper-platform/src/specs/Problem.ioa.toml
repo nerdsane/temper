@@ -9,7 +9,7 @@ from = []
 to = "Open"
 kind = "input"
 params = ["observation_id", "problem_statement", "severity", "invariants"]
-guard = [{ type = "cross_entity_state", entity_type = "Observation", entity_id_source = "observation_id", required_status = ["Open", "UnderReview"] }]
+guard = "empty(observation_id) || Observation[observation_id].status in ['Open', 'UnderReview']"
 
 [[action]]
 name = "MarkReviewed"

@@ -1,5 +1,7 @@
 # ADR-0046: Unified Action Triggers — Supersede Reactions Subsystem
 
+> **Syntax superseded by [ADR-0179](0179-unified-predicate-grammar.md):** the predicate forms shown here (guard, assert and field-predicate tables or clauses) are now one expression grammar. The decision below stands; its examples use the old syntax.
+
 - Status: Accepted
 - Date: 2026-04-20
 - Accepted: 2026-04-24

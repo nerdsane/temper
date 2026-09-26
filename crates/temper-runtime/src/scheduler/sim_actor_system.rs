@@ -591,35 +591,35 @@ impl SimActorSystem {
         item_count: usize,
         tick: u64,
     ) {
-        // 1. Check spec-derived invariants from the handler (automatic).
+        // 1. Check spec-derived invariants and terminal states (automatic).
         if let Some(handler) = self.actors.get(actor_id) {
-            let invariants: Vec<_> = handler.spec_invariants().to_vec();
-            for inv in &invariants {
-                let triggered = inv.when.is_empty() || inv.when.iter().any(|s| s == status_after);
-                if !triggered {
-                    continue;
-                }
-
-                let passed = evaluate_spec_assert(
-                    &inv.assert,
-                    handler.as_ref(),
-                    &inv.when,
-                    status_before,
-                    status_after,
-                    item_count,
-                );
-                let violated = !passed;
-
+            let mut checks: Vec<(String, bool)> = handler
+                .spec_invariants()
+                .iter()
+                .map(|inv| {
+                    (
+                        inv.name.clone(),
+                        spec_invariant_holds(&inv.assert, handler.as_ref(), status_after),
+                    )
+                })
+                .collect();
+            // A transition between terminal states means one was left.
+            let terminal = handler.terminal_states();
+            if terminal.iter().any(|s| s == status_before)
+                && terminal.iter().any(|s| s == status_after)
+            {
+                checks.push((format!("Terminal({status_before})"), false));
+            }
+            for (name, passed) in checks {
                 self.recorded_invariants
-                    .push((actor_id.to_string(), inv.name.clone(), !violated));
-
-                if violated {
+                    .push((actor_id.to_string(), name.clone(), passed));
+                if !passed {
                     self.violations.push(ActorInvariantViolation {
                         actor_id: actor_id.to_string(),
                         action: action.to_string(),
                         status_before: status_before.to_string(),
                         status_after: status_after.to_string(),
-                        description: format!("{}: violated after '{}'", inv.name, action),
+                        description: format!("{name}: violated after '{action}'"),
                         tick,
                     });
                 }
@@ -642,65 +642,45 @@ impl SimActorSystem {
     }
 }
 
-/// Evaluate a [`SpecAssert`] against handler state. Returns `true` if the
-/// assertion holds, `false` if violated. Recurses through `And`/`Or`.
-fn evaluate_spec_assert(
-    assert: &super::sim_handler::SpecAssert,
+/// Whether `assert` holds in the handler's current state. Only the names the
+/// assertion reads are fetched from the handler.
+fn spec_invariant_holds(
+    assert: &temper_spec::predicate::Expr,
     handler: &dyn super::sim_handler::SimActorHandler,
-    when: &[String],
-    status_before: &str,
     status_after: &str,
-    item_count: usize,
 ) -> bool {
-    use super::sim_handler::{CompareOp, SpecAssert};
+    use temper_spec::predicate::{Env, Name, Truth, Val, eval};
 
-    match assert {
-        SpecAssert::CounterPositive { var } => {
-            if var == "items" {
-                item_count > 0
-            } else {
-                true // Unknown counter: not in scope for invariant checking here.
-            }
-        }
-        SpecAssert::NoFurtherTransitions => {
-            // Holds unless status_before was a terminal state in `when`.
-            !when.iter().any(|s| s == status_before)
-        }
-        SpecAssert::OrderingConstraint { before, after } => {
-            if status_after == after.as_str() {
-                let events = handler.events_json();
-                if let Some(arr) = events.as_array() {
-                    arr.iter().any(|e| {
-                        e.get("to_status").and_then(|s| s.as_str()) == Some(before.as_str())
-                    })
-                } else {
-                    true
-                }
-            } else {
-                true
-            }
-        }
-        SpecAssert::NeverState { state } => status_after != state.as_str(),
-        SpecAssert::CounterCompare { var, op, value } => {
-            let counter_val = if var == "items" { item_count } else { 0 };
-            match op {
-                CompareOp::Gt => counter_val > *value,
-                CompareOp::Gte => counter_val >= *value,
-                CompareOp::Lt => counter_val < *value,
-                CompareOp::Lte => counter_val <= *value,
-                CompareOp::Eq => counter_val == *value,
-            }
-        }
-        SpecAssert::BoolRequired { var, expect } => {
-            handler.bool_field(var).unwrap_or(false) == *expect
-        }
-        SpecAssert::And(parts) => parts.iter().all(|p| {
-            evaluate_spec_assert(p, handler, when, status_before, status_after, item_count)
-        }),
-        SpecAssert::Or(parts) => parts.iter().any(|p| {
-            evaluate_spec_assert(p, handler, when, status_before, status_after, item_count)
-        }),
+    struct Snapshot<'a> {
+        status: &'a str,
+        values: BTreeMap<String, serde_json::Value>,
     }
+    impl Env for Snapshot<'_> {
+        fn status(&self) -> Val<'_> {
+            Val::Str(self.status)
+        }
+        fn var(&self, name: &str) -> Val<'_> {
+            self.values.get(name).map_or(Val::Null, Val::json)
+        }
+        fn cross_statuses(&self, _: &str, _: &str) -> Option<Vec<Val<'_>>> {
+            None
+        }
+    }
+
+    let mut values = BTreeMap::new();
+    assert.for_each_name(&mut |name| {
+        if let Name::Var(var) = name
+            && !values.contains_key(var)
+            && let Some(value) = handler.state_value(var)
+        {
+            values.insert(var.to_string(), value);
+        }
+    });
+    let snapshot = Snapshot {
+        status: status_after,
+        values,
+    };
+    eval(assert, &snapshot) != Truth::False
 }
 
 #[cfg(test)]

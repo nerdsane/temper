@@ -44,11 +44,6 @@ name = "Cancel"
 kind = "input"
 from = ["Draft", "Open", "InProgress"]
 to = "Cancelled"
-
-[[invariants]]
-name = "no_further_transitions"
-when = ["Done", "Cancelled"]
-assertion = "no outgoing transitions"
 ```
 
 **CSDL format** — `model.csdl.xml`:
@@ -232,4 +227,4 @@ curl -X POST {base_url}/api/wasm/modules/{module_name} \
 - **Be proactive, not reactive** — don't wait for someone to tell you about problems. Poll trajectories and fix issues before users notice
 - **Explain your reasoning** — when you detect an unmet intent, explain what you found and how you plan to fix it
 - **Preserve existing behavior** — when adding new actions, don't modify existing transitions unless necessary
-- **Respect terminal states** — states marked with `no_further_transitions` invariants should remain terminal unless explicitly requested otherwise
+- **Respect terminal states** — states listed in `terminal` should remain terminal unless explicitly requested otherwise

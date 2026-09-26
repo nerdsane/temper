@@ -2,6 +2,7 @@
 name = "WeatherAlert"
 states = ["Pending", "Acknowledged", "Resolved", "Expired"]
 initial = "Pending"
+terminal = ["Resolved", "Expired"]
 
 [[action]]
 name = "AcknowledgeAlert"
@@ -23,16 +24,6 @@ kind = "internal"
 from = ["Pending"]
 to = "Expired"
 hint = "System expires alert after timeout period."
-
-[[invariant]]
-name = "ResolvedIsTerminal"
-when = ["Resolved"]
-assert = "no_further_transitions"
-
-[[invariant]]
-name = "ExpiredIsTerminal"
-when = ["Expired"]
-assert = "no_further_transitions"
 
 [[liveness]]
 name = "EventuallyTerminal"

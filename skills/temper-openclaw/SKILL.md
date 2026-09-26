@@ -131,7 +131,7 @@ name = "Complete"
 kind = "internal"
 from = ["InProgress"]
 to = "Done"
-guard = "is_true is_assigned"
+guard = "is_assigned"
 
 [[action]]
 name = "Reopen"
@@ -142,8 +142,7 @@ effect = "set is_assigned false"
 
 [[invariant]]
 name = "DoneRequiresAssignment"
-when = ["Done"]
-assert = "is_assigned"
+assert = "status in ['Done'] => is_assigned"
 ```
 
 ### Spec Reference
@@ -152,13 +151,14 @@ assert = "is_assigned"
 
 **State variable types** — only two are valid:
 - `bool` — `initial = "false"` or `initial = "true"`
-- `counter` — `initial = "0"` (integer, supports `increment`/`decrement` effects and `gt`/`lt` guards)
+- `counter` — `initial = "0"` (integer, supports `increment`/`decrement` effects and comparisons in guards)
 
 `int`, `string`, `float`, and any other type will pass L0-L3 verification silently but the entity set **will not register at runtime**. Store text/numeric data via action `params` (they become entity fields automatically). Use state variables only for values that drive guards and invariants.
 
-**Guards** — conditions checked before transition fires:
-- `is_true var` / `is_false var` — boolean checks
-- `gt var N` / `lt var N` — counter comparisons
+**Guards** — one expression checked before the transition fires, e.g. `guard = "is_assigned && items > 0"`:
+- `flag` / `!flag` — boolean checks
+- `count > 3`, `count <= limit` — counter comparisons
+- `&&`, `||`, `!`, `=>`, `in [...]`, single-quoted strings — see `docs/predicates.md`
 
 **`to` is required on every action**, including self-loops. A self-loop that keeps the entity in the same state needs `to = "SameState"` explicitly:
 ```toml
@@ -174,7 +174,7 @@ params = ["Item"]
 - `set var true/false` — set boolean
 - `increment var` / `decrement var` — counter arithmetic
 
-**Invariants** — assertions checked in every state listed under `when`. If any invariant fails at runtime, the transition is rejected.
+**Invariants** — one `assert` expression, proven by verification in every reachable state; use `status in [...] => ...` to scope it to some states. Invariants may only read `status`, `bool` and `counter` variables; rules about text fields belong in `[[field_invariant]]`, which is checked on writes.
 
 **Integrations (WASM)** — when your app needs external API calls (payments, email, notifications), add an `[[integration]]` block with `type = "wasm"`:
 ```toml
@@ -220,7 +220,7 @@ method = "GET"
 ```
 The `http_fetch` module reads `url`, `method`, and `body` from the integration config, makes the HTTP call via the host, and returns `{"status_code": "200", "body": "..."}` as callback params. URL templates support `{param}` substitution from action params.
 
-**Terminal states** — states with no outgoing actions. Entities in terminal states can't move. Design intentionally. Don't write `assert = "no_further_transitions"` — that's not valid IOA syntax and will be silently ignored. Just don't define any `[[action]]` with `from = ["TerminalState"]`.
+**Terminal states** — list them in `[automaton]` (`terminal = ["Done"]`); verification then checks that no action leaves them. Entities in terminal states can't move, so design them intentionally.
 
 ### L0–L3 Verification
 

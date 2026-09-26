@@ -7290,6 +7290,7 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "temper-spec",
  "thiserror 2.0.18",
  "tokio",
  "tokio-test",
@@ -7405,6 +7406,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "toml",
+ "toml_edit",
  "tracing",
 ]
 

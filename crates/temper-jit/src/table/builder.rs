@@ -4,9 +4,8 @@
 //! translation layer in `temper-spec`. The shared layer eliminates duplicated
 //! guard/effect translation logic between JIT and verification paths.
 
-use temper_spec::automaton::{self, Automaton, ResolvedEffect, ResolvedGuard, translate_actions};
+use temper_spec::automaton::{self, Automaton, ResolvedEffect, translate_actions};
 
-use super::guard::Guard;
 use super::types::{
     CompositeActionMetadata, CompositeCedarGate, Effect, SubWriteSpec, TransitionRule,
     TransitionTable,
@@ -45,8 +44,6 @@ impl TransitionTable {
         let rules: Vec<TransitionRule> = resolved_actions
             .into_iter()
             .map(|a| {
-                let guard = convert_guard(a.guard);
-
                 let mut effects = Vec::new();
                 if let Some(ref to) = a.to_state {
                     effects.push(Effect::SetState(to.clone()));
@@ -60,7 +57,7 @@ impl TransitionTable {
                     name: a.name,
                     from_states: a.from_states,
                     to_state: a.to_state,
-                    guard,
+                    guard: a.guard,
                     effects,
                 }
             })
@@ -176,34 +173,6 @@ impl TransitionTable {
                 .collect(),
             rule_index,
         }
-    }
-}
-
-/// Convert a shared [`ResolvedGuard`] to the JIT [`Guard`] type.
-fn convert_guard(guard: ResolvedGuard) -> Guard {
-    match guard {
-        ResolvedGuard::Always => Guard::Always,
-        ResolvedGuard::StateIn(values) => Guard::StateIn(values),
-        ResolvedGuard::CounterMin { var, min } => Guard::CounterMin { var, min },
-        ResolvedGuard::CounterMax { var, max } => Guard::CounterMax { var, max },
-        ResolvedGuard::BoolTrue(var) => Guard::BoolTrue(var),
-        ResolvedGuard::BoolFalse(var) => Guard::BoolFalse(var),
-        ResolvedGuard::ListContains { var, value } => Guard::ListContains { var, value },
-        ResolvedGuard::ListLengthMin { var, min } => Guard::ListLengthMin { var, min },
-        ResolvedGuard::CrossEntityState {
-            entity_type,
-            entity_id_source,
-            required_status,
-            forbidden_status,
-            required,
-        } => Guard::CrossEntityStateIn {
-            entity_type,
-            entity_id_source,
-            required_status,
-            forbidden_status,
-            required,
-        },
-        ResolvedGuard::And(guards) => Guard::And(guards.into_iter().map(convert_guard).collect()),
     }
 }
 
@@ -334,6 +303,7 @@ generated_from = "pack_bytes"
 mod cross_entity_tests {
     use super::*;
     use crate::EvalContext;
+    use crate::table::guard::Related;
 
     #[test]
     fn test_cross_entity_guard_maps_to_cross_entity_state_in() {
@@ -347,65 +317,58 @@ initial = "Waiting"
 name = "Proceed"
 from = ["Waiting"]
 to = "Ready"
-guard = [{ type = "cross_entity_state", entity_type = "Child", entity_id_source = "child_id", required_status = ["Done"] }]
+guard = "empty(child_id) || Child[child_id].status in ['Done']"
 "#;
 
         let table = TransitionTable::from_ioa_source(spec);
         let rule = table.rules.iter().find(|r| r.name == "Proceed").unwrap();
 
-        // Guard should be And([StateIn, CrossEntityStateIn]) since from=["Waiting"] + guard
-        let is_cross = match &rule.guard {
-            Guard::CrossEntityStateIn {
-                entity_type,
-                entity_id_source,
-                required_status,
-                ..
-            } => {
-                entity_type == "Child"
-                    && entity_id_source == "child_id"
-                    && required_status == &vec!["Done".to_string()]
-            }
-            Guard::And(guards) => guards.iter().any(|g| {
-                matches!(
-                    g,
-                    Guard::CrossEntityStateIn { entity_type, entity_id_source, required_status, .. }
-                        if entity_type == "Child"
-                            && entity_id_source == "child_id"
-                            && required_status == &vec!["Done".to_string()]
-                )
-            }),
-            _ => false,
-        };
-        assert!(
-            is_cross,
-            "expected CrossEntityStateIn guard, got: {:?}",
-            rule.guard
+        assert_eq!(rule.from_states, vec!["Waiting".to_string()]);
+        assert_eq!(
+            rule.guard.to_string(),
+            "empty(child_id) || Child[child_id].status in ['Done']"
         );
     }
 
     #[test]
-    fn test_cross_entity_guard_check_with_boolean() {
-        let guard = Guard::CrossEntityStateIn {
-            entity_type: "Child".to_string(),
-            entity_id_source: "child_id".to_string(),
-            required_status: vec!["Done".to_string()],
-            forbidden_status: vec![],
-            required: false,
-        };
+    fn test_cross_entity_guard_reads_resolved_statuses() {
+        let spec = r#"
+[automaton]
+name = "Parent"
+states = ["Waiting", "Ready"]
+initial = "Waiting"
 
+[[action]]
+name = "Proceed"
+from = ["Waiting"]
+to = "Ready"
+guard = "Child[child_id].status in ['Done']"
+"#;
+        let table = TransitionTable::from_ioa_source(spec);
+        let key = ("Child".to_string(), "child_id".to_string());
         let mut ctx = EvalContext::default();
-        // Without the boolean set, guard should fail
-        assert!(!guard.check("Waiting", &ctx));
-
-        // With __xref boolean set to true, guard should pass
-        ctx.booleans
-            .insert("__xref:Child:child_id".to_string(), true);
-        assert!(guard.check("Waiting", &ctx));
-
-        // With __xref boolean set to false, guard should fail
-        ctx.booleans
-            .insert("__xref:Child:child_id".to_string(), false);
-        assert!(!guard.check("Waiting", &ctx));
+        assert!(
+            !table
+                .evaluate_ctx("Waiting", &ctx, "Proceed")
+                .unwrap()
+                .success
+        );
+        ctx.related
+            .insert(key.clone(), Related::Statuses(vec![Some("Done".into())]));
+        assert!(
+            table
+                .evaluate_ctx("Waiting", &ctx, "Proceed")
+                .unwrap()
+                .success
+        );
+        ctx.related
+            .insert(key, Related::Statuses(vec![Some("Running".into())]));
+        assert!(
+            !table
+                .evaluate_ctx("Waiting", &ctx, "Proceed")
+                .unwrap()
+                .success
+        );
     }
 
     #[test]

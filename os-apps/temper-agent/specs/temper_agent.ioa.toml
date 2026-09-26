@@ -21,6 +21,7 @@
 name = "TemperAgent"
 states = ["Created", "Provisioning", "Thinking", "Executing", "Compacting", "Steering", "Completed", "Failed", "Cancelled"]
 initial = "Created"
+terminal = ["Completed", "Failed", "Cancelled"]
 
 # --- State Variables: Core ---
 
@@ -524,27 +525,10 @@ temper_api_url = "{secret:temper_api_url}"
 
 [[invariant]]
 name = "CompletedHasResult"
-when = ["Completed"]
-assert = "has_result"
-
-[[invariant]]
-name = "CompletedIsFinal"
-when = ["Completed"]
-assert = "no_further_transitions"
-
-[[invariant]]
-name = "FailedIsFinal"
-when = ["Failed"]
-assert = "no_further_transitions"
-
-[[invariant]]
-name = "CancelledIsFinal"
-when = ["Cancelled"]
-assert = "no_further_transitions"
+assert = "status in ['Completed'] => has_result"
 
 [[invariant]]
 name = "TurnCountNonNegative"
-when = ["Created", "Provisioning", "Thinking", "Executing", "Compacting", "Steering", "Completed", "Failed", "Cancelled"]
-assert = "turn_count >= 0"
+assert = "status in ['Created', 'Provisioning', 'Thinking', 'Executing', 'Compacting', 'Steering', 'Completed', 'Failed', 'Cancelled'] => turn_count >= 0"
 
 # --- Integrations ---

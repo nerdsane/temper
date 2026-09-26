@@ -9,6 +9,7 @@
 name = "Task"
 states = ["Open", "Claimed", "InProgress", "Review", "Done", "Cancelled"]
 initial = "Open"
+terminal = ["Done", "Cancelled"]
 
 # --- State Variables ---
 
@@ -104,15 +105,3 @@ from = ["Open", "Claimed", "InProgress"]
 to = "Cancelled"
 params = ["reason"]
 hint = "Cancel the task. Can be cancelled from Open, Claimed, or InProgress."
-
-# --- Safety Invariants ---
-
-[[invariant]]
-name = "DoneIsFinal"
-when = ["Done"]
-assert = "no_further_transitions"
-
-[[invariant]]
-name = "CancelledIsFinal"
-when = ["Cancelled"]
-assert = "no_further_transitions"

@@ -6,6 +6,7 @@
 name = "Cycle"
 states = ["Planning", "Active", "Completed"]
 initial = "Planning"
+terminal = ["Completed"]
 
 # --- State Variables ---
 
@@ -72,17 +73,9 @@ guard = "issue_count > 0"
 params = ["IssueId"]
 hint = "Remove an issue from this cycle."
 
-# --- Safety Invariants ---
-
-[[invariant]]
-name = "CompletedIsFinal"
-when = ["Completed"]
-assert = "no_further_transitions"
-
 [[invariant]]
 name = "ActiveRequiresIssues"
-when = ["Active"]
-assert = "issue_count > 0"
+assert = "status in ['Active'] => issue_count > 0"
 
 # --- Liveness ---
 

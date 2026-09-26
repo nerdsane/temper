@@ -83,8 +83,3 @@ entity_param = "state"
 
 [webhook.extract]
 code = "query.code"
-
-[[invariant]]
-name = "DisconnectedIsRecoverable"
-when = ["Disconnected"]
-assert = "ordering(Disconnected, Expired)"

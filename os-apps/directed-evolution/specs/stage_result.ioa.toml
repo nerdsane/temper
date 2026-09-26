@@ -46,10 +46,8 @@ hint = "Record that this Stage Result eliminated the variant."
 
 [[invariant]]
 name = "PassedHasEvidence"
-when = ["Passed"]
-assert = "is_true has_evidence"
+assert = "status in ['Passed'] => has_evidence"
 
 [[invariant]]
 name = "FailedHasEvidence"
-when = ["Failed"]
-assert = "is_true has_evidence"
+assert = "status in ['Failed'] => has_evidence"

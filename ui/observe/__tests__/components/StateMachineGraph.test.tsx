@@ -7,13 +7,12 @@ const mockSpec: SpecDetail = {
   entity_type: "Ticket",
   states: ["Open", "InProgress", "Closed"],
   initial_state: "Open",
+  terminal_states: ["Closed"],
   actions: [
     { name: "start_work", kind: "input", from: ["Open"], to: "InProgress", guards: [], effects: [] },
     { name: "close", kind: "input", from: ["InProgress"], to: "Closed", guards: [], effects: [] },
   ],
-  invariants: [
-    { name: "no_further_transitions", when: ["Closed"], assertion: "no outgoing transitions" },
-  ],
+  invariants: [],
   state_variables: [],
 };
 

@@ -12,6 +12,7 @@
 name = "MemoryVersion"
 states = ["Active", "Redacted"]
 initial = "Active"
+terminal = ["Redacted"]
 
 [[action]]
 name = "RedactVersion"
@@ -20,19 +21,9 @@ from = ["Active"]
 to = "Redacted"
 hint = "Redact this version. Clears content fields while preserving audit metadata."
 
-[[invariant]]
-name = "RedactedIsFinal"
-when = ["Redacted"]
-assert = "no_further_transitions"
-
 # --- Cross-field validation ---
 
 [[field_invariant]]
 name = "OperationMustBeKnown"
-when = { not = { field = "Operation", absent = true } }
-require = { any_of = [
-  { field = "Operation", equals = "created" },
-  { field = "Operation", equals = "modified" },
-  { field = "Operation", equals = "deleted" },
-]}
 message = "MemoryVersion.Operation must be created, modified, or deleted"
+assert = "Operation != null => Operation in ['created', 'modified', 'deleted']"

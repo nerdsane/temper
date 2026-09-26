@@ -1,73 +1,24 @@
 //! Local-invariant evaluator for the composite verifier.
 //!
 //! Projects a joint state down to a single entity's slice and evaluates
-//! that entity's `ResolvedInvariant`s. Called from
+//! that entity's `ResolvedInvariant`s with the shared evaluator. Called from
 //! [`super::model::CompositeTemperModel::properties`] for each entity in
-//! the composition on every BFS-visited state.
-//!
-//! This is a minimum-viable port of the single-entity evaluator used in
-//! [`crate::model::stateright_impl`]. It handles the invariant kinds
-//! that are directly checkable on a single-entity `TemperModelState`:
-//! `StatusInSet`, `CounterPositive`, `NeverState`, `BoolRequired`,
-//! `NoReachingState`, `NoFurtherTransitions`. `Unverifiable` invariants
-//! are treated as true (the single-entity cascade issues a warning;
-//! the composite checker inherits that warning via the plan's
-//! warnings vector).
+//! the composition on every BFS-visited state. Values the model does not
+//! track read as unknown and are not violations (the single-entity cascade
+//! warns about them).
 
-use crate::model::{InvariantKind, TemperModel, TemperModelState};
+use temper_spec::predicate::Truth;
+
+use crate::model::semantics::truth;
+use crate::model::{TemperModel, TemperModelState};
 
 /// Evaluate every invariant on `model` against `state` (a single
-/// entity's slice of the joint state). Returns `true` iff all pass.
+/// entity's slice of the joint state). Returns `true` iff none is false.
 pub(super) fn all_local_invariants_hold(model: &TemperModel, state: &TemperModelState) -> bool {
-    for inv in &model.invariants {
-        if !triggers_on(&inv.trigger_states, &state.status) {
-            continue;
-        }
-        if !evaluate_one(&inv.kind, state) {
-            return false;
-        }
-    }
-    true
-}
-
-fn triggers_on(trigger_states: &[String], current: &str) -> bool {
-    trigger_states.is_empty() || trigger_states.iter().any(|s| s == current)
-}
-
-fn evaluate_one(kind: &InvariantKind, state: &TemperModelState) -> bool {
-    match kind {
-        InvariantKind::StatusInSet => {
-            // Status validity is an inherent property of the per-entity
-            // model (its transitions only produce declared statuses).
-            true
-        }
-        InvariantKind::CounterPositive { var } => {
-            // `usize` is always >= 0; the invariant encodes a soft
-            // check but the type enforces it.
-            let _ = state.counters.get(var);
-            true
-        }
-        InvariantKind::NeverState { state: forbidden } => state.status != *forbidden,
-        InvariantKind::BoolRequired { var, expect } => {
-            state.booleans.get(var).copied().unwrap_or(false) == *expect
-        }
-        InvariantKind::NoFurtherTransitions => {
-            // Structural — BFS naturally surfaces if a state has no
-            // enabled actions. Not a per-state evaluation here.
-            true
-        }
-        InvariantKind::Implication => true, // handled by StatusInSet + transitions
-        InvariantKind::CounterCompare { .. } => {
-            // Generalised counter comparison — single-entity checker
-            // interprets the expression; composite inherits the
-            // per-entity decision (non-violating here means the
-            // single-entity cascade was not asked to reject it).
-            true
-        }
-        InvariantKind::And(kinds) => kinds.iter().all(|k| evaluate_one(k, state)),
-        InvariantKind::Or(kinds) => kinds.iter().any(|k| evaluate_one(k, state)),
-        InvariantKind::Unverifiable { .. } => true, // warning issued elsewhere
-    }
+    model
+        .invariants
+        .iter()
+        .all(|inv| truth(&inv.assert, &model.var_kinds, state) != Truth::False)
 }
 
 #[cfg(test)]
@@ -105,7 +56,7 @@ to = "Forbidden"
 
 [[invariant]]
 name = "NoForbidden"
-assert = "never(Forbidden)"
+assert = "status != 'Forbidden'"
 "#;
         let model = build(spec);
         assert!(all_local_invariants_hold(&model, &state("A")));

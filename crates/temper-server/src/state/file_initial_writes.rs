@@ -126,14 +126,18 @@ impl ServerState {
             "previous_version_id": previous_version_id,
             "created_by": created_by,
         });
-        // The `File.StreamUpdated` spec guard requires the owning Workspace to
-        // be Active. On the live dispatch path that boolean is resolved by
+        // The `File.StreamUpdated` spec guard reads the owning Workspace's
+        // status. On the live dispatch path that status is resolved by
         // `resolve_cross_entity_guards`; this atomic synthetic path bypasses
-        // that resolution, so supply the `__xref` boolean directly. We already
-        // confirmed the workspace is Active (or vacuous) above, so the guard
-        // holds — pass `true`.
-        let mut stream_xref = std::collections::BTreeMap::new();
-        stream_xref.insert("__xref:Workspace:workspace_id".to_string(), true);
+        // that resolution, so supply it directly. We already confirmed the
+        // workspace is Active (or absent) above.
+        let mut stream_xref = temper_jit::table::RelatedMap::new();
+        if !workspace_id.is_empty() {
+            stream_xref.insert(
+                ("Workspace".to_string(), "workspace_id".to_string()),
+                temper_jit::table::Related::Statuses(vec![Some("Active".to_string())]),
+            );
+        }
         let stream_event = apply_synthetic_file_action(
             &mut state,
             &table,
@@ -357,9 +361,9 @@ fn apply_synthetic_file_action(
     table: &temper_jit::table::TransitionTable,
     action: &str,
     params: serde_json::Value,
-    cross_entity_booleans: &std::collections::BTreeMap<String, bool>,
+    related: &temper_jit::table::RelatedMap,
 ) -> Result<EntityEvent, FileStreamContentError> {
-    let result = process_action_with_xref(state, table, action, &params, cross_entity_booleans);
+    let result = process_action_with_xref(state, table, action, &params, related);
     if !result.overflow_blobs.is_empty() {
         return Err(FileStreamContentError::State(format!(
             "File.{action} produced field-overflow blobs on the atomic initial content path"

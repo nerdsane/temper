@@ -42,7 +42,7 @@ initial = "false"
 name = "TryRead"
 kind = "input"
 from = ["Idle", "Reading", "Writing"]
-guard = "is_false wasm_in_flight"
+guard = "!wasm_in_flight"
 effect = "set wasm_in_flight true"
 params = ["actor"]
 hint = "Append ('read', actor) to the FIFO waiting queue if the actor is not already waiting to read."
@@ -58,7 +58,7 @@ on_failure = "StepFailed"
 name = "TryWrite"
 kind = "input"
 from = ["Idle", "Reading", "Writing"]
-guard = "is_false wasm_in_flight"
+guard = "!wasm_in_flight"
 effect = "set wasm_in_flight true"
 params = ["actor"]
 hint = "Append ('write', actor) to the FIFO waiting queue if the actor is not already waiting to write."
@@ -74,7 +74,7 @@ on_failure = "StepFailed"
 name = "ReadOrWrite"
 kind = "input"
 from = ["Idle", "Reading", "Writing"]
-guard = "is_false wasm_in_flight"
+guard = "!wasm_in_flight"
 effect = "set wasm_in_flight true"
 hint = "Serve the head of the FIFO waiting queue if the head request is enabled."
 
@@ -89,7 +89,7 @@ on_failure = "StepFailed"
 name = "Stop"
 kind = "input"
 from = ["Reading", "Writing"]
-guard = "is_false wasm_in_flight"
+guard = "!wasm_in_flight"
 effect = "set wasm_in_flight true"
 params = ["actor"]
 hint = "Stop one active reader or writer."
@@ -107,7 +107,7 @@ on_failure = "StepFailed"
 name = "ValidateProposal"
 kind = "input"
 from = ["Idle", "Reading", "Writing"]
-guard = "is_true wasm_in_flight"
+guard = "wasm_in_flight"
 params = ["proposed_readers", "proposed_writers", "proposed_waiting", "last_step", "actor"]
 hint = "Validate a WASM proposal against the current detailed fields, then dispatch a narrow commit callback."
 
@@ -123,7 +123,7 @@ on_failure = "StepFailed"
 name = "Enqueued"
 kind = "input"
 from = ["Idle", "Reading", "Writing"]
-guard = "is_true wasm_in_flight"
+guard = "wasm_in_flight"
 params = ["readers", "writers", "waiting", "last_step", "actor"]
 effect = [
     { type = "increment", var = "waiting_count" },
@@ -135,7 +135,7 @@ hint = "A request was appended to the waiting queue. Active readers/writers are 
 name = "Unchanged"
 kind = "input"
 from = ["Idle", "Reading", "Writing"]
-guard = "is_true wasm_in_flight"
+guard = "wasm_in_flight"
 params = ["readers", "writers", "waiting", "last_step", "actor"]
 effect = "set wasm_in_flight false"
 hint = "The Quint transition was a no-op, for example a duplicate TryRead/TryWrite."
@@ -145,10 +145,7 @@ name = "ReaderStartedFromIdle"
 kind = "input"
 from = ["Idle"]
 to = "Reading"
-guard = [
-    { type = "is_true", var = "wasm_in_flight" },
-    { type = "min_count", var = "waiting_count", min = 1 },
-]
+guard = "wasm_in_flight && waiting_count >= 1"
 params = ["readers", "writers", "waiting", "last_step", "actor"]
 effect = [
     { type = "increment", var = "reader_count" },
@@ -162,10 +159,7 @@ name = "ReaderStartedFromReading"
 kind = "input"
 from = ["Reading"]
 to = "Reading"
-guard = [
-    { type = "is_true", var = "wasm_in_flight" },
-    { type = "min_count", var = "waiting_count", min = 1 },
-]
+guard = "wasm_in_flight && waiting_count >= 1"
 params = ["readers", "writers", "waiting", "last_step", "actor"]
 effect = [
     { type = "increment", var = "reader_count" },
@@ -179,10 +173,7 @@ name = "WriterStarted"
 kind = "input"
 from = ["Idle"]
 to = "Writing"
-guard = [
-    { type = "is_true", var = "wasm_in_flight" },
-    { type = "min_count", var = "waiting_count", min = 1 },
-]
+guard = "wasm_in_flight && waiting_count >= 1"
 params = ["readers", "writers", "waiting", "last_step", "actor"]
 effect = [
     { type = "increment", var = "writer_count" },
@@ -195,10 +186,7 @@ hint = "The FIFO queue head was a write request and the resource was idle."
 name = "ReaderStoppedMoreRemain"
 kind = "input"
 from = ["Reading"]
-guard = [
-    { type = "is_true", var = "wasm_in_flight" },
-    { type = "min_count", var = "reader_count", min = 2 },
-]
+guard = "wasm_in_flight && reader_count >= 2"
 params = ["readers", "writers", "waiting", "last_step", "actor"]
 effect = [
     { type = "decrement", var = "reader_count" },
@@ -211,11 +199,7 @@ name = "ReaderStoppedLast"
 kind = "input"
 from = ["Reading"]
 to = "Idle"
-guard = [
-    { type = "is_true", var = "wasm_in_flight" },
-    { type = "min_count", var = "reader_count", min = 1 },
-    { type = "max_count", var = "reader_count", max = 2 },
-]
+guard = "wasm_in_flight && reader_count >= 1 && reader_count < 2"
 params = ["readers", "writers", "waiting", "last_step", "actor"]
 effect = [
     { type = "decrement", var = "reader_count" },
@@ -228,10 +212,7 @@ name = "WriterStopped"
 kind = "input"
 from = ["Writing"]
 to = "Idle"
-guard = [
-    { type = "is_true", var = "wasm_in_flight" },
-    { type = "min_count", var = "writer_count", min = 1 },
-]
+guard = "wasm_in_flight && writer_count >= 1"
 params = ["readers", "writers", "waiting", "last_step", "actor"]
 effect = [
     { type = "decrement", var = "writer_count" },
@@ -243,7 +224,7 @@ hint = "The active writer stopped."
 name = "Rejected"
 kind = "input"
 from = ["Idle", "Reading", "Writing"]
-guard = "is_true wasm_in_flight"
+guard = "wasm_in_flight"
 params = ["error", "last_step", "actor"]
 effect = "set wasm_in_flight false"
 hint = "The requested step was disabled or failed proposal validation. No protocol state is committed."
@@ -252,7 +233,7 @@ hint = "The requested step was disabled or failed proposal validation. No protoc
 name = "StepFailed"
 kind = "input"
 from = ["Idle", "Reading", "Writing"]
-guard = "is_true wasm_in_flight"
+guard = "wasm_in_flight"
 params = ["error", "integration"]
 effect = "set wasm_in_flight false"
 hint = "The readers_writers_step WASM module failed before producing a proposal or validation result."
@@ -269,15 +250,12 @@ assert = "writer_count <= 1"
 
 [[invariant]]
 name = "IdleMeansNoActiveActors"
-when = ["Idle"]
-assert = "reader_count == 0 && writer_count == 0"
+assert = "status in ['Idle'] => reader_count == 0 && writer_count == 0"
 
 [[invariant]]
 name = "ReadingMeansReadersOnly"
-when = ["Reading"]
-assert = "reader_count > 0 && writer_count == 0"
+assert = "status in ['Reading'] => reader_count > 0 && writer_count == 0"
 
 [[invariant]]
 name = "WritingHasWriter"
-when = ["Writing"]
-assert = "reader_count == 0 && writer_count > 0"
+assert = "status in ['Writing'] => reader_count == 0 && writer_count > 0"

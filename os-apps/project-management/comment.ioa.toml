@@ -7,6 +7,7 @@
 name = "Comment"
 states = ["Active", "Edited", "Deleted"]
 initial = "Active"
+terminal = ["Deleted"]
 
 # --- State Variables ---
 
@@ -52,14 +53,6 @@ from = ["Active", "Edited"]
 params = ["emoji", "reactor_id"]
 hint = "Add a reaction to the comment."
 
-# --- Safety Invariants ---
-
-[[invariant]]
-name = "DeletedIsFinal"
-when = ["Deleted"]
-assert = "no_further_transitions"
-
 [[invariant]]
 name = "EditedHasEdits"
-when = ["Edited"]
-assert = "edit_count > 0"
+assert = "status in ['Edited'] => edit_count > 0"

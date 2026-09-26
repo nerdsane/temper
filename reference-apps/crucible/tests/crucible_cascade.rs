@@ -387,33 +387,37 @@ fn session_event_kind_enum_has_all_members() {
         .find(|i| i.name == "KindMustBeKnown")
         .expect("SessionEvent should declare KindMustBeKnown");
 
-    // Serialize the predicate and extract string literals that the `require`
-    // side compares against. We do this via the rendered serde form rather
-    // than pattern-matching the enum to stay resilient to grammar additions.
-    let json =
-        serde_json::to_value(&kind_invariant.require).expect("FieldPredicate should serialize");
-
-    fn collect_equals<'a>(value: &'a serde_json::Value, out: &mut Vec<&'a str>) {
-        match value {
-            serde_json::Value::Object(map) => {
-                if let Some(serde_json::Value::String(literal)) = map.get("equals") {
-                    out.push(literal.as_str());
-                }
-                for (_, v) in map {
-                    collect_equals(v, out);
+    // Collect every string literal the assertion compares `Kind` against.
+    fn collect_strings<'a>(expr: &'a temper_spec::predicate::Expr, out: &mut Vec<&'a str>) {
+        use temper_spec::predicate::{Expr, Literal, Operand, Set};
+        match expr {
+            Expr::Compare {
+                rhs: Operand::Lit(Literal::Str(s)),
+                ..
+            } => out.push(s),
+            Expr::In {
+                set: Set::List(items),
+                ..
+            } => out.extend(items.iter().filter_map(|item| match item {
+                Literal::Str(s) => Some(s.as_str()),
+                _ => None,
+            })),
+            Expr::Not(inner) => collect_strings(inner, out),
+            Expr::And(parts) | Expr::Or(parts) => {
+                for part in parts {
+                    collect_strings(part, out);
                 }
             }
-            serde_json::Value::Array(items) => {
-                for item in items {
-                    collect_equals(item, out);
-                }
+            Expr::Implies(lhs, rhs) => {
+                collect_strings(lhs, out);
+                collect_strings(rhs, out);
             }
             _ => {}
         }
     }
 
     let mut kinds: Vec<&str> = Vec::new();
-    collect_equals(&json, &mut kinds);
+    collect_strings(&kind_invariant.assert, &mut kinds);
     kinds.sort();
 
     let mut expected: Vec<&str> = vec![

@@ -35,7 +35,7 @@ hint = "Activate the escalation policy. Sets current step to 1."
 name = "StepUp"
 kind = "internal"
 from = ["Active"]
-guard = "is_true can_escalate"
+guard = "can_escalate"
 effect = "increment current_step"
 hint = "Move to the next escalation tier. Requires can_escalate to be true."
 
@@ -71,5 +71,4 @@ hint = "Reset the policy for reuse after incident resolution."
 
 [[invariant]]
 name = "ActiveHasStep"
-when = ["Active", "Exhausted"]
-assert = "current_step > 0"
+assert = "status in ['Active', 'Exhausted'] => current_step > 0"

@@ -537,6 +537,7 @@ await temper.install_app("project-management")
 name = "EntityName"
 states = ["State1", "State2", "State3"]
 initial = "State1"
+terminal = ["State3"]   # states no action may leave
 
 # Optional state variables
 [[state]]
@@ -550,7 +551,7 @@ name = "DoSomething"
 kind = "input"          # "input" | "internal" | "output"
 from = ["State1"]       # states this can fire from
 to = "State2"           # target state
-guard = "counter_var > 0"  # optional precondition
+guard = "counter_var > 0"  # optional precondition (one expression)
 params = ["Param1"]     # optional parameters
 hint = "Description."   # optional
 
@@ -562,6 +563,7 @@ hint = "Description."   # optional
 name = "trigger_name"
 kind = "entity"               # "entity" | "wasm" | "webhook"
 principal = "my-service"      # optional elevation
+guard = "status == 'State2'"  # optional; reads the entity after the action
 target_entity = "OtherEntity"
 target_action = "DoTargetThing"
 
@@ -572,11 +574,11 @@ field = "other_entity_id"
 [action.triggers.params_from]
 target_param = "source_field"
 
-# Safety invariants
+# Safety invariants: one expression, proven in every reachable state
+# (see docs/predicates.md for the grammar)
 [[invariant]]
-name = "FinalIsFinal"
-when = ["State3"]
-assert = "no_further_transitions"
+name = "DoneHasCount"
+assert = "status in ['State3'] => counter_var > 0"
 
 # Liveness properties
 [[liveness]]

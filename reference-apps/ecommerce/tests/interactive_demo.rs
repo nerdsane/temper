@@ -35,10 +35,10 @@ fn interactive_full_pipeline() {
     }
     println!("  Actions:  {} total", automaton.actions.len());
     for a in &automaton.actions {
-        let guard_str = if a.guard.is_empty() {
+        let guard_str = if a.guard.is_always() {
             "none".to_string()
         } else {
-            format!("{:?}", a.guard)
+            a.guard.to_string()
         };
         println!(
             "    {:20} kind={:8} from={:<30} to={:<15} guard={}",
@@ -51,12 +51,7 @@ fn interactive_full_pipeline() {
     }
     println!("  Invariants: {}", automaton.invariants.len());
     for inv in &automaton.invariants {
-        println!(
-            "    {:25} when={:<50} assert={}",
-            inv.name,
-            format!("{:?}", inv.when),
-            inv.assert
-        );
+        println!("    {:25} assert={}", inv.name, inv.assert);
     }
 
     // ── Stage 2: Build TransitionTable ──────────────────────────────
@@ -87,8 +82,7 @@ fn interactive_full_pipeline() {
     // SubmitOrder with 0 items -> should FAIL
     let ctx_empty = EvalContext {
         counters: BTreeMap::from([("items".to_string(), 0)]),
-        booleans: BTreeMap::new(),
-        lists: BTreeMap::new(),
+        ..EvalContext::default()
     };
     let result = table.evaluate_ctx("Draft", &ctx_empty, "SubmitOrder");
     println!("  SubmitOrder from Draft, items=0:");
@@ -100,8 +94,7 @@ fn interactive_full_pipeline() {
     // SubmitOrder with 2 items -> should PASS
     let ctx_items = EvalContext {
         counters: BTreeMap::from([("items".to_string(), 2)]),
-        booleans: BTreeMap::new(),
-        lists: BTreeMap::new(),
+        ..EvalContext::default()
     };
     let result = table.evaluate_ctx("Draft", &ctx_items, "SubmitOrder");
     println!("  SubmitOrder from Draft, items=2:");

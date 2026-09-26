@@ -120,21 +120,28 @@ pub const MAX_CROSS_ENTITY_LOOKUPS: usize = 16;
 /// Maximum entity spawns per transition (TigerStyle budget).
 pub const MAX_SPAWNS_PER_TRANSITION: usize = 8;
 
-/// Build an [`EvalContext`] from current entity state.
+/// Build an [`EvalContext`] from current entity state, for the guards of
+/// `action` (or every action, for `None`).
 ///
 /// This is the single source of truth for context construction. All code paths
 /// that call `TransitionTable::evaluate_ctx()` MUST use this function.
-pub fn build_eval_context(state: &EntityState) -> EvalContext {
-    build_eval_context_with_xref(state, &std::collections::BTreeMap::new())
+pub fn build_eval_context(
+    state: &EntityState,
+    table: &TransitionTable,
+    action: Option<&str>,
+) -> EvalContext {
+    build_eval_context_with_xref(state, &temper_jit::table::RelatedMap::new(), table, action)
 }
 
-/// Build an [`EvalContext`] with pre-resolved cross-entity booleans.
+/// Build an [`EvalContext`] with the related entities' statuses resolved by
+/// the dispatch layer.
 ///
-/// The `cross_entity_booleans` map contains `__xref:{type}:{field} -> bool` entries
-/// from cross-entity state gate resolution at the dispatch layer.
+/// Only the entity fields the guards read are copied into the context.
 pub fn build_eval_context_with_xref(
     state: &EntityState,
-    cross_entity_booleans: &std::collections::BTreeMap<String, bool>,
+    related: &temper_jit::table::RelatedMap,
+    table: &TransitionTable,
+    action: Option<&str>,
 ) -> EvalContext {
     let mut ctx = EvalContext::default();
     ctx.counters.insert("items".to_string(), state.item_count);
@@ -147,10 +154,12 @@ pub fn build_eval_context_with_xref(
     for (k, v) in &state.lists {
         ctx.lists.insert(k.clone(), v.clone());
     }
-    // Merge pre-resolved cross-entity state booleans
-    for (k, v) in cross_entity_booleans {
-        ctx.booleans.insert(k.clone(), *v);
+    for name in table.guard_field_names(action) {
+        if let Some(value) = state.fields.get(&name) {
+            ctx.fields.insert(name, value.clone());
+        }
     }
+    ctx.related = related.clone();
     ctx
 }
 
@@ -242,45 +251,43 @@ pub fn process_action(
 
 /// Render a [`GuardFailure`] into the agent-facing self-heal error string (ADR-0151).
 ///
-/// Names the action, the from-state, the specific sub-guard that failed, the
-/// field/ref it read, and the required-vs-found values where the guard exposes
-/// them, e.g.:
+/// Names the action, the from-state, the failing part of the guard, and the
+/// values it read (ADR-0151), e.g.:
 ///
-/// `Action 'SubmitForReview' blocked from state 'Draft': guard cross_entity_state on 'landing_file_id' requires File status in [Ready,Locked], found <unsatisfied>`
+/// `Action 'SubmitForReview' blocked from state 'Draft': guard 'File[landing_file_id].status in ['Ready', 'Locked']' failed (landing_file_id = f-1, File[landing_file_id].status = Draft)`
 fn render_guard_failure(action: &str, from_state: &str, failure: &GuardFailure) -> String {
     let mut msg = format!(
-        "Action '{action}' blocked from state '{from_state}': guard {}",
-        failure.kind.label()
+        "Action '{action}' blocked from state '{from_state}': guard '{}' failed",
+        failure.expr
     );
-    if let Some(var) = &failure.var {
-        msg.push_str(&format!(" on '{var}'"));
-    }
-    if let Some(required) = &failure.required {
-        msg.push_str(&format!(" requires {required}"));
-    }
-    if let Some(found) = &failure.found {
-        msg.push_str(&format!(", found {found}"));
+    if !failure.found.is_empty() {
+        let found: Vec<String> = failure
+            .found
+            .iter()
+            .map(|(name, value)| format!("{name} = {value}"))
+            .collect();
+        msg.push_str(&format!(" ({})", found.join(", ")));
     }
     msg
 }
 
-/// Process an action with pre-resolved cross-entity booleans.
+/// Process an action with the related entities' statuses resolved.
 ///
-/// Same as [`process_action`] but injects cross-entity state booleans
-/// into the evaluation context for `CrossEntityStateIn` guard evaluation.
+/// Same as [`process_action`] but with the related entities' statuses the
+/// action's guards read.
 pub fn process_action_with_xref(
     state: &mut EntityState,
     table: &TransitionTable,
     action: &str,
     params: &serde_json::Value,
-    cross_entity_booleans: &std::collections::BTreeMap<String, bool>,
+    related: &temper_jit::table::RelatedMap,
 ) -> ProcessResult {
     process_action_with_xref_and_field_mode(
         state,
         table,
         action,
         params,
-        cross_entity_booleans,
+        related,
         FieldSyncMode::InlineTruncate,
         None,
     )
@@ -292,7 +299,7 @@ pub(crate) fn process_action_with_xref_and_field_mode(
     table: &TransitionTable,
     action: &str,
     params: &serde_json::Value,
-    cross_entity_booleans: &std::collections::BTreeMap<String, bool>,
+    related: &temper_jit::table::RelatedMap,
     field_sync_mode: FieldSyncMode,
     comparison_fields: Option<&serde_json::Value>,
 ) -> ProcessResult {
@@ -350,7 +357,7 @@ pub(crate) fn process_action_with_xref_and_field_mode(
         }
     }
 
-    let ctx = build_eval_context_with_xref(state, cross_entity_booleans);
+    let ctx = build_eval_context_with_xref(state, related, table, Some(action));
     let result = table.evaluate_ctx(&state.status, &ctx, action);
 
     match result {
@@ -1206,8 +1213,9 @@ effect = [{ type = "schedule", action = "Refresh", delay_seconds = 2700 }]
     #[test]
     fn guard_failure_error_names_guard_and_field() {
         let _guard = temper_runtime::scheduler::install_deterministic_context(7);
-        // Cross-entity guard on `landing_file_id`: the ref is unresolved, so the
-        // guard fails and the error must name the guard kind and the ref.
+        // Cross-entity guard on `landing_file_id`: the ref is set but its File
+        // was not found, so the guard fails and the error must name the failing
+        // part of the guard and the values it read.
         let spec = r#"
 [automaton]
 name = "Doc"
@@ -1218,12 +1226,13 @@ initial = "Draft"
 name = "SubmitForReview"
 from = ["Draft"]
 to = "Submitted"
-guard = [{ type = "cross_entity_state", entity_type = "File", entity_id_source = "landing_file_id", required_status = ["Ready", "Locked"] }]
+guard = "empty(landing_file_id) || File[landing_file_id].status in ['Ready', 'Locked']"
 "#;
         let table = temper_jit::table::TransitionTable::from_ioa_source(spec);
         let mut state = test_state("Doc", "Draft");
+        state.fields = serde_json::json!({ "landing_file_id": "f-1" });
 
-        // No __xref boolean set -> guard fails.
+        // No related status resolved -> the File reads as null -> guard fails.
         let result = process_action_with_xref(
             &mut state,
             &table,
@@ -1237,9 +1246,8 @@ guard = [{ type = "cross_entity_state", entity_type = "File", entity_id_source =
         assert!(
             error.contains("SubmitForReview")
                 && error.contains("blocked from state 'Draft'")
-                && error.contains("cross_entity_state")
-                && error.contains("landing_file_id")
-                && error.contains("Ready,Locked"),
+                && error.contains("File[landing_file_id].status in ['Ready', 'Locked']")
+                && error.contains("landing_file_id = f-1"),
             "expected specific guard error, got: {error}"
         );
     }
@@ -1421,9 +1429,7 @@ initial = "Planning"
 name = "Promote"
 from = ["Planning"]
 to = "Deployed"
-guard = [
-    { type = "cross_entity_state", entity_type = "TestWorkflow", entity_id_source = "test_wf_id", required_status = ["Passed"] }
-]
+guard = "empty(test_wf_id) || TestWorkflow[test_wf_id].status in ['Passed']"
 "#;
 
         let table = temper_jit::table::TransitionTable::from_ioa_source(spec);
@@ -1451,14 +1457,17 @@ guard = [
             "should fail without cross-entity resolution"
         );
 
-        // With cross-entity booleans via process_action_with_xref
-        let mut xref = std::collections::BTreeMap::new();
-        xref.insert("__xref:TestWorkflow:test_wf_id".to_string(), true);
+        // With the related TestWorkflow's status resolved
+        let mut xref = temper_jit::table::RelatedMap::new();
+        xref.insert(
+            ("TestWorkflow".to_string(), "test_wf_id".to_string()),
+            temper_jit::table::Related::Statuses(vec![Some("Passed".to_string())]),
+        );
         let result =
             process_action_with_xref(&mut state, &table, "Promote", &serde_json::json!({}), &xref);
         assert!(
             result.success,
-            "should succeed with cross-entity boolean = true"
+            "should succeed once the related entity is Passed"
         );
         assert_eq!(state.status, "Deployed");
     }
@@ -1477,16 +1486,7 @@ initial = "Draft"
 name = "Submit"
 from = ["Draft"]
 to = "Submitted"
-guard = [
-    { type = "cross_entity_state", entity_type = "Attachment", entity_id_source = "attachment_a_id", required_status = ["Ready", "Locked"] },
-    { type = "cross_entity_state", entity_type = "Attachment", entity_id_source = "attachment_b_id", required_status = ["Ready", "Locked"] },
-    { type = "cross_entity_state", entity_type = "Attachment", entity_id_source = "attachment_c_id", required_status = ["Ready", "Locked"] },
-    { type = "cross_entity_state", entity_type = "Attachment", entity_id_source = "attachment_d_id", required_status = ["Ready", "Locked"] },
-    { type = "cross_entity_state", entity_type = "Attachment", entity_id_source = "attachment_e_id", required_status = ["Ready", "Locked"] },
-    { type = "cross_entity_state", entity_type = "Attachment", entity_id_source = "attachment_f_id", required_status = ["Ready", "Locked"] },
-    { type = "cross_entity_state", entity_type = "Attachment", entity_id_source = "attachment_g_id", required_status = ["Ready", "Locked"] },
-    { type = "cross_entity_state", entity_type = "Attachment", entity_id_source = "attachment_h_id", required_status = ["Ready", "Locked"] }
-]
+guard = "(empty(attachment_a_id) || Attachment[attachment_a_id].status in ['Ready', 'Locked']) && (empty(attachment_b_id) || Attachment[attachment_b_id].status in ['Ready', 'Locked']) && (empty(attachment_c_id) || Attachment[attachment_c_id].status in ['Ready', 'Locked']) && (empty(attachment_d_id) || Attachment[attachment_d_id].status in ['Ready', 'Locked']) && (empty(attachment_e_id) || Attachment[attachment_e_id].status in ['Ready', 'Locked']) && (empty(attachment_f_id) || Attachment[attachment_f_id].status in ['Ready', 'Locked']) && (empty(attachment_g_id) || Attachment[attachment_g_id].status in ['Ready', 'Locked']) && (empty(attachment_h_id) || Attachment[attachment_h_id].status in ['Ready', 'Locked'])"
 "#;
 
         let table = temper_jit::table::TransitionTable::from_ioa_source(spec);
@@ -1515,16 +1515,15 @@ guard = [
             sequence_nr: 0,
             processed_idempotency_keys: std::collections::BTreeMap::new(),
         };
-        let xref = std::collections::BTreeMap::from([
-            ("__xref:Attachment:attachment_a_id".to_string(), true),
-            ("__xref:Attachment:attachment_b_id".to_string(), true),
-            ("__xref:Attachment:attachment_c_id".to_string(), true),
-            ("__xref:Attachment:attachment_d_id".to_string(), true),
-            ("__xref:Attachment:attachment_e_id".to_string(), true),
-            ("__xref:Attachment:attachment_f_id".to_string(), true),
-            ("__xref:Attachment:attachment_g_id".to_string(), true),
-            ("__xref:Attachment:attachment_h_id".to_string(), true),
-        ]);
+        let xref: temper_jit::table::RelatedMap = ["a", "b", "c", "d", "e", "f", "g", "h"]
+            .into_iter()
+            .map(|slot| {
+                (
+                    ("Attachment".to_string(), format!("attachment_{slot}_id")),
+                    temper_jit::table::Related::Statuses(vec![Some("Ready".to_string())]),
+                )
+            })
+            .collect();
         let required_guard_lookup_count = xref.len();
         assert!(
             MAX_CROSS_ENTITY_LOOKUPS >= required_guard_lookup_count,

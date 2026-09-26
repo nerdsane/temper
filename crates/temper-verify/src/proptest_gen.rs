@@ -11,11 +11,11 @@
 use proptest::test_runner::{Config as ProptestConfig, TestRunner};
 use stateright::Model;
 
-use temper_spec::automaton::AssertCompareOp;
+use temper_spec::predicate::Truth;
 
-use crate::model::{
-    InvariantKind, TemperModel, TemperModelAction, TemperModelState, build_model_from_ioa,
-};
+use crate::model::semantics::truth;
+
+use crate::model::{TemperModel, TemperModelAction, TemperModelState, build_model_from_ioa};
 
 // ---------------------------------------------------------------------------
 // Public result types
@@ -52,72 +52,22 @@ pub struct PropTestFailure {
 /// Returns `Ok(())` when every invariant holds, or `Err(invariant_name)` for
 /// the first invariant that is violated.
 fn check_invariants(model: &TemperModel, state: &TemperModelState) -> Result<(), String> {
+    if !model.states.contains(&state.status) {
+        return Err("TypeInvariant".into());
+    }
     for inv in &model.invariants {
-        let triggered = inv.trigger_states.is_empty() || inv.trigger_states.contains(&state.status);
-        if !triggered {
-            continue;
-        }
-
-        if kind_violated(&inv.kind, &inv.required_states, model, state) {
+        if truth(&inv.assert, &model.var_kinds, state) == Truth::False {
             return Err(inv.name.clone());
         }
     }
-    Ok(())
-}
-
-/// Evaluate whether an [`InvariantKind`] is violated given model+state.
-///
-/// Pure recursion over compound variants; does not consult `trigger_states`.
-fn kind_violated(
-    kind: &InvariantKind,
-    required_states: &[String],
-    model: &TemperModel,
-    state: &TemperModelState,
-) -> bool {
-    match kind {
-        InvariantKind::StatusInSet => !model.states.contains(&state.status),
-        InvariantKind::CounterPositive { var } => {
-            state.counters.get(var).copied().unwrap_or(0) == 0
+    if model.terminal.contains(&state.status) {
+        let mut actions = Vec::new();
+        model.actions(state, &mut actions);
+        if !actions.is_empty() {
+            return Err(format!("Terminal({})", state.status));
         }
-        InvariantKind::BoolRequired { var, expect } => {
-            state.booleans.get(var).copied().unwrap_or(false) != *expect
-        }
-        InvariantKind::NoFurtherTransitions => {
-            let mut actions = Vec::new();
-            model.actions(state, &mut actions);
-            !actions.is_empty()
-        }
-        InvariantKind::Implication => {
-            let valid_required: Vec<&String> = required_states
-                .iter()
-                .filter(|s| model.states.contains(s))
-                .collect();
-            if valid_required.is_empty() {
-                false
-            } else {
-                !valid_required.contains(&&state.status)
-            }
-        }
-        InvariantKind::CounterCompare { var, op, value } => {
-            let val = state.counters.get(var).copied().unwrap_or(0);
-            let holds = match op {
-                AssertCompareOp::Gt => val > *value,
-                AssertCompareOp::Gte => val >= *value,
-                AssertCompareOp::Lt => val < *value,
-                AssertCompareOp::Lte => val <= *value,
-                AssertCompareOp::Eq => val == *value,
-            };
-            !holds
-        }
-        InvariantKind::NeverState { state: forbidden } => state.status == *forbidden,
-        InvariantKind::And(parts) => parts
-            .iter()
-            .any(|k| kind_violated(k, required_states, model, state)),
-        InvariantKind::Or(parts) => parts
-            .iter()
-            .all(|k| kind_violated(k, required_states, model, state)),
-        InvariantKind::Unverifiable { .. } => false,
     }
+    Ok(())
 }
 
 /// Collect enabled actions for a state.
@@ -347,8 +297,9 @@ fn replay_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{InvariantKind, ModelGuard, ResolvedInvariant, ResolvedTransition};
+    use crate::model::{ResolvedInvariant, ResolvedTransition};
     use std::collections::BTreeMap;
+    use temper_spec::predicate::{Expr, parse};
 
     const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
 
@@ -451,24 +402,16 @@ mod tests {
                 name: "GoB".to_string(),
                 from_states: vec!["A".to_string()],
                 to_state: Some("B".to_string()),
-                guard: ModelGuard::Always,
+                guard: Expr::always(),
                 effects: vec![],
             }],
-            invariants: vec![
-                ResolvedInvariant {
-                    name: "TypeInvariant".to_string(),
-                    trigger_states: vec![],
-                    required_states: vec![],
-                    kind: InvariantKind::StatusInSet,
-                },
-                ResolvedInvariant {
-                    name: "OnlyA".to_string(),
-                    trigger_states: vec!["B".to_string()],
-                    required_states: vec!["A".to_string()],
-                    kind: InvariantKind::Implication,
-                },
-            ],
+            invariants: vec![ResolvedInvariant {
+                name: "OnlyA".to_string(),
+                assert: parse("status == 'A'").unwrap(),
+            }],
             liveness: vec![],
+            terminal: vec![],
+            var_kinds: BTreeMap::new(),
             initial_status: "A".to_string(),
             initial_counters: BTreeMap::new(),
             initial_booleans: BTreeMap::new(),

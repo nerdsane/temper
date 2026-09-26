@@ -1,54 +1,12 @@
 //! Shared IOA-to-intermediate translation layer.
 //!
 //! Translates `Automaton` actions into [`ResolvedAction`]s with canonical
-//! guard and effect representations. Both `temper-jit` (runtime) and
+//! effect representations; guards are already [`Expr`]s. Both `temper-jit` (runtime) and
 //! `temper-verify` (model checking) consume this intermediate form,
 //! eliminating duplicated translation logic and preventing semantic drift.
 
-use super::types::{Automaton, Effect, Guard};
-
-// ---------------------------------------------------------------------------
-// Intermediate guard representation
-// ---------------------------------------------------------------------------
-
-/// Canonical guard produced by shared translation.
-///
-/// Consumers map this to their domain-specific guard type. For example,
-/// `temper-verify` preserves `CrossEntityState` as an abstract guard,
-/// while `temper-jit` maps it to a runtime cross-entity check.
-#[derive(Debug, Clone, PartialEq)]
-pub enum ResolvedGuard {
-    /// No guard — always passes.
-    Always,
-    /// Current status must be in the given set.
-    StateIn(Vec<String>),
-    /// A counter variable must be >= min.
-    CounterMin { var: String, min: usize },
-    /// A counter variable must be < max.
-    CounterMax { var: String, max: usize },
-    /// A boolean variable must be true.
-    BoolTrue(String),
-    /// A boolean variable must be false.
-    BoolFalse(String),
-    /// A list variable must contain a specific value.
-    ListContains { var: String, value: String },
-    /// A list variable must have at least N elements.
-    ListLengthMin { var: String, min: usize },
-    /// A cross-entity status precondition: the target must be in
-    /// `required_status` (allowlist; empty ⇒ unconstrained) and NOT in
-    /// `forbidden_status` (denylist; empty ⇒ unconstrained).
-    CrossEntityState {
-        entity_type: String,
-        entity_id_source: String,
-        required_status: Vec<String>,
-        forbidden_status: Vec<String>,
-        /// Whether the ref must be present; an empty required ref fails the
-        /// guard rather than passing vacuously (ARN-92 #2).
-        required: bool,
-    },
-    /// All inner guards must pass.
-    And(Vec<ResolvedGuard>),
-}
+use super::types::{Automaton, Effect};
+use crate::predicate::Expr;
 
 // ---------------------------------------------------------------------------
 // Intermediate effect representation
@@ -125,12 +83,12 @@ impl ResolvedEffect {
 pub struct ResolvedAction {
     /// Action name (e.g., "SubmitOrder").
     pub name: String,
-    /// States from which this action can fire.
+    /// States from which this action can fire (empty: any state).
     pub from_states: Vec<String>,
     /// Target state after the action fires (if deterministic).
     pub to_state: Option<String>,
-    /// Guard condition (combined from `from` + explicit guards).
-    pub guard: ResolvedGuard,
+    /// Precondition beyond `from_states`.
+    pub guard: Expr,
     /// Effects (combined from `to` state change + explicit effects + heuristics).
     pub effects: Vec<ResolvedEffect>,
 }
@@ -157,77 +115,17 @@ pub fn translate_actions(automaton: &Automaton) -> Vec<ResolvedAction> {
         .iter()
         .filter(|a| a.kind != "output")
         .map(|a| {
-            let guard = translate_guards(&a.from, &a.guard);
             let effects = translate_effects(a.to.as_deref(), &a.effect, &a.name, &counter_vars);
 
             ResolvedAction {
                 name: a.name.clone(),
                 from_states: a.from.clone(),
                 to_state: a.to.clone(),
-                guard,
+                guard: a.guard.clone(),
                 effects,
             }
         })
         .collect()
-}
-
-/// Translate guard clauses into a single [`ResolvedGuard`].
-///
-/// Combines `from` states with explicit guard conditions using `And`.
-fn translate_guards(from_states: &[String], guards: &[Guard]) -> ResolvedGuard {
-    let mut resolved = Vec::new();
-
-    if !from_states.is_empty() {
-        resolved.push(ResolvedGuard::StateIn(from_states.to_vec()));
-    }
-
-    for g in guards {
-        resolved.push(translate_single_guard(g));
-    }
-
-    match resolved.len() {
-        0 => ResolvedGuard::Always,
-        1 => resolved.remove(0),
-        _ => ResolvedGuard::And(resolved),
-    }
-}
-
-/// Translate a single IOA guard to its resolved form.
-fn translate_single_guard(guard: &Guard) -> ResolvedGuard {
-    match guard {
-        Guard::StateIn { values } => ResolvedGuard::StateIn(values.clone()),
-        Guard::MinCount { var, min } => ResolvedGuard::CounterMin {
-            var: var.clone(),
-            min: *min,
-        },
-        Guard::MaxCount { var, max } => ResolvedGuard::CounterMax {
-            var: var.clone(),
-            max: *max,
-        },
-        Guard::IsTrue { var } => ResolvedGuard::BoolTrue(var.clone()),
-        Guard::IsFalse { var } => ResolvedGuard::BoolFalse(var.clone()),
-        Guard::ListContains { var, value } => ResolvedGuard::ListContains {
-            var: var.clone(),
-            value: value.clone(),
-        },
-        Guard::ListLengthMin { var, min } => ResolvedGuard::ListLengthMin {
-            var: var.clone(),
-            min: *min,
-        },
-        Guard::CrossEntityState {
-            entity_type,
-            entity_id_source,
-            required_status,
-            forbidden_status,
-            required,
-        } => ResolvedGuard::CrossEntityState {
-            entity_type: entity_type.clone(),
-            entity_id_source: entity_id_source.clone(),
-            required_status: required_status.clone(),
-            forbidden_status: forbidden_status.clone(),
-            required: *required,
-        },
-    }
 }
 
 /// Translate effects, including state change, explicit effects, and name heuristics.

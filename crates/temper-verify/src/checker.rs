@@ -124,7 +124,7 @@ fn is_transition_enabled(
     // Use `guard_may_hold` (not `evaluate_guard`) so cross-entity gated edges
     // are walked during reachability BFS: a cross-entity guard is a free
     // boolean, so the gated target state is genuinely reachable in the model.
-    if !status_ok || !guard_may_hold(&transition.guard, state) {
+    if !status_ok || !guard_may_hold(&transition.guard, &model.var_kinds, state) {
         return false;
     }
 
@@ -249,17 +249,13 @@ guard = "task_count > 0"
 name = "Parent"
 states = ["Waiting", "Ready"]
 initial = "Waiting"
+terminal = ["Waiting"]
 
 [[action]]
 name = "ProceedWhenChildDone"
 from = ["Waiting"]
 to = "Ready"
-guard = [{ type = "cross_entity_state", entity_type = "Child", entity_id_source = "child_id", required_status = ["Done"] }]
-
-[[invariant]]
-name = "WaitingLocallyTerminal"
-when = ["Waiting"]
-assert = "no_further_transitions"
+guard = "empty(child_id) || Child[child_id].status in ['Done']"
 "#;
         let model = build_model_from_ioa(src, 2).unwrap();
         let result = check_model(&model);
@@ -272,7 +268,7 @@ assert = "no_further_transitions"
             "abstract cross-entity transitions should not be reported as dead: {:?}",
             result.dead_transitions
         );
-        // The local-terminal proof still holds (no_further_transitions uses
+        // The local-terminal proof still holds (`terminal` states use
         // local enablement, where the gate is false), AND the gated edge is now
         // genuinely explored: Ready is reachable, so the model is not silently
         // pruning the state behind the gate.
@@ -326,7 +322,7 @@ initial = "Draft"
 name = "Publish"
 from = ["Draft"]
 to = "Published"
-guard = [{ type = "cross_entity_state", entity_type = "File", entity_id_source = "file_id", required_status = ["Ready"] }]
+guard = "empty(file_id) || File[file_id].status in ['Ready']"
 "#;
         let model = build_model_from_ioa(src, 2).unwrap();
         let result = check_model(&model);
@@ -361,7 +357,7 @@ initial = "Draft"
 name = "Publish"
 from = ["Draft"]
 to = "Published"
-guard = [{ type = "cross_entity_state", entity_type = "File", entity_id_source = "file_id", required_status = ["Ready"] }]
+guard = "empty(file_id) || File[file_id].status in ['Ready']"
 
 [[liveness]]
 name = "EventuallyPublished"
@@ -395,7 +391,7 @@ to = "End"
 name = "GatedFromStranded"
 from = ["Stranded"]
 to = "End"
-guard = [{ type = "cross_entity_state", entity_type = "Other", entity_id_source = "other_id", required_status = ["Ok"] }]
+guard = "empty(other_id) || Other[other_id].status in ['Ok']"
 "#;
         let model = build_model_from_ioa(src, 2).unwrap();
         let result = check_model(&model);

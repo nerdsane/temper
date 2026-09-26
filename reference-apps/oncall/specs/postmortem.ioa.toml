@@ -8,6 +8,7 @@
 name = "Postmortem"
 states = ["Draft", "InReview", "Approved", "Published"]
 initial = "Draft"
+terminal = ["Published"]
 
 # --- State Variables ---
 
@@ -36,7 +37,7 @@ name = "SubmitForReview"
 kind = "internal"
 from = ["Draft"]
 to = "InReview"
-guard = "is_true has_root_cause"
+guard = "has_root_cause"
 hint = "Submit postmortem for human review. Requires root cause."
 
 [[action]]
@@ -63,19 +64,10 @@ from = ["Approved"]
 to = "Published"
 hint = "Publish the approved postmortem."
 
-# --- Safety Invariants ---
-
-[[invariant]]
-name = "PublishedIsFinal"
-when = ["Published"]
-assert = "no_further_transitions"
-
 [[invariant]]
 name = "ReviewRequiresRootCause"
-when = ["InReview", "Approved", "Published"]
-assert = "has_root_cause"
+assert = "status in ['InReview', 'Approved', 'Published'] => has_root_cause"
 
 [[invariant]]
 name = "ApprovedHasReview"
-when = ["Approved", "Published"]
-assert = "review_rounds > 0"
+assert = "status in ['Approved', 'Published'] => review_rounds > 0"

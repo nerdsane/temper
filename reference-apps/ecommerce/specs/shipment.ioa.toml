@@ -8,6 +8,7 @@
 name = "Shipment"
 states = ["Created", "PickedUp", "InTransit", "OutForDelivery", "Delivered", "Failed", "Returned"]
 initial = "Created"
+terminal = ["Returned"]
 
 # --- Actions: Shipment Lifecycle ---
 
@@ -55,10 +56,3 @@ params = ["Reason"]
 [[action]]
 name = "ShipmentDeliveredEvent"
 kind = "output"
-
-# --- Safety Invariants ---
-
-[[invariant]]
-name = "ReturnedIsFinal"
-when = ["Returned"]
-assert = "no_further_transitions"

@@ -293,7 +293,7 @@ async fn dst_update_fields_rejects_stale_authorization_without_a_journal() {
             EntityMsg::Action {
                 name: "CancelOrder".to_string(),
                 params: serde_json::json!({"Reason": "test"}),
-                cross_entity_booleans: BTreeMap::new(),
+                related: BTreeMap::new(),
                 idempotency_key: None,
                 expected_authorization_precondition: None,
             },
@@ -390,7 +390,7 @@ async fn dst_action_rejects_stale_authorization_but_allows_idempotent_reply() {
             EntityMsg::Action {
                 name: "CancelOrder".to_string(),
                 params: serde_json::json!({"Reason": "stale"}),
-                cross_entity_booleans: BTreeMap::new(),
+                related: BTreeMap::new(),
                 idempotency_key: Some("cancel-request".to_string()),
                 expected_authorization_precondition: Some(stale_precondition),
             },
@@ -408,7 +408,7 @@ async fn dst_action_rejects_stale_authorization_but_allows_idempotent_reply() {
             EntityMsg::Action {
                 name: "CancelOrder".to_string(),
                 params: serde_json::json!({"Reason": "fresh"}),
-                cross_entity_booleans: BTreeMap::new(),
+                related: BTreeMap::new(),
                 idempotency_key: Some("cancel-request".to_string()),
                 expected_authorization_precondition: Some(fresh_precondition.clone()),
             },
@@ -424,7 +424,7 @@ async fn dst_action_rejects_stale_authorization_but_allows_idempotent_reply() {
             EntityMsg::Action {
                 name: "CancelOrder".to_string(),
                 params: serde_json::json!({"Reason": "fresh"}),
-                cross_entity_booleans: BTreeMap::new(),
+                related: BTreeMap::new(),
                 idempotency_key: Some("cancel-request".to_string()),
                 expected_authorization_precondition: Some(fresh_precondition),
             },
@@ -484,7 +484,7 @@ async fn dst_add_item_then_submit() {
             EntityMsg::Action {
                 name: "AddItem".into(),
                 params: serde_json::json!({"ProductId": "prod-1"}),
-                cross_entity_booleans: std::collections::BTreeMap::new(),
+                related: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_authorization_precondition: None,
             },
@@ -502,7 +502,7 @@ async fn dst_add_item_then_submit() {
             EntityMsg::Action {
                 name: "SubmitOrder".into(),
                 params: serde_json::json!({"ShippingAddressId": "addr-1"}),
-                cross_entity_booleans: std::collections::BTreeMap::new(),
+                related: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_authorization_precondition: None,
             },
@@ -536,7 +536,7 @@ async fn duplicate_composite_idempotency_reemits_spec_trigger() {
             EntityMsg::Action {
                 name: "IngestPack".into(),
                 params: params.clone(),
-                cross_entity_booleans: std::collections::BTreeMap::new(),
+                related: std::collections::BTreeMap::new(),
                 idempotency_key: Some("same-pack".into()),
                 expected_authorization_precondition: None,
             },
@@ -551,7 +551,7 @@ async fn duplicate_composite_idempotency_reemits_spec_trigger() {
             EntityMsg::Action {
                 name: "IngestPack".into(),
                 params,
-                cross_entity_booleans: std::collections::BTreeMap::new(),
+                related: std::collections::BTreeMap::new(),
                 idempotency_key: Some("same-pack".into()),
                 expected_authorization_precondition: None,
             },
@@ -584,7 +584,7 @@ async fn dst_cannot_submit_without_items() {
             EntityMsg::Action {
                 name: "SubmitOrder".into(),
                 params: serde_json::json!({}),
-                cross_entity_booleans: std::collections::BTreeMap::new(),
+                related: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_authorization_precondition: None,
             },
@@ -628,7 +628,7 @@ async fn dst_full_order_lifecycle() {
                 EntityMsg::Action {
                     name: action.into(),
                     params,
-                    cross_entity_booleans: std::collections::BTreeMap::new(),
+                    related: std::collections::BTreeMap::new(),
                     idempotency_key: None,
                     expected_authorization_precondition: None,
                 },
@@ -664,7 +664,7 @@ async fn dst_cancel_from_draft() {
             EntityMsg::Action {
                 name: "CancelOrder".into(),
                 params: serde_json::json!({"Reason": "changed mind"}),
-                cross_entity_booleans: std::collections::BTreeMap::new(),
+                related: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_authorization_precondition: None,
             },
@@ -696,7 +696,7 @@ async fn dst_cannot_cancel_shipped_order() {
                 EntityMsg::Action {
                     name: action.to_string(),
                     params: serde_json::json!({}),
-                    cross_entity_booleans: std::collections::BTreeMap::new(),
+                    related: std::collections::BTreeMap::new(),
                     idempotency_key: None,
                     expected_authorization_precondition: None,
                 },
@@ -712,7 +712,7 @@ async fn dst_cannot_cancel_shipped_order() {
             EntityMsg::Action {
                 name: "CancelOrder".into(),
                 params: serde_json::json!({}),
-                cross_entity_booleans: std::collections::BTreeMap::new(),
+                related: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_authorization_precondition: None,
             },
@@ -745,7 +745,7 @@ async fn dst_multiple_actors_independent() {
             EntityMsg::Action {
                 name: "CancelOrder".into(),
                 params: serde_json::json!({}),
-                cross_entity_booleans: std::collections::BTreeMap::new(),
+                related: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_authorization_precondition: None,
             },
@@ -760,7 +760,7 @@ async fn dst_multiple_actors_independent() {
             EntityMsg::Action {
                 name: "AddItem".into(),
                 params: serde_json::json!({}),
-                cross_entity_booleans: std::collections::BTreeMap::new(),
+                related: std::collections::BTreeMap::new(),
                 idempotency_key: None,
                 expected_authorization_precondition: None,
             },
@@ -1340,9 +1340,7 @@ kind = "input"
 from = ["Created", "Ready"]
 to = "Ready"
 params = ["size_bytes"]
-guard = [
-  { type = "cross_entity_state", entity_type = "Workspace", entity_id_source = "workspace_id", forbidden_status = ["Frozen", "Archived"] },
-]
+guard = "Workspace[workspace_id].status not in ['Frozen', 'Archived']"
 effect = [
   { type = "increment", var = "version_count" },
   { type = "set_bool", var = "has_content", value = "true" },
@@ -1636,7 +1634,7 @@ async fn reserved_field_update_event_names_are_refused_as_actions() {
                 EntityMsg::Action {
                     name: reserved.to_string(),
                     params: serde_json::json!({"Customer": "Mallory"}),
-                    cross_entity_booleans: BTreeMap::new(),
+                    related: BTreeMap::new(),
                     idempotency_key: None,
                     expected_authorization_precondition: None,
                 },

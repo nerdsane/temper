@@ -72,246 +72,159 @@ initial = "Active"
 
 [[field_invariant]]
 name = "KindMustBeKnown"
-when = { not = { field = "Kind", absent = true } }
-require = { any_of = [
-  { field = "Kind", equals = "user.message" },
-  { field = "Kind", equals = "user.interrupt" },
-  { field = "Kind", equals = "user.tool_confirmation" },
-  { field = "Kind", equals = "user.custom_tool_result" },
-  { field = "Kind", equals = "agent.message" },
-  { field = "Kind", equals = "agent.thinking" },
-  { field = "Kind", equals = "agent.custom_tool_use" },
-  { field = "Kind", equals = "agent.tool_use" },
-  { field = "Kind", equals = "agent.tool_result" },
-  { field = "Kind", equals = "agent.mcp_tool_use" },
-  { field = "Kind", equals = "agent.mcp_tool_result" },
-  { field = "Kind", equals = "agent.thread_context_compacted" },
-  { field = "Kind", equals = "session.status_running" },
-  { field = "Kind", equals = "session.status_idle" },
-  { field = "Kind", equals = "session.status_rescheduled" },
-  { field = "Kind", equals = "session.status_terminated" },
-  { field = "Kind", equals = "session.deleted" },
-  { field = "Kind", equals = "session.error" },
-  { field = "Kind", equals = "span.model_request_start" },
-  { field = "Kind", equals = "span.model_request_end" },
-  # Multi-agent thread events
-  { field = "Kind", equals = "session.thread_created" },
-  { field = "Kind", equals = "session.thread_idle" },
-  { field = "Kind", equals = "agent.thread_message_sent" },
-  { field = "Kind", equals = "agent.thread_message_received" },
-]}
 message = "SessionEvent.Kind must be one of the 24 documented event kinds"
+assert = "Kind != null => Kind in ['user.message', 'user.interrupt', 'user.tool_confirmation', 'user.custom_tool_result', 'agent.message', 'agent.thinking', 'agent.custom_tool_use', 'agent.tool_use', 'agent.tool_result', 'agent.mcp_tool_use', 'agent.mcp_tool_result', 'agent.thread_context_compacted', 'session.status_running', 'session.status_idle', 'session.status_rescheduled', 'session.status_terminated', 'session.deleted', 'session.error', 'span.model_request_start', 'span.model_request_end', 'session.thread_created', 'session.thread_idle', 'agent.thread_message_sent', 'agent.thread_message_received']"
 
 # --- User event rules ---
 
 [[field_invariant]]
 name = "UserToolConfirmationRequiresToolUseId"
-when = { field = "Kind", equals = "user.tool_confirmation" }
-require = { not = { field = "ToolUseId", empty = true } }
 message = "user.tool_confirmation events must reference a ToolUseId"
+assert = "Kind == 'user.tool_confirmation' => !empty(ToolUseId)"
 
 [[field_invariant]]
 name = "UserToolConfirmationRequiresResult"
-when = { field = "Kind", equals = "user.tool_confirmation" }
-require = { not = { field = "ConfirmationResult", absent = true } }
 message = "user.tool_confirmation events must set ConfirmationResult"
+assert = "Kind == 'user.tool_confirmation' => ConfirmationResult != null"
 
 [[field_invariant]]
 name = "DenyConfirmationRequiresDenyMessage"
-when = { field = "ConfirmationResult", equals = "deny" }
-require = { not = { field = "DenyMessage", empty = true } }
 message = "user.tool_confirmation with ConfirmationResult=deny must set DenyMessage"
+assert = "ConfirmationResult == 'deny' => !empty(DenyMessage)"
 
 [[field_invariant]]
 name = "UserCustomToolResultRequiresCustomToolUseId"
-when = { field = "Kind", equals = "user.custom_tool_result" }
-require = { not = { field = "CustomToolUseId", empty = true } }
 message = "user.custom_tool_result events must reference a CustomToolUseId"
+assert = "Kind == 'user.custom_tool_result' => !empty(CustomToolUseId)"
 
 # --- Agent event rules ---
 
 [[field_invariant]]
 name = "AgentCustomToolUseRequiresName"
-when = { field = "Kind", equals = "agent.custom_tool_use" }
-require = { not = { field = "ToolName", empty = true } }
 message = "agent.custom_tool_use events must set ToolName"
+assert = "Kind == 'agent.custom_tool_use' => !empty(ToolName)"
 
 [[field_invariant]]
 name = "AgentToolUseRequiresName"
-when = { field = "Kind", equals = "agent.tool_use" }
-require = { not = { field = "ToolName", empty = true } }
 message = "agent.tool_use events must set ToolName"
+assert = "Kind == 'agent.tool_use' => !empty(ToolName)"
 
 [[field_invariant]]
 name = "AgentToolResultRequiresToolUseId"
-when = { field = "Kind", equals = "agent.tool_result" }
-require = { not = { field = "ToolUseId", empty = true } }
 message = "agent.tool_result events must reference a ToolUseId"
+assert = "Kind == 'agent.tool_result' => !empty(ToolUseId)"
 
 [[field_invariant]]
 name = "AgentMcpToolUseRequiresName"
-when = { field = "Kind", equals = "agent.mcp_tool_use" }
-require = { not = { field = "ToolName", empty = true } }
 message = "agent.mcp_tool_use events must set ToolName"
+assert = "Kind == 'agent.mcp_tool_use' => !empty(ToolName)"
 
 [[field_invariant]]
 name = "AgentMcpToolUseRequiresServerName"
-when = { field = "Kind", equals = "agent.mcp_tool_use" }
-require = { not = { field = "McpServerName", empty = true } }
 message = "agent.mcp_tool_use events must set McpServerName"
+assert = "Kind == 'agent.mcp_tool_use' => !empty(McpServerName)"
 
 [[field_invariant]]
 name = "AgentMcpToolResultRequiresMcpToolUseId"
-when = { field = "Kind", equals = "agent.mcp_tool_result" }
-require = { not = { field = "McpToolUseId", empty = true } }
 message = "agent.mcp_tool_result events must reference an McpToolUseId"
+assert = "Kind == 'agent.mcp_tool_result' => !empty(McpToolUseId)"
 
 # --- Thread event rules (multi-agent delegation) ---
 
 [[field_invariant]]
 name = "ThreadCreatedRequiresThreadId"
-when = { field = "Kind", equals = "session.thread_created" }
-require = { not = { field = "SessionThreadId", empty = true } }
 message = "session.thread_created events must set SessionThreadId"
+assert = "Kind == 'session.thread_created' => !empty(SessionThreadId)"
 
 [[field_invariant]]
 name = "ThreadIdleRequiresThreadId"
-when = { field = "Kind", equals = "session.thread_idle" }
-require = { not = { field = "SessionThreadId", empty = true } }
 message = "session.thread_idle events must set SessionThreadId"
+assert = "Kind == 'session.thread_idle' => !empty(SessionThreadId)"
 
 [[field_invariant]]
 name = "ThreadMessageSentRequiresThreadId"
-when = { field = "Kind", equals = "agent.thread_message_sent" }
-require = { not = { field = "SessionThreadId", empty = true } }
 message = "agent.thread_message_sent events must set SessionThreadId"
+assert = "Kind == 'agent.thread_message_sent' => !empty(SessionThreadId)"
 
 [[field_invariant]]
 name = "ThreadMessageReceivedRequiresThreadId"
-when = { field = "Kind", equals = "agent.thread_message_received" }
-require = { not = { field = "SessionThreadId", empty = true } }
 message = "agent.thread_message_received events must set SessionThreadId"
+assert = "Kind == 'agent.thread_message_received' => !empty(SessionThreadId)"
 
 # --- Enum-value sanity rules ---
 
 [[field_invariant]]
 name = "ConfirmationResultMustBeKnown"
-when = { not = { field = "ConfirmationResult", absent = true } }
-require = { any_of = [
-  { field = "ConfirmationResult", equals = "allow" },
-  { field = "ConfirmationResult", equals = "deny" },
-]}
 message = "SessionEvent.ConfirmationResult must be `allow` or `deny`"
+assert = "ConfirmationResult != null => ConfirmationResult in ['allow', 'deny']"
 
 [[field_invariant]]
 name = "EvaluatedPermissionMustBeKnown"
-when = { not = { field = "EvaluatedPermission", absent = true } }
-require = { any_of = [
-  { field = "EvaluatedPermission", equals = "allow" },
-  { field = "EvaluatedPermission", equals = "ask" },
-  { field = "EvaluatedPermission", equals = "deny" },
-]}
 message = "SessionEvent.EvaluatedPermission must be `allow`, `ask`, or `deny`"
+assert = "EvaluatedPermission != null => EvaluatedPermission in ['allow', 'ask', 'deny']"
 
 # --- Session status event rules ---
 
 [[field_invariant]]
 name = "StatusIdleRequiresStopReason"
-when = { field = "Kind", equals = "session.status_idle" }
-require = { not = { field = "StopReason", empty = true } }
 message = "session.status_idle events must set StopReason"
+assert = "Kind == 'session.status_idle' => !empty(StopReason)"
 
 [[field_invariant]]
 name = "StopReasonMustBeKnown"
-when = { not = { field = "StopReason", absent = true } }
-require = { any_of = [
-  { field = "StopReason", equals = "end_turn" },
-  { field = "StopReason", equals = "requires_action" },
-  { field = "StopReason", equals = "retries_exhausted" },
-]}
 message = "SessionEvent.StopReason must be `end_turn`, `requires_action`, or `retries_exhausted`"
+assert = "StopReason != null => StopReason in ['end_turn', 'requires_action', 'retries_exhausted']"
 
 [[field_invariant]]
 name = "RequiresActionRequiresEventIds"
-when = { all_of = [
-  { field = "Kind",       equals = "session.status_idle" },
-  { field = "StopReason", equals = "requires_action" },
-]}
-require = { not = { field = "StopReasonEventIds", empty = true } }
 message = "session.status_idle with StopReason=requires_action must set StopReasonEventIds"
+assert = "Kind == 'session.status_idle' && StopReason == 'requires_action' => !empty(StopReasonEventIds)"
 
 # --- session.error rules ---
 
 [[field_invariant]]
 name = "SessionErrorRequiresKind"
-when = { field = "Kind", equals = "session.error" }
-require = { not = { field = "ErrorKind", empty = true } }
 message = "session.error events must set ErrorKind"
+assert = "Kind == 'session.error' => !empty(ErrorKind)"
 
 [[field_invariant]]
 name = "SessionErrorRequiresMessage"
-when = { field = "Kind", equals = "session.error" }
-require = { not = { field = "ErrorMessage", empty = true } }
 message = "session.error events must set ErrorMessage"
+assert = "Kind == 'session.error' => !empty(ErrorMessage)"
 
 [[field_invariant]]
 name = "SessionErrorRequiresRetryStatus"
-when = { field = "Kind", equals = "session.error" }
-require = { not = { field = "RetryStatus", empty = true } }
 message = "session.error events must set RetryStatus"
+assert = "Kind == 'session.error' => !empty(RetryStatus)"
 
 [[field_invariant]]
 name = "ErrorKindMustBeKnown"
-when = { not = { field = "ErrorKind", absent = true } }
-require = { any_of = [
-  { field = "ErrorKind", equals = "unknown_error" },
-  { field = "ErrorKind", equals = "model_overloaded_error" },
-  { field = "ErrorKind", equals = "model_rate_limited_error" },
-  { field = "ErrorKind", equals = "model_request_failed_error" },
-  { field = "ErrorKind", equals = "mcp_connection_failed_error" },
-  { field = "ErrorKind", equals = "mcp_authentication_failed_error" },
-  { field = "ErrorKind", equals = "billing_error" },
-]}
 message = "SessionEvent.ErrorKind must be one of the 7 documented error variants"
+assert = "ErrorKind != null => ErrorKind in ['unknown_error', 'model_overloaded_error', 'model_rate_limited_error', 'model_request_failed_error', 'mcp_connection_failed_error', 'mcp_authentication_failed_error', 'billing_error']"
 
 [[field_invariant]]
 name = "RetryStatusMustBeKnown"
-when = { not = { field = "RetryStatus", absent = true } }
-require = { any_of = [
-  { field = "RetryStatus", equals = "retrying" },
-  { field = "RetryStatus", equals = "exhausted" },
-  { field = "RetryStatus", equals = "terminal" },
-]}
 message = "SessionEvent.RetryStatus must be `retrying`, `exhausted`, or `terminal`"
+assert = "RetryStatus != null => RetryStatus in ['retrying', 'exhausted', 'terminal']"
 
 [[field_invariant]]
 name = "McpErrorRequiresServerName"
-when = { any_of = [
-  { field = "ErrorKind", equals = "mcp_connection_failed_error" },
-  { field = "ErrorKind", equals = "mcp_authentication_failed_error" },
-]}
-require = { not = { field = "McpServerName", empty = true } }
 message = "MCP error kinds must identify the failing McpServerName"
+assert = "ErrorKind in ['mcp_connection_failed_error', 'mcp_authentication_failed_error'] => !empty(McpServerName)"
 
 # --- span.model_request_end rules ---
 
 [[field_invariant]]
 name = "ModelRequestEndRequiresStartId"
-when = { field = "Kind", equals = "span.model_request_end" }
-require = { not = { field = "ModelRequestStartId", empty = true } }
 message = "span.model_request_end events must reference ModelRequestStartId"
+assert = "Kind == 'span.model_request_end' => !empty(ModelRequestStartId)"
 
 [[field_invariant]]
 name = "ModelRequestEndRequiresIsError"
-when = { field = "Kind", equals = "span.model_request_end" }
-require = { not = { field = "IsError", absent = true } }
 message = "span.model_request_end events must set IsError"
+assert = "Kind == 'span.model_request_end' => IsError != null"
 
 [[field_invariant]]
 name = "ModelSpeedMustBeKnown"
-when = { not = { field = "ModelSpeed", absent = true } }
-require = { any_of = [
-  { field = "ModelSpeed", equals = "standard" },
-  { field = "ModelSpeed", equals = "fast" },
-]}
 message = "SessionEvent.ModelSpeed must be `standard` or `fast`"
+assert = "ModelSpeed != null => ModelSpeed in ['standard', 'fast']"

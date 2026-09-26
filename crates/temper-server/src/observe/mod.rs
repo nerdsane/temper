@@ -34,6 +34,9 @@ pub struct SpecSummary {
     pub actions: Vec<String>,
     /// Initial state.
     pub initial_state: String,
+    /// States no action may leave.
+    #[serde(default)]
+    pub terminal_states: Vec<String>,
     /// Verification status: "pending", "running", "passed", "failed", "partial".
     pub verification_status: String,
     /// Number of verification levels that passed (if completed).
@@ -63,6 +66,9 @@ pub struct SpecDetail {
     pub states: Vec<String>,
     /// Initial state.
     pub initial_state: String,
+    /// States no action may leave.
+    #[serde(default)]
+    pub terminal_states: Vec<String>,
     /// Action details.
     pub actions: Vec<ActionDetail>,
     /// Invariant details.
@@ -82,7 +88,7 @@ pub struct ActionDetail {
     pub from: Vec<String>,
     /// Target state after firing.
     pub to: Option<String>,
-    /// Guard conditions (Debug representation).
+    /// The guard expression, when the action has one.
     pub guards: Vec<String>,
     /// Effects (Debug representation).
     pub effects: Vec<String>,
@@ -112,8 +118,6 @@ pub struct ActionParamDetail {
 pub struct InvariantDetail {
     /// Invariant name.
     pub name: String,
-    /// Trigger states (empty = always checked).
-    pub when: Vec<String>,
     /// Assertion expression.
     pub assertion: String,
 }

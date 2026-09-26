@@ -195,9 +195,7 @@ allow_indefinite_states = ["New", "Updated"]
 name = "Touch"
 from = ["New"]
 to = "Updated"
-guard = [
-  { type = "cross_entity_state", entity_type = "Workspace", entity_id_source = "workspace_id", required_status = ["Active"] },
-]
+guard = "empty(workspace_id) || Workspace[workspace_id].status in ['Active']"
 
 [[action.triggers]]
 name = "touch_increments_usage"
@@ -245,9 +243,7 @@ allow_indefinite_states = ["New", "Updated"]
 name = "Touch"
 from = ["New"]
 to = "Updated"
-guard = [
-  { type = "cross_entity_state", entity_type = "Workspace", entity_id_source = "workspace_id", forbidden_status = ["Frozen"] },
-]
+guard = "Workspace[workspace_id].status not in ['Frozen']"
 
 [[action.triggers]]
 name = "touch_increments_usage"

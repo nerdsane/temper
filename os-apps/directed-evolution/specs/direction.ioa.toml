@@ -22,7 +22,7 @@ name = "SelectDirection"
 kind = "input"
 from = ["Proposed"]
 to = "Selected"
-guard = "is_true has_provenance"
+guard = "has_provenance"
 params = ["EpisodeId", "SelectedBy", "SelectionNotes"]
 hint = "Select this direction for an episode."
 
@@ -44,5 +44,4 @@ hint = "Archive the direction."
 
 [[invariant]]
 name = "SelectedHasProvenance"
-when = ["Selected"]
-assert = "is_true has_provenance"
+assert = "status in ['Selected'] => has_provenance"

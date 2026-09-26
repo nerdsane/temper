@@ -8,6 +8,7 @@
 name = "LeadPlan"
 states = ["Created", "Planning", "Testing", "Reviewing", "Deploying", "Completed", "Failed"]
 initial = "Created"
+terminal = ["Completed", "Failed"]
 
 # --- Actions: Pipeline Lifecycle ---
 
@@ -70,15 +71,3 @@ to = "Failed"
 params = ["reason"]
 hint = "Mark the pipeline as failed from any active phase."
 effect = [{ type = "emit_event", event = "PipelineFailed" }]
-
-# --- Safety Invariants ---
-
-[[invariant]]
-name = "CompletedIsFinal"
-when = ["Completed"]
-assert = "no_further_transitions"
-
-[[invariant]]
-name = "FailedIsFinal"
-when = ["Failed"]
-assert = "no_further_transitions"

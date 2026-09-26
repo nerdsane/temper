@@ -79,8 +79,7 @@ hint = "Created an EvolutionRun entity for the affected skill."
 
 [[invariant]]
 name = "alerts_when_triggering"
-when = ["Triggering"]
-assert = "has_alerts"
+assert = "status in ['Triggering'] => has_alerts"
 
 # --- Schedule Effects ---
 # Each transition back to Active schedules the next CheckSentinel.

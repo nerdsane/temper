@@ -9,7 +9,7 @@ from = []
 to = "Open"
 kind = "input"
 params = ["problem_id", "root_cause", "options", "recommendation"]
-guard = [{ type = "cross_entity_state", entity_type = "Problem", entity_id_source = "problem_id", required_status = ["Reviewed"] }]
+guard = "empty(problem_id) || Problem[problem_id].status in ['Reviewed']"
 
 [[action]]
 name = "MarkReviewed"
