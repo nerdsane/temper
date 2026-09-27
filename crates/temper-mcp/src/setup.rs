@@ -175,8 +175,12 @@ impl SetupAdmin {
         {
             bail!("Setup requires HTTPS outside localhost");
         }
+        #[cfg(not(test))]
+        let builder = Client::builder();
+        #[cfg(test)]
+        let builder = crate::test_tls::builder();
         Ok(Self {
-            client: Client::builder()
+            client: builder
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(30))
                 .build()?,

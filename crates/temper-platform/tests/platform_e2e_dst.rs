@@ -14,7 +14,7 @@ use axum::http::{Request, StatusCode};
 use temper_runtime::tenant::TenantId;
 use tower::ServiceExt;
 
-mod common;
+use crate::common;
 
 use common::http::{body_json, body_string};
 use common::platform::{bootstrapped_router, bootstrapped_state};

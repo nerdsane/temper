@@ -6,6 +6,10 @@
 //! - **OData API**: All entities (system and user) are accessible via the
 //!   Temper Data API (`/tdata`), following OData v4 standard.
 
+// Match the finite async Send-proof depth required by the pinned next solver.
+// This raises the checking budget, not a lint allowance or an unsafe Send impl.
+#![recursion_limit = "256"]
+
 pub mod bearer_auth;
 pub mod bootstrap;
 pub mod deploy;

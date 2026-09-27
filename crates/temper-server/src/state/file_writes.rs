@@ -5,6 +5,9 @@ use temper_wasm::{StreamRegistry, WasmInvocationContext};
 
 use super::{DispatchCommand, DispatchExtOptions, ServerState};
 
+mod future_boundary;
+mod public_future_boundary;
+
 struct FileStreamAction<'a> {
     tenant: &'a temper_runtime::tenant::TenantId,
     file_id: &'a str,
@@ -81,12 +84,7 @@ impl ServerState {
         }
     }
 
-    /// Upload stream content for a TemperFS `File` entity, then dispatch the
-    /// verified `StreamUpdated` action.
-    ///
-    /// This is the programmatic equivalent of `PUT /tdata/Files('{id}')/$value`
-    /// and keeps platform-side bootstrapping aligned with normal stream writes.
-    pub async fn put_file_stream_content(
+    async fn put_file_stream_content_inner(
         &self,
         tenant: &temper_runtime::tenant::TenantId,
         file_id: &str,
@@ -101,13 +99,13 @@ impl ServerState {
 
     /// Upload stream content for a TemperFS `File` entity and preserve typed
     /// failure classes for HTTP status mapping.
-    #[tracing::instrument(skip_all, fields(
+    #[tracing::instrument(name = "put_file_stream_content_checked", skip_all, fields(
         otel.name = "state.put_file_stream_content",
         tenant = %tenant,
         file_id,
         request_bytes = body.len() as u64,
     ))]
-    pub(crate) async fn put_file_stream_content_checked(
+    async fn put_file_stream_content_checked_inner(
         &self,
         tenant: &temper_runtime::tenant::TenantId,
         file_id: &str,

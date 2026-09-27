@@ -772,7 +772,7 @@ impl EventStore for SimEventStore {
     ) -> Result<Vec<String>, PersistenceError> {
         let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
         let mut ids: BTreeSet<String> = BTreeSet::new();
-        for ((t, et, _, _, entity_id), _) in inner.vector_index.iter() {
+        for (t, et, _, _, entity_id) in inner.vector_index.keys() {
             if t.as_str() == tenant && et.as_str() == entity_type {
                 ids.insert(entity_id.clone());
             }

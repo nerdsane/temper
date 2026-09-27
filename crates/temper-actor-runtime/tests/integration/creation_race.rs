@@ -48,8 +48,12 @@ impl Actor for ConcurrentCreation {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
-async fn activation_preserves_fields_from_concurrent_creation() {
+/// Prove activation preserves fields committed by concurrent actor creation.
+#[cfg_attr(
+    not(feature = "test-shared-pg-proofs"),
+    tokio::test(flavor = "multi_thread", worker_threads = 3)
+)]
+pub async fn activation_preserves_fields_from_concurrent_creation() {
     let pool = test_pool().await;
     let system = Arc::new(ActorSystem::new(pool.clone(), SchedulerConfig::default()));
     let name = format!("creation_race_{}", Uuid::new_v4());

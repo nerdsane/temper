@@ -449,6 +449,7 @@ impl PgActorActivator {
     }
 }
 
-#[cfg(test)]
+/// Unchanged PostgreSQL proofs, exported only for test-harness consolidation.
+#[cfg(any(test, feature = "test-shared-pg-proofs"))]
 #[path = "pg_strict_tests.rs"]
-mod strict_tests;
+pub mod strict_tests;

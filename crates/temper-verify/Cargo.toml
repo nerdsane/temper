@@ -14,3 +14,9 @@ proptest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 z3 = { version = "0.19" }
+
+# Distribution-supported GNU/Linux targets use the same prebuilt solver rather
+# than whichever (often much older) library the host package manager supplies.
+# Other targets retain their existing system-library integration.
+[target.'cfg(all(target_os = "linux", target_env = "gnu", any(target_arch = "x86_64", target_arch = "aarch64")))'.dependencies]
+z3 = { version = "0.19", features = ["gh-release"] }

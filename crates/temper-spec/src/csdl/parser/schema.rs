@@ -31,7 +31,7 @@ pub(super) fn parse_schema(
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(ref element)) => match local_name(element).as_str() {
+            Ok(Event::Start(ref element)) => match local_name(element) {
                 "EntityType" => {
                     let parsed = parse_entity_type(reader, element)?;
                     schema.entity_types.push(parsed.entity_type);
@@ -104,7 +104,7 @@ fn parse_entity_type(
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(ref element)) => match local_name(element).as_str() {
+            Ok(Event::Start(ref element)) => match local_name(element) {
                 "NavigationProperty" => entity_type
                     .navigation_properties
                     .push(parse_navigation_property_children(reader, element)?),
@@ -116,7 +116,7 @@ fn parse_entity_type(
                 "Function" => functions.push(parse_function(reader, element)?),
                 _ => skip_element(reader)?,
             },
-            Ok(Event::Empty(ref element)) => match local_name(element).as_str() {
+            Ok(Event::Empty(ref element)) => match local_name(element) {
                 "PropertyRef" => push_property_ref(element, &mut entity_type.key_properties),
                 "Property" => entity_type.properties.push(parse_property(element)),
                 "NavigationProperty" => {
@@ -282,11 +282,11 @@ where
 
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(ref element)) => match local_name(element).as_str() {
+            Ok(Event::Start(ref element)) => match local_name(element) {
                 "Annotation" => annotations.push(parse_annotation_children(reader, element)?),
                 _ => skip_element(reader)?,
             },
-            Ok(Event::Empty(ref element)) => match local_name(element).as_str() {
+            Ok(Event::Empty(ref element)) => match local_name(element) {
                 "Parameter" => parameters.push(parse_parameter(element)),
                 "ReturnType" => return_type = Some(parse_return_type(element)),
                 "Annotation" => {
@@ -321,13 +321,13 @@ fn parse_entity_container(
 
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(ref element)) => match local_name(element).as_str() {
+            Ok(Event::Start(ref element)) => match local_name(element) {
                 "EntitySet" => entity_container
                     .entity_sets
                     .push(parse_entity_set_children(reader, element)?),
                 _ => skip_element(reader)?,
             },
-            Ok(Event::Empty(ref element)) => match local_name(element).as_str() {
+            Ok(Event::Empty(ref element)) => match local_name(element) {
                 "EntitySet" => entity_container
                     .entity_sets
                     .push(parse_entity_set_empty(element)),

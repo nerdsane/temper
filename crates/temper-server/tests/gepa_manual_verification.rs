@@ -1,8 +1,8 @@
 #![cfg(feature = "observe")]
 //! Manual GEPA verification — exercises each component and prints results.
-//! Run with: cargo test --test gepa_manual_verification -- --nocapture
+//! Run with: cargo test -p temper-integration-tests --test server gepa_manual_verification:: -- --nocapture
 
-mod common;
+common!();
 
 use common::platform_harness::SimPlatformHarness;
 use temper_runtime::scheduler::install_deterministic_context;

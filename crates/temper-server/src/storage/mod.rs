@@ -34,7 +34,7 @@ use temper_store_turso::{
 };
 
 use crate::platform_store::PlatformStore;
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 use crate::platform_store::SimPlatformStore;
 use crate::state::trajectory::TrajectoryEntry;
 
@@ -1371,7 +1371,7 @@ impl StorageStack {
         )
     }
 
-    #[cfg(feature = "sim")]
+    #[cfg(any(test, feature = "sim"))]
     pub fn from_sim(
         store: temper_store_sim::SimEventStore,
         platform_store: Option<Arc<SimPlatformStore>>,

@@ -8,7 +8,7 @@
 //! 2. `X-Session-Id` and `X-Intent` travel from the HTTP request all the way
 //!    into the persisted row, on both the success and the failure path.
 
-mod common;
+common!();
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};

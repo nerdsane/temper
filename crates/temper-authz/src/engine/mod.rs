@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::str::FromStr;
-use std::sync::RwLock;
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Instant;
 
 use cedar_policy::{
@@ -19,12 +19,18 @@ use crate::error::{AuthzDenial, AuthzError};
 use crate::metrics::{CedarDecisionMetric, CedarPhaseOutcome};
 
 mod candidates;
+mod compiled_cache;
+
+use compiled_cache::compiled_raw_policies;
 
 #[cfg(test)]
 mod tests;
 
 #[cfg(test)]
 mod stack_tests;
+
+#[cfg(test)]
+mod system_policy_tests;
 
 /// The result of an authorization check.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,7 +82,7 @@ impl CompiledPolicies {
 
 /// Per-tenant policy data: the compiled policies and the source text.
 struct TenantPolicies {
-    policies: CompiledPolicies,
+    policies: Arc<CompiledPolicies>,
     source_text: String,
 }
 
@@ -86,15 +92,16 @@ struct TenantPolicies {
 ///
 /// Uses `BTreeMap` for deterministic iteration order (DST compliance).
 pub struct AuthzEngine {
-    /// Per-tenant policy sets. Each tenant has its own isolated PolicySet.
+    /// Per-tenant activation. Immutable compiled snapshots may be shared, but
+    /// replacing or removing one tenant never changes another tenant or engine.
     tenant_policies: RwLock<BTreeMap<String, TenantPolicies>>,
     /// Fallback global policy set for callers that don't specify a tenant.
     /// Deprecated: callers should migrate to `authorize_for_tenant`.
-    fallback_policy_set: RwLock<CompiledPolicies>,
+    fallback_policy_set: RwLock<Arc<CompiledPolicies>>,
     /// Immutable platform policy used when a tenant has no app policy set.
     /// Only System principals are evaluated against this set; all externally
     /// resolvable principal kinds still fail closed for an unloaded tenant.
-    platform_policy_set: CompiledPolicies,
+    platform_policy_set: Arc<CompiledPolicies>,
     authorizer: Authorizer,
 }
 
@@ -104,15 +111,12 @@ impl AuthzEngine {
     /// policy is merged in so System principals are authorized by an
     /// explicit, auditable policy rather than a hard-coded bypass.
     pub fn new(policy_text: &str) -> Result<Self, AuthzError> {
-        // Parse the user policy first — return an error if it's malformed.
-        let mut policy_set = policy_text
-            .parse::<PolicySet>()
-            .map_err(|e| AuthzError::PolicyParse(e.to_string()))?;
-        merge_system_platform_policy(&mut policy_set);
+        // Compile the user policy first — return an error if it's malformed.
+        let policies = compiled_raw_policies(policy_text)?;
 
         Ok(Self {
             tenant_policies: RwLock::new(BTreeMap::new()),
-            fallback_policy_set: RwLock::new(CompiledPolicies::new(policy_set)),
+            fallback_policy_set: RwLock::new(policies),
             platform_policy_set: compiled_system_platform_policies(),
             authorizer: Authorizer::new(),
         })
@@ -126,12 +130,11 @@ impl AuthzEngine {
     /// setups that need all requests to be allowed, use
     /// [`permissive`](Self::permissive) instead.
     pub fn empty() -> Self {
-        let mut policy_set = PolicySet::new();
-        merge_system_platform_policy(&mut policy_set);
+        let policies = compiled_system_platform_policies();
         Self {
             tenant_policies: RwLock::new(BTreeMap::new()),
-            fallback_policy_set: RwLock::new(CompiledPolicies::new(policy_set)),
-            platform_policy_set: compiled_system_platform_policies(),
+            fallback_policy_set: RwLock::new(Arc::clone(&policies)),
+            platform_policy_set: policies,
             authorizer: Authorizer::new(),
         }
     }
@@ -142,16 +145,15 @@ impl AuthzEngine {
     /// so that Cedar evaluates to Allow for every principal kind (System or
     /// otherwise). Used in tests and permissive dev environments.
     pub fn permissive() -> Self {
-        let mut policy_set =
-            PolicySet::from_str("permit(principal, action, resource);").unwrap_or_default();
         // Even a permit-all fallback (e.g. the ARN-230 fail-open path) must keep
         // the system-platform forbids — the god-mode identity entities
         // (TrustedIssuer / PrincipalGeneration) stay System/Admin-only, so a
         // fail-open tenant can never become an authz-takeover (ARN-255).
-        merge_system_platform_policy(&mut policy_set);
+        let policies = compiled_raw_policies("permit(principal, action, resource);")
+            .unwrap_or_else(|_| compiled_system_platform_policies());
         Self {
             tenant_policies: RwLock::new(BTreeMap::new()),
-            fallback_policy_set: RwLock::new(CompiledPolicies::new(policy_set)),
+            fallback_policy_set: RwLock::new(policies),
             platform_policy_set: compiled_system_platform_policies(),
             authorizer: Authorizer::new(),
         }
@@ -159,10 +161,7 @@ impl AuthzEngine {
 
     /// Parse and validate policy text without changing the active policy set.
     pub fn validate_tenant_policies(&self, policy_text: &str) -> Result<(), AuthzError> {
-        policy_text
-            .parse::<PolicySet>()
-            .map(|_| ())
-            .map_err(|error| AuthzError::PolicyParse(error.to_string()))
+        compiled_raw_policies(policy_text).map(|_| ())
     }
 
     /// Hot-reload Cedar policies for a specific tenant. Parses and validates
@@ -173,10 +172,7 @@ impl AuthzEngine {
         tenant: &str,
         policy_text: &str,
     ) -> Result<(), AuthzError> {
-        let mut new_policy_set = policy_text
-            .parse::<PolicySet>()
-            .map_err(|e| AuthzError::PolicyParse(e.to_string()))?;
-        merge_system_platform_policy(&mut new_policy_set);
+        let policies = compiled_raw_policies(policy_text)?;
 
         let mut tenants = self
             .tenant_policies
@@ -186,7 +182,7 @@ impl AuthzEngine {
         tenants.insert(
             tenant.to_string(),
             TenantPolicies {
-                policies: CompiledPolicies::new(new_policy_set),
+                policies,
                 source_text: policy_text.to_string(),
             },
         );
@@ -252,7 +248,7 @@ impl AuthzEngine {
         tenants.insert(
             tenant.to_string(),
             TenantPolicies {
-                policies: CompiledPolicies::new(combined_set),
+                policies: Arc::new(CompiledPolicies::new(combined_set)),
                 source_text: combined_text,
             },
         );
@@ -280,16 +276,13 @@ impl AuthzEngine {
     /// for per-tenant isolation. This method exists for backward compatibility
     /// during migration.
     pub fn reload_policies(&self, policy_text: &str) -> Result<(), AuthzError> {
-        let mut new_policy_set = policy_text
-            .parse::<PolicySet>()
-            .map_err(|e| AuthzError::PolicyParse(e.to_string()))?;
-        merge_system_platform_policy(&mut new_policy_set);
+        let policies = compiled_raw_policies(policy_text)?;
 
         let mut current = self
             .fallback_policy_set
             .write()
             .map_err(|e| AuthzError::Engine(format!("policy lock poisoned: {e}")))?;
-        *current = CompiledPolicies::new(new_policy_set);
+        *current = policies;
         Ok(())
     }
 
@@ -780,6 +773,15 @@ unless {{ principal is System || principal is Admin || ({op}) }};
 /// (ADR-0046). Used to exclude them from user-facing counts.
 const SYSTEM_PLATFORM_POLICY_ID_PREFIX: &str = "system-platform:";
 
+/// Parse the immutable built-in source once, including during simulated restarts.
+/// This source is immutable; per-engine and per-tenant activation remains local.
+fn system_platform_policies() -> Option<&'static PolicySet> {
+    static POLICIES: OnceLock<Option<PolicySet>> = OnceLock::new();
+    POLICIES
+        .get_or_init(|| system_platform_policy().parse().ok())
+        .as_ref()
+}
+
 /// Merge the built-in system-platform policy into an existing [`PolicySet`].
 ///
 /// Policies are added with explicit `PolicyId`s prefixed by
@@ -788,9 +790,8 @@ const SYSTEM_PLATFORM_POLICY_ID_PREFIX: &str = "system-platform:";
 /// hard-coded system policy fails to parse, the combined set is left
 /// unchanged — preserving availability at the cost of System auth.
 fn merge_system_platform_policy(combined: &mut PolicySet) {
-    let system_set: PolicySet = match system_platform_policy().parse() {
-        Ok(ps) => ps,
-        Err(_) => return,
+    let Some(system_set) = system_platform_policies() else {
+        return;
     };
     for (idx, policy) in system_set.policies().enumerate() {
         let named = policy.clone().new_id(PolicyId::new(format!(
@@ -800,10 +801,13 @@ fn merge_system_platform_policy(combined: &mut PolicySet) {
     }
 }
 
-fn compiled_system_platform_policies() -> CompiledPolicies {
-    let mut policy_set = PolicySet::new();
-    merge_system_platform_policy(&mut policy_set);
-    CompiledPolicies::new(policy_set)
+fn compiled_system_platform_policies() -> Arc<CompiledPolicies> {
+    static POLICIES: OnceLock<Arc<CompiledPolicies>> = OnceLock::new();
+    Arc::clone(POLICIES.get_or_init(|| {
+        let mut policy_set = PolicySet::new();
+        merge_system_platform_policy(&mut policy_set);
+        Arc::new(CompiledPolicies::new(policy_set))
+    }))
 }
 
 /// Count user-authored policies in a [`PolicySet`], excluding the built-in

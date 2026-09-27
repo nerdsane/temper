@@ -14,10 +14,10 @@
 
 use std::sync::Arc;
 
+use crate::common;
 use temper_jit::table::TransitionTable;
 use temper_runtime::scheduler::{FaultConfig, RunRecord, SimActorSystem, SimActorSystemConfig};
 use temper_server::entity_actor::sim_handler::EntityActorHandler;
-mod common;
 
 use common::dst::{
     new_sim, register_all_system_entities, register_catalog_entries, register_catalog_entry,

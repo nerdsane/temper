@@ -223,11 +223,11 @@ impl WorkloadGenerator {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    #[test]
-    fn generator_produces_ops() {
+    /// Original assertion body, forwarded from each suite's common module.
+    pub(crate) fn generator_produces_ops() {
         let mut wg = WorkloadGenerator::new(42);
         // First ops should be InstallApp (no apps installed yet, dispatch
         // falls back to install).
@@ -258,8 +258,8 @@ mod tests {
         assert!(saw_dispatch, "expected at least one Dispatch op");
     }
 
-    #[test]
-    fn generator_is_deterministic() {
+    /// Original assertion body, forwarded from each suite's common module.
+    pub(crate) fn generator_is_deterministic() {
         let ops_a: Vec<String> = {
             let mut wg = WorkloadGenerator::new(99);
             (0..50).map(|_| format!("{:?}", wg.next_op())).collect()

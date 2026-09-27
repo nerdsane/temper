@@ -1,4 +1,4 @@
-mod common;
+common!();
 use axum::{
     body::Body,
     http::{Request, StatusCode},

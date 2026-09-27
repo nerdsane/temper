@@ -156,8 +156,27 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use tokio::time::Instant;
+
+    fn assert_attempt_schedule(attempts: &[Instant], started: Instant, delays_ms: &[u64]) {
+        assert_eq!(attempts.len(), delays_ms.len() + 1);
+        assert_eq!(attempts[0], started, "the first attempt must not wait");
+        for (pair, delay_ms) in attempts.windows(2).zip(delays_ms) {
+            let elapsed = pair[1] - pair[0];
+            let expected = Duration::from_millis(*delay_ms);
+            assert!(
+                elapsed >= expected && elapsed <= expected + Duration::from_millis(2),
+                "retry delay {elapsed:?} must retain the {expected:?} schedule"
+            );
+        }
+        assert_eq!(
+            Instant::now(),
+            *attempts.last().unwrap(),
+            "there must be no extra delay after the final attempt"
+        );
+    }
 
     #[test]
     fn is_transient_matches_hrana_blocked() {
@@ -210,14 +229,19 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn retry_succeeds_on_third_attempt_after_two_transient_errors() {
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_clone = calls.clone();
+        let started = Instant::now();
+        let attempts = Arc::new(Mutex::new(Vec::new()));
+        let attempts_clone = Arc::clone(&attempts);
         let result: Result<&'static str, PersistenceError> =
             retry_persistence("test.op", move || {
                 let calls = calls_clone.clone();
+                let attempts = Arc::clone(&attempts_clone);
                 async move {
+                    attempts.lock().unwrap().push(Instant::now());
                     let n = calls.fetch_add(1, Ordering::SeqCst);
                     if n < 2 {
                         Err(PersistenceError::Storage(
@@ -231,6 +255,7 @@ mod tests {
             .await;
         assert_eq!(result.unwrap(), "ok");
         assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_attempt_schedule(&attempts.lock().unwrap(), started, &[250, 500]);
     }
 
     #[tokio::test]
@@ -255,13 +280,18 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn retry_exhausts_after_all_delays_on_persistent_transient_error() {
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_clone = calls.clone();
+        let started = Instant::now();
+        let attempts = Arc::new(Mutex::new(Vec::new()));
+        let attempts_clone = Arc::clone(&attempts);
         let result: Result<i32, PersistenceError> = retry_persistence("test.op", move || {
             let calls = calls_clone.clone();
+            let attempts = Arc::clone(&attempts_clone);
             async move {
+                attempts.lock().unwrap().push(Instant::now());
                 calls.fetch_add(1, Ordering::SeqCst);
                 Err(PersistenceError::Storage(
                     "Hrana: BLOCKED — quota exceeded".into(),
@@ -272,6 +302,7 @@ mod tests {
         assert!(result.is_err());
         // 1 initial attempt + 4 retries = 5 total.
         assert_eq!(calls.load(Ordering::SeqCst), RETRY_DELAYS_MS.len() + 1);
+        assert_attempt_schedule(&attempts.lock().unwrap(), started, &[250, 500, 1000, 2000]);
     }
 
     #[tokio::test]

@@ -15,6 +15,10 @@ use super::retry;
 use super::{DispatchCommand, DispatchError, DispatchExtOptions, record_workflow_span_attrs};
 use crate::state::admission::AdmissionOutcome;
 
+mod future_boundary;
+mod tenant_future_boundary;
+mod typed_future_boundary;
+
 const DEFAULT_BACKGROUND_REACTION_MAX_CONCURRENCY: usize = 64;
 
 struct BackgroundReactionDispatch {
@@ -56,19 +60,14 @@ fn truncate_request_body_for_log(serialized: &str) -> String {
 }
 
 impl crate::state::ServerState {
-    /// Dispatch an action using the unified command object.
-    ///
-    /// This is the preferred entry point. The command struct makes all
-    /// parameters explicit (especially tenant) and avoids the previous
-    /// three-layer wrapper chain.
-    #[instrument(skip_all, fields(
+    #[instrument(name = "dispatch", skip_all, fields(
         otel.name = %format_args!("{}.{}", cmd.entity_type, cmd.action),
         tenant = %cmd.tenant,
         entity_type = cmd.entity_type,
         entity_id = cmd.entity_id,
         action_name = cmd.action,
     ))]
-    pub async fn dispatch(&self, cmd: DispatchCommand<'_>) -> Result<EntityResponse, String> {
+    async fn dispatch_inner(&self, cmd: DispatchCommand<'_>) -> Result<EntityResponse, String> {
         self.dispatch_typed(cmd).await.map_err(|e| e.to_string())
     }
 
@@ -92,13 +91,8 @@ impl crate::state::ServerState {
         .await
     }
 
-    /// Convenience wrapper around [`dispatch`](Self::dispatch) for the common
-    /// case where `await_integration` is `false`.
-    ///
-    /// Callers that need integration await or other options should use
-    /// `dispatch(DispatchCommand { .. })` directly.
-    #[instrument(skip_all, fields(otel.name = %format_args!("{}.{}", entity_type, action), tenant = %tenant, entity_type, entity_id, action_name = action))]
-    pub async fn dispatch_tenant_action(
+    #[instrument(name = "dispatch_tenant_action", skip_all, fields(otel.name = %format_args!("{}.{}", entity_type, action), tenant = %tenant, entity_type, entity_id, action_name = action))]
+    async fn dispatch_tenant_action_inner(
         &self,
         tenant: &TenantId,
         entity_type: &str,
@@ -192,7 +186,7 @@ impl crate::state::ServerState {
         self.dispatch_typed_checked(cmd, None).await
     }
 
-    async fn dispatch_typed_checked(
+    async fn dispatch_typed_checked_inner(
         &self,
         cmd: DispatchCommand<'_>,
         expected_authorization_precondition: Option<String>,
@@ -355,15 +349,12 @@ impl crate::state::ServerState {
         None
     }
 
-    /// Core dispatch without reaction cascade (used by ReactionDispatcher to
-    /// avoid infinite async recursion).
-    #[allow(clippy::too_many_arguments)]
-    #[instrument(skip_all, fields(
+    #[instrument(name = "dispatch_tenant_action_core", skip_all, fields(
         otel.name = "dispatch.dispatch_tenant_action_core",
-        tenant = %tenant,
+        tenant = %cmd.tenant,
         entity_type,
         entity_id,
-        action_name = action,
+        action_name = cmd.action,
         workflow.root_entity_type = tracing::field::Empty,
         workflow.root_entity_id = tracing::field::Empty,
         workflow.run_id = tracing::field::Empty,
@@ -375,17 +366,21 @@ impl crate::state::ServerState {
         success = tracing::field::Empty,
         error_msg = tracing::field::Empty,
     ))]
-    pub(crate) async fn dispatch_tenant_action_core(
+    async fn dispatch_tenant_action_core_inner(
         &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-        action: &str,
-        params: serde_json::Value,
-        agent_ctx: &AgentContext,
-        await_integration: bool,
+        cmd: DispatchCommand<'_>,
         expected_authorization_precondition: Option<String>,
     ) -> Result<EntityResponse, DispatchError> {
+        let DispatchCommand {
+            tenant,
+            entity_type,
+            entity_id,
+            action,
+            params,
+            agent_ctx,
+            await_integration,
+            await_reactions: _,
+        } = cmd;
         let explicit_workflow_context = agent_ctx.workflow_run_id.is_some()
             || agent_ctx.workflow_root_entity_type.is_some()
             || agent_ctx.workflow_root_entity_id.is_some();

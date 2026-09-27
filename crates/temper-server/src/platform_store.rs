@@ -3,7 +3,7 @@
 //! [`PlatformStore`] abstracts the ~12 platform storage methods used by
 //! `install_os_app`, bootstrap, and the verification cascade. The production
 //! implementation delegates to [`TursoEventStore`]; the simulation implementation
-//! ([`SimPlatformStore`], behind `#[cfg(feature = "sim")]`) uses in-memory
+//! ([`SimPlatformStore`], available in unit tests or with the `sim` feature) uses in-memory
 //! `BTreeMap` storage with fault injection for deterministic testing.
 
 use std::collections::BTreeMap;
@@ -787,10 +787,10 @@ impl PlatformStore for PostgresEventStore {
 // SimPlatformStore (behind cfg(feature = "sim"))
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 pub use sim_platform_store::*;
 
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 mod sim_platform_store {
     use super::*;
     use std::collections::{BTreeMap, BTreeSet};

@@ -332,15 +332,13 @@ pub async fn assert_p8_state_store_sequence(harness: &SimPlatformHarness) -> Res
         }
 
         // Verify the sequence starts at 1 and increments by 1.
-        let mut expected_seq = 1u64;
-        for event in &events {
+        for (expected_seq, event) in (1u64..).zip(&events) {
             if event.sequence_nr != expected_seq {
                 return Err(format!(
                     "P8: entity {pid} has sequence gap: expected {expected_seq}, got {}",
                     event.sequence_nr
                 ));
             }
-            expected_seq += 1;
         }
     }
     Ok(())
@@ -434,8 +432,7 @@ pub async fn assert_p10_field_replay_fidelity(harness: &SimPlatformHarness) -> R
             }
 
             // Events must form a gapless sequence starting at 1.
-            let mut expected_seq = 1u64;
-            for event in &events {
+            for (expected_seq, event) in (1u64..).zip(&events) {
                 if event.sequence_nr != expected_seq {
                     return Err(format!(
                         "P10: entity {persistence_id} replay would fail: \
@@ -443,7 +440,6 @@ pub async fn assert_p10_field_replay_fidelity(harness: &SimPlatformHarness) -> R
                         event.sequence_nr
                     ));
                 }
-                expected_seq += 1;
             }
 
             // Each event must have valid structure for replay.

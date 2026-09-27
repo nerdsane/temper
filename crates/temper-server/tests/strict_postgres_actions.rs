@@ -39,7 +39,7 @@ param = "expected_notes"
 field = "Notes"
 "#;
 
-async fn pool() -> (Pool, Option<ContainerAsync<Postgres>>) {
+async fn pool() -> (Pool, Option<Arc<ContainerAsync<Postgres>>>) {
     temper_actor_runtime::test_utils::setup_test_pg().await
 }
 

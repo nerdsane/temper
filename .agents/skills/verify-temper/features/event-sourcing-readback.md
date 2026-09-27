@@ -16,8 +16,8 @@ curl -sS "http://localhost:3600/observe/projections/replay-parity?entity_type=<T
 # -> {"kind":"query_projection_replay_parity","clean":true,"report":{checked,drifted,missing,errors}}
 
 # crash/replay is exercised deterministically by the suites
-cargo test -p temper-server --test dst_persistence
-cargo test -p temper-server --test dst_lifecycle    # create->crash->respawn->replay->continue
+cargo test -p temper-integration-tests --test server dst_persistence::
+cargo test -p temper-integration-tests --test server dst_lifecycle:: # create->crash->respawn->replay->continue
 ```
 
 ## What proves it

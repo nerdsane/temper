@@ -3,11 +3,15 @@
 //! Verifies entity set listing, single entity fetch, metadata,
 //! service document, and error responses via the axum router.
 
-mod common;
+common!();
+
+#[path = "fixtures/query_plane.rs"]
+mod query_plane_fixture;
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use common::{build_default_state, dispatch};
+use query_plane_fixture::{fresh_order_projection, seed_fresh_order_projections};
 use temper_runtime::ActorSystem;
 use temper_runtime::tenant::TenantId;
 use temper_server::build_router;
@@ -135,36 +139,6 @@ async fn post_json(
         .unwrap();
     let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (status, body)
-}
-
-async fn upsert_projected_order(
-    store: &TursoEventStore,
-    tenant: &TenantId,
-    entity_id: &str,
-    mut fields: serde_json::Value,
-    sequence_nr: u64,
-) {
-    fields["Id"] = serde_json::json!(entity_id);
-    let state_json = serde_json::json!({
-        "entity_type": "Order",
-        "entity_id": entity_id,
-        "status": "Created",
-        "fields": fields,
-        "sequence_nr": sequence_nr,
-        "events": [],
-    });
-    store
-        .upsert_query_projection_with_state(
-            tenant.as_str(),
-            "Order",
-            entity_id,
-            "Created",
-            state_json.get("fields").unwrap(),
-            &state_json,
-            sequence_nr,
-        )
-        .await
-        .expect("upsert projected order");
 }
 
 async fn patch_json(
@@ -320,33 +294,30 @@ async fn composite_entity_key_resolves_through_query_plane_index() {
     let store = TursoEventStore::new(&db_url, None)
         .await
         .expect("create local turso db");
-    let state = build_turso_state("odata-read-composite-key", store.clone());
     let tenant = TenantId::default();
 
-    for index in 0usize..1200 {
-        upsert_projected_order(
-            &store,
-            &tenant,
-            &format!("entry-{index:04}"),
-            serde_json::json!({
-                "SessionId": "session-hot",
-                "EntryId": format!("entry-{index:04}"),
-            }),
-            index as u64 + 1,
-        )
-        .await;
-    }
-    upsert_projected_order(
-        &store,
-        &tenant,
-        "entry-cold-1199",
+    let mut projections = (0usize..1200)
+        .map(|index| {
+            fresh_order_projection(
+                format!("entry-{index:04}"),
+                serde_json::json!({
+                    "SessionId": "session-hot",
+                    "EntryId": format!("entry-{index:04}"),
+                }),
+                index as u64 + 1,
+            )
+        })
+        .collect::<Vec<_>>();
+    projections.push(fresh_order_projection(
+        "entry-cold-1199".to_string(),
         serde_json::json!({
             "SessionId": "session-cold",
             "EntryId": "entry-1199",
         }),
         2000,
-    )
-    .await;
+    ));
+    seed_fresh_order_projections(&store, &tenant, &projections).await;
+    let state = build_turso_state("odata-read-composite-key", store.clone());
 
     let (status, body) = get_json(
         &state,

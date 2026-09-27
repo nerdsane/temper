@@ -1,5 +1,13 @@
+[build]
+# The pinned nightly supports a parallel frontend. Cargo's jobserver bounds
+# total concurrency across crates and compiler worker threads.
+rustflags = ["-Zthreads=16"]
+
 [env]
 BINDGEN_EXTRA_CLANG_ARGS = "-I/opt/homebrew/opt/z3/include"
+# 4.14.1's GNU/Linux archives support the existing Ubuntu 22.04 release jobs
+# and Debian bookworm runtime; newer x86_64 archives require glibc 2.39.
+Z3_SYS_Z3_VERSION = { value = "4.14.1", force = true }
 
 [target.aarch64-apple-darwin]
-rustflags = ["-L/opt/homebrew/opt/z3/lib"]
+rustflags = ["-Zthreads=8", "-L/opt/homebrew/opt/z3/lib"]

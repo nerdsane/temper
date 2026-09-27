@@ -13,7 +13,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeMap;
 

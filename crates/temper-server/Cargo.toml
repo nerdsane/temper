@@ -5,10 +5,9 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 description = "HTTP server assembly for Temper entity services"
-
-[[test]]
-name = "spec_validate_endpoint"
-required-features = ["observe"]
+# Cross-crate suites live in temper-integration-tests, so unit tests do not
+# depend on this library again through temper-platform or a self dev-dependency.
+autotests = false
 
 [features]
 default = []
@@ -95,9 +94,7 @@ tracing-subscriber = { workspace = true }
 # test. Dev-only: not built into any production artifact.
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 temper-store-sim = { workspace = true }
-temper-server = { path = ".", features = ["sim"] }
-temper-wasm = { workspace = true, features = ["test-helpers", "test-shared-compilation"] }
-temper-platform = { workspace = true }
+temper-wasm = { workspace = true, features = ["test-helpers", "test-shared-compilation", "test-prepared-default-tls"] }
 
 [[bench]]
 name = "actor_throughput"

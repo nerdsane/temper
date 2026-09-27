@@ -1,0 +1,5 @@
+# This target directory is an upstream source module, not Cargo build output.
+!src/target/
+!src/target/**
+/target/
+/Cargo.lock

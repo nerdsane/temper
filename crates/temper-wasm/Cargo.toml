@@ -16,6 +16,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }
 tokio-stream = { workspace = true }
+native-tls = { version = "0.2", optional = true }
 futures-util = "0.3"
 bytes = "1"
 async-stream = "0.3"
@@ -32,12 +33,22 @@ test-helpers = []
 # Test-only compiled-code reuse. Registrations and per-invocation Stores remain
 # isolated. Keep this on dev-dependencies, never production dependencies.
 test-shared-compilation = []
+# Test-only immutable TLS preparation; HTTP clients and pools remain per engine.
+test-prepared-default-tls = ["dep:native-tls", "reqwest/native-tls"]
 
 [dev-dependencies]
 base64 = "0.22"
+native-tls = "0.2"
+reqwest = { workspace = true, features = ["native-tls"] }
+tokio-native-tls = "0.3"
 tokio-test = { workspace = true }
 # `testing` gives the in-memory span exporter used by the ARN-243 behavioral
 # redaction test. Dev-only: not built into any production artifact.
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 tracing-subscriber = { workspace = true }
 axum = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# The native TLS backend already uses OpenSSL on Linux; generate ephemeral
+# loopback certificates without adding an OpenSSL requirement on other hosts.
+openssl = "0.10"

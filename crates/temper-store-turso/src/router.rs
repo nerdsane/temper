@@ -23,6 +23,9 @@ use temper_runtime::tenant::parse_persistence_id_parts;
 use crate::TursoEventStore;
 use crate::schema;
 
+mod ensure_future_boundary;
+mod register_future_boundary;
+
 /// Routes storage operations to per-tenant Turso databases.
 ///
 /// Holds a platform database (for tenant registry, user access, and shared
@@ -299,12 +302,8 @@ impl TenantStoreRouter {
         Ok(())
     }
 
-    /// Ensure a tenant exists in the persistence layer.
-    ///
-    /// If the tenant is already registered, returns `Ok(true)` (already existed).
-    /// If not, provisions a new database and registers it, returning `Ok(false)`.
-    #[instrument(skip_all, fields(tenant_id, otel.name = "router.ensure_tenant"))]
-    pub async fn ensure_tenant(&self, tenant_id: &str) -> Result<bool, PersistenceError> {
+    #[instrument(name = "ensure_tenant", skip_all, fields(tenant_id, otel.name = "router.ensure_tenant"))]
+    async fn ensure_tenant_inner(&self, tenant_id: &str) -> Result<bool, PersistenceError> {
         {
             let tenants = self.tenants.read().await;
             if tenants.contains_key(tenant_id) {
@@ -336,12 +335,8 @@ impl TenantStoreRouter {
         Ok(false)
     }
 
-    /// Register and connect a new tenant.
-    ///
-    /// In local mode, creates a new SQLite file in `local_base_dir`.
-    /// In cloud mode (with `cloud` feature), provisions via Turso Cloud API.
-    #[instrument(skip_all, fields(tenant_id, otel.name = "router.register_tenant"))]
-    pub async fn register_tenant(
+    #[instrument(name = "register_tenant", skip_all, fields(tenant_id, otel.name = "router.register_tenant"))]
+    async fn register_tenant_inner(
         &self,
         tenant_id: &str,
     ) -> Result<TursoEventStore, PersistenceError> {

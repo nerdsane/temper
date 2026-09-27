@@ -24,7 +24,7 @@ default = []
 cloud = ["reqwest"]
 
 [dev-dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 uuid = { workspace = true }
 chrono = { workspace = true }
 tempfile = "3"

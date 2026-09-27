@@ -28,6 +28,9 @@ libc = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+# Test fixtures reuse native TLS preparation, not HTTP clients or their pools.
+native-tls = "0.2"
+reqwest = { workspace = true, features = ["native-tls"] }
 axum = { workspace = true }
 temper-authz = { workspace = true }
 temper-platform = { workspace = true }

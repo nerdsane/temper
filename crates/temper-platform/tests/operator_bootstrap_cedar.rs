@@ -23,7 +23,7 @@ use temper_server::state::PendingDecision;
 use temper_store_turso::TursoEventStore;
 use tower::ServiceExt;
 
-mod common;
+use crate::common;
 use common::http::body_json;
 
 const OPERATOR_KEY: &str = "tmpr_operator-bootstrap-cedar";

@@ -16,7 +16,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  RUST_TOOLCHAIN: nightly-2026-02-08
+  RUST_TOOLCHAIN: nightly-2026-09-26
   # CI does not reuse incremental state between jobs. Local builds retain it.
   # Keep debug overrides aligned with Cargo.toml's dev/test defaults: workspace
   # backtraces retain file/line information. Dependency debug sections
@@ -228,20 +228,22 @@ jobs:
             (cd "wasm-modules/$module" && cargo build --target wasm32-unknown-unknown --release)
           done
 
-      - name: cargo nextest run --workspace (skip dst_)
-        run: cargo nextest run --workspace -E 'not test(dst_)'
+      # Consolidated DST modules prefix their helper names too. Preserve the
+      # original ordinary-job generator executions, including suites not in
+      # the DST matrix; the filter union does not duplicate tests in this job.
+      - name: cargo nextest run --workspace (skip DST scenarios)
+        run: cargo nextest run --workspace -E 'not test(dst_) | test(/::common::workload_gen::tests::generator_(is_deterministic|produces_ops)$/)'
 
-      # spec_validate_endpoint declares required-features = ["observe"]. The
-      # workspace run above usually still covers it via feature unification
-      # (temper-cli/temper-mcp enable temper-server's observe feature), but
-      # that coverage is incidental — it evaporates if those edges change.
+      # The consolidated server test target forwards its observe feature. Keep
+      # an explicit module-filtered run so endpoint coverage never depends on
+      # feature unification from other workspace packages.
       # Run the observe-gated tests explicitly so coverage is guaranteed.
       # These stay on `cargo test` on purpose (ARN-439 decision D4): they are
       # narrow name-filtered runs whose whole job is to *guarantee* coverage, and
       # cargo test's positional-substring filter is the exact semantics relied on.
       - name: cargo test observe-gated tests
         run: |
-          cargo test -p temper-server --features observe --test spec_validate_endpoint
+          cargo test -p temper-integration-tests --features observe --test server spec_validate_endpoint::
           cargo test -p temper-server --features observe --lib observe::
           # api::repl tests (incl. server_repl_config_never_allows_host_ops,
           # the ARN-166 host-op isolation guard) compile only under `observe`;
@@ -278,11 +280,11 @@ jobs:
         # four full-mode seed shards on push/schedule/dispatch.
         run: |
           SUITES='[
-            {"suite":"core","command":"cargo nextest run -p temper-server --test dst_concurrency_retry --test dst_hotswap --test dst_lifecycle --test dst_multi_tenant --test dst_persistence"},
-            {"suite":"platform-boot","command":"cargo nextest run -p temper-server --test dst_platform_boot"},
-            {"suite":"platform-consistency","command":"cargo nextest run -p temper-server --test dst_platform_cedar --test dst_platform_index --test dst_platform_rollback"}
+            {"suite":"core","command":"cargo nextest run -p temper-integration-tests --test server -E \"test(/^dst_concurrency_retry::/) | test(/^dst_hotswap::/) | test(/^dst_lifecycle::/) | test(/^dst_multi_tenant::/) | test(/^dst_persistence::/)\""},
+            {"suite":"platform-boot","command":"cargo nextest run -p temper-integration-tests --test server -E \"test(/^dst_platform_boot::/)\""},
+            {"suite":"platform-consistency","command":"cargo nextest run -p temper-integration-tests --test server -E \"test(/^dst_platform_cedar::/) | test(/^dst_platform_index::/) | test(/^dst_platform_rollback::/)\""}
           ]'
-          RANDOM_CMD="cargo nextest run -p temper-server --test dst_platform_random"
+          RANDOM_CMD="cargo nextest run -p temper-integration-tests --test server -E 'test(/^dst_platform_random::/)'"
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             RANDOM_CELLS=$(jq -cn --arg cmd "$RANDOM_CMD" '[{suite:"platform-random",command:$cmd}]')
           else

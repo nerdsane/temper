@@ -13,6 +13,9 @@ exclude = [
     "os-apps/temper-agent/wasm/tool_runner",
     "os-apps/temper-agent/wasm/sandbox_provisioner",
     "os-apps/temper-fs/wasm/blob_adapter",
+    "vendor/turso-sdk-kit",
+    "vendor/turso-sync-sdk-kit",
+    "vendor/cc",
 ]
 members = [
     "crates/temper-macros",
@@ -28,6 +31,7 @@ members = [
     "crates/temper-store-redis",
     "crates/temper-store-sim",
     "crates/temper-server",
+    "crates/temper-integration-tests",
     "crates/temper-cli",
     "crates/temper-mcp",
     "crates/temper-evolution",
@@ -177,9 +181,35 @@ libc = "0.2"
 
 # Keep useful file/line backtraces without copying full type/variable debug
 # information into every workspace integration-test executable. The test
-# profile inherits these settings; incremental compilation remains enabled.
+# profile inherits the debug settings; development stays incremental.
 [profile.dev]
 debug = "line-tables-only"
+
+# Full-workspace tests favor a compact cold build over incremental compiler
+# state. Keep this separate from the ordinary development/editing profile.
+[profile.test]
+incremental = false
+codegen-units = 16
+lto = "off"
+
+# These small runtime/specification crates are exercised on every simulated
+# operation. Keep ordinary development unoptimized and all test checks enabled.
+[profile.test.package.temper-runtime]
+opt-level = 1
+
+[profile.test.package.temper-jit]
+opt-level = 1
+
+[profile.test.package.temper-spec]
+opt-level = 1
+
+[profile.test.package.temper-integration-tests]
+opt-level = 1
+
+# Connection-lifetime profiles spend time throughout the embedded SQL engine.
+# Optimize test execution without changing engine source or development checks.
+[profile.test.package.turso_core]
+opt-level = 1
 
 # Keep workspace backtraces, but do not duplicate third-party dependency debug
 # sections in every test executable. See docs/testing.md for the debugger opt-in.
@@ -207,6 +237,19 @@ opt-level = 1
 opt-level = 1
 
 [profile.dev.package.sha2]
+opt-level = 3
+
+# Profiles of full-seed simulations also expose unoptimized byte-scanning and
+# RNG primitive helpers. Keep application code and development checks intact.
+[profile.dev.package.memchr]
+opt-level = 3
+
+[profile.dev.package.rand_core]
+opt-level = 3
+
+# Full blob simulations serialize and validate large JSON values. Optimize the
+# serializer while retaining generic code sharing and all development checks.
+[profile.dev.package.serde_json]
 opt-level = 1
 
 [profile.release]
@@ -218,3 +261,11 @@ strip = true
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+# Rust consumers need neither SDK's standalone C dynamic/static artifacts.
+# The exact published source is retained with manifest-only packaging changes.
+[patch.crates-io]
+turso_sdk_kit = { path = "vendor/turso-sdk-kit" }
+turso_sync_sdk_kit = { path = "vendor/turso-sync-sdk-kit" }
+# Keep native-job polling responsive without changing Cargo's jobserver budget.
+cc = { path = "vendor/cc" }

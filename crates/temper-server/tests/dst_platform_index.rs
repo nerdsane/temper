@@ -4,7 +4,7 @@
 //! after restarts, and that index entries are consistent across entity types
 //! and tenants.
 
-mod common;
+common!();
 
 use common::platform_harness::SimPlatformHarness;
 use common::platform_invariants::*;

@@ -199,10 +199,8 @@ fn namespace_to_app_candidates(namespace: &str) -> Vec<String> {
                 candidates.insert(format!("paw-{remainder}"));
             }
         }
-        "temper" => {
-            if !remainder.is_empty() {
-                candidates.insert(format!("temper-{remainder}"));
-            }
+        "temper" if !remainder.is_empty() => {
+            candidates.insert(format!("temper-{remainder}"));
         }
         _ => {}
     }

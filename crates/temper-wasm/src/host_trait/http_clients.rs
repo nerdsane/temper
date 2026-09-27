@@ -141,18 +141,35 @@ fn build_client(config: &ClientConfig, disable_redirects: bool) -> reqwest::Clie
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy();
     }
+    #[cfg(any(test, feature = "test-prepared-default-tls"))]
+    let mut has_custom_root = false;
     for (key, pem) in &config.ca_certs {
         match reqwest::Certificate::from_pem(pem.as_bytes()) {
-            Ok(cert) => builder = builder.add_root_certificate(cert),
+            Ok(cert) => {
+                builder = builder.add_root_certificate(cert);
+                #[cfg(any(test, feature = "test-prepared-default-tls"))]
+                {
+                    has_custom_root = true;
+                }
+            }
             Err(error) => {
                 tracing::warn!(key, error = %error, "failed to parse CA certificate from secret");
             }
         }
     }
+    // Test builds share only immutable default TLS setup, never HTTP pools.
+    // Valid private roots always use the unchanged per-configuration builder.
+    #[cfg(any(test, feature = "test-prepared-default-tls"))]
+    if !has_custom_root {
+        builder = builder.use_preconfigured_tls(test_tls::connector().clone());
+    }
     builder
         .build()
         .expect("production HTTP client configuration must be valid")
 }
+
+#[cfg(any(test, feature = "test-prepared-default-tls"))]
+mod test_tls;
 
 #[cfg(test)]
 #[path = "http_clients_test.rs"]

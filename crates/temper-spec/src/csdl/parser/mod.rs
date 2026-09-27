@@ -1,4 +1,5 @@
 mod elements;
+mod parse_cache;
 mod schema;
 mod xml;
 
@@ -23,6 +24,10 @@ pub enum CsdlParseError {
 
 /// Parse a CSDL XML document from a string.
 pub fn parse_csdl(xml: &str) -> Result<CsdlDocument, CsdlParseError> {
+    parse_cache::parse_cached(xml)
+}
+
+fn parse_uncached(xml: &str) -> Result<CsdlDocument, CsdlParseError> {
     let mut reader = Reader::from_str(xml);
     let mut doc = CsdlDocument {
         version: String::new(),
@@ -32,7 +37,7 @@ pub fn parse_csdl(xml: &str) -> Result<CsdlDocument, CsdlParseError> {
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(ref e)) => match local_name(e).as_str() {
+            Ok(Event::Start(ref e)) => match local_name(e) {
                 "Edmx" => doc.version = attr_str(e, "Version").unwrap_or_default(),
                 "Schema" => doc.schemas.push(parse_schema(&mut reader, e)?),
                 _ => {}

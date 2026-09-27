@@ -457,7 +457,7 @@ pub(super) fn build_verification_stream_response(
                         .send(Ok(serde_json::to_string(&serde_json::json!({
                                 "type": "verification_error",
                                 "entity": entity_name,
-                                "error": format!("{e}"),
+                                "error": e.to_string(),
                             }))
                             .unwrap() // ci-ok: infallible serialization
                                 + "\n"))

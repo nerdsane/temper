@@ -14,22 +14,29 @@ static POSTGRES: OnceCell<ContainerAsync<Postgres>> = OnceCell::const_new();
 // ─── Proto messages (prost derive) ───────────────────────────────────────────
 
 #[derive(Clone, PartialEq, prost::Message)]
+/// Start the integration fixture's ping-pong exchange.
 pub struct StartMessage {}
 
 #[derive(Clone, PartialEq, prost::Message)]
+/// Integration fixture request carrying its ordered payload.
 pub struct PingMessage {
+    /// Payload echoed by the pong actor.
     #[prost(string, tag = "1")]
     pub payload: String,
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
+/// Integration fixture reply carrying the original request payload.
 pub struct PongMessage {
+    /// Reply payload consumed by the ping actor.
     #[prost(string, tag = "1")]
     pub payload: String,
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
+/// Integration fixture message for persistence and ordering proofs.
 pub struct GenericMessage {
+    /// Content persisted by the receiving fixture actor.
     #[prost(string, tag = "1")]
     pub content: String,
 }
@@ -256,8 +263,9 @@ async fn run_until_quiescent(system: &ActorSystem, max_polls: usize) {
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
-#[tokio::test]
-async fn test_tell_and_activate() {
+/// Prove a queued message activates its actor and persists the resulting state.
+#[cfg_attr(not(feature = "test-shared-pg-proofs"), tokio::test)]
+pub async fn test_tell_and_activate() {
     let pool = test_pool().await;
     let system = ActorSystem::new(pool.clone(), SchedulerConfig::default());
     let name = format!("echo_{}", Uuid::new_v4());
@@ -286,8 +294,9 @@ async fn test_tell_and_activate() {
     assert_eq!(state["payloads"], serde_json::json!(["world"]));
 }
 
-#[tokio::test]
-async fn test_ping_pong_3_rounds() {
+/// Prove the complete three-message ping-pong exchange preserves payload order.
+#[cfg_attr(not(feature = "test-shared-pg-proofs"), tokio::test)]
+pub async fn test_ping_pong_3_rounds() {
     let pool = test_pool().await;
     let system = ActorSystem::new(pool.clone(), SchedulerConfig::default());
     system
@@ -327,8 +336,9 @@ async fn test_ping_pong_3_rounds() {
     assert_eq!(pong_payloads, vec!["ping-0", "ping-1", "ping-2"]);
 }
 
-#[tokio::test]
-async fn test_no_pending_messages_skip() {
+/// Prove polling skips actors without pending messages.
+#[cfg_attr(not(feature = "test-shared-pg-proofs"), tokio::test)]
+pub async fn test_no_pending_messages_skip() {
     let pool = test_pool().await;
     let system = ActorSystem::new(pool.clone(), SchedulerConfig::default());
     let name = format!("echo_{}", Uuid::new_v4());
@@ -343,8 +353,9 @@ async fn test_no_pending_messages_skip() {
     assert_eq!(system.poll_once().await.unwrap(), 0);
 }
 
-#[tokio::test]
-async fn test_no_reprocessing() {
+/// Prove processed messages are not handled again on later polls.
+#[cfg_attr(not(feature = "test-shared-pg-proofs"), tokio::test)]
+pub async fn test_no_reprocessing() {
     let pool = test_pool().await;
     let system = ActorSystem::new(pool.clone(), SchedulerConfig::default());
     let name = format!("echo_{}", Uuid::new_v4());
@@ -375,8 +386,9 @@ async fn test_no_reprocessing() {
     assert_eq!(state["payloads"], serde_json::json!(["test"]));
 }
 
-#[tokio::test]
-async fn test_fifo_ordering() {
+/// Prove FIFO handling preserves all five message payloads in order.
+#[cfg_attr(not(feature = "test-shared-pg-proofs"), tokio::test)]
+pub async fn test_fifo_ordering() {
     let pool = test_pool().await;
 
     struct OrderActor {
@@ -446,4 +458,5 @@ async fn test_fifo_ordering() {
 }
 
 #[path = "integration/creation_race.rs"]
-mod creation_race;
+/// Original PostgreSQL concurrent-creation regression proof.
+pub mod creation_race;

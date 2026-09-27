@@ -1,0 +1,60 @@
+[package]
+name = "temper-integration-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Cross-crate integration and deterministic simulation suites"
+publish = false
+autotests = false
+
+[features]
+default = ["observe"]
+observe = ["temper-server/observe"]
+
+# This package has no production library. Keeping its dependencies here avoids
+# making server unit tests wait for server + platform to compile a second time.
+[dev-dependencies]
+async-trait = { workspace = true }
+axum = { workspace = true }
+base64 = "0.22"
+bytes = "1"
+chrono = { workspace = true }
+deadpool-postgres = { workspace = true }
+p256 = { version = "0.13", features = ["ecdsa"] }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+sqlx = { workspace = true }
+temper-actor-runtime = { workspace = true, features = ["test-shared-pg-proofs"] }
+temper-agents = { workspace = true, features = ["test-shared-pg-proofs"] }
+temper-authz = { workspace = true }
+temper-codegen = { workspace = true }
+temper-evolution = { workspace = true }
+temper-jit = { workspace = true }
+temper-platform = { workspace = true }
+temper-runtime = { workspace = true }
+temper-server = { workspace = true, features = ["sim"] }
+temper-spec = { workspace = true }
+temper-store-postgres = { workspace = true }
+temper-store-sim = { workspace = true }
+temper-store-turso = { workspace = true }
+temper-verify = { workspace = true }
+temper-wasm = { workspace = true, features = ["test-helpers", "test-shared-compilation", "test-prepared-default-tls"] }
+tempfile = "3"
+testcontainers = { workspace = true }
+testcontainers-modules = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+toml = { workspace = true }
+tower = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+wiremock = { workspace = true }
+
+[[test]]
+name = "server"
+path = "tests/server.rs"
+
+[[test]]
+name = "platform"
+path = "tests/platform.rs"

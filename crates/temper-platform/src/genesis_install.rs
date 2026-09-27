@@ -2221,7 +2221,6 @@ fn sanitize_fragment(input: &str) -> String {
 mod tests {
     use super::object_lookup::genesis_object_entity_id;
     use base64::Engine as _;
-    use sha2::Digest as _;
     use temper_runtime::ActorSystem;
     use temper_spec::csdl::CsdlDocument;
 

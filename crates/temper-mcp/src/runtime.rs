@@ -103,9 +103,13 @@ impl RuntimeContext {
                  Use --port <n> for a local server or --url <url> for a remote server."
             ),
         };
+        #[cfg(not(test))]
+        let http = reqwest::Client::new();
+        #[cfg(test)]
+        let http = crate::test_tls::client();
         let mut context = Self {
             base_url,
-            http: reqwest::Client::new(),
+            http,
             agent_id: config.agent_id.clone(),
             agent_type: config.agent_type.clone(),
             // An interactive MCP runtime needs a session even when the host did

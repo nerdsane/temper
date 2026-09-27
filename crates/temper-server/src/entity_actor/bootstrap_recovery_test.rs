@@ -42,7 +42,7 @@ async fn legacy_bootstrap_after_skipped_history_remains_lenient() {
     );
 }
 
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test]
 async fn skipped_history_does_not_append_a_fresh_bootstrap_on_restart() {
     use std::time::Duration;

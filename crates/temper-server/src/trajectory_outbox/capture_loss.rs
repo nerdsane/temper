@@ -105,6 +105,9 @@ impl CaptureHealth {
     }
 
     /// Clear one loss, once its marker is durably stored.
+    // Rust 1.100 renamed this API; keep the existing operation for the declared
+    // Rust 1.92 minimum rather than requiring its newer try_update replacement.
+    #[allow(deprecated)]
     fn confirm_loss_recorded(&self) {
         // Saturating: a decrement that ran without a matching increment would
         // wrap to a permanently degraded server.

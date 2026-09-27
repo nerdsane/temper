@@ -1,4 +1,4 @@
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[path = "composite/defaults_test.rs"]
 mod defaults_test;
 use std::collections::BTreeMap;
@@ -6,12 +6,12 @@ use std::collections::BTreeMap;
 use serde_json::json;
 use temper_runtime::ActorSystem;
 use temper_spec::csdl::parse_csdl;
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 use temper_store_sim::SimEventStore;
 
 use crate::request_context::AgentContext;
 use crate::state::ServerState;
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 use crate::storage::StorageStack;
 
 use super::*;
@@ -335,7 +335,7 @@ fn composite_test_state() -> ServerState {
     state
 }
 
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 fn composite_test_state_with_store(store: SimEventStore) -> ServerState {
     let csdl = parse_csdl(COMPOSITE_CSDL).expect("test CSDL should parse");
     let mut specs = BTreeMap::new();
@@ -684,7 +684,7 @@ async fn composite_app_create_sub_write_authorization_can_enforce_owner_scope() 
     assert!(state.entity_exists(&tenant, "App", "app-alice-owned"));
 }
 
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test]
 async fn composite_preflights_sub_write_auth_before_persisting_any_write() {
     let store = SimEventStore::no_faults(40);
@@ -758,7 +758,7 @@ async fn composite_preflights_sub_write_auth_before_persisting_any_write() {
     assert!(!state.entity_exists(&tenant, "Child", "child-preflight-denied"));
 }
 
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test]
 async fn composite_preflights_sub_write_transition_before_persisting_any_write() {
     let store = SimEventStore::no_faults(41);
@@ -830,7 +830,7 @@ async fn composite_preflights_sub_write_transition_before_persisting_any_write()
     );
 }
 
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test]
 async fn composite_atomic_batch_conflict_leaves_all_sub_write_journals_empty() {
     let store = SimEventStore::no_faults(42);
@@ -888,7 +888,7 @@ async fn composite_atomic_batch_conflict_leaves_all_sub_write_journals_empty() {
     assert!(!state.entity_exists(&tenant, "Child", "child-atomic-second"));
 }
 
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test]
 async fn composite_atomic_batch_records_parent_composite_event_once() {
     let store = SimEventStore::no_faults(40);
@@ -971,7 +971,7 @@ async fn composite_atomic_batch_records_parent_composite_event_once() {
     );
 }
 
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test]
 async fn composite_atomic_batch_can_skip_parent_composite_event_by_spec() {
     let store = SimEventStore::no_faults(40);
@@ -1015,7 +1015,7 @@ async fn composite_atomic_batch_can_skip_parent_composite_event_by_spec() {
     );
 }
 
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test]
 async fn parent_gated_pack_object_create_repairs_partial_existing_object() {
     let store = SimEventStore::no_faults(40);
@@ -1088,7 +1088,7 @@ async fn parent_gated_pack_object_create_repairs_partial_existing_object() {
     );
 }
 
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test]
 async fn parent_gated_pack_object_create_skips_complete_existing_object() {
     let store = SimEventStore::no_faults(40);
@@ -1144,7 +1144,7 @@ async fn parent_gated_pack_object_create_skips_complete_existing_object() {
     );
 }
 
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test]
 async fn composite_ref_create_cas_rejects_existing_ref_without_pack_object_leak() {
     let store = SimEventStore::no_faults(40);
@@ -1228,7 +1228,7 @@ async fn composite_ref_create_cas_rejects_existing_ref_without_pack_object_leak(
     );
 }
 
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test]
 async fn composite_ref_update_cas_rejects_stale_previous_without_pack_object_leak() {
     let store = SimEventStore::no_faults(40);
@@ -1311,7 +1311,7 @@ async fn composite_ref_update_cas_rejects_stale_previous_without_pack_object_lea
     );
 }
 
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test]
 async fn composite_sub_write_idempotency_survives_actor_restart() {
     let store = SimEventStore::no_faults(40);
@@ -1374,7 +1374,7 @@ async fn composite_sub_write_idempotency_survives_actor_restart() {
     );
 }
 
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test]
 async fn composite_atomic_batch_allows_existing_sub_write_to_delete_target() {
     let store = SimEventStore::no_faults(40);
@@ -1433,7 +1433,7 @@ async fn composite_atomic_batch_allows_existing_sub_write_to_delete_target() {
     );
 }
 
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn composite_ingest_pack_large_blob_sub_write_persists_overflow_fields() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1502,7 +1502,7 @@ async fn composite_ingest_pack_large_blob_sub_write_persists_overflow_fields() {
     );
 }
 
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn composite_atomic_batch_handles_concurrent_multi_entity_results() {
     const COMPOSITES: usize = 12;
@@ -1669,7 +1669,7 @@ async fn commons_composite_rejects_duplicate_owner_app_name_before_dispatch() {
     assert!(!state.entity_exists(&tenant, "App", "app-alice-notes-copy"));
 }
 
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn commons_composite_app_name_uniqueness_serializes_concurrent_creates() {
     let store = SimEventStore::no_faults(43);
@@ -1809,12 +1809,12 @@ async fn composite_integration_result_rejects_undeclared_sub_write() {
     assert!(err.contains("is not declared"), "unexpected error: {err}");
 }
 
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 fn strict_composite_state(store: SimEventStore) -> ServerState {
     strict_composite_state_with_name_constraint(store, false)
 }
 
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 fn strict_composite_state_with_name_constraint(
     store: SimEventStore,
     compare_name: bool,
@@ -1903,7 +1903,7 @@ field="revision"
     state
 }
 
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test]
 async fn strict_composite_preflight_uses_defaults_and_sequential_target_state() {
     let store = SimEventStore::no_faults(101);
@@ -1994,7 +1994,7 @@ async fn strict_composite_preflight_uses_defaults_and_sequential_target_state() 
     }
 }
 
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test]
 async fn strict_composite_rejects_later_bad_inputs_before_any_journal_write() {
     for invalid in [
@@ -2028,7 +2028,7 @@ async fn strict_composite_rejects_later_bad_inputs_before_any_journal_write() {
     }
 }
 
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test]
 async fn strict_composite_seeded_ordering_replays_once_or_writes_nothing() {
     use temper_runtime::scheduler::DeterministicRng;
@@ -2112,7 +2112,7 @@ async fn strict_composite_seeded_ordering_replays_once_or_writes_nothing() {
     }
 }
 
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test]
 async fn strict_composite_uses_virtual_authorization_and_rejects_before_overflow_storage() {
     for allowed in [true, false] {
@@ -2166,7 +2166,7 @@ async fn strict_composite_uses_virtual_authorization_and_rejects_before_overflow
     }
 }
 
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test]
 async fn strict_composite_compares_uncommitted_overflow_from_earlier_subwrite() {
     for matches in [true, false] {

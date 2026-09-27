@@ -1,7 +1,7 @@
 //! Strict specifications cannot be bypassed through generic writes.
 #[path = "strict_generic_writes/authorization.rs"]
 mod authorization;
-mod common;
+common!();
 #[path = "strict_generic_writes/creation.rs"]
 mod creation;
 use axum::{

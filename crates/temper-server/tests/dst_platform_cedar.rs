@@ -4,13 +4,114 @@
 //! are isolated across tenants, and remain coherent with specs under
 //! fault injection.
 
-mod common;
+common!();
 
 use common::platform_harness::SimPlatformHarness;
 use common::platform_invariants::*;
 use temper_runtime::scheduler::install_deterministic_context;
 
 const NUM_SEEDS: u64 = 50;
+
+// Cache reuse must not substitute an old engine's activation for durable rows.
+#[tokio::test]
+async fn dst_cedar_cached_compilation_observes_durable_changes_after_restart() {
+    use std::sync::Arc;
+
+    use temper_authz::{AuthzDecision, AuthzDenial, AuthzEngine, SecurityContext};
+    use temper_server::platform_store::PlatformStore;
+
+    const PERMIT: &str =
+        r#"permit(principal is Agent, action == Action::"read", resource is Doc);"#;
+    const FORBID: &str =
+        r#"forbid(principal is Agent, action == Action::"read", resource is Doc);"#;
+
+    for seed in 0..NUM_SEEDS {
+        let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
+        let mut harness = SimPlatformHarness::no_faults(seed);
+        let principal = SecurityContext::from_resolved_identity("cache-reader", "worker", None);
+        let decision = |engine: &AuthzEngine, tenant: &str| {
+            engine.authorize_for_tenant(tenant, &principal, "read", "Doc", &Default::default())
+        };
+
+        for tenant in ["cache-a", "cache-b"] {
+            harness
+                .sim_platform_store
+                .upsert_tenant_policy(tenant, PERMIT)
+                .await
+                .unwrap();
+        }
+        harness.restart().await;
+        let previous_engine = Arc::clone(&harness.platform_state.server.authz);
+        for tenant in ["cache-a", "cache-b"] {
+            assert!(
+                decision(&previous_engine, tenant).is_allowed(),
+                "seed {seed}: {tenant}"
+            );
+        }
+
+        // Change only durable state. The old live engine must remain unchanged.
+        harness
+            .sim_platform_store
+            .upsert_tenant_policy("cache-a", FORBID)
+            .await
+            .unwrap();
+        assert!(
+            decision(&previous_engine, "cache-a").is_allowed(),
+            "seed {seed}"
+        );
+        harness.restart().await;
+        let current_engine = &harness.platform_state.server.authz;
+        assert!(
+            matches!(
+                decision(current_engine, "cache-a"),
+                AuthzDecision::Deny(AuthzDenial::PolicyDenied { .. })
+            ),
+            "seed {seed}"
+        );
+        assert!(
+            decision(current_engine, "cache-b").is_allowed(),
+            "seed {seed}"
+        );
+        assert_eq!(
+            current_engine
+                .get_tenant_policy_text("cache-a")
+                .unwrap()
+                .trim(),
+            FORBID
+        );
+        for tenant in ["cache-a", "cache-b"] {
+            assert!(
+                decision(&previous_engine, tenant).is_allowed(),
+                "seed {seed}: {tenant}"
+            );
+        }
+
+        // An empty durable policy must not inherit the previously cached permit.
+        harness
+            .sim_platform_store
+            .upsert_tenant_policy("cache-b", "")
+            .await
+            .unwrap();
+        harness.restart().await;
+        assert_eq!(
+            decision(&harness.platform_state.server.authz, "cache-b"),
+            AuthzDecision::Deny(AuthzDenial::NoMatchingPermit),
+            "seed {seed}"
+        );
+        assert!(
+            harness
+                .platform_state
+                .server
+                .authz
+                .get_tenant_policy_text("cache-b")
+                .is_none()
+        );
+        assert!(
+            decision(&previous_engine, "cache-b").is_allowed(),
+            "seed {seed}"
+        );
+    }
+}
 
 // =========================================================================
 // Test: Cedar policies survive restart

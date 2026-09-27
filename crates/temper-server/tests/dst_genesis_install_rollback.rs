@@ -16,7 +16,7 @@
 //! probe are unit-tested separately in `temper-platform`. The full `install_genesis_app_from_registry`
 //! entry point is not simulated because its closure materialization is network/git-backed.
 
-mod common;
+common!();
 
 use common::platform_harness::SimPlatformHarness;
 use temper_platform::genesis_install_verify::restore_prior_install;

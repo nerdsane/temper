@@ -40,8 +40,9 @@ async fn run_until_quiescent(system: &ActorSystem, max_polls: usize) {
     }
 }
 
-#[tokio::test]
-async fn test_agent_initialize() {
+/// Prove initialization persists the process actor's ready state.
+#[cfg_attr(not(feature = "test-shared-pg-proofs"), tokio::test)]
+pub async fn test_agent_initialize() {
     let (pool, _postgres) = setup_test_pg().await;
     let system = Arc::new(ActorSystem::new(pool.clone(), SchedulerConfig::default()));
     register_agent_actors(&system).await.unwrap();
@@ -62,8 +63,9 @@ async fn test_agent_initialize() {
     assert_eq!(state.status, "Ready");
 }
 
-#[tokio::test]
-async fn test_inference_chain_discovers_unspawned_registered_siblings() {
+/// Prove inference discovers registered siblings and remains consumed after restart.
+#[cfg_attr(not(feature = "test-shared-pg-proofs"), tokio::test)]
+pub async fn test_inference_chain_discovers_unspawned_registered_siblings() {
     let (pool, _postgres) = setup_test_pg().await;
     let system = Arc::new(ActorSystem::new(pool.clone(), SchedulerConfig::default()));
     register_agent_actors(&system).await.unwrap();
@@ -130,8 +132,9 @@ async fn test_inference_chain_discovers_unspawned_registered_siblings() {
     assert_eq!(after.fields, agent_state.fields);
 }
 
-#[tokio::test]
-async fn test_context_manager_transitions() {
+/// Prove context preparation returns to idle with one completed preparation.
+#[cfg_attr(not(feature = "test-shared-pg-proofs"), tokio::test)]
+pub async fn test_context_manager_transitions() {
     let (pool, _postgres) = setup_test_pg().await;
     let system = Arc::new(ActorSystem::new(pool.clone(), SchedulerConfig::default()));
     register_agent_actors(&system).await.unwrap();

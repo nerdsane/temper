@@ -4,7 +4,9 @@ use crate::{
     runtime::RuntimeContext,
 };
 use anyhow::{Context, Result, bail};
-use reqwest::{Client, Url, header::HeaderValue};
+#[cfg(not(test))]
+use reqwest::Client;
+use reqwest::{Url, header::HeaderValue};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -121,7 +123,11 @@ async fn perform(ctx: &RuntimeContext, upload: &Upload) -> Result<Uploaded> {
         .push(&format!("Files('{}')", upload.file_id))
         .push("$value");
     // Never follow redirects carrying credentials or local bytes.
-    let http = Client::builder()
+    #[cfg(not(test))]
+    let builder = Client::builder();
+    #[cfg(test)]
+    let builder = crate::test_tls::builder();
+    let http = builder
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(90))
         .build()?;

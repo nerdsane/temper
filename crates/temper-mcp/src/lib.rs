@@ -13,6 +13,9 @@ mod setup_identity;
 mod stdio;
 mod trajectory_bounds;
 
+#[cfg(test)]
+mod test_tls;
+
 pub mod repl;
 pub use runtime::run_stdio_server;
 

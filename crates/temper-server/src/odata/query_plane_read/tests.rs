@@ -22,6 +22,10 @@ mod keyed_existence;
 mod paging;
 mod proof;
 
+#[path = "../../../tests/fixtures/query_plane.rs"]
+mod query_plane_fixture;
+use query_plane_fixture::{fresh_order_projection, seed_fresh_order_projections};
+
 const CSDL_XML: &str = include_str!("../../../../../test-fixtures/specs/model.csdl.xml");
 const ORDER_IOA: &str = include_str!("../../../../../test-fixtures/specs/order.ioa.toml");
 

@@ -8,6 +8,14 @@
 //! - ToolRegistryActor — maps (session, tool_name) → client_id
 //! - Mock integration actors for testing
 
+#[cfg(feature = "test-shared-pg-proofs")]
+extern crate self as temper_agents;
+
+/// Unchanged PostgreSQL agent-chain proofs shared by the workspace test harness.
+#[cfg(feature = "test-shared-pg-proofs")]
+#[path = "../tests/agent_chain.rs"]
+pub mod agent_chain_proofs;
+
 pub mod child_completion;
 pub mod child_spawner;
 pub mod common;

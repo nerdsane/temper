@@ -13,7 +13,7 @@ The path that actually permits after SKILL Launch is in-process, not those HTTP 
 
 ```bash
 # swap primitive + live-entity proof (no Cedar HTTP gate)
-cargo test -p temper-server --test dst_hotswap
+cargo test -p temper-integration-tests --test server dst_hotswap::
 # offline cascade before you change a spec
 cargo run -p temper-cli -- verify --specs-dir <dir>
 ```

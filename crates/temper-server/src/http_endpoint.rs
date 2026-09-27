@@ -502,14 +502,12 @@ fn match_path_prefix(template: &str, path: &str) -> Option<BTreeMap<String, Stri
         match (t_seg, p_seg) {
             (None, _) => return Some(params),
             (Some(""), Some("")) => continue, // leading `/` aligns
-            (Some(t), Some(p)) => match match_segment(t, p) {
-                Some(extracted) => {
-                    for (k, v) in extracted {
-                        params.insert(k, v);
-                    }
+            (Some(t), Some(p)) => {
+                let extracted = match_segment(t, p)?;
+                for (k, v) in extracted {
+                    params.insert(k, v);
                 }
-                None => return None,
-            },
+            }
             (Some(_), None) => return None,
         }
     }

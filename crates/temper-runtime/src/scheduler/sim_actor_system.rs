@@ -570,8 +570,7 @@ impl SimActorSystem {
 
     /// Deliver any pending integration callbacks by executing them as actions.
     fn deliver_integration_callbacks(&mut self) {
-        let callbacks: Vec<(String, String)> =
-            self.pending_integration_callbacks.drain(..).collect();
+        let callbacks = std::mem::take(&mut self.pending_integration_callbacks);
         for (actor_id, callback_action) in callbacks {
             // Execute the callback as a regular step (this checks invariants too)
             let _ = self.step(&actor_id, &callback_action, "{}");

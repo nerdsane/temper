@@ -15,7 +15,7 @@
 //! SimPlatformHarness (production code, simulated I/O) and deterministic
 //! spec mutations.
 
-mod common;
+common!();
 
 use common::platform_harness::SimPlatformHarness;
 use std::future::Future;

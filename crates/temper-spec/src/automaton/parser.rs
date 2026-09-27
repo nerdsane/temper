@@ -67,6 +67,11 @@ pub fn parse_automaton_with_liveness(
     toml_str: &str,
     mode: LivenessEnforcement,
 ) -> Result<Automaton, AutomatonParseError> {
+    super::parse_cache::parse_cached(toml_str, mode)
+}
+
+/// Prepare the source-dependent AST without mode-dependent diagnostics.
+pub(super) fn prepare_automaton(toml_str: &str) -> Result<Automaton, AutomatonParseError> {
     let mut automaton: Automaton = toml_parser::parse_toml_to_automaton(toml_str)?;
     validate(&automaton)?;
     // ADR-0049: wire each state_timeout's `state` into the target action's
@@ -77,8 +82,6 @@ pub fn parse_automaton_with_liveness(
     // trigger (`translate::dispatch_effects`). Entity-kind triggers are handled
     // separately by the reaction dispatcher.
     expand_external_action_triggers(&mut automaton)?;
-    // ADR-0050: enforce (or warn on) liveness coverage.
-    check_liveness_coverage(&automaton, mode)?;
     Ok(automaton)
 }
 
@@ -193,6 +196,10 @@ pub type LivenessViolationReporter =
 use std::sync::OnceLock;
 static VIOLATION_REPORTER: OnceLock<Box<LivenessViolationReporter>> = OnceLock::new();
 
+pub(super) fn liveness_reporter() -> Option<&'static LivenessViolationReporter> {
+    VIOLATION_REPORTER.get().map(|reporter| reporter.as_ref())
+}
+
 /// Install a global reporter used whenever a liveness violation is observed
 /// during `parse_automaton*`. Callable at most once per process.
 pub fn set_liveness_violation_reporter<F>(reporter: F)
@@ -202,15 +209,16 @@ where
     let _ = VIOLATION_REPORTER.set(Box::new(reporter));
 }
 
-fn check_liveness_coverage(
+pub(super) fn check_liveness_coverage<'a>(
     automaton: &Automaton,
     mode: LivenessEnforcement,
+    reporter: impl FnOnce() -> Option<&'a LivenessViolationReporter>,
 ) -> Result<(), AutomatonParseError> {
     let Err(violations) = automaton.validate_liveness_coverage() else {
         return Ok(());
     };
 
-    if let Some(reporter) = VIOLATION_REPORTER.get() {
+    if let Some(reporter) = reporter() {
         for v in &violations {
             reporter(v);
         }

@@ -3,6 +3,10 @@
 //! HTTP / OData / Cedar / registry live here with EntityActor and
 //! `entity_actor/effects.rs` (the default `apply_effects`). Not a plug.
 
+// The pinned next solver counts cached async Send-proof depth accurately.
+// These finite proofs pass at 256; retain checking instead of allowing its lint.
+#![recursion_limit = "256"]
+
 pub mod adapters;
 mod admin;
 #[cfg(feature = "observe")]

@@ -77,7 +77,7 @@ fn event_budget_workspace_id_uses_workspace_entity_id_or_field() {
     assert_eq!(event_budget_workspace_id(&file_state), "ws-2");
 }
 
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test]
 async fn queued_snapshot_only_advances_replay_boundary_after_write_applies() {
     use temper_store_sim::SimEventStore;
@@ -793,7 +793,7 @@ async fn dst_multiple_actors_independent() {
 ///
 /// The actor must reach a consistent final state using only the events that
 /// parsed successfully, and must NOT panic on the schema-mismatched event.
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test]
 async fn replay_skips_schema_mismatched_events() {
     use temper_runtime::persistence::EventStore;
@@ -873,7 +873,7 @@ async fn replay_skips_schema_mismatched_events() {
 /// `EntityMsg::UpdateFields` has to survive actor eviction/restart, or any
 /// OData PATCH is silently lost the moment the actor rehydrates from the
 /// event store.
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test]
 async fn patched_fields_survive_actor_restart() {
     use temper_store_sim::SimEventStore;
@@ -949,7 +949,7 @@ async fn patched_fields_survive_actor_restart() {
 /// ARN-189: PUT-style replacement must also be journaled with REPLACE
 /// semantics — after restart the replaced field set must match the live
 /// result, including the absence of keys the replacement dropped.
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test]
 async fn replaced_fields_survive_actor_restart_with_replace_semantics() {
     use temper_store_sim::SimEventStore;
@@ -1038,14 +1038,14 @@ async fn replaced_fields_survive_actor_restart_with_replace_semantics() {
 /// can start an actor normally and then fail exactly the append under test)
 /// and whose snapshot saves fail once `fail_snapshots` is set (so a test can
 /// model a stalled snapshot path while appends keep succeeding).
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 struct AppendFuseStore {
     inner: temper_store_sim::SimEventStore,
     armed: std::sync::atomic::AtomicBool,
     fail_snapshots: std::sync::atomic::AtomicBool,
 }
 
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 impl AppendFuseStore {
     fn no_faults(seed: u64) -> Self {
         Self {
@@ -1066,7 +1066,7 @@ impl AppendFuseStore {
     }
 }
 
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 impl temper_runtime::persistence::EventStore for AppendFuseStore {
     async fn append(
         &self,
@@ -1174,7 +1174,7 @@ impl temper_runtime::persistence::EventStore for AppendFuseStore {
 /// ARN-189 fail-closed: when the journal append fails, a field update must
 /// NOT report success — otherwise the caller believes a write is durable
 /// while restart will lose it.
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test]
 async fn field_update_with_failed_journal_append_does_not_report_success() {
     let store = Arc::new(AppendFuseStore::no_faults(13));
@@ -1236,7 +1236,7 @@ async fn field_update_with_failed_journal_append_does_not_report_success() {
 /// With the snapshot path stalled (all snapshot failures are soft), sustained
 /// PATCH traffic must be REJECTED at MAX_EVENTS_SINCE_SNAPSHOT instead of
 /// growing a replay tail that makes the entity permanently unhydratable.
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test]
 async fn field_updates_reject_when_event_budget_exhausted() {
     let store = Arc::new(AppendFuseStore::no_faults(17));
@@ -1420,7 +1420,7 @@ effect = ["version_count += 1", "has_content = true"]
 /// cannot restore `Id`/`Status` into a non-object, and `persist_event` would
 /// co-commit zero key and zero vector rows, purging the entity's index. Before
 /// journaling, that corruption was in-memory and healed on restart.
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test]
 async fn field_update_rejects_non_object_payload_before_journaling() {
     let store = Arc::new(AppendFuseStore::no_faults(23));
@@ -1495,7 +1495,7 @@ async fn field_update_rejects_non_object_payload_before_journaling() {
 /// `apply_field_update` is shared with journal replay — must survive rehydration
 /// identically. A sanitize step applied only on the live path would silently
 /// rewrite the entity the next time it replayed.
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test]
 async fn field_update_sanitization_is_reproduced_by_replay() {
     let store = Arc::new(AppendFuseStore::no_faults(29));
@@ -1603,7 +1603,7 @@ async fn field_update_sanitization_is_reproduced_by_replay() {
 /// the same name would be hijacked on rehydration: its params merged into
 /// fields, its transition never replayed. The ADR reserved the names by
 /// convention; this makes the reservation real.
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test]
 async fn reserved_field_update_event_names_are_refused_as_actions() {
     let store = Arc::new(AppendFuseStore::no_faults(31));
@@ -1672,7 +1672,7 @@ async fn reserved_field_update_event_names_are_refused_as_actions() {
 /// rehydrate with the authoritative sequence. The Action arm right above has had
 /// ADR-0046 replay-and-retry for exactly this; a field update needs the same,
 /// minus the guard re-evaluation it has no guards for.
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test]
 async fn field_update_recovers_from_a_concurrency_violation() {
     let store = Arc::new(AppendFuseStore::no_faults(37));
@@ -1768,7 +1768,7 @@ async fn field_update_recovers_from_a_concurrency_violation() {
 
 /// Beyond the retry budget the arm still fails closed rather than reporting a
 /// success it did not persist.
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test]
 async fn field_update_fails_closed_when_conflicts_exceed_the_retry_budget() {
     let store = Arc::new(AppendFuseStore::no_faults(41));
@@ -1936,7 +1936,7 @@ fn apply_field_update_merge_replace_and_runtime_owned_fields() {
 /// event on top of its own effects: the events deque grows, `total_event_count`
 /// and `events_since_snapshot` climb, and non-idempotent effects fire twice — and
 /// the result is returned to the caller, projected, and possibly snapshotted.
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test]
 async fn field_update_retry_does_not_double_apply_the_journal() {
     let store = Arc::new(AppendFuseStore::no_faults(43));
@@ -2039,7 +2039,7 @@ async fn field_update_retry_does_not_double_apply_the_journal() {
 /// to state the caller never saw and Cedar never evaluated. It must be refused,
 /// not retried — `entity_ops` caps preconditioned asks at one attempt for exactly
 /// this reason.
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test]
 async fn preconditioned_field_update_refuses_rather_than_retrying_a_conflict() {
     let store = Arc::new(AppendFuseStore::no_faults(47));
@@ -2146,7 +2146,7 @@ async fn preconditioned_field_update_refuses_rather_than_retrying_a_conflict() {
 ///
 /// Driven by a second actor on the same store, so the conflict is a real stale
 /// sequence rather than an injected one.
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test]
 async fn field_update_retry_refuses_when_the_race_deleted_the_entity() {
     let store = Arc::new(AppendFuseStore::no_faults(53));
@@ -2241,7 +2241,7 @@ async fn field_update_retry_refuses_when_the_race_deleted_the_entity() {
 /// `..._exceed_the_retry_budget` pins 3, so halving the budget to a single retry
 /// is invisible to both. This pins the boundary: exactly 2 conflicts must still
 /// recover.
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test]
 async fn field_update_recovers_at_the_full_retry_budget() {
     let store = Arc::new(AppendFuseStore::no_faults(59));
@@ -2346,7 +2346,7 @@ fn replaying_a_non_object_field_event_leaves_state_untouched() {
 /// would restore the *pre-replay* fields — erasing a concurrent writer's
 /// committed values from live state until the actor next rehydrates, so reads
 /// would serve data the journal says is stale.
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test]
 async fn exhausted_field_update_rolls_back_to_the_caught_up_state() {
     let store = Arc::new(AppendFuseStore::no_faults(61));
@@ -2436,7 +2436,7 @@ async fn exhausted_field_update_rolls_back_to_the_caught_up_state() {
 /// recheck the retry appends past `MAX_EVENTS_SINCE_SNAPSHOT`, growing the
 /// snapshot tail past the hydration budget the entry check exists to protect —
 /// which is how an entity becomes permanently unhydratable.
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test]
 async fn field_update_retry_refuses_when_the_race_spent_the_event_budget() {
     let store = Arc::new(AppendFuseStore::no_faults(67));
@@ -2538,7 +2538,7 @@ async fn field_update_retry_refuses_when_the_race_spent_the_event_budget() {
 /// from the rebuilt state. A `tracing::warn!` alone leaves that undetectable in
 /// aggregate, so it is also counted. Asserted through a real meter, because a
 /// counter nobody reads is indistinguishable from one that is never incremented.
-#[cfg(feature = "sim")]
+#[cfg(any(test, feature = "sim"))]
 #[tokio::test]
 async fn replay_skip_of_a_field_update_event_is_counted() {
     use opentelemetry_sdk::metrics::{InMemoryMetricExporter, SdkMeterProvider};

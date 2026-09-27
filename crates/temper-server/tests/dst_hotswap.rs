@@ -4,7 +4,7 @@
 //! safe while entities are live. The real `ServerState` dispatches through
 //! the real `Arc<RwLock<TransitionTable>>` — no simulation abstractions.
 
-mod common;
+common!();
 
 use temper_runtime::scheduler::install_deterministic_context;
 use temper_runtime::tenant::TenantId;

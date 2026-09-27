@@ -5,7 +5,7 @@ use prost::Message as _;
 
 async fn pool() -> (
     Pool,
-    Option<testcontainers::ContainerAsync<testcontainers_modules::postgres::Postgres>>,
+    Option<Arc<testcontainers::ContainerAsync<testcontainers_modules::postgres::Postgres>>>,
 ) {
     crate::test_utils::setup_test_pg().await
 }
@@ -60,8 +60,9 @@ param = "expected_desired"
 field = "desired"
 "#;
 
-#[tokio::test]
-async fn rejected_input_is_consumed_and_the_next_valid_message_runs() {
+/// Prove rejection consumption still permits the next valid queued request.
+#[cfg_attr(not(feature = "test-shared-pg-proofs"), tokio::test)]
+pub async fn rejected_input_is_consumed_and_the_next_valid_message_runs() {
     let (pool, _container) = pool().await;
     let actor = SpecDrivenActor::from_ioa(SPEC).unwrap();
     let handle = setup(&pool, &actor).await;
@@ -152,8 +153,9 @@ impl Actor for MutatingFailure {
     }
 }
 
-#[tokio::test]
-async fn rejection_discards_handler_mutations_and_tells_but_transient_failure_retries() {
+/// Prove rejected mutations roll back while transient failures remain retryable.
+#[cfg_attr(not(feature = "test-shared-pg-proofs"), tokio::test)]
+pub async fn rejection_discards_handler_mutations_and_tells_but_transient_failure_retries() {
     let (pool, _container) = pool().await;
     let mailbox = Arc::new(PgMailbox::new(pool.clone(), PgMailboxConfig::default()));
     let activator = PgActorActivator::new(pool.clone(), mailbox.clone(), Default::default());
@@ -198,8 +200,9 @@ async fn rejection_discards_handler_mutations_and_tells_but_transient_failure_re
     }
 }
 
-#[tokio::test]
-async fn routed_trigger_projects_only_declared_inputs_then_enforces_constraints() {
+/// Prove routed triggers preserve declared inputs and enforce target constraints.
+#[cfg_attr(not(feature = "test-shared-pg-proofs"), tokio::test)]
+pub async fn routed_trigger_projects_only_declared_inputs_then_enforces_constraints() {
     let (pool, _container) = pool().await;
     {
         let source_spec = r#"
@@ -310,8 +313,9 @@ resolve_target = { type = "same_id" }
     }
 }
 
-#[tokio::test]
-async fn fresh_identity_is_persisted_before_any_action() {
+/// Prove fresh actor identities are persisted before their first action.
+#[cfg_attr(not(feature = "test-shared-pg-proofs"), tokio::test)]
+pub async fn fresh_identity_is_persisted_before_any_action() {
     let (pool, _container) = pool().await;
     let spec = SPEC.replace("field = \"desired\"", "field = \"Id\"");
     let system = crate::ActorSystem::new(pool.clone(), crate::SchedulerConfig::default());
@@ -368,8 +372,9 @@ async fn fresh_identity_is_persisted_before_any_action() {
     }
 }
 
-#[tokio::test]
-async fn activation_preserves_recovered_bytes_and_initializes_only_absent_actors() {
+/// Prove activation preserves recovery bytes and only initializes absent actors.
+#[cfg_attr(not(feature = "test-shared-pg-proofs"), tokio::test)]
+pub async fn activation_preserves_recovered_bytes_and_initializes_only_absent_actors() {
     let (pool, _container) = pool().await;
     let mailbox = Arc::new(PgMailbox::new(pool.clone(), PgMailboxConfig::default()));
     let activator = PgActorActivator::new(pool.clone(), mailbox.clone(), Default::default());
@@ -433,10 +438,12 @@ async fn activation_preserves_recovered_bytes_and_initializes_only_absent_actors
 }
 
 #[path = "pg_creation_tests.rs"]
-mod creation_tests;
+/// Unchanged PostgreSQL creation proofs shared by the workspace test harness.
+pub mod creation_tests;
 
-#[tokio::test]
-async fn auxiliary_state_updates_invalidate_queued_authorization() {
+/// Prove auxiliary updates invalidate authorization for already queued requests.
+#[cfg_attr(not(feature = "test-shared-pg-proofs"), tokio::test)]
+pub async fn auxiliary_state_updates_invalidate_queued_authorization() {
     let (pool, _container) = pool().await;
     let actor = MutatingFailure {
         rejected: false,

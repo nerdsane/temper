@@ -6,6 +6,10 @@ description = "PG-backed mailbox actor runtime for Temper"
 
 [features]
 test-utils = ["dep:testcontainers", "dep:testcontainers-modules"]
+# The workspace integration harness registers these unchanged PG proofs instead
+# of running them in separate unit- and integration-test executables. Standalone
+# defaults retain the original registrations.
+test-shared-pg-proofs = ["test-utils"]
 
 [dependencies]
 tokio = { workspace = true }

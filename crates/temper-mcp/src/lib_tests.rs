@@ -618,7 +618,7 @@ async fn e2e_agent_denial_human_approve_retry() {
     );
 
     // Step 3: Human approves directly via HTTP (simulating Observe UI / temper decide).
-    let http = reqwest::Client::new();
+    let http = crate::test_tls::client();
     let approve_url =
         format!("http://127.0.0.1:{port}/api/tenants/demo/decisions/{decision_id}/approve");
     let approve_resp = http

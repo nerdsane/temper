@@ -1,9 +1,9 @@
 # Deterministic simulation proof (the DST suites)
 
 ## Sub-features
-Seeded runs, fault injection, invariant checking (P1-P18), crash/replay, reproduction. The actor-level DST coverage lives in standalone test binaries, not in the CLI cascade (see spec-cascade.md on L2b).
+Seeded runs, fault injection, invariant checking (P1-P18), crash/replay, reproduction. The actor-level DST coverage lives in the consolidated integration test targets, not in the CLI cascade (see spec-cascade.md on L2b).
 
-The 13 `dst_*` suites in `crates/temper-server/tests/` (each is its own `cargo test --test <name>` binary):
+The 13 `dst_*` suites in `crates/temper-server/tests/` are modules in the `temper-integration-tests` package's `server` target:
 
 | Suite | Proves |
 |---|---|
@@ -28,15 +28,12 @@ An engineer changing sim-visible kernel code proves the change holds across seed
 
 ## Driving it
 ```bash
-cargo test -p temper-server --test dst_lifecycle          # one suite (fast to iterate)
-cargo test -p temper-server --test dst_platform_random    # randomized; TEMPER_DST_RANDOM_MODE=full|smoke
-cargo test -p temper-platform --test system_entity_dst
-# ALL suites: each dst_* is its own --test binary, so select by binary, not a name
-# filter (`cargo test -p temper-server dst_` filters test-FUNCTION names, which is
-# not the same set). Loop the binaries, or run every integration test target:
-for t in $(ls crates/temper-server/tests/dst_*.rs | xargs -n1 basename | sed 's/\.rs$//'); do
-  cargo test -p temper-server --test "$t"; done
-cargo test -p temper-server --tests                       # or: every integration test binary
+cargo test -p temper-integration-tests --test server dst_lifecycle:: # one suite
+cargo test -p temper-integration-tests --test server dst_platform_random:: # TEMPER_DST_RANDOM_MODE=full|smoke
+cargo test -p temper-integration-tests --test platform system_entity_dst::
+# ALL server dst_* modules: match the suite prefix, not individual function names.
+cargo nextest run -p temper-integration-tests --test server -E 'test(/^dst_/)'
+cargo test -p temper-integration-tests --test server # every server integration suite
 ```
 
 ## What proves it

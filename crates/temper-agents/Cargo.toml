@@ -4,8 +4,14 @@ version.workspace = true
 edition.workspace = true
 description = "Agent system actors built on temper-actor-runtime"
 
+[features]
+# Register unchanged PG chain proofs in the workspace integration harness only.
+# Standalone defaults retain the original agent_chain test registrations.
+test-shared-pg-proofs = ["dep:deadpool-postgres", "temper-actor-runtime/test-utils"]
+
 [dependencies]
 temper-actor-runtime = { workspace = true }
+deadpool-postgres = { workspace = true, optional = true }
 temper-runtime = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }

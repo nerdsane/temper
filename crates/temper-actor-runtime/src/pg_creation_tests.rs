@@ -1,8 +1,9 @@
 //! Public actor creation contract, exercised against PostgreSQL.
 use super::*;
 
-#[tokio::test]
-async fn public_spawn_with_fields_validates_strict_creation_before_writing() {
+/// Prove strict public creation validation occurs before any persistent write.
+#[cfg_attr(not(feature = "test-shared-pg-proofs"), tokio::test)]
+pub async fn public_spawn_with_fields_validates_strict_creation_before_writing() {
     let (pool, _container) = pool().await;
     let system = crate::ActorSystem::new(pool.clone(), crate::SchedulerConfig::default());
     system
@@ -85,8 +86,9 @@ impl Actor for ChildSpawner {
     }
 }
 
-#[tokio::test]
-async fn context_spawn_persists_strict_child_defaults_before_activation() {
+/// Prove context spawning persists validated child defaults before activation.
+#[cfg_attr(not(feature = "test-shared-pg-proofs"), tokio::test)]
+pub async fn context_spawn_persists_strict_child_defaults_before_activation() {
     let (pool, _container) = pool().await;
     let system = crate::ActorSystem::new(pool.clone(), crate::SchedulerConfig::default());
     // Registration after system construction must reach contexts through the same registry.
@@ -146,8 +148,9 @@ async fn context_spawn_persists_strict_child_defaults_before_activation() {
     );
 }
 
-#[tokio::test]
-async fn public_creation_normalizes_both_aliases_and_refuses_conflicting_identity() {
+/// Prove creation normalizes identity aliases and rejects conflicting identities.
+#[cfg_attr(not(feature = "test-shared-pg-proofs"), tokio::test)]
+pub async fn public_creation_normalizes_both_aliases_and_refuses_conflicting_identity() {
     let (pool, _container) = pool().await;
     let system = crate::ActorSystem::new(pool.clone(), crate::SchedulerConfig::default());
     let spec = SPEC.replace(

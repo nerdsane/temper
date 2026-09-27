@@ -4,6 +4,14 @@
 //! then applies effects here — a second interpreter. Unimplemented `Effect`
 //! variants fail closed. Default path is `temper-server` EntityActor.
 
+#[cfg(feature = "test-shared-pg-proofs")]
+extern crate self as temper_actor_runtime;
+
+/// Unchanged PostgreSQL integration proofs shared by the workspace test harness.
+#[cfg(feature = "test-shared-pg-proofs")]
+#[path = "../tests/integration.rs"]
+pub mod integration_proofs;
+
 pub mod actor;
 pub mod bus;
 pub mod mailbox;

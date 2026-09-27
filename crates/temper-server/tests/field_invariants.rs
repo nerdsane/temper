@@ -13,7 +13,7 @@
 //! `when` side, leaf `absent = true` on the `require` side, optional
 //! configured `message`.
 
-mod common;
+common!();
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};

@@ -1,0 +1,4 @@
+# Existing inline Axum responses and constraint errors are 128 bytes on the
+# pinned nightly. Keep their public APIs allocation-free while still rejecting
+# larger error values: Clippy warns at or above this threshold.
+large-error-threshold = 129

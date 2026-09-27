@@ -18,6 +18,7 @@ mod initial;
 pub mod legacy;
 mod lint;
 pub mod metadata;
+mod parse_cache;
 pub mod parser;
 mod toml_parser;
 pub mod translate;

@@ -1,6 +1,6 @@
 //! Integration test: idle passivation and lazy respawn.
 
-mod common;
+common!();
 
 use temper_runtime::persistence::EventStore;
 use temper_runtime::scheduler::{install_deterministic_context, sim_now};

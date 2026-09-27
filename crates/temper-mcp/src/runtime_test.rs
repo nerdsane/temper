@@ -111,7 +111,7 @@ fn truncate_trajectory_text_bounds_large_content() {
 fn trajectory_test_ctx(identity: &str) -> RuntimeContext {
     RuntimeContext {
         base_url: "http://127.0.0.1:1".to_string(),
-        http: reqwest::Client::new(),
+        http: crate::test_tls::client(),
         agent_id: None,
         agent_type: None,
         session_id: None,
@@ -318,7 +318,7 @@ async fn finalize_trajectory_retries_retryable_ots_upload_failure() {
 
     let mut ctx = RuntimeContext {
         base_url: format!("http://{addr}"),
-        http: reqwest::Client::new(),
+        http: crate::test_tls::client(),
         agent_id: Some("agent".to_string()),
         agent_type: Some("test-agent".to_string()),
         session_id: Some("session".to_string()),

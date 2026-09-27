@@ -12,7 +12,7 @@ use std::time::Duration;
 use temper_runtime::ActorSystem;
 use temper_server::{EntityActor, EntityMsg, EntityResponse};
 
-mod common;
+use crate::common;
 
 use common::specs::{
     SYSTEM_MODEL_CSDL_XML, catalog_table_rw, collaborator_table_rw, project_table_rw,
