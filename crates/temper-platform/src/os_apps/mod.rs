@@ -1394,6 +1394,12 @@ pub(super) async fn install_os_app_with_plan(
     let mut wasm_registered = Vec::new();
     let mut wasm_skipped = Vec::new();
     let mut wasm_failures = Vec::new();
+    // ARN-61/ARN-273: modules declared platform-required/app-required whose
+    // compiled artifact is absent from the bundle. A non-empty set fails the
+    // install loudly (see the guard after this block) instead of activating an
+    // app that will lazy-flap 503s at request time (e.g. paw-fs/blob_adapter
+    // missing from a published Genesis version → Files/$value 503s).
+    let mut missing_required_modules = Vec::new();
     if plan.wasm {
         let existing_sources = match state.server.load_wasm_module_sources(tenant).await {
             Ok(map) => map,
@@ -1514,6 +1520,7 @@ pub(super) async fn install_os_app_with_plan(
                 }
                 WasmModuleCriticality::PlatformRequired | WasmModuleCriticality::AppRequired => {
                     wasm_failures.push(module_name.clone());
+                    missing_required_modules.push(module_name.clone());
                     tracing::error!(
                         tenant,
                         module = %module_name,
@@ -1523,6 +1530,25 @@ pub(super) async fn install_os_app_with_plan(
                 }
             }
         }
+    }
+
+    // ARN-61/ARN-273: refuse to activate an app whose required WASM modules have
+    // no artifact in the bundle. Previously the install logged an error but
+    // returned Ok(InstallResult), so the app was bootstrapped and marked
+    // installed while the missing module 503-flapped at request time. Fail here —
+    // before Step 5 bootstraps the App entity and before install metadata is
+    // recorded — so a broken required module is a loud, safe activation failure
+    // (surfaced through install-from-genesis) rather than a silent prod outage.
+    // Optional modules are intentionally excluded (they only warn above).
+    if plan.wasm && !missing_required_modules.is_empty() {
+        missing_required_modules.sort();
+        return Err(format!(
+            "Refusing to activate os-app '{app_name}' for tenant '{tenant}': \
+             required WASM module artifact(s) missing from the app bundle: {}. \
+             The published bundle must include a compiled binary for every module \
+             declared platform-required/app-required in app.toml.",
+            missing_required_modules.join(", ")
+        ));
     }
 
     tracing::info!(
