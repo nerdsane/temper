@@ -53,6 +53,12 @@
 //! decision either. Decisions carry no observed state, so only the action-set
 //! checks apply to them.
 //!
+//! Most decisions in a run driven by an agent harness name that harness's own
+//! tools rather than anything this kernel governs. [`decisions`] holds the rule
+//! that separates the two and the one blind spot it leaves; the counts are
+//! [`ConformanceStats::ots_decisions_skipped_as_harness_tool`] and
+//! [`ConformanceStats::ots_decisions_skipped_as_unrecognized_name`].
+//!
 //! # Verdict, and why `passed` is not just "no violations"
 //!
 //! A report that saw nothing found no violations, and so did a report that
@@ -70,7 +76,10 @@
 //!
 //! - [`ViolationKind::UnknownAction`] — the action name appears in no
 //!   `[[action]]` of the spec and is not a name the kernel itself emits. No
-//!   spec defines it anywhere.
+//!   spec defines it anywhere. From a kernel row this is unconditional: the
+//!   platform dispatched the name, so it was an action. From an OTS decision it
+//!   requires that the name be placeable as an action at all — see
+//!   [`decisions`].
 //! - [`ViolationKind::ForbiddenAction`] — the action is one the platform
 //!   defines (see [`KERNEL_PLATFORM_ACTIONS`]) but this actor's spec does not
 //!   declare, recorded against the actor from the entity dispatch path. The
@@ -118,7 +127,7 @@ use temper_ots::models::OTSTrajectory;
 use temper_spec::automaton::Automaton;
 use temper_store_turso::TursoTrajectoryRow;
 
-use decisions::{DecisionActions, decision_actions};
+use decisions::{ActionVocabulary, DecisionActions, decision_actions};
 use report::{EvidenceContext, evidence_gaps};
 use spec_view::SpecView;
 use walk::{RowDisposition, Walk, check_row, row_disposition, undeclared_detail};
@@ -257,9 +266,13 @@ fn check_decisions(
         .filter(|row| row_disposition(spec, row) == RowDisposition::ActorExecution)
         .map(|row| row.action.as_str())
         .collect();
+    // Built from every row in the session, not just this actor's: the question
+    // it answers is "is this name an action in this deployment at all", which a
+    // row on another entity settles just as well.
+    let vocabulary = ActionVocabulary::new(spec, kernel_rows);
     let mut index = kernel_rows.len();
     for decision in trajectory.turns.iter().flat_map(|turn| &turn.decisions) {
-        let actions = match decision_actions(decision) {
+        let actions = match decision_actions(decision, &vocabulary) {
             // A reasoning step or a response formulation names a thought, not
             // a callable; reporting it as an action invents an attempt the
             // agent never made.
@@ -270,8 +283,16 @@ fn check_decisions(
             // The agent invoked its harness, not this actor. The governed
             // actions it reached through that call, if any, are recorded
             // alongside it and are judged as `Actions` instead.
-            DecisionActions::HarnessTool => {
+            DecisionActions::HarnessEnvelope => {
                 stats.ots_decisions_skipped_as_harness_tool += 1;
+                continue;
+            }
+            // A name no action vocabulary the kernel knows contains. Read as
+            // the agent's own tooling, which is what it is in every run driven
+            // by an agent harness; see [`decisions`] for why the alternative
+            // reading cannot be told apart from this one, and what that costs.
+            DecisionActions::UnrecognizedName => {
+                stats.ots_decisions_skipped_as_unrecognized_name += 1;
                 continue;
             }
             DecisionActions::Actions(actions) => actions,
