@@ -182,6 +182,22 @@ pub(crate) async fn handle_ready(
     Ok(())
 }
 
+/// Discord's per-message character budget.
+const DISCORD_MESSAGE_LIMIT: usize = 2000;
+
+/// Maximum sequential Discord messages one reply may fan out to (ADR-0158), so
+/// a reply cannot become an unbounded broadcast. The chunk count — not a raw
+/// byte count — is the authority: `split_message` may break on newlines and
+/// produce more chunks than `bytes / 2000`, so this is the exact bound.
+pub(crate) const MAX_REPLY_CHUNKS: usize = 8;
+
+/// Whether `content` fits the reply fan-out budget (splits into at most
+/// [`MAX_REPLY_CHUNKS`] Discord messages). The `/reply` handler uses this to
+/// reject an oversized reply cleanly, before any delivery.
+pub(crate) fn reply_fits_fanout_budget(content: &str) -> bool {
+    split_message(content, DISCORD_MESSAGE_LIMIT).len() <= MAX_REPLY_CHUNKS
+}
+
 /// Send a message to a Discord channel via REST API.
 pub async fn send_discord_message(
     http: &reqwest::Client,
@@ -189,7 +205,14 @@ pub async fn send_discord_message(
     channel_id: &str,
     content: &str,
 ) -> Result<(), String> {
-    let chunks = split_message(content, 2000);
+    let chunks = split_message(content, DISCORD_MESSAGE_LIMIT);
+    // Defensive backstop for any caller that skipped `reply_fits_fanout_budget`.
+    if chunks.len() > MAX_REPLY_CHUNKS {
+        return Err(format!(
+            "reply exceeds {MAX_REPLY_CHUNKS}-message fan-out budget ({} messages)",
+            chunks.len()
+        ));
+    }
     for chunk in chunks {
         let body = CreateMessageRequest {
             content: chunk.to_string(),
@@ -265,4 +288,27 @@ pub(crate) fn log_message(username: &str, content: &str) {
         "  [discord] Message from {username}: {}",
         truncate(content, 80)
     );
+}
+
+#[cfg(test)]
+mod fanout_tests {
+    use super::*;
+
+    #[test]
+    fn fanout_budget_bounds_chunk_count() {
+        // Exactly at the budget: MAX_REPLY_CHUNKS full messages fit.
+        let at_budget = "x".repeat(MAX_REPLY_CHUNKS * DISCORD_MESSAGE_LIMIT);
+        assert_eq!(
+            split_message(&at_budget, DISCORD_MESSAGE_LIMIT).len(),
+            MAX_REPLY_CHUNKS
+        );
+        assert!(reply_fits_fanout_budget(&at_budget));
+
+        // One byte over: an extra chunk is needed, so the budget is exceeded
+        // and the reply is rejected — no opaque 500 on a within-byte-budget
+        // body, and no unbounded fan-out.
+        let over = "x".repeat(MAX_REPLY_CHUNKS * DISCORD_MESSAGE_LIMIT + 1);
+        assert!(split_message(&over, DISCORD_MESSAGE_LIMIT).len() > MAX_REPLY_CHUNKS);
+        assert!(!reply_fits_fanout_budget(&over));
+    }
 }
