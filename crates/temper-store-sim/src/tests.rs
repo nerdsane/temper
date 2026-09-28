@@ -292,3 +292,46 @@ async fn fault_injection_produces_errors() {
     let err = store.append(pid, 0, &[test_envelope(0, "Created")]).await;
     assert!(err.is_err());
 }
+
+#[tokio::test]
+async fn stale_snapshot_rejected_and_same_content_idempotent() {
+    let store = SimEventStore::no_faults(7);
+    let id = "default:Issue:i1";
+    store.save_snapshot(id, 5, b"v5").await.expect("save 5");
+    let err = store
+        .save_snapshot(id, 3, b"stale")
+        .await
+        .expect_err("stale");
+    assert!(matches!(
+        err,
+        temper_runtime::persistence::PersistenceError::ConcurrencyViolation { .. }
+    ));
+    store
+        .save_snapshot(id, 5, b"v5")
+        .await
+        .expect("idempotent same content");
+    let loaded = store.load_snapshot(id).await.expect("load").expect("some");
+    assert_eq!(loaded.0, 5);
+    assert_eq!(loaded.1, b"v5");
+}
+
+#[tokio::test]
+async fn same_sequence_conflicting_content_rejected() {
+    let store = SimEventStore::no_faults(11);
+    let id = "default:Issue:i2";
+    store
+        .save_snapshot(id, 4, b"original")
+        .await
+        .expect("save original");
+    let err = store
+        .save_snapshot(id, 4, b"different")
+        .await
+        .expect_err("conflict");
+    assert!(matches!(
+        err,
+        temper_runtime::persistence::PersistenceError::ConcurrencyViolation { .. }
+    ));
+    let loaded = store.load_snapshot(id).await.expect("load").expect("some");
+    assert_eq!(loaded.0, 4);
+    assert_eq!(loaded.1, b"original");
+}
