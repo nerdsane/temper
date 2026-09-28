@@ -13,6 +13,8 @@ exclude = [
     "os-apps/temper-agent/wasm/tool_runner",
     "os-apps/temper-agent/wasm/sandbox_provisioner",
     "os-apps/temper-fs/wasm/blob_adapter",
+    "os-apps/dsf-deploy/wasm/dsf_deploy",
+    "os-apps/dsf-investigate/wasm/dsf_investigate",
 ]
 members = [
     "crates/temper-macros",

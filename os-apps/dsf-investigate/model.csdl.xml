@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Temper DSF Investigate OS App
+  OData v4 data model for stored Deep Sci-Fi Datadog investigations.
+-->
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.DsfInvestigate" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+
+      <EntityType Name="Investigation">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="Service" Type="Edm.String"/>
+        <Property Name="Query" Type="Edm.String"/>
+        <Property Name="TimeRange" Type="Edm.String"/>
+        <Property Name="FindingCount" Type="Edm.String"/>
+        <Property Name="HasQuery" Type="Edm.Boolean"/>
+        <Property Name="FindingsRecorded" Type="Edm.Boolean"/>
+      </EntityType>
+
+      <Action Name="Arm" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DsfInvestigate.Investigation"/>
+        <Parameter Name="Service" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Query" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="TimeRange" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.DsfInvestigate.Investigation"/>
+      </Action>
+
+      <Action Name="StartGather" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DsfInvestigate.Investigation"/>
+        <ReturnType Type="Temper.DsfInvestigate.Investigation"/>
+      </Action>
+
+      <Action Name="RecordFindings" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DsfInvestigate.Investigation"/>
+        <Parameter Name="FindingCount" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.DsfInvestigate.Investigation"/>
+      </Action>
+
+      <Action Name="MarkReady" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DsfInvestigate.Investigation"/>
+        <ReturnType Type="Temper.DsfInvestigate.Investigation"/>
+      </Action>
+
+      <Action Name="MarkFailed" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DsfInvestigate.Investigation"/>
+        <ReturnType Type="Temper.DsfInvestigate.Investigation"/>
+      </Action>
+
+      <Action Name="Cancel" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DsfInvestigate.Investigation"/>
+        <ReturnType Type="Temper.DsfInvestigate.Investigation"/>
+      </Action>
+
+      <Action Name="Resume" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.DsfInvestigate.Investigation"/>
+        <ReturnType Type="Temper.DsfInvestigate.Investigation"/>
+      </Action>
+
+      <EntityContainer Name="Service">
+        <EntitySet Name="Investigations" EntityType="Temper.DsfInvestigate.Investigation"/>
+      </EntityContainer>
+
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>
