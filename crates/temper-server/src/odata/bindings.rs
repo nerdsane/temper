@@ -306,15 +306,6 @@ pub(super) async fn dispatch_bound_action(
     let response = match result {
         Ok(response) => {
             if response.success {
-                // Cache for idempotency
-                if let Some(ref idem_key) = idempotency_key {
-                    state.idempotency_cache.put_effects_applied(
-                        &actor_key,
-                        idem_key,
-                        response.clone(),
-                    );
-                }
-
                 http_span.set_status(Status::Ok);
                 http_span.set_attribute(OtelKeyValue::new("http.status_code", 200i64));
 
@@ -344,6 +335,11 @@ pub(super) async fn dispatch_bound_action(
                         }
                         Ok(None) => {}
                         Err(error) => {
+                            // Not cached: the transition committed but its
+                            // post-action effect did not, and the caller is
+                            // told so. Caching here would let an idempotent
+                            // retry return this success without ever running
+                            // the hook again (review, ARN-505).
                             http_span.set_status(Status::error(error.clone()));
                             http_span.set_attribute(OtelKeyValue::new("http.status_code", 500i64));
                             return odata_error(
@@ -354,6 +350,16 @@ pub(super) async fn dispatch_bound_action(
                             .into_response();
                         }
                     }
+                }
+                // Cache for idempotency only now: the transition AND its
+                // post-action hook both succeeded, so a retry may safely be
+                // answered from the cache.
+                if let Some(ref idem_key) = idempotency_key {
+                    state.idempotency_cache.put_effects_applied(
+                        &actor_key,
+                        idem_key,
+                        response.clone(),
+                    );
                 }
                 hydrate_blob_refs_for_tenant(state, tenant, &mut state_json).await;
                 let body =
