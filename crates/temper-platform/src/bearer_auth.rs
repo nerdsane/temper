@@ -1,10 +1,12 @@
 //! Tenant-scoped bearer authentication middleware.
 //!
-//! Every protected request resolves a bearer credential in the requested
-//! tenant and receives one typed [`temper_authz::AuthenticatedRequestContext`].
+//! Every protected request resolves a bearer credential, or carries a
+//! [`HostVerifiedIdentity`], in the requested tenant and receives one typed
+//! [`temper_authz::AuthenticatedRequestContext`].
 //! `TEMPER_API_KEY` may bootstrap a normal tenant credential, but it has no
 //! special runtime fallback or deployment-wide Admin authority.
 
+use crate::host_identity::HostVerifiedIdentity;
 use crate::state::PlatformState;
 use axum::extract::{Request, State};
 use axum::http::{Method, StatusCode};
@@ -33,6 +35,13 @@ pub async fn bearer_auth_check(
 ) -> Result<Response, StatusCode> {
     let bearer = bearer_credential(&req);
     let tenant = requested_tenant(&req)?;
+
+    if let Some(HostVerifiedIdentity(identity)) = req.extensions_mut().remove() {
+        req.headers_mut().remove("authorization");
+        let authenticated = temper_authz::AuthenticatedRequestContext::new(tenant, identity);
+        req.extensions_mut().insert(authenticated);
+        return Ok(next.run(req).await);
+    }
 
     if bearer
         .as_deref()
