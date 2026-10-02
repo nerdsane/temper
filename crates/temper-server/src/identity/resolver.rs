@@ -7,6 +7,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 
@@ -43,6 +46,10 @@ pub struct ResolvedIdentity {
     pub is_human: bool,
     /// Verified `role` claim (Cedar), when the issuer stamped one.
     pub role: Option<String>,
+    /// Verified application principal type, if the issuer explicitly owns its
+    /// namespace. Absent for legacy Customer and Agent credentials.
+    #[serde(default)]
+    pub principal_type: Option<String>,
 }
 
 /// Resolves bearer tokens to platform-assigned agent identities.
@@ -55,6 +62,117 @@ pub struct ResolvedIdentity {
 /// when another server replica performed the mutation.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct IdentityResolver;
+
+/// The result of asking one credential format to authenticate a token.
+/// Rejection is terminal; it must never fall through to another format.
+pub enum AuthenticationResult {
+    /// This authenticator does not own the credential format.
+    NotApplicable,
+    /// A verified, tenant-bound identity.
+    Authenticated(ResolvedIdentity),
+    /// The format was recognized, but authentication failed.
+    Rejected,
+}
+
+/// Trusted implementation of one credential format. Implementations must
+/// validate all authority they return against the requested tenant.
+pub trait CredentialAuthenticator: Send + Sync {
+    /// Authenticate one token or decline a format this implementation does not own.
+    fn authenticate<'a>(
+        &'a self,
+        state: &'a ServerState,
+        tenant: &'a TenantId,
+        token: &'a str,
+    ) -> Pin<Box<dyn Future<Output = AuthenticationResult> + Send + 'a>>;
+}
+
+/// Ordered chain of trusted credential authenticators.
+pub struct CompositeAuthenticator {
+    authenticators: Vec<Arc<dyn CredentialAuthenticator>>,
+}
+
+impl Default for CompositeAuthenticator {
+    fn default() -> Self {
+        Self::new(vec![
+            Arc::new(JwtAuthenticator),
+            Arc::new(OpaqueCredentialAuthenticator),
+        ])
+    }
+}
+
+impl CompositeAuthenticator {
+    /// Create a chain. Registrations should have disjoint credential formats;
+    /// the first implementation that recognizes a token owns its outcome.
+    pub fn new(authenticators: Vec<Arc<dyn CredentialAuthenticator>>) -> Self {
+        Self { authenticators }
+    }
+
+    /// Authenticate through the chain without downgrading a rejection.
+    pub async fn authenticate(
+        &self,
+        state: &ServerState,
+        tenant: &TenantId,
+        token: &str,
+    ) -> AuthenticationResult {
+        for authenticator in &self.authenticators {
+            match authenticator.authenticate(state, tenant, token).await {
+                AuthenticationResult::NotApplicable => continue,
+                outcome => return outcome,
+            }
+        }
+        AuthenticationResult::Rejected
+    }
+}
+
+/// Verify JWS-shaped bearer credentials against registered trusted issuers.
+pub struct JwtAuthenticator;
+
+impl CredentialAuthenticator for JwtAuthenticator {
+    fn authenticate<'a>(
+        &'a self,
+        state: &'a ServerState,
+        tenant: &'a TenantId,
+        token: &'a str,
+    ) -> Pin<Box<dyn Future<Output = AuthenticationResult> + Send + 'a>> {
+        Box::pin(async move {
+            if !looks_like_jwt(token) {
+                return AuthenticationResult::NotApplicable;
+            }
+            IdentityResolver::new()
+                .resolve_jwt(state, tenant, token)
+                .await
+                .map_or(
+                    AuthenticationResult::Rejected,
+                    AuthenticationResult::Authenticated,
+                )
+        })
+    }
+}
+
+/// Resolve opaque bearer credentials from the authoritative agent registry.
+pub struct OpaqueCredentialAuthenticator;
+
+impl CredentialAuthenticator for OpaqueCredentialAuthenticator {
+    fn authenticate<'a>(
+        &'a self,
+        state: &'a ServerState,
+        tenant: &'a TenantId,
+        token: &'a str,
+    ) -> Pin<Box<dyn Future<Output = AuthenticationResult> + Send + 'a>> {
+        Box::pin(async move {
+            if looks_like_jwt(token) {
+                return AuthenticationResult::NotApplicable;
+            }
+            IdentityResolver::new()
+                .resolve_opaque(state, tenant, token)
+                .await
+                .map_or(
+                    AuthenticationResult::Rejected,
+                    AuthenticationResult::Authenticated,
+                )
+        })
+    }
+}
 
 impl IdentityResolver {
     /// Create a new identity resolver.
@@ -80,12 +198,19 @@ impl IdentityResolver {
             return None;
         }
 
-        // JWS-shaped tokens are verified against a registered TrustedIssuer;
-        // opaque tokens are looked up in the AgentCredential registry.
-        if looks_like_jwt(bearer_token) {
-            return self.resolve_jwt(state, tenant, bearer_token).await;
+        let chain = CompositeAuthenticator::default();
+        match chain.authenticate(state, tenant, bearer_token).await {
+            AuthenticationResult::Authenticated(identity) => Some(identity),
+            AuthenticationResult::NotApplicable | AuthenticationResult::Rejected => None,
         }
+    }
 
+    async fn resolve_opaque(
+        &self,
+        state: &ServerState,
+        tenant: &TenantId,
+        bearer_token: &str,
+    ) -> Option<ResolvedIdentity> {
         let key_hash = hash_token(bearer_token);
 
         // Look up AgentCredential entity. We use the key_hash as entity ID
@@ -160,6 +285,7 @@ impl IdentityResolver {
             from_jwt: false,
             is_human: false,
             role: None,
+            principal_type: None,
         };
 
         // Re-check after the linked AgentType lookup so a short-lived
@@ -216,6 +342,27 @@ impl IdentityResolver {
         )
         .ok()?;
 
+        // A signature establishes who issued a claim, not unlimited authority
+        // over Cedar types. The issuer registration controls one namespace.
+        let principal_type = match claims.principal_type.as_deref() {
+            Some(name) => {
+                let namespace = fields
+                    .get("principal_namespace")
+                    .and_then(serde_json::Value::as_str)?;
+                if namespace.is_empty()
+                    || name
+                        .strip_prefix(namespace)
+                        .and_then(|rest| rest.strip_prefix("::"))
+                        .is_none()
+                {
+                    return None;
+                }
+                temper_authz::PrincipalKind::verified_application_type(name).ok()?;
+                Some(name.to_string())
+            }
+            None => None,
+        };
+
         // Sign-out-everywhere: reject a token whose generation is older than the
         // principal's current generation (ARN-255 option A), keyed on the human
         // `sub` so signing a human out also invalidates agents acting for them.
@@ -241,7 +388,7 @@ impl IdentityResolver {
 
         // A token with an `agent_type` is an agent acting for the human `sub`;
         // a token with only a `sub` is the human themselves (a Customer).
-        let identity = match claims.agent_type.as_deref().filter(|s| !s.is_empty()) {
+        let mut identity = match claims.agent_type.as_deref().filter(|s| !s.is_empty()) {
             Some(agent_type) => {
                 let client_id = claims.client_id.clone().unwrap_or_default();
                 if client_id.is_empty() {
@@ -256,6 +403,7 @@ impl IdentityResolver {
                     from_jwt: true,
                     is_human: false,
                     role: claims.role.clone(),
+                    principal_type: None,
                 }
             }
             None => {
@@ -272,9 +420,17 @@ impl IdentityResolver {
                     from_jwt: true,
                     is_human: true,
                     role: claims.role.clone(),
+                    principal_type: None,
                 }
             }
         };
+        if principal_type.is_some() {
+            // A Cedar UID must not alias a subject minted by another trusted
+            // issuer (or a legacy Customer/Agent ID). Keep legacy IDs stable.
+            let subject = std::mem::take(&mut identity.agent_instance_id);
+            identity.agent_instance_id = format!("{}:{}:{}", issuer_id.len(), issuer_id, subject);
+        }
+        identity.principal_type = principal_type;
         Some(identity)
     }
 
@@ -391,6 +547,48 @@ pub fn hash_token(token: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct FixedAuthenticator {
+        result: fn() -> AuthenticationResult,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl CredentialAuthenticator for FixedAuthenticator {
+        fn authenticate<'a>(
+            &'a self,
+            _state: &'a ServerState,
+            _tenant: &'a TenantId,
+            _token: &'a str,
+        ) -> Pin<Box<dyn Future<Output = AuthenticationResult> + Send + 'a>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move { (self.result)() })
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_credential_never_falls_through_to_another_authenticator() {
+        let second_calls = Arc::new(AtomicUsize::new(0));
+        let chain = CompositeAuthenticator::new(vec![
+            Arc::new(FixedAuthenticator {
+                result: || AuthenticationResult::Rejected,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Arc::new(FixedAuthenticator {
+                result: || AuthenticationResult::NotApplicable,
+                calls: second_calls.clone(),
+            }),
+        ]);
+        let state = ServerState::from_registry(
+            temper_runtime::ActorSystem::new("auth-chain"),
+            crate::registry::SpecRegistry::new(),
+        );
+        let result = chain
+            .authenticate(&state, &TenantId::default(), "bad-token")
+            .await;
+        assert!(matches!(result, AuthenticationResult::Rejected));
+        assert_eq!(second_calls.load(Ordering::SeqCst), 0);
+    }
 
     #[test]
     fn test_hash_token_deterministic() {

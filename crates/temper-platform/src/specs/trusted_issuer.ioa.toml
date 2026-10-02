@@ -34,6 +34,13 @@ name = "audience"
 type = "string"
 initial = ""
 
+# Optional namespace whose principal types this issuer may assert. Empty
+# preserves the legacy Customer/Agent mapping and rejects custom type claims.
+[[state]]
+name = "principal_namespace"
+type = "string"
+initial = ""
+
 # Accepted signing algorithms (informational; the verifier enforces ES256).
 [[state]]
 name = "algorithms"
@@ -56,7 +63,7 @@ initial = ""
 name = "RegisterIssuer"
 kind = "input"
 from = ["Active"]
-params = ["issuer", "jwks_json", "audience", "algorithms", "description", "created_by"]
+params = ["issuer", "jwks_json", "audience", "principal_namespace", "algorithms", "description", "created_by"]
 hint = "Register a trusted JWT issuer for this tenant. Entity id must be the issuer URL."
 
 [[action]]

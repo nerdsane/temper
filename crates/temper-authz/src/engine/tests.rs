@@ -51,6 +51,39 @@ fn test_permissive_engine_allows_all() {
 }
 
 #[test]
+fn namespaced_principal_is_evaluated_without_a_kernel_type_mapping() {
+    let engine = AuthzEngine::new(
+        r#"permit(principal == Acme::ServiceAccount::"service-1", action == Action::"read", resource is Order);"#,
+    ).unwrap();
+    let kind =
+        crate::context::PrincipalKind::verified_application_type("Acme::ServiceAccount").unwrap();
+    let ctx = SecurityContext::from_verified_jwt("service-1", kind, None, None, None, None);
+    assert!(
+        engine
+            .authorize(&ctx, "read", "Order", &HashMap::new())
+            .is_allowed()
+    );
+    assert!(
+        !engine
+            .authorize(&ctx, "delete", "Order", &HashMap::new())
+            .is_allowed()
+    );
+    assert!(!ctx.principal.attributes.contains_key("agentTypeVerified"));
+}
+
+#[test]
+fn custom_type_cannot_impersonate_builtin_system() {
+    let engine = AuthzEngine::empty();
+    let mut ctx = SecurityContext::anonymous();
+    ctx.principal.kind = crate::context::PrincipalKind::Custom("System".to_string());
+    assert!(
+        !engine
+            .authorize(&ctx, "read", "Order", &HashMap::new())
+            .is_allowed()
+    );
+}
+
+#[test]
 fn test_system_bypass() {
     let engine = AuthzEngine::permissive();
     let ctx = SecurityContext::system();
@@ -171,16 +204,35 @@ fn test_invalid_policy_returns_error() {
 }
 
 #[test]
-fn invalid_action_denies_through_instrumented_error_path() {
+fn invalid_resource_type_denies_through_instrumented_error_path() {
     let engine = AuthzEngine::permissive();
     let ctx = customer_context("cust-1");
     let attrs = HashMap::new();
 
-    let decision = engine.authorize(&ctx, "bad\"action", "Order", &attrs);
+    let decision = engine.authorize(&ctx, "read", "bad\"resource", &attrs);
     assert!(
-        matches!(decision, AuthzDecision::Deny(AuthzDenial::InvalidAction(_))),
-        "invalid action should deny with typed reason, got: {decision:?}"
+        matches!(
+            decision,
+            AuthzDecision::Deny(AuthzDenial::InvalidResource(_))
+        ),
+        "invalid resource type should deny with typed reason, got: {decision:?}"
     );
+}
+
+#[test]
+fn escaped_action_id_matches_only_the_exact_cedar_uid() {
+    let engine =
+        AuthzEngine::new(r#"permit(principal, action == Action::"bad\"action", resource);"#)
+            .expect("policy with escaped action ID must parse");
+    let ctx = customer_context("cust-1");
+    let attrs = HashMap::new();
+
+    assert!(
+        engine
+            .authorize(&ctx, "bad\"action", "Order", &attrs)
+            .is_allowed()
+    );
+    assert!(!engine.authorize(&ctx, "bad", "Order", &attrs).is_allowed());
 }
 
 #[test]

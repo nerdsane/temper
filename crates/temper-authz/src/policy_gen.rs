@@ -166,7 +166,11 @@ pub fn generate_cedar_from_matrix(
 
     let principal_clause = match &matrix.principal {
         PrincipalScope::ThisAgent => {
-            format!("principal == {}::\"{}\"", principal_kind, agent_id)
+            format!(
+                "principal == {}::{}",
+                principal_kind,
+                serde_json::to_string(agent_id).expect("string serializes")
+            )
         }
         PrincipalScope::AgentsWithRole
         | PrincipalScope::AgentsOfType
@@ -174,13 +178,20 @@ pub fn generate_cedar_from_matrix(
     };
 
     let action_clause = match &matrix.action {
-        ActionScope::ThisAction => format!("action == Action::\"{}\"", action),
+        ActionScope::ThisAction => format!(
+            "action == Action::{}",
+            serde_json::to_string(action).expect("string serializes")
+        ),
         ActionScope::AllActionsOnType | ActionScope::AllActions => "action".to_string(),
     };
 
     let resource_clause = match &matrix.resource {
         ResourceScope::ThisResource => {
-            format!("resource == {}::\"{}\"", resource_type, resource_id)
+            format!(
+                "resource == {}::{}",
+                resource_type,
+                serde_json::to_string(resource_id).expect("string serializes")
+            )
         }
         ResourceScope::AnyOfType => format!("resource is {}", resource_type),
         ResourceScope::AnyResource => "resource".to_string(),
@@ -192,12 +203,18 @@ pub fn generate_cedar_from_matrix(
     match &matrix.principal {
         PrincipalScope::AgentsWithRole => {
             if let Some(ref role) = matrix.role_value {
-                conditions.push(format!("context.role == \"{}\"", role));
+                conditions.push(format!(
+                    "context.role == {}",
+                    serde_json::to_string(role).expect("string serializes")
+                ));
             }
         }
         PrincipalScope::AgentsOfType => {
             if let Some(ref agent_type) = matrix.agent_type_value {
-                conditions.push(format!("context.agentType == \"{}\"", agent_type));
+                conditions.push(format!(
+                    "context.agentType == {}",
+                    serde_json::to_string(agent_type).expect("string serializes")
+                ));
                 // Require credential-verified identity (ADR-0033).
                 conditions.push("context.agentTypeVerified == true".to_string());
             }
@@ -208,7 +225,10 @@ pub fn generate_cedar_from_matrix(
     if matrix.duration == DurationScope::Session
         && let Some(ref session_id) = matrix.session_id
     {
-        conditions.push(format!("context.sessionId == \"{}\"", session_id));
+        conditions.push(format!(
+            "context.sessionId == {}",
+            serde_json::to_string(session_id).expect("string serializes")
+        ));
     }
 
     let when_clause = if conditions.is_empty() {

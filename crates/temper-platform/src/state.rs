@@ -34,6 +34,8 @@ pub struct PlatformState {
     pub api_token: Option<String>,
     /// In-memory spec storage for pending tenant deployments.
     pub spec_store: Arc<RwLock<SpecStore>>,
+    /// Tenant-bound bearer authenticators installed by the hosting platform.
+    pub authenticators: Arc<temper_server::identity::CompositeAuthenticator>,
 }
 
 /// Default broadcast channel capacity.
@@ -97,6 +99,7 @@ impl PlatformState {
             api_key,
             api_token: None,
             spec_store,
+            authenticators: Arc::new(temper_server::identity::CompositeAuthenticator::default()),
         };
         state.server.bound_action_hook = Some(Arc::new(
             crate::genesis_install::GenesisInstallHook::new(state.clone()),
@@ -132,6 +135,7 @@ impl PlatformState {
             api_key,
             api_token: None,
             spec_store,
+            authenticators: Arc::new(temper_server::identity::CompositeAuthenticator::default()),
         };
         state.server.bound_action_hook = Some(Arc::new(
             crate::genesis_install::GenesisInstallHook::new(state.clone()),
@@ -142,6 +146,16 @@ impl PlatformState {
     /// Subscribe to the broadcast channel for platform events.
     pub fn subscribe(&self) -> broadcast::Receiver<PlatformEvent> {
         self.broadcast_tx.subscribe()
+    }
+
+    /// Replace the trusted authenticator chain before building the router.
+    #[must_use]
+    pub fn with_authenticators(
+        mut self,
+        authenticators: temper_server::identity::CompositeAuthenticator,
+    ) -> Self {
+        self.authenticators = Arc::new(authenticators);
+        self
     }
 
     /// Broadcast a platform event to all subscribers.
