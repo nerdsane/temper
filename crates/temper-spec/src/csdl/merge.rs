@@ -1,11 +1,12 @@
 //! Merge two [`CsdlDocument`]s by combining their schemas.
 
-use super::types::{CsdlDocument, EntityContainer, Schema, TargetedAnnotations};
+use super::types::{Action, CsdlDocument, EntityContainer, Schema, TargetedAnnotations};
 
 /// Merge two CSDL documents by combining their schemas.
 ///
 /// For schemas with matching namespaces, entity types, actions, functions,
 /// and entity containers are merged by name (incoming wins on conflict).
+/// Actions additionally match bound/unbound status and binding parameter type.
 /// Schemas in `incoming` that don't exist in `existing` are appended.
 pub fn merge_csdl(existing: &CsdlDocument, incoming: &CsdlDocument) -> CsdlDocument {
     let mut result = existing.clone();
@@ -36,11 +37,7 @@ fn merge_schema(schemas: &mut Vec<Schema>, incoming_schema: &Schema) {
         &incoming_schema.enum_types,
         |item| item.name.as_str(),
     );
-    merge_replace_by_name(
-        &mut result_schema.actions,
-        &incoming_schema.actions,
-        |item| item.name.as_str(),
-    );
+    merge_actions(&mut result_schema.actions, &incoming_schema.actions);
     merge_replace_by_name(
         &mut result_schema.functions,
         &incoming_schema.functions,
@@ -90,6 +87,33 @@ fn merge_entity_container(containers: &mut Vec<EntityContainer>, incoming: &Enti
         &incoming.function_imports,
         |item| item.name.as_str(),
     );
+}
+
+// Same-named actions on different entity types are distinct CSDL operations.
+// Non-binding parameters belong to the definition, so incoming updates them.
+fn merge_actions(target: &mut Vec<Action>, incoming: &[Action]) {
+    for action in incoming {
+        if let Some(position) = target.iter().position(|existing| {
+            existing.name == action.name
+                && existing.is_bound == action.is_bound
+                && existing.binding_type() == action.binding_type()
+        }) {
+            target[position] = action.clone();
+            // Remove stale duplicates of this definition so lookup order cannot
+            // select an older signature after an update.
+            let mut index = 0;
+            target.retain(|existing| {
+                let keep = index <= position
+                    || existing.name != action.name
+                    || existing.is_bound != action.is_bound
+                    || existing.binding_type() != action.binding_type();
+                index += 1;
+                keep
+            });
+        } else {
+            target.push(action.clone());
+        }
+    }
 }
 
 fn merge_replace_by_name<T, F>(target: &mut Vec<T>, incoming: &[T], name: F)
