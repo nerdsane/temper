@@ -12,33 +12,34 @@ use temper_authz::AuthenticatedRequestContext;
 use temper_runtime::scheduler::sim_now;
 use tracing::instrument;
 
+use crate::authz::operation::{AuthorizedOperation, OperationCheck, PreparedOperation};
 use crate::authz::require_authenticated_context;
 use crate::state::{ServerState, TrajectoryEntry, TrajectorySource};
 
 fn require_repl_authorization(
     state: &ServerState,
     authenticated: &AuthenticatedRequestContext,
-) -> Result<(), StatusCode> {
-    state
-        .authorize_with_context(
-            authenticated.security_context(),
-            "execute_repl",
-            "Repl",
-            &std::collections::BTreeMap::from([(
-                "id".to_string(),
-                serde_json::Value::String(authenticated.tenant().to_string()),
-            )]),
-            authenticated.tenant().as_str(),
-        )
-        .map_err(|denial| {
-            tracing::warn!(
+    command: ReplRequest,
+) -> Result<AuthorizedOperation<ReplRequest>, StatusCode> {
+    PreparedOperation::new(
+        command,
+        vec![OperationCheck {
+            action: "execute_repl".to_string(),
+            resource_type: "Repl".to_string(),
+            resource_id: authenticated.tenant().to_string(),
+            resource_attrs: Default::default(),
+        }],
+    )
+    .authorize(state, authenticated)
+    .map_err(|denial| {
+        tracing::warn!(
                 reason = %denial,
-                tenant = %authenticated.tenant(),
-                principal_id = %authenticated.security_context().principal.id,
-                "REPL execution denied"
-            );
-            StatusCode::FORBIDDEN
-        })
+            tenant = %authenticated.tenant(),
+            principal_id = %authenticated.security_context().principal.id,
+            "REPL execution denied"
+        );
+        StatusCode::FORBIDDEN
+    })
 }
 
 /// Request body for POST /api/repl.
@@ -92,9 +93,11 @@ pub(crate) async fn handle_repl(
         Ok(authenticated) => authenticated,
         Err(status) => return status.into_response(),
     };
-    if let Err(status) = require_repl_authorization(&state, authenticated) {
-        return status.into_response();
-    }
+    let authorized = match require_repl_authorization(&state, authenticated, body) {
+        Ok(authorized) => authorized,
+        Err(status) => return status.into_response(),
+    };
+    let body = authorized.into_command();
     // Session and intent come from the canonical observability extractor so the
     // REPL honours the same header aliases as every other entrypoint
     // (`X-Temper-Observe-Session-Id`/`X-Session-Id`,
@@ -295,14 +298,17 @@ permit(
             },
         );
 
-        assert!(require_repl_authorization(&state, &allowed).is_ok());
-        assert_eq!(
-            require_repl_authorization(&state, &denied),
+        let request = || super::ReplRequest {
+            code: String::new(),
+        };
+        assert!(require_repl_authorization(&state, &allowed, request()).is_ok());
+        assert!(matches!(
+            require_repl_authorization(&state, &denied, request()),
             Err(axum::http::StatusCode::FORBIDDEN)
-        );
-        assert_eq!(
-            require_repl_authorization(&state, &claimed_admin),
+        ));
+        assert!(matches!(
+            require_repl_authorization(&state, &claimed_admin, request()),
             Err(axum::http::StatusCode::FORBIDDEN)
-        );
+        ));
     }
 }

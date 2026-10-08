@@ -10,8 +10,8 @@ use std::sync::RwLock;
 use std::time::Instant;
 
 use cedar_policy::{
-    Authorizer, Context, Decision, Entities, Entity, EntityUid, Policy, PolicyId, PolicySet,
-    Request, Response as CedarResponse,
+    Authorizer, Context, Decision, Entities, Entity, EntityId, EntityTypeName, EntityUid, Policy,
+    PolicyId, PolicySet, Request, Response as CedarResponse,
 };
 
 use crate::context::{PrincipalKind, SecurityContext, is_cedar_authority_context_key};
@@ -400,43 +400,39 @@ impl AuthzEngine {
         let mut recorder = CedarEvaluationRecorder::start();
 
         // Build Cedar principal
-        let principal_type = match security_ctx.principal.kind {
-            PrincipalKind::Customer => "Customer",
-            PrincipalKind::Agent => "Agent",
-            PrincipalKind::Admin => "Admin",
-            PrincipalKind::System => "System",
-        };
-
-        let principal_uid = match EntityUid::from_str(&format!(
-            "{}::\"{}\"",
-            principal_type, security_ctx.principal.id
-        )) {
-            Ok(uid) => uid,
-            Err(e) => {
-                return recorder.fail(
-                    "principal_uid",
-                    AuthzDenial::InvalidPrincipal(e.to_string()),
-                );
-            }
-        };
+        if let PrincipalKind::Custom(name) = &security_ctx.principal.kind
+            && let Err(error) = PrincipalKind::verified_application_type(name)
+        {
+            return recorder.fail("principal_uid", AuthzDenial::InvalidPrincipal(error));
+        }
+        let principal_uid =
+            match EntityTypeName::from_str(security_ctx.principal.kind.cedar_type_name()) {
+                Ok(entity_type) => EntityUid::from_type_name_and_id(
+                    entity_type,
+                    EntityId::new(&security_ctx.principal.id),
+                ),
+                Err(e) => {
+                    return recorder.fail(
+                        "principal_uid",
+                        AuthzDenial::InvalidPrincipal(e.to_string()),
+                    );
+                }
+            };
         recorder.finish_phase("principal_uid");
 
         // Build Cedar action
-        let action_uid = match EntityUid::from_str(&format!("Action::\"{}\"", action)) {
-            Ok(uid) => uid,
-            Err(e) => {
-                return recorder.fail("action_uid", AuthzDenial::InvalidAction(e.to_string()));
-            }
-        };
+        let action_uid = EntityUid::from_type_name_and_id(
+            EntityTypeName::from_str("Action").expect("static Cedar action type"),
+            EntityId::new(action),
+        );
         recorder.finish_phase("action_uid");
 
         // Build Cedar resource
-        let resource_uid = match EntityUid::from_str(&format!(
-            "{}::\"{}\"",
-            resource_type,
-            resource_id_from_attrs(resource_attrs)
-        )) {
-            Ok(uid) => uid,
+        let resource_uid = match EntityTypeName::from_str(resource_type) {
+            Ok(entity_type) => EntityUid::from_type_name_and_id(
+                entity_type,
+                EntityId::new(resource_id_from_attrs(resource_attrs)),
+            ),
             Err(e) => {
                 return recorder.fail("resource_uid", AuthzDenial::InvalidResource(e.to_string()));
             }

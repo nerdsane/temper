@@ -16,6 +16,37 @@ pub enum PrincipalKind {
     Admin,
     /// An internal system process.
     System,
+    /// A verified, issuer-scoped application principal type.
+    Custom(String),
+}
+
+impl PrincipalKind {
+    /// The Cedar entity type for this principal. Built-in spellings remain
+    /// stable so existing policies and recorded decisions continue to match.
+    pub fn cedar_type_name(&self) -> &str {
+        match self {
+            Self::Customer => "Customer",
+            Self::Agent => "Agent",
+            Self::Admin => "Admin",
+            Self::System => "System",
+            Self::Custom(name) => name,
+        }
+    }
+
+    /// Construct an externally verified application type. An application type
+    /// must be namespaced; a credential cannot select the built-in System or
+    /// Admin authority by copying its spelling.
+    pub fn verified_application_type(name: &str) -> Result<Self, String> {
+        use std::str::FromStr;
+
+        let parsed = cedar_policy::EntityTypeName::from_str(name)
+            .map_err(|error| format!("invalid Cedar principal type: {error}"))?;
+        if parsed.namespace().is_empty() || parsed.namespace().split("::").next() == Some("Temper")
+        {
+            return Err("application principal type must use a non-Temper namespace".into());
+        }
+        Ok(Self::Custom(name.to_string()))
+    }
 }
 
 /// A principal (the entity making the request).
@@ -274,10 +305,12 @@ impl SecurityContext {
         session_id: Option<&str>,
     ) -> Self {
         let mut attributes = HashMap::new();
-        attributes.insert(
-            "agentTypeVerified".to_string(),
-            serde_json::Value::Bool(true),
-        );
+        if !matches!(kind, PrincipalKind::Custom(_)) {
+            attributes.insert(
+                "agentTypeVerified".to_string(),
+                serde_json::Value::Bool(true),
+            );
+        }
 
         let mut context_attrs = HashMap::new();
         context_attrs.insert(
@@ -290,10 +323,12 @@ impl SecurityContext {
                 serde_json::Value::String(at.to_string()),
             );
         }
-        context_attrs.insert(
-            "agentTypeVerified".to_string(),
-            serde_json::Value::Bool(true),
-        );
+        if !matches!(kind, PrincipalKind::Custom(_)) {
+            context_attrs.insert(
+                "agentTypeVerified".to_string(),
+                serde_json::Value::Bool(true),
+            );
+        }
         if let Some(af) = acting_for {
             context_attrs.insert(
                 "actingFor".to_string(),

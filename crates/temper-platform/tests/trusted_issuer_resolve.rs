@@ -8,15 +8,23 @@
 
 use std::collections::BTreeMap;
 
+use axum::Router;
+use axum::body::Body;
+use axum::extract::{Extension, State};
+use axum::http::{Request, StatusCode};
+use axum::middleware;
+use axum::routing::get;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use p256::ecdsa::signature::Signer;
 use p256::ecdsa::{Signature, SigningKey};
 
+use temper_authz::AuthenticatedRequestContext;
 use temper_platform::{PlatformState, bootstrap_agent_specs, bootstrap_system_tenant};
 use temper_runtime::tenant::TenantId;
 use temper_server::identity::IdentityResolver;
 use temper_server::request_context::AgentContext;
+use tower::ServiceExt;
 
 const ISSUER: &str = "https://issuer.e2e.local";
 const AUD: &str = "temper-e2e";
@@ -65,6 +73,10 @@ fn contributor_claims() -> serde_json::Value {
 }
 
 async fn state_with_issuer(sk: &SigningKey) -> PlatformState {
+    state_with_issuer_namespace(sk, "").await
+}
+
+async fn state_with_issuer_namespace(sk: &SigningKey, namespace: &str) -> PlatformState {
     let state = PlatformState::new(None);
     let cache = BTreeMap::new();
     bootstrap_system_tenant(&state, &cache);
@@ -83,6 +95,7 @@ async fn state_with_issuer(sk: &SigningKey) -> PlatformState {
                 "issuer": ISSUER,
                 "jwks_json": jwks_json(sk, "k1"),
                 "audience": AUD,
+                "principal_namespace": namespace,
                 "algorithms": "ES256",
                 "description": "e2e issuer",
                 "created_by": "e2e",
@@ -92,6 +105,127 @@ async fn state_with_issuer(sk: &SigningKey) -> PlatformState {
         .await
         .expect("register issuer");
     state
+}
+
+#[tokio::test]
+async fn issuer_can_assert_only_its_registered_principal_namespace() {
+    let sk = SigningKey::from_slice(&[7u8; 32]).unwrap();
+    let state = state_with_issuer_namespace(&sk, "Acme").await;
+    let tenant = TenantId::new("default");
+    let resolver = IdentityResolver::new();
+
+    let mut claims = serde_json::json!({
+        "iss": ISSUER, "aud": AUD, "sub": "service-account-1",
+        "principal_type": "Acme::ServiceAccount",
+        "nbf": 0, "exp": 4_102_444_800i64,
+    });
+    let token = mint(&sk, header(), claims.clone());
+    let identity = resolver
+        .resolve(&state.server, &tenant, &token)
+        .await
+        .expect("registered namespace must resolve");
+    assert_eq!(
+        identity.principal_type.as_deref(),
+        Some("Acme::ServiceAccount")
+    );
+    assert_eq!(
+        identity.agent_instance_id,
+        format!("{}:{ISSUER}:service-account-1", ISSUER.len())
+    );
+
+    claims["principal_type"] = serde_json::json!("Other::ServiceAccount");
+    assert!(
+        resolver
+            .resolve(&state.server, &tenant, &mint(&sk, header(), claims.clone()))
+            .await
+            .is_none()
+    );
+    claims["principal_type"] = serde_json::json!("System");
+    assert!(
+        resolver
+            .resolve(&state.server, &tenant, &mint(&sk, header(), claims))
+            .await
+            .is_none()
+    );
+
+    let legacy_state = state_with_issuer(&sk).await;
+    assert!(
+        resolver
+            .resolve(&legacy_state.server, &tenant, &token)
+            .await
+            .is_none()
+    );
+}
+
+async fn custom_principal_probe(
+    State(state): State<PlatformState>,
+    Extension(authenticated): Extension<AuthenticatedRequestContext>,
+) -> StatusCode {
+    let attrs = BTreeMap::from([(
+        "id".to_string(),
+        serde_json::Value::String(authenticated.tenant().to_string()),
+    )]);
+    match state.server.authorize_with_context(
+        authenticated.security_context(),
+        "execute_repl",
+        "Repl",
+        &attrs,
+        authenticated.tenant().as_str(),
+    ) {
+        Ok(()) => StatusCode::OK,
+        Err(_) => StatusCode::FORBIDDEN,
+    }
+}
+
+#[tokio::test]
+async fn signed_custom_principal_is_authorized_through_http_bearer_edge() {
+    let sk = SigningKey::from_slice(&[7u8; 32]).unwrap();
+    let state = state_with_issuer_namespace(&sk, "Acme").await;
+    let principal_id = format!("{}:{ISSUER}:service-account-1", ISSUER.len());
+    let claims = serde_json::json!({
+        "iss": ISSUER, "aud": AUD, "sub": "service-account-1",
+        "principal_type": "Acme::ServiceAccount",
+        "nbf": 0, "exp": 4_102_444_800i64,
+    });
+    let token = mint(&sk, header(), claims);
+    let app = Router::new()
+        .route("/probe", get(custom_principal_probe))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            temper_platform::bearer_auth::bearer_auth_check,
+        ))
+        .with_state(state.clone());
+    let request = || {
+        Request::get("/probe")
+            .header("authorization", format!("Bearer {token}"))
+            .header("x-tenant-id", "default")
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    state
+        .server
+        .authz
+        .reload_tenant_policies("default", "")
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(request()).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+
+    let policy = format!(
+        "permit(principal == Acme::ServiceAccount::{}, action == Action::\"execute_repl\", resource == Repl::\"default\");",
+        serde_json::to_string(&principal_id).unwrap()
+    );
+    state
+        .server
+        .authz
+        .reload_tenant_policies("default", &policy)
+        .unwrap();
+    assert_eq!(
+        app.oneshot(request()).await.unwrap().status(),
+        StatusCode::OK
+    );
 }
 
 #[tokio::test]

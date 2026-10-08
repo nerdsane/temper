@@ -8,4 +8,8 @@ pub mod endpoint;
 pub mod jwt;
 mod resolver;
 
-pub use resolver::{IdentityResolver, MAX_CREDENTIAL_BYTES, ResolvedIdentity, hash_token};
+pub use resolver::{
+    AuthenticationResult, CompositeAuthenticator, CredentialAuthenticator, IdentityResolver,
+    JwtAuthenticator, MAX_CREDENTIAL_BYTES, OpaqueCredentialAuthenticator, ResolvedIdentity,
+    hash_token,
+};

@@ -127,6 +127,38 @@ async fn no_key_mode_rejects_protected_requests() {
 }
 
 #[tokio::test]
+async fn invalid_bearer_cannot_downgrade_to_anonymous() {
+    let state = PlatformState::new(None);
+    state
+        .server
+        .http_endpoint_tables
+        .table_for(&TenantId::default())
+        .await
+        .replace(vec![protocol_route_forwarding(false, true)])
+        .await;
+    let router = app(state);
+
+    for path in [
+        "/repo.git/info/refs",
+        "/api/genesis/apps/owner/name/hash/bundle",
+    ] {
+        for credential in ["Bearer invalid-kernel-token", "Bearer"] {
+            let response = router
+                .clone()
+                .oneshot(
+                    HttpRequest::get(path)
+                        .header("authorization", credential)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn deployment_key_has_no_unregistered_fallback() {
     let mut state = PlatformState::new(None);
     state.api_token = Some("deployment-root".to_string());
@@ -672,10 +704,20 @@ async fn a_forwarding_route_forwards_only_the_protocol_credential_formats() {
         "default:Agent:operator:false",
         "a credential the kernel resolved is kernel authority and is stripped"
     );
+    let unresolved_bearer = app(state)
+        .oneshot(
+            HttpRequest::get("/repo.git/info/refs")
+                .header("authorization", "Bearer a-credential-for-some-other-tenant")
+                .header("x-tenant-id", "default")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(
-        guest_saw_credential(&state, "Bearer a-credential-for-some-other-tenant").await,
-        "default:Customer:anonymous:false",
-        "an UNRESOLVED Bearer is withheld too: it may be valid in a tenant this request did not name"
+        unresolved_bearer.status(),
+        StatusCode::UNAUTHORIZED,
+        "an unresolved kernel Bearer must not downgrade to a guest-anonymous request"
     );
 }
 

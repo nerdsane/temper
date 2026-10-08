@@ -148,6 +148,7 @@
         <Property Name="issuer" Type="Edm.String"/>
         <Property Name="jwks_json" Type="Edm.String"/>
         <Property Name="audience" Type="Edm.String"/>
+        <Property Name="principal_namespace" Type="Edm.String"/>
         <Property Name="algorithms" Type="Edm.String"/>
         <Property Name="description" Type="Edm.String"/>
         <Property Name="created_by" Type="Edm.String"/>
@@ -190,6 +191,7 @@
         <Parameter Name="issuer" Type="Edm.String" Nullable="false"/>
         <Parameter Name="jwks_json" Type="Edm.String" Nullable="false"/>
         <Parameter Name="audience" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="principal_namespace" Type="Edm.String" Nullable="true"/>
         <Parameter Name="algorithms" Type="Edm.String" Nullable="true"/>
         <Parameter Name="description" Type="Edm.String" Nullable="true"/>
         <Parameter Name="created_by" Type="Edm.String" Nullable="true"/>

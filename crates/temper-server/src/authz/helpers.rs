@@ -318,13 +318,12 @@ pub(crate) async fn record_authz_denial(
     );
     pd.agent_type = input.security_ctx.principal.agent_type.clone();
     pd.principal_kind = Some(
-        match input.security_ctx.principal.kind {
-            temper_authz::PrincipalKind::Customer => "Customer",
-            temper_authz::PrincipalKind::Agent => "Agent",
-            temper_authz::PrincipalKind::Admin => "Admin",
-            temper_authz::PrincipalKind::System => "System",
-        }
-        .to_string(),
+        input
+            .security_ctx
+            .principal
+            .kind
+            .cedar_type_name()
+            .to_string(),
     );
     pd.session_id = session_id.clone();
 

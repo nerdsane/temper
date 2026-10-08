@@ -69,11 +69,29 @@ pub async fn bearer_auth_check(
     let request_method = req.method().as_str().to_string();
     let request_path = req.uri().path().to_string();
 
-    if let Some(token) = request_credential(&req)
-        && let Some(identity) = temper_server::identity::IdentityResolver::new()
-            .resolve(&state.server, &tenant, &token)
-            .await
-    {
+    let presented_kernel_bearer = req
+        .headers()
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split_ascii_whitespace().next())
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("bearer"));
+    let identity = match request_credential(&req) {
+        Some(token) if token.len() <= temper_server::identity::MAX_CREDENTIAL_BYTES => {
+            match state
+                .authenticators
+                .authenticate(&state.server, &tenant, &token)
+                .await
+            {
+                temper_server::identity::AuthenticationResult::Authenticated(identity) => {
+                    Some(identity)
+                }
+                temper_server::identity::AuthenticationResult::NotApplicable
+                | temper_server::identity::AuthenticationResult::Rejected => None,
+            }
+        }
+        _ => None,
+    };
+    if let Some(identity) = identity {
         let session_id = temper_server::request_context::session_id_from_headers(req.headers());
         let intent = temper_server::request_context::intent_from_headers(req.headers());
         let verified_session = match session_id.as_deref() {
@@ -89,7 +107,10 @@ pub async fn bearer_auth_check(
         // that from_resolved_identity cannot express (ARN-255, RFC-0002). The
         // AgentCredential path stays exactly as before.
         let security_context = if identity.from_jwt {
-            let kind = if identity.is_human {
+            let kind = if let Some(name) = identity.principal_type.as_deref() {
+                temper_authz::PrincipalKind::verified_application_type(name)
+                    .map_err(|_| StatusCode::UNAUTHORIZED)?
+            } else if identity.is_human {
                 temper_authz::PrincipalKind::Customer
             } else {
                 temper_authz::PrincipalKind::Agent
@@ -165,6 +186,13 @@ pub async fn bearer_auth_check(
         }
         req.headers_mut().remove("authorization");
         return Ok(next.run(req).await);
+    }
+
+    // Optional-identity and protocol routes may admit an anonymous caller,
+    // but an invalid kernel bearer cannot silently become anonymous. A guest
+    // must never see it as a forwardable credential either.
+    if presented_kernel_bearer {
+        return Err(StatusCode::UNAUTHORIZED);
     }
 
     // Routes declared public have an explicit anonymous Customer context.
