@@ -1,3 +1,4 @@
+import { createVisibleEventSource as createReconnectingEventSource } from "./event-source";
 import type {
   SpecSummary,
   SpecDetail,
@@ -135,39 +136,6 @@ export async function fetchWorkflows(): Promise<WorkflowsResponse> {
   const res = await fetchWithRetry(`${API_BASE}/observe/workflows`, { cache: "no-store" });
   if (!res.ok) throw new ApiError(`Failed to fetch workflows: ${res.status}`, res.status);
   return res.json();
-}
-
-/** Create a reconnecting EventSource that re-establishes the connection on error. */
-function createReconnectingEventSource(
-  url: string,
-  eventName: string,
-  onMessage: (data: string) => void,
-): () => void {
-  let source: EventSource | null = null;
-  let closed = false;
-  let retryDelay = 1000;
-
-  function connect() {
-    if (closed) return;
-    source = new EventSource(url);
-    source.addEventListener(eventName, (e) => {
-      retryDelay = 1000; // reset on successful message
-      onMessage((e as MessageEvent).data);
-    });
-    source.onerror = () => {
-      source?.close();
-      if (!closed) {
-        setTimeout(connect, retryDelay);
-        retryDelay = Math.min(retryDelay * 2, 30000);
-      }
-    };
-  }
-
-  connect();
-  return () => {
-    closed = true;
-    source?.close();
-  };
 }
 
 /** Subscribe to design-time SSE events. Returns a cleanup function. */

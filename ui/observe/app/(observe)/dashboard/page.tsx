@@ -265,10 +265,6 @@ export default function Dashboard() {
             </select>
           )}
           {/* Last updated indicator */}
-          {lastUpdated && (
-            <span className="text-xs text-[var(--color-text-muted)]">
-            </span>
-          )}
         </div>
       </div>
 
