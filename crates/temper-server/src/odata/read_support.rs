@@ -207,13 +207,59 @@ pub(super) async fn missing_catalog_entity_ids(
         .collect()
 }
 
-/// Try to load a single entity body from the durable `entity_catalog`.
+/// Outcome of a single-entity catalog read, including the freshness check
+/// against the authoritative journal tail (temper#529 fresh point reads).
+pub(super) enum CatalogReadOutcome {
+    /// The catalog row was present and proven current — serve it directly.
+    Fresh(serde_json::Value),
+    /// Catalog reads are disabled, the catalog has no row for this key, or
+    /// the row is behind the journal tail. The caller must fall back to
+    /// actor hydration, which performs its own authoritative existence/
+    /// tombstone check instead of trusting the stale row.
+    FallbackToActor,
+    /// A durable journal is configured but could not be read to validate the
+    /// catalog row's freshness. The caller must fail with a typed dependency
+    /// error — never serve the possibly-stale row and never fabricate a 404.
+    JournalUnavailable(String),
+}
+
+/// Prove a catalog row is not behind the authoritative journal before it is
+/// served (temper#529 fresh point reads, read-only lane map finding V1).
 ///
-/// Returns `Some(json)` when the catalog has a row for `(tenant, entity_type,
-/// key)` and catalog materialization is preferred or the catalog fast-read
-/// feature flag is enabled. Returns `None` when catalog reads are disabled,
-/// the catalog has no row, or the read fails — caller is expected to fall
-/// back to actor hydration in that case.
+/// Reads only events strictly AFTER `row_sequence` — the lightest existing
+/// `EventStore::read_events` primitive, not a full-stream replay — so an
+/// up-to-date row (the common case) pays the cost of one bounded tail probe
+/// per read rather than a full actor hydration. An empty tail proves the row
+/// reflects every committed event; any non-empty tail (including a trailing
+/// delete) means the row is stale and the caller must fall back to actor
+/// hydration, which already carries its own tombstone check
+/// (`ServerState::ensure_entity_loaded`) rather than duplicating it here.
+///
+/// Returns `Ok(true)` when no durable journal is configured at all (dev
+/// in-memory deployments keep today's behavior: the catalog row IS the only
+/// state there is).
+async fn catalog_row_is_current(
+    state: &ServerState,
+    tenant: &TenantId,
+    entity_type: &str,
+    entity_id: &str,
+    row_sequence: u64,
+) -> Result<bool, String> {
+    let Some((store, _backend)) = state.event_journal() else {
+        return Ok(true);
+    };
+    let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
+    let tail = store
+        .read_events(&persistence_id, row_sequence)
+        .await
+        .map_err(|error| {
+            format!("failed to validate catalog freshness for {entity_type}:{entity_id}: {error}")
+        })?;
+    Ok(tail.is_empty())
+}
+
+/// Try to load a single entity body from the durable `entity_catalog`,
+/// validated against the authoritative journal tail before being trusted.
 ///
 /// The returned JSON has the same shape as the actor's serialized
 /// `EntityState` so downstream code (`enrich_entity_response`, OData
@@ -225,19 +271,27 @@ pub(super) async fn try_load_entity_body_from_catalog(
     entity_set_name: &str,
     key: &str,
     prefer_catalog: bool,
-) -> Option<serde_json::Value> {
+) -> CatalogReadOutcome {
     if !should_read_catalog_for_materialization(prefer_catalog) {
-        return None;
+        return CatalogReadOutcome::FallbackToActor;
     }
     let ids = [key.to_string()];
     let rows = try_load_catalog_rows(state, tenant, entity_type, &ids).await;
-    let row = rows.into_iter().next().map(|(_, r)| r)?;
-    maybe_spawn_catalog_shadow_check(state, tenant, entity_type, &row);
-    Some(catalog_row_to_entity_body(
-        entity_type,
-        entity_set_name,
-        row,
-    ))
+    let Some(row) = rows.into_iter().next().map(|(_, r)| r) else {
+        return CatalogReadOutcome::FallbackToActor;
+    };
+    match catalog_row_is_current(state, tenant, entity_type, key, row.sequence_nr).await {
+        Ok(true) => {
+            maybe_spawn_catalog_shadow_check(state, tenant, entity_type, &row);
+            CatalogReadOutcome::Fresh(catalog_row_to_entity_body(
+                entity_type,
+                entity_set_name,
+                row,
+            ))
+        }
+        Ok(false) => CatalogReadOutcome::FallbackToActor,
+        Err(error) => CatalogReadOutcome::JournalUnavailable(error),
+    }
 }
 
 pub(super) async fn materialize_entity_set_entities(

@@ -5,6 +5,10 @@ OData bound actions. Before starting the WASM module the kernel runs each action
 through the ordinary OData handler with the incoming request's authenticated user.
 Cedar authorization, input validation and IOA state checks therefore apply before
 external I/O. A rejection is returned directly; the module is not started.
+Admission targets must already exist: route declaration and an initial-state action
+do not imply creation. An authorized missing or deleted target returns
+`404 EntityNotFound`; Cedar denial still precedes existence disclosure. This rule
+also applies to native endpoint admission and guest calls to OData bound actions.
 
 Example field value:
 

@@ -2,6 +2,7 @@ use temper_runtime::ActorSystem;
 use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope};
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
+use temper_store_sim::SimEventStore;
 use temper_store_turso::TursoEventStore;
 
 use temper_server::registry::SpecRegistry;
@@ -11,6 +12,21 @@ use temper_spec::csdl::parse_csdl;
 
 const CSDL_XML: &str = include_str!("../../../test-fixtures/specs/model.csdl.xml");
 const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
+
+fn build_state_with_sim(system_name: &str, store: SimEventStore) -> ServerState {
+    let mut registry = SpecRegistry::new();
+    let csdl = parse_csdl(CSDL_XML).expect("CSDL should parse");
+    registry.register_tenant(
+        "tenant-a",
+        csdl,
+        CSDL_XML.to_string(),
+        &[("Order", ORDER_IOA)],
+    );
+
+    let mut state = ServerState::from_registry(ActorSystem::new(system_name), registry);
+    state.set_storage_stack(StorageStack::from_sim(store, None));
+    state
+}
 
 fn build_state_with_turso(system_name: &str, store: TursoEventStore) -> ServerState {
     let mut registry = SpecRegistry::new();
@@ -406,4 +422,136 @@ async fn list_entity_ids_lazy_surfaces_durable_entities_missing_from_partial_ind
     );
 
     let _ = std::fs::remove_file(db_path);
+}
+
+// ── temper#529 P2 follow-up (issue #529): a journal read failure during
+// hydration must not be reported the same way as confirmed absence ────────
+
+/// RED: a non-resident entity with real history whose journal read fails
+/// during hydration must surface as `Err`, never collapse into the same
+/// `Ok(false)` that confirmed absence (zero history) produces.
+#[tokio::test]
+async fn ensure_entity_loaded_or_error_distinguishes_journal_failure_from_absence() {
+    let store = SimEventStore::no_faults(529_101);
+    let tenant = TenantId::new("tenant-a");
+    let entity_id = "ord-journal-fail";
+
+    let writer = build_state_with_sim("test-ensure-or-error-writer", store.clone());
+    writer
+        .get_or_create_tenant_entity(
+            &tenant,
+            "Order",
+            entity_id,
+            serde_json::json!({"Title": "x"}),
+        )
+        .await
+        .expect("create durable order");
+
+    // Cold reader: fresh actor registry/index, same durable journal.
+    let reader = build_state_with_sim("test-ensure-or-error-reader", store.clone());
+    assert!(
+        !reader.entity_exists(&tenant, "Order", entity_id),
+        "precondition: reader must not already have this entity resident"
+    );
+
+    let persistence_id = format!("{tenant}:Order:{entity_id}");
+    store.fail_next_reads(&persistence_id, 1);
+
+    let outcome = reader
+        .ensure_entity_loaded_or_error(&tenant, "Order", entity_id)
+        .await;
+    assert!(
+        outcome.is_err(),
+        "a journal read failure for an entity that exists must not report Ok(false): {outcome:?}"
+    );
+    assert!(
+        !reader.entity_exists(&tenant, "Order", entity_id),
+        "a dependency failure must not fabricate residency either"
+    );
+}
+
+/// Control: the legacy `bool` form keeps today's behavior exactly — every
+/// existing caller that only distinguishes "loaded" vs "not loaded" must see
+/// `false` for a journal read failure, identical to before this change.
+#[tokio::test]
+async fn ensure_entity_loaded_still_collapses_journal_failure_to_false_for_legacy_callers() {
+    let store = SimEventStore::no_faults(529_102);
+    let tenant = TenantId::new("tenant-a");
+    let entity_id = "ord-journal-fail-legacy";
+
+    let writer = build_state_with_sim("test-ensure-legacy-writer", store.clone());
+    writer
+        .get_or_create_tenant_entity(
+            &tenant,
+            "Order",
+            entity_id,
+            serde_json::json!({"Title": "x"}),
+        )
+        .await
+        .expect("create durable order");
+
+    let reader = build_state_with_sim("test-ensure-legacy-reader", store.clone());
+    let persistence_id = format!("{tenant}:Order:{entity_id}");
+    store.fail_next_reads(&persistence_id, 1);
+
+    let loaded = reader
+        .ensure_entity_loaded(&tenant, "Order", entity_id)
+        .await;
+    assert!(
+        !loaded,
+        "legacy bool callers must keep collapsing a journal read failure to false"
+    );
+}
+
+/// Control: a never-created id is still confirmed absence (`Ok(false)`), not
+/// an error, when the journal itself is healthy.
+#[tokio::test]
+async fn ensure_entity_loaded_or_error_returns_ok_false_for_confirmed_absence() {
+    let store = SimEventStore::no_faults(529_103);
+    let state = build_state_with_sim("test-ensure-or-error-absent", store);
+    let tenant = TenantId::new("tenant-a");
+
+    let outcome = state
+        .ensure_entity_loaded_or_error(&tenant, "Order", "ord-never-created")
+        .await;
+    assert_eq!(
+        outcome,
+        Ok(false),
+        "a never-created id must stay confirmed-absent, not an error: {outcome:?}"
+    );
+}
+
+/// Control: an entity already resident in the index is unaffected by a
+/// journal fault here — the read is only a tombstone double-check for data
+/// already held in memory, so a transient fault must not turn a live,
+/// in-memory entity into a dependency error.
+#[tokio::test]
+async fn ensure_entity_loaded_or_error_resident_entity_unaffected_by_journal_fault() {
+    let store = SimEventStore::no_faults(529_104);
+    let state = build_state_with_sim("test-ensure-or-error-resident", store.clone());
+    let tenant = TenantId::new("tenant-a");
+    let entity_id = "ord-resident";
+
+    state
+        .get_or_create_tenant_entity(
+            &tenant,
+            "Order",
+            entity_id,
+            serde_json::json!({"Title": "x"}),
+        )
+        .await
+        .expect("create durable order");
+    assert!(state.entity_exists(&tenant, "Order", entity_id));
+
+    let persistence_id = format!("{tenant}:Order:{entity_id}");
+    store.fail_next_reads(&persistence_id, 1);
+
+    let outcome = state
+        .ensure_entity_loaded_or_error(&tenant, "Order", entity_id)
+        .await;
+    assert_eq!(
+        outcome,
+        Ok(true),
+        "a resident entity must not become a dependency error on a journal fault: {outcome:?}"
+    );
 }

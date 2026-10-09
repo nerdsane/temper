@@ -111,6 +111,10 @@ mod tests;
 #[path = "setup_server_test.rs"]
 mod server_tests;
 
+#[cfg(all(test, unix))]
+#[path = "setup_recovery_test.rs"]
+mod recovery_tests;
+
 pub(crate) fn identity_path() -> Result<Option<PathBuf>> {
     let Some(raw) = std::env::var_os("TEMPER_MCP_IDENTITY_FILE") else {
         return Ok(None);
@@ -186,13 +190,13 @@ impl SetupAdmin {
         })
     }
 
-    async fn request(
+    async fn send_request(
         &self,
         method: Method,
         path: &str,
         key: &str,
         body: Option<Value>,
-    ) -> Result<Value> {
+    ) -> Result<reqwest::Response> {
         let mut request = self
             .client
             .request(method, format!("{}{path}", self.base))
@@ -201,16 +205,19 @@ impl SetupAdmin {
         if let Some(body) = body {
             request = request.json(&body);
         }
-        let response = request.send().await.map_err(|_| anyhow::anyhow!(
+        request.send().await.map_err(|_| anyhow::anyhow!(
             "Setup request failed; outcome may be unknown. Retained private state supports explicit recovery"
-        ))?;
-        if !response.status().is_success() {
-            bail!(
-                "Setup operation {path} returned HTTP {}; no policy bypass or automatic retry was attempted",
-                response.status()
-            );
-        }
-        read_response(response).await
+        ))
+    }
+
+    async fn request(
+        &self,
+        method: Method,
+        path: &str,
+        key: &str,
+        body: Option<Value>,
+    ) -> Result<Value> {
+        read_setup_response(path, self.send_request(method, path, key, body).await?).await
     }
 
     async fn resolve(&self, token: &str) -> Result<Value> {
@@ -245,24 +252,33 @@ impl SetupAdmin {
     }
 
     async fn ensure_type(&self) -> Result<()> {
-        if let Some(entity) = self
+        let fields = json!({"name":REQUESTER_TYPE,"system_prompt":"External MCP requester",
+            "tool_set":"none","model":"none","max_turns":"0",
+            "adapter_config":"{}","default_budget_cents":"0"});
+        let entity = match self
             .entity(&format!("/tdata/AgentTypes('{REQUESTER_TYPE}')"))
             .await?
         {
-            if entity["status"] == "Active" && entity["fields"]["name"] == REQUESTER_TYPE {
-                return Ok(());
+            Some(entity) => entity,
+            None => {
+                self.create_identity("AgentTypes", REQUESTER_TYPE, &fields)
+                    .await?
+                    .0
             }
+        };
+        if entity["status"] == "Active" && entity["fields"]["name"] == REQUESTER_TYPE {
+            return Ok(());
+        }
+        // Apply the same check after GET, successful POST, or a create-conflict read.
+        // Only resume a Draft carrying this setup's complete intended definition.
+        if entity["status"] != "Draft" || !fields_match(&entity, &fields) {
             bail!("Existing requester type is incompatible; setup will not overwrite it");
         }
         self.request(
             Method::POST,
             &format!("/tdata/AgentTypes('{REQUESTER_TYPE}')/Temper.Define"),
             &self.key,
-            Some(
-                json!({"name":REQUESTER_TYPE,"system_prompt":"External MCP requester",
-                "tool_set":"none","model":"none","max_turns":"0",
-                "adapter_config":"{}","default_budget_cents":"0"}),
-            ),
+            Some(fields),
         )
         .await?;
         Ok(())
@@ -270,37 +286,60 @@ impl SetupAdmin {
 
     async fn ensure_credential(&self, identity: &RequesterIdentity) -> Result<()> {
         let hash = format!("{:x}", Sha256::digest(identity.token.as_bytes()));
-        if let Some(entity) = self
+        let fields = json!({"agent_type_id":REQUESTER_TYPE,"agent_instance_id":identity.principal,
+            "key_hash":hash,"key_prefix":identity.token.chars().take(8).collect::<String>(),
+            "description":"Human-authorized MCP requester","created_by":"operator",
+            "expires_at":""});
+        let (entity, needs_issue) = match self
             .entity(&format!("/tdata/AgentCredentials('{hash}')"))
             .await?
         {
-            let fields = &entity["fields"];
-            if entity["status"] != "Active" {
-                bail!("Existing requester credential is inactive; setup will not reactivate it");
+            Some(entity) => (entity, false),
+            None => {
+                self.create_identity("AgentCredentials", &hash, &fields)
+                    .await?
             }
-            if fields["key_hash"] == hash
-                && fields["agent_instance_id"] == identity.principal
-                && fields["agent_type_id"] == REQUESTER_TYPE
-            {
-                return Ok(());
-            }
+        };
+        if entity["status"] != "Active" {
+            bail!("Existing requester credential is inactive; setup will not reactivate it");
+        }
+        if !fields_match(&entity, &fields) {
             bail!(
                 "Existing requester credential has unexpected bindings; setup will not overwrite it"
             );
+        }
+        // Creation already persists the complete Active binding. If the client
+        // stopped before Issue, reuse it without another issuance or mutation.
+        if !needs_issue {
+            return Ok(());
         }
         self.request(
             Method::POST,
             &format!("/tdata/AgentCredentials('{hash}')/Temper.Issue"),
             &self.key,
-            Some(
-                json!({"agent_type_id":REQUESTER_TYPE,"agent_instance_id":identity.principal,
-                "key_hash":hash,"key_prefix":identity.token.chars().take(8).collect::<String>(),
-                "description":"Human-authorized MCP requester","created_by":"operator",
-                "expires_at":""}),
-            ),
+            Some(fields),
         )
         .await?;
         Ok(())
+    }
+
+    // The boolean requests Issue only after a successful collection POST, never
+    // when a create-only conflict revealed an existing, already bound credential.
+    async fn create_identity(&self, set: &str, id: &str, fields: &Value) -> Result<(Value, bool)> {
+        let mut body = fields.clone();
+        body["Id"] = json!(id);
+        let path = format!("/tdata/{set}");
+        let response = self
+            .send_request(Method::POST, &path, &self.key, Some(body))
+            .await?;
+        if response.status() == reqwest::StatusCode::CONFLICT {
+            let entity = self
+                .entity(&format!("/tdata/{set}('{id}')"))
+                .await?
+                .context("Identity create conflicted but no existing entity was found")?;
+            return Ok((entity, false));
+        }
+        Ok((read_setup_response(&path, response).await?, true))
     }
 
     async fn entity(&self, path: &str) -> Result<Option<Value>> {
@@ -319,6 +358,24 @@ impl SetupAdmin {
         }
         Ok(Some(read_response(response).await?))
     }
+}
+
+fn fields_match(entity: &Value, expected: &Value) -> bool {
+    expected.as_object().is_some_and(|fields| {
+        fields
+            .iter()
+            .all(|(key, value)| entity["fields"].get(key) == Some(value))
+    })
+}
+
+async fn read_setup_response(path: &str, response: reqwest::Response) -> Result<Value> {
+    if !response.status().is_success() {
+        bail!(
+            "Setup operation {path} returned HTTP {}; no policy bypass or automatic retry was attempted",
+            response.status()
+        );
+    }
+    read_response(response).await
 }
 
 async fn read_response(mut response: reqwest::Response) -> Result<Value> {

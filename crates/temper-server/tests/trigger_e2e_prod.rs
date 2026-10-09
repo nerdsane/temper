@@ -143,6 +143,7 @@ name = "StreamUpdated"
 kind = "input"
 from = ["Created", "Ready"]
 to = "Ready"
+effect = ["size_bytes = params.size_bytes"]
 params = ["size_bytes"]
 
 [[action.triggers]]
@@ -537,6 +538,12 @@ permit(
     .await;
     assert!(resp.success, "File.StreamUpdated should succeed");
     assert_eq!(resp.state.status, "Ready");
+    assert_eq!(
+        resp.state.counters.get("size_bytes"),
+        Some(&42),
+        "StreamUpdated must establish the authoritative counter read by trigger args",
+    );
+    assert_eq!(resp.state.fields["size_bytes"], serde_json::json!(42));
 
     tokio::task::yield_now().await;
 
@@ -544,6 +551,7 @@ permit(
         .get_tenant_entity_state(&tenant, "Workspace", workspace_id)
         .await
         .expect("workspace should exist after trigger fired");
+    assert_eq!(workspace_after.state.counters.get("used_bytes"), Some(&42));
     assert_eq!(
         workspace_after.state.fields["used_bytes"],
         serde_json::json!(42),
@@ -602,6 +610,12 @@ permit(
 
     assert!(resp.success, "source File transition should commit");
     assert_eq!(resp.state.status, "Ready");
+    assert_eq!(
+        resp.state.counters.get("size_bytes"),
+        Some(&42),
+        "StreamUpdated must establish the authoritative counter read by trigger args",
+    );
+    assert_eq!(resp.state.fields["size_bytes"], serde_json::json!(42));
 
     let mut observed_usage = None;
     for _ in 0..50 {
@@ -610,6 +624,7 @@ permit(
             .await
             .expect("workspace should exist after trigger fired");
         if workspace_after.state.fields["used_bytes"] == serde_json::json!(42) {
+            assert_eq!(workspace_after.state.counters.get("used_bytes"), Some(&42));
             observed_usage = Some(workspace_after.state.fields["used_bytes"].clone());
             break;
         }

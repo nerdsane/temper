@@ -26,7 +26,8 @@ use super::query_plane_read::{
     QueryPlaneReadBudget, QueryPlaneReadRequest, read_entity_set_from_query_plane,
 };
 use super::read_support::{
-    record_entity_set_not_found, resolve_entity_set_name, try_load_entity_body_from_catalog,
+    CatalogReadOutcome, record_entity_set_not_found, resolve_entity_set_name,
+    try_load_entity_body_from_catalog,
 };
 use super::response::annotate_entity;
 use super::stream_fast_path::try_file_stream_fast_path;
@@ -220,6 +221,26 @@ fn resource_not_found_response(set_name: &str, key: &str) -> Response {
     .into_response()
 }
 
+/// The authoritative journal could not be read while serving a point read
+/// (temper#529: catalog freshness validation or hydration existence probe).
+/// A typed dependency failure, never a silent stale 200 and never a
+/// fabricated 404. `context` names the failed check for the structured log.
+fn journal_unavailable_response(set_name: &str, key: &str, context: &str, error: &str) -> Response {
+    tracing::error!(
+        entity_set = %set_name,
+        entity_id = %key,
+        context = %context,
+        %error,
+        "journal dependency unavailable during entity point read"
+    );
+    odata_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "JournalUnavailable",
+        &format!("Entity '{set_name}' with key '{key}' could not be validated as current: {error}"),
+    )
+    .into_response()
+}
+
 pub(super) async fn load_existing_entity_descriptor_body(
     state: &ServerState,
     tenant: &TenantId,
@@ -228,16 +249,46 @@ pub(super) async fn load_existing_entity_descriptor_body(
     key: &str,
 ) -> Result<serde_json::Value, Response> {
     let prefer_catalog = state.query_plane_store().is_some();
-    if let Some(body) =
-        try_load_entity_body_from_catalog(state, tenant, entity_type, set_name, key, prefer_catalog)
-            .await
+    match try_load_entity_body_from_catalog(
+        state,
+        tenant,
+        entity_type,
+        set_name,
+        key,
+        prefer_catalog,
+    )
+    .await
     {
-        return Ok(body);
+        CatalogReadOutcome::Fresh(body) => return Ok(body),
+        CatalogReadOutcome::FallbackToActor => {}
+        CatalogReadOutcome::JournalUnavailable(error) => {
+            return Err(journal_unavailable_response(
+                set_name,
+                key,
+                "catalog freshness check",
+                &error,
+            ));
+        }
     }
-    if !state.entity_exists(tenant, entity_type, key)
-        && !state.ensure_entity_loaded(tenant, entity_type, key).await
-    {
-        return Err(resource_not_found_response(set_name, key));
+    if !state.entity_exists(tenant, entity_type, key) {
+        // temper#529 P2 follow-up (issue #529): a journal read failure while
+        // hydrating a non-resident entity is not absence — it must surface
+        // as a typed dependency failure, never a fabricated 404.
+        match state
+            .ensure_entity_loaded_or_error(tenant, entity_type, key)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return Err(resource_not_found_response(set_name, key)),
+            Err(error) => {
+                return Err(journal_unavailable_response(
+                    set_name,
+                    key,
+                    "hydration existence probe",
+                    &error,
+                ));
+            }
+        }
     }
     state
         .get_tenant_entity_state(tenant, entity_type, key)
@@ -1225,6 +1276,26 @@ pub async fn handle_odata_get(
     axum::extract::Path(path): axum::extract::Path<String>,
     Query(query_params): Query<std::collections::BTreeMap<String, String>>,
 ) -> impl IntoResponse {
+    handle_odata_get_with_context(
+        State(state),
+        authenticated,
+        _headers,
+        axum::extract::Path(path),
+        Query(query_params),
+        None,
+    )
+    .await
+}
+
+/// Internal local-read entry; lineage is used only if a denial starts an audit write.
+pub(crate) async fn handle_odata_get_with_context(
+    State(state): State<ServerState>,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
+    _headers: HeaderMap,
+    axum::extract::Path(path): axum::extract::Path<String>,
+    Query(query_params): Query<std::collections::BTreeMap<String, String>>,
+    execution_ctx: Option<&crate::request_context::AgentContext>,
+) -> axum::response::Response {
     let authenticated = match require_authenticated_context(authenticated) {
         Ok(context) => context,
         Err(error) => return error.into_response(),
@@ -1233,7 +1304,7 @@ pub async fn handle_odata_get(
     let security_ctx = authenticated.security_context().clone();
     let response =
         handle_odata_get_for_tenant(state.clone(), tenant, security_ctx, path, query_params).await;
-    crate::authz::resolve_requested_denial(&state, &authenticated, response).await
+    crate::authz::resolve_requested_denial(&state, &authenticated, response, execution_ctx).await
 }
 
 #[instrument(skip_all, fields(otel.name = "GET /odata"))]
