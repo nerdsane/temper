@@ -4,14 +4,16 @@
 //! linked `AgentType` is active, and returns a `ResolvedIdentity` that the
 //! security context uses as the authoritative agent identity.
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 
-use crate::entity_actor::{EntityState, recover_authoritative_entity_state_from_store};
+use crate::identity::error::{IdentityError, classify_dependency_read};
 use crate::identity::jwt;
+use crate::identity::resolver_support::{
+    authoritative_entity_state, hash_token, looks_like_jwt, parse_credential_expiry, require_field,
+    same_credential_authority,
+};
 use crate::state::ServerState;
 
 /// Maximum opaque credential size accepted by the identity boundary.
@@ -70,14 +72,18 @@ impl IdentityResolver {
     /// 4. Read the linked `AgentType`
     /// 5. Verify AgentType is `Active`
     /// 6. Return the verified identity without retaining positive authority
+    ///
+    /// Returns [`IdentityError::Unavailable`] — never [`IdentityError::Invalid`]
+    /// — when a dependency read failed rather than confirmed the credential
+    /// invalid; see [`classify_dependency_read`].
     pub async fn resolve(
         &self,
         state: &ServerState,
         tenant: &TenantId,
         bearer_token: &str,
-    ) -> Option<ResolvedIdentity> {
+    ) -> Result<ResolvedIdentity, IdentityError> {
         if bearer_token.is_empty() || bearer_token.len() > MAX_CREDENTIAL_BYTES {
-            return None;
+            return Err(IdentityError::Invalid);
         }
 
         // JWS-shaped tokens are verified against a registered TrustedIssuer;
@@ -91,12 +97,14 @@ impl IdentityResolver {
         // Look up AgentCredential entity. We use the key_hash as entity ID
         // for O(1) lookup — the Issue action must use the key_hash as the
         // entity ID when creating credentials.
-        let credential =
-            authoritative_entity_state(state, tenant, "AgentCredential", &key_hash).await?;
+        let credential = classify_dependency_read(
+            authoritative_entity_state(state, tenant, "AgentCredential", &key_hash).await,
+            "AgentCredential read",
+        )?;
 
         // Verify credential is Active.
         if credential.status != "Active" {
-            return None;
+            return Err(IdentityError::Invalid);
         }
 
         let fields = &credential.fields;
@@ -104,34 +112,37 @@ impl IdentityResolver {
             Ok(expires_at) => expires_at,
             Err(error) => {
                 tracing::warn!(tenant = %tenant, %error, "credential has invalid expiration metadata");
-                return None;
+                return Err(IdentityError::Invalid);
             }
         };
         if credential_expires_at.is_some_and(|expires_at| sim_now() >= expires_at) {
-            return None;
+            return Err(IdentityError::Invalid);
         }
-        let agent_type_id = fields.get("agent_type_id")?.as_str()?;
-        let agent_instance_id = fields.get("agent_instance_id")?.as_str()?;
-        let stored_key_hash = fields.get("key_hash")?.as_str()?;
+        let agent_type_id = require_field(fields, "agent_type_id")?;
+        let agent_instance_id = require_field(fields, "agent_instance_id")?;
+        let stored_key_hash = require_field(fields, "key_hash")?;
 
         if agent_type_id.is_empty() || agent_instance_id.is_empty() || stored_key_hash != key_hash {
-            return None;
+            return Err(IdentityError::Invalid);
         }
 
         // Look up linked AgentType entity.
-        let agent_type =
-            authoritative_entity_state(state, tenant, "AgentType", agent_type_id).await?;
+        let agent_type = classify_dependency_read(
+            authoritative_entity_state(state, tenant, "AgentType", agent_type_id).await,
+            "AgentType read",
+        )?;
 
         // Verify AgentType is Active.
         if agent_type.status != "Active" {
-            return None;
+            return Err(IdentityError::Invalid);
         }
 
         let agent_type_name = agent_type
             .fields
             .get("name")
             .and_then(|v| v.as_str())
-            .filter(|name| !name.is_empty())?
+            .filter(|name| !name.is_empty())
+            .ok_or(IdentityError::Invalid)?
             .to_string();
 
         // The credential and linked type are separate actors/streams. Re-read
@@ -140,15 +151,17 @@ impl IdentityResolver {
         // read at which both were active; without it, a revocation or link
         // change between the two reads could assemble a mixed-time identity
         // that never existed.
-        let credential_recheck =
-            authoritative_entity_state(state, tenant, "AgentCredential", &key_hash).await?;
+        let credential_recheck = classify_dependency_read(
+            authoritative_entity_state(state, tenant, "AgentCredential", &key_hash).await,
+            "AgentCredential recheck",
+        )?;
         if !same_credential_authority(&credential, &credential_recheck) {
             tracing::warn!(
                 tenant = %tenant,
                 credential = %key_hash,
                 "credential authority changed during identity resolution"
             );
-            return None;
+            return Err(IdentityError::Invalid);
         }
 
         let identity = ResolvedIdentity {
@@ -165,10 +178,10 @@ impl IdentityResolver {
         // Re-check after the linked AgentType lookup so a short-lived
         // credential cannot cross its expiry while resolution is in flight.
         if credential_expires_at.is_some_and(|expires_at| sim_now() >= expires_at) {
-            return None;
+            return Err(IdentityError::Invalid);
         }
 
-        Some(identity)
+        Ok(identity)
     }
 
     /// JWT path: verify an ES256 token against its registered `TrustedIssuer`,
@@ -179,9 +192,12 @@ impl IdentityResolver {
         state: &ServerState,
         tenant: &TenantId,
         token: &str,
-    ) -> Option<ResolvedIdentity> {
+    ) -> Result<ResolvedIdentity, IdentityError> {
         // Read `iss` from the unverified payload to pick the issuer entity.
-        let unverified = jwt::decode_claims_unverified(token).ok()?;
+        // Local parsing of attacker-controlled bytes — a failure here is a
+        // malformed token, not a dependency problem.
+        let unverified =
+            jwt::decode_claims_unverified(token).map_err(|_| IdentityError::Invalid)?;
         let issuer_id = unverified.iss;
 
         // `iss` is attacker-chosen and unverified, and entity reads spawn the
@@ -189,21 +205,25 @@ impl IdentityResolver {
         // a junk token persist an Active TrustedIssuer row with empty fields.
         // Check existence first and never materialise one from a token.
         if !state.entity_exists(tenant, "TrustedIssuer", &issuer_id) {
-            return None;
+            return Err(IdentityError::Invalid);
         }
 
-        let issuer_response = state
-            .get_tenant_entity_state(tenant, "TrustedIssuer", &issuer_id)
-            .await
-            .ok()?;
+        let issuer_response = classify_dependency_read(
+            state
+                .get_tenant_entity_state(tenant, "TrustedIssuer", &issuer_id)
+                .await
+                .map(Some),
+            "TrustedIssuer read",
+        )?;
         if issuer_response.state.status != "Active" {
-            return None;
+            return Err(IdentityError::Invalid);
         }
 
         let fields = &issuer_response.state.fields;
-        let jwks_json = fields.get("jwks_json")?.as_str()?;
-        let audience = fields.get("audience")?.as_str()?;
-        let jwks: jwt::Jwks = serde_json::from_str(jwks_json).ok()?;
+        let jwks_json = require_field(fields, "jwks_json")?;
+        let audience = require_field(fields, "audience")?;
+        let jwks: jwt::Jwks =
+            serde_json::from_str(jwks_json).map_err(|_| IdentityError::Invalid)?;
 
         let now_unix = sim_now().timestamp();
         let claims = jwt::verify(
@@ -214,7 +234,7 @@ impl IdentityResolver {
             now_unix,
             JWT_LEEWAY_SECS,
         )
-        .ok()?;
+        .map_err(|_| IdentityError::Invalid)?;
 
         // Sign-out-everywhere: reject a token whose generation is older than the
         // principal's current generation (ARN-255 option A), keyed on the human
@@ -223,9 +243,10 @@ impl IdentityResolver {
         // skippable by an issuer that fails to stamp it.
         if let Some(sub) = claims.sub.as_deref() {
             let token_gen = claims.auth_generation.unwrap_or(0);
-            // `?` denies when the read failed — see current_generation.
+            // `?` propagates Unavailable when the read failed — see
+            // current_generation — and denies on Invalid when stale.
             if token_gen < self.current_generation(state, tenant, sub).await? {
-                return None;
+                return Err(IdentityError::Invalid);
             }
         }
 
@@ -236,7 +257,7 @@ impl IdentityResolver {
         if let Some(grant_id) = claims.grant_id.as_deref().filter(|g| !g.is_empty())
             && self.current_generation(state, tenant, grant_id).await? > 0
         {
-            return None;
+            return Err(IdentityError::Invalid);
         }
 
         // A token with an `agent_type` is an agent acting for the human `sub`;
@@ -245,7 +266,7 @@ impl IdentityResolver {
             Some(agent_type) => {
                 let client_id = claims.client_id.clone().unwrap_or_default();
                 if client_id.is_empty() {
-                    return None;
+                    return Err(IdentityError::Invalid);
                 }
                 ResolvedIdentity {
                     agent_instance_id: client_id,
@@ -261,7 +282,7 @@ impl IdentityResolver {
             None => {
                 let sub = claims.sub.clone().unwrap_or_default();
                 if sub.is_empty() {
-                    return None;
+                    return Err(IdentityError::Invalid);
                 }
                 ResolvedIdentity {
                     agent_instance_id: sub,
@@ -275,215 +296,36 @@ impl IdentityResolver {
                 }
             }
         };
-        Some(identity)
+        Ok(identity)
     }
 
-    /// Current monotonic generation for a principal/grant key. `None` means the
-    /// read failed and the caller must DENY (fail closed); `Some(0)` means the
-    /// counter has never been bumped (never revoked) without materialising a row.
+    /// Current monotonic generation for a principal/grant key.
+    ///
+    /// `Err(Unavailable)` means the read failed and the caller must DENY
+    /// (fail closed) as a dependency failure, never as a stale/never-revoked
+    /// token. `Ok(0)` means the counter has never been bumped (never
+    /// revoked) without materialising a row.
     async fn current_generation(
         &self,
         state: &ServerState,
         tenant: &TenantId,
         key: &str,
-    ) -> Option<i64> {
+    ) -> Result<i64, IdentityError> {
         if !state.entity_exists(tenant, "PrincipalGeneration", key) {
-            return Some(0);
+            return Ok(0);
         }
-        match state
-            .get_tenant_entity_state(tenant, "PrincipalGeneration", key)
-            .await
-        {
-            Ok(resp) => Some(
-                resp.state
-                    .counters
-                    .get("generation")
-                    .map(|c| *c as i64)
-                    .unwrap_or(0),
-            ),
-            Err(e) => {
-                tracing::warn!(
-                    tenant = %tenant, key, error = %e,
-                    "PrincipalGeneration read failed; denying the token rather than \
-                     treating it as never-revoked"
-                );
-                None
-            }
-        }
-    }
-}
-
-fn same_credential_authority(first: &EntityState, second: &EntityState) -> bool {
-    first.entity_type == second.entity_type
-        && first.entity_id == second.entity_id
-        && first.sequence_nr == second.sequence_nr
-        && first.status == second.status
-        && first.fields == second.fields
-}
-
-async fn authoritative_entity_state(
-    state: &ServerState,
-    tenant: &TenantId,
-    entity_type: &str,
-    entity_id: &str,
-) -> Option<EntityState> {
-    let Some((store, backend)) = state.event_journal() else {
-        return state
-            .get_tenant_entity_state(tenant, entity_type, entity_id)
-            .await
-            .ok()
-            .map(|response| response.state);
-    };
-
-    let table = state.registry.read().ok()?.get_table(tenant, entity_type)?;
-    let initial_fields = serde_json::json!({});
-    match recover_authoritative_entity_state_from_store(
-        tenant.as_str(),
-        entity_type,
-        entity_id,
-        table.as_ref(),
-        &store,
-        backend,
-        &initial_fields,
-        None,
-    )
-    .await
-    {
-        Ok(entity) if entity.total_event_count > 0 => Some(entity),
-        Ok(_) => None,
-        Err(error) => {
-            tracing::warn!(
-                tenant = %tenant,
-                entity_type,
-                entity_id,
-                %error,
-                "authoritative identity state replay failed closed"
-            );
-            None
-        }
-    }
-}
-
-fn parse_credential_expiry(fields: &serde_json::Value) -> Result<Option<DateTime<Utc>>, String> {
-    let Some(value) = fields.get("expires_at") else {
-        return Ok(None);
-    };
-    let value = value
-        .as_str()
-        .ok_or_else(|| "expires_at must be an RFC3339 string".to_string())?
-        .trim();
-    if value.is_empty() {
-        return Ok(None);
-    }
-    DateTime::parse_from_rfc3339(value)
-        .map(|expires_at| Some(expires_at.with_timezone(&Utc)))
-        .map_err(|error| format!("expires_at is not valid RFC3339: {error}"))
-}
-
-/// Hash a bearer token with SHA-256 for credential lookup.
-pub fn hash_token(token: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(token.as_bytes());
-    let hash_bytes = hasher.finalize();
-    hash_bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_hash_token_deterministic() {
-        let h1 = hash_token("test-token-123");
-        let h2 = hash_token("test-token-123");
-        assert_eq!(h1, h2);
-        assert_eq!(h1.len(), 64); // SHA-256 = 64 hex chars
-    }
-
-    #[test]
-    fn test_hash_token_different_inputs() {
-        let h1 = hash_token("token-a");
-        let h2 = hash_token("token-b");
-        assert_ne!(h1, h2);
-    }
-
-    #[test]
-    fn credential_expiry_is_optional_but_malformed_values_fail_closed() {
-        assert_eq!(
-            parse_credential_expiry(&serde_json::json!({"expires_at": ""})),
-            Ok(None)
-        );
-        assert_eq!(parse_credential_expiry(&serde_json::json!({})), Ok(None));
-        assert!(parse_credential_expiry(&serde_json::json!({"expires_at": "tomorrow"})).is_err());
-        assert!(parse_credential_expiry(&serde_json::json!({"expires_at": 42})).is_err());
-        assert_eq!(
-            parse_credential_expiry(&serde_json::json!({
-                "expires_at": "2030-01-02T03:04:05+02:00"
-            }))
-            .expect("valid RFC3339 expiry")
-            .expect("expiry present")
-            .to_rfc3339(),
-            "2030-01-02T01:04:05+00:00"
-        );
-    }
-
-    #[test]
-    fn credential_stability_check_binds_sequence_status_and_fields() {
-        let state = |sequence_nr, status: &str, fields: serde_json::Value| EntityState {
-            entity_type: "AgentCredential".to_string(),
-            entity_id: "hash".to_string(),
-            status: status.to_string(),
-            item_count: 0,
-            counters: Default::default(),
-            booleans: Default::default(),
-            lists: Default::default(),
-            fields,
-            events: Default::default(),
-            total_event_count: 0,
-            events_since_snapshot: 0,
-            last_snapshot_sequence_nr: 0,
-            sequence_nr,
-            processed_idempotency_keys: Default::default(),
-        };
-        let first = state(3, "Active", serde_json::json!({"agent_type_id": "type-a"}));
-
-        assert!(same_credential_authority(&first, &first.clone()));
-        assert!(!same_credential_authority(
-            &first,
-            &state(4, "Active", first.fields.clone())
-        ));
-        assert!(!same_credential_authority(
-            &first,
-            &state(3, "Revoked", first.fields.clone())
-        ));
-        assert!(!same_credential_authority(
-            &first,
-            &state(3, "Active", serde_json::json!({"agent_type_id": "type-b"}))
-        ));
-    }
-}
-
-/// A JWS compact serialization is exactly three non-empty dot-separated parts.
-/// Opaque credential tokens (e.g. `kc_...`) never match, so they take the
-/// registry path.
-fn looks_like_jwt(token: &str) -> bool {
-    let mut parts = token.split('.');
-    matches!(
-        (parts.next(), parts.next(), parts.next(), parts.next()),
-        (Some(h), Some(p), Some(s), None) if !h.is_empty() && !p.is_empty() && !s.is_empty()
-    )
-}
-
-#[cfg(test)]
-mod jwt_shape_tests {
-    use super::looks_like_jwt;
-
-    #[test]
-    fn distinguishes_jwt_from_opaque() {
-        assert!(looks_like_jwt("eyJhbGciOiJFUzI1NiJ9.eyJpc3MiOiJ4In0.c2ln"));
-        assert!(!looks_like_jwt("kc_3f2a9b8c7d6e5f4a"));
-        assert!(!looks_like_jwt(""));
-        assert!(!looks_like_jwt("a.b"));
-        assert!(!looks_like_jwt("a.b.c.d"));
+        let response = classify_dependency_read(
+            state
+                .get_tenant_entity_state(tenant, "PrincipalGeneration", key)
+                .await
+                .map(Some),
+            "PrincipalGeneration read",
+        )?;
+        Ok(response
+            .state
+            .counters
+            .get("generation")
+            .map(|c| *c as i64)
+            .unwrap_or(0))
     }
 }

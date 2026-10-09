@@ -164,7 +164,7 @@ async fn assert_token_resolves(state: &crate::state::ServerState, token: &str, e
     let resolved = crate::identity::IdentityResolver::new()
         .resolve(state, &TenantId::default(), token)
         .await;
-    assert_eq!(resolved.is_some(), expected);
+    assert_eq!(resolved.is_ok(), expected);
 }
 
 struct ResultAdapter {
@@ -478,7 +478,7 @@ async fn caller_cancellation_detaches_cleanup_and_revokes_after_adapter_finishes
         if crate::identity::IdentityResolver::new()
             .resolve(&fixture.second, &TenantId::default(), &plaintext)
             .await
-            .is_none()
+            .is_err()
         {
             return;
         }

@@ -69,11 +69,31 @@ pub async fn bearer_auth_check(
     let request_method = req.method().as_str().to_string();
     let request_path = req.uri().path().to_string();
 
-    if let Some(token) = request_credential(&req)
-        && let Some(identity) = temper_server::identity::IdentityResolver::new()
+    let resolved_identity = match request_credential(&req) {
+        Some(token) => match temper_server::identity::IdentityResolver::new()
             .resolve(&state.server, &tenant, &token)
             .await
-    {
+        {
+            Ok(identity) => Some(identity),
+            // The identity authority could not be read — the credential was
+            // never shown to be bad. Fail closed as a dependency failure
+            // (503), never as 401/anonymous/protocol-forwarded, and never
+            // reach `next.run` with a mutated request.
+            Err(temper_server::identity::IdentityError::Unavailable(reason)) => {
+                tracing::warn!(
+                    tenant = %tenant,
+                    path = %req.uri().path(),
+                    reason,
+                    "identity authority unavailable; failing closed with 503"
+                );
+                return Err(StatusCode::SERVICE_UNAVAILABLE);
+            }
+            Err(temper_server::identity::IdentityError::Invalid) => None,
+        },
+        None => None,
+    };
+
+    if let Some(identity) = resolved_identity {
         let session_id = temper_server::request_context::session_id_from_headers(req.headers());
         let intent = temper_server::request_context::intent_from_headers(req.headers());
         let verified_session = match session_id.as_deref() {

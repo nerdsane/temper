@@ -328,7 +328,7 @@ async fn e2e_identity_resolution_invalid_token() {
     let result = resolver
         .resolve(&state.server, &tenant, "nonexistent-key")
         .await;
-    assert!(result.is_none(), "invalid token should not resolve");
+    assert!(result.is_err(), "invalid token should not resolve");
 }
 
 /// Identity resolver: rotated credential → None.
@@ -381,7 +381,7 @@ async fn e2e_identity_resolution_rotated_credential() {
         resolver
             .resolve(&state.server, &tenant, plaintext)
             .await
-            .is_some()
+            .is_ok()
     );
 
     // Rotate the credential
@@ -400,7 +400,7 @@ async fn e2e_identity_resolution_rotated_credential() {
 
     // Should no longer resolve (status is Rotated, not Active)
     let result = resolver.resolve(&state.server, &tenant, plaintext).await;
-    assert!(result.is_none(), "rotated credential should not resolve");
+    assert!(result.is_err(), "rotated credential should not resolve");
 }
 
 /// Identity resolver: revocation takes effect for an already-used resolver.
@@ -423,7 +423,7 @@ async fn e2e_identity_resolution_revocation_is_immediate() {
         resolver
             .resolve(&state.server, &tenant, plaintext)
             .await
-            .is_some()
+            .is_ok()
     );
     let response = dispatch(
         &state,
@@ -439,7 +439,7 @@ async fn e2e_identity_resolution_revocation_is_immediate() {
         resolver
             .resolve(&state.server, &tenant, plaintext)
             .await
-            .is_none(),
+            .is_err(),
         "revocation must remove authority on the next resolution"
     );
 }
@@ -464,7 +464,7 @@ async fn e2e_identity_resolution_rejects_mismatched_stored_hash() {
         resolver
             .resolve(&state.server, &tenant, plaintext)
             .await
-            .is_some()
+            .is_ok()
     );
 
     state
@@ -483,7 +483,7 @@ async fn e2e_identity_resolution_rejects_mismatched_stored_hash() {
         resolver
             .resolve(&state.server, &tenant, plaintext)
             .await
-            .is_none(),
+            .is_err(),
         "mismatched durable lookup ID and stored key hash must fail closed"
     );
 }
@@ -538,7 +538,7 @@ async fn e2e_identity_resolution_deprecated_agent_type() {
         resolver
             .resolve(&state.server, &tenant, plaintext)
             .await
-            .is_some()
+            .is_ok()
     );
 
     // Deprecate the AgentType
@@ -554,7 +554,7 @@ async fn e2e_identity_resolution_deprecated_agent_type() {
     // Should no longer resolve (AgentType status is Deprecated, not Active)
     let result = resolver.resolve(&state.server, &tenant, plaintext).await;
     assert!(
-        result.is_none(),
+        result.is_err(),
         "credential linked to deprecated AgentType should not resolve"
     );
 }
@@ -797,7 +797,7 @@ async fn e2e_http_generic_delete_removes_credential_authority() {
         resolver
             .resolve(&state.server, &tenant, plaintext)
             .await
-            .is_some()
+            .is_ok()
     );
 
     // Use the generic entity mutation path, not an AgentCredential action.
@@ -817,7 +817,7 @@ async fn e2e_http_generic_delete_removes_credential_authority() {
         resolver
             .resolve(&state.server, &tenant, plaintext)
             .await
-            .is_none(),
+            .is_err(),
         "generic deletion must remove authority on the next resolution"
     );
 }
@@ -860,7 +860,7 @@ async fn e2e_replica_revocation_is_read_from_shared_durable_state() {
         resolver
             .resolve(&first.server, &tenant, plaintext)
             .await
-            .is_some()
+            .is_ok()
     );
 
     let response = dispatch(
@@ -877,7 +877,7 @@ async fn e2e_replica_revocation_is_read_from_shared_durable_state() {
         resolver
             .resolve(&first.server, &tenant, plaintext)
             .await
-            .is_none(),
+            .is_err(),
         "the first replica must observe revocation from shared durable state"
     );
 }
@@ -957,7 +957,7 @@ async fn e2e_identity_resolution_is_tenant_scoped() {
         .resolve(&state.server, &TenantId::new("other-tenant"), api_key)
         .await;
     assert!(
-        leaked.is_none(),
+        leaked.is_err(),
         "identity authority must not cross tenant boundaries"
     );
 }
@@ -974,7 +974,7 @@ async fn e2e_unregistered_api_key_does_not_resolve() {
         .resolve(&state.server, &tenant, "tmpr_never-registered")
         .await;
     assert!(
-        result.is_none(),
+        result.is_err(),
         "unregistered API key should not resolve to any identity"
     );
 }

@@ -126,7 +126,7 @@ async fn token_signed_by_unknown_key_is_rejected() {
     let id = resolver
         .resolve(&state.server, &TenantId::new("default"), &token)
         .await;
-    assert!(id.is_none(), "rogue-key token must not resolve");
+    assert!(id.is_err(), "rogue-key token must not resolve");
 }
 
 #[tokio::test]
@@ -142,7 +142,7 @@ async fn expired_token_is_rejected() {
     let id = resolver
         .resolve(&state.server, &TenantId::new("default"), &token)
         .await;
-    assert!(id.is_none(), "expired token must not resolve");
+    assert!(id.is_err(), "expired token must not resolve");
 }
 
 #[tokio::test]
@@ -159,7 +159,7 @@ async fn unregistered_issuer_is_rejected() {
         .resolve(&state.server, &TenantId::new("default"), &token)
         .await;
     assert!(
-        id.is_none(),
+        id.is_err(),
         "token from an unregistered issuer must not resolve"
     );
 }
@@ -183,7 +183,7 @@ async fn tampered_payload_is_rejected() {
     let id = resolver
         .resolve(&state.server, &TenantId::new("default"), &tampered)
         .await;
-    assert!(id.is_none(), "tampered token must not resolve");
+    assert!(id.is_err(), "tampered token must not resolve");
 }
 
 #[tokio::test]
@@ -199,7 +199,7 @@ async fn suspended_issuer_stops_resolving() {
         resolver
             .resolve(&state.server, &tenant, &token)
             .await
-            .is_some(),
+            .is_ok(),
         "token should resolve while issuer is Active"
     );
 
@@ -221,10 +221,7 @@ async fn suspended_issuer_stops_resolving() {
     // A fresh resolver (empty cache) must now reject the same token.
     let fresh = IdentityResolver::new();
     assert!(
-        fresh
-            .resolve(&state.server, &tenant, &token)
-            .await
-            .is_none(),
+        fresh.resolve(&state.server, &tenant, &token).await.is_err(),
         "token must not resolve once its issuer is Suspended"
     );
 }
@@ -275,7 +272,7 @@ async fn bumping_generation_invalidates_older_tokens() {
         resolver
             .resolve(&state.server, &tenant, &gen0)
             .await
-            .is_some(),
+            .is_ok(),
         "gen-0 token valid before sign-out-everywhere"
     );
 
@@ -298,7 +295,7 @@ async fn bumping_generation_invalidates_older_tokens() {
     // A fresh resolver must now reject the gen-0 token (0 < current 1)...
     let fresh = IdentityResolver::new();
     assert!(
-        fresh.resolve(&state.server, &tenant, &gen0).await.is_none(),
+        fresh.resolve(&state.server, &tenant, &gen0).await.is_err(),
         "gen-0 token must be rejected after the generation is bumped"
     );
 
@@ -309,7 +306,7 @@ async fn bumping_generation_invalidates_older_tokens() {
         mint(&sk, header(), c)
     };
     assert!(
-        fresh.resolve(&state.server, &tenant, &gen1).await.is_some(),
+        fresh.resolve(&state.server, &tenant, &gen1).await.is_ok(),
         "a token minted at the current generation must still resolve"
     );
 }
@@ -327,7 +324,7 @@ async fn revoking_a_grant_stops_the_agents_token_at_the_kernel() {
         resolver
             .resolve(&state.server, &tenant, &token)
             .await
-            .is_some(),
+            .is_ok(),
         "agent token resolves while its grant is live"
     );
 
@@ -349,10 +346,7 @@ async fn revoking_a_grant_stops_the_agents_token_at_the_kernel() {
     // A fresh resolver must now reject it — no waiting for token expiry.
     let fresh = IdentityResolver::new();
     assert!(
-        fresh
-            .resolve(&state.server, &tenant, &token)
-            .await
-            .is_none(),
+        fresh.resolve(&state.server, &tenant, &token).await.is_err(),
         "a revoked grant must stop resolving at the kernel immediately"
     );
 }
@@ -376,7 +370,7 @@ async fn a_rejected_token_never_materialises_a_trusted_issuer() {
         resolver
             .resolve(&state.server, &tenant, &token)
             .await
-            .is_none(),
+            .is_err(),
         "a token from an unregistered issuer must not resolve"
     );
     assert!(
@@ -397,7 +391,7 @@ async fn resolving_does_not_materialise_generation_rows() {
         resolver
             .resolve(&state.server, &tenant, &token)
             .await
-            .is_some()
+            .is_ok()
     );
 
     // Never-revoked principals read as generation 0 without persisting a

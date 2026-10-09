@@ -80,16 +80,29 @@ pub async fn handle_identity_resolve(
     // metadata, but they do not replace per-request bearer authentication.
     let resolver = super::IdentityResolver::new();
     match resolver.resolve(&state, &tenant, &body.bearer_token).await {
-        Some(identity) => {
+        Ok(identity) => {
             let response: ResolveResponse = identity.into();
             (StatusCode::OK, axum::Json(response)).into_response()
         }
-        None => (
+        Err(super::IdentityError::Invalid) => (
             StatusCode::NOT_FOUND,
             axum::Json(serde_json::json!({
                 "error": "Credential not found or inactive"
             })),
         )
             .into_response(),
+        // The identity authority could not be read — never report this as
+        // "not found"; that would tell the caller the credential is bad when
+        // the dependency, not the credential, is the problem.
+        Err(super::IdentityError::Unavailable(reason)) => {
+            tracing::warn!(tenant = %tenant, reason, "identity authority unavailable; failing closed with 503");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                axum::Json(serde_json::json!({
+                    "error": "Identity authority unavailable"
+                })),
+            )
+                .into_response()
+        }
     }
 }
