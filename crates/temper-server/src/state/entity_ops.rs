@@ -161,7 +161,8 @@ pub(crate) struct AuthzResourceSnapshot {
 }
 
 impl ServerState {
-    fn touch_actor_access(&self, actor_key: &str) {
+    /// Mark authorized actor use for idle passivation without creating an actor.
+    pub(super) fn touch_actor_access(&self, actor_key: &str) {
         if let Ok(mut last_accessed) = self.last_accessed.write() {
             last_accessed.insert(actor_key.to_string(), sim_now());
         }
@@ -856,6 +857,18 @@ impl ServerState {
         entity_id: &str,
         initial_fields: serde_json::Value,
     ) -> Result<ActorRef<EntityMsg>, String> {
+        self.spawn_tenant_actor(tenant, entity_type, entity_id, initial_fields, false)
+    }
+
+    /// Runtime-only admission policy; external callers cannot enable bootstrap.
+    pub(super) fn spawn_tenant_actor(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        initial_fields: serde_json::Value,
+        existing_only: bool,
+    ) -> Result<ActorRef<EntityMsg>, String> {
         if !initial_fields
             .as_object()
             .is_some_and(|fields| fields.is_empty())
@@ -926,6 +939,11 @@ impl ServerState {
                 .with_blob_store(tenant_blob_store),
         }
         .with_legacy_blob_store(legacy_blob_store);
+        let actor = if existing_only {
+            actor.existing_only()
+        } else {
+            actor
+        };
 
         // Slow-path: atomically re-check and spawn under write lock.
         // This prevents duplicate actors when concurrent requests race to create
@@ -940,8 +958,9 @@ impl ServerState {
             actor_ref
         };
 
-        // Track in entity index for collection queries
-        {
+        // Recovery-only admission never publishes speculative index entries.
+        // Collection discovery for these durable entities remains journal-backed.
+        if !existing_only {
             let index_key = format!("{tenant}:{entity_type}");
             let mut index = self.entity_index.write().unwrap();
             index
@@ -1285,10 +1304,10 @@ impl ServerState {
         };
 
         let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
-        let initial_fields =
-            crate::entity_actor::effects::sanitize_action_params(&initial_fields).into_owned();
         let mut state =
             EntityActor::build_initial_state(entity_type, entity_id, &table, &initial_fields);
+        let initial_fields =
+            crate::entity_actor::field_ownership::sanitize(&state, &table, &initial_fields);
 
         let created = EntityEvent {
             action: "Created".to_string(),
@@ -1297,8 +1316,11 @@ impl ServerState {
             timestamp: sim_now(),
             params: initial_fields,
             idempotency_key: None,
+            idempotency_binding: None,
+            idempotency_result: None,
+            idempotency_reply: None,
         };
-        let payload = crate::entity_actor::bootstrap::event_payload(&created, &state)
+        let payload = crate::entity_actor::bootstrap::event_payload(&created, &state, &table)
             .map_err(|e| format!("failed to serialize Created event: {e}"))?;
         let envelope = PersistenceEnvelope {
             sequence_nr: 1,

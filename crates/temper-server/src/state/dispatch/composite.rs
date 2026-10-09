@@ -187,13 +187,16 @@ impl crate::state::ServerState {
 
             let response = self
                 .dispatch_tenant_action_core(
-                    tenant,
-                    &prepared.entity_type,
-                    &prepared.entity_id,
-                    &prepared.action,
-                    prepared.unresolved_params,
-                    &sub_agent_ctx,
-                    false,
+                    super::DispatchCommand {
+                        tenant,
+                        entity_type: &prepared.entity_type,
+                        entity_id: &prepared.entity_id,
+                        action: &prepared.action,
+                        params: prepared.unresolved_params,
+                        agent_ctx: &sub_agent_ctx,
+                        await_integration: false,
+                        await_reactions: false,
+                    },
                     None,
                 )
                 .await?;
@@ -367,10 +370,10 @@ impl crate::state::ServerState {
             let mut event = result
                 .event
                 .expect("successful process_action returns an event");
-            event.idempotency_key = Some(write.idempotency_key.clone());
-            stream
-                .events
-                .push(composite_envelope(&persistence_id, &event, &stream.state)?);
+            let (key, action, params) = (&write.idempotency_key, &write.action, &write.params);
+            crate::idempotency::stamp_keyed_commit(&mut event, key, action, params, &stream.state);
+            let envelope = composite_envelope(&persistence_id, &event, &stream.state, &table)?;
+            stream.events.push(envelope);
             stream.state.sequence_nr = stream.state.sequence_nr.saturating_add(1);
             stream.state.push_event_bounded(event);
         }
@@ -516,8 +519,13 @@ impl crate::state::ServerState {
                 timestamp: sim_now(),
                 params: serde_json::json!({}),
                 idempotency_key: None,
+                idempotency_binding: None,
+                idempotency_result: None,
+                idempotency_reply: None,
             };
-            events.push(composite_envelope(&persistence_id, &bootstrap, &state)?);
+            let table = self.transition_table_for_dispatch(tenant, entity_type)?;
+            let envelope = composite_envelope(&persistence_id, &bootstrap, &state, &table)?;
+            events.push(envelope);
             state.sequence_nr = state.sequence_nr.saturating_add(1);
             state.push_event_bounded(bootstrap);
         }
@@ -852,6 +860,9 @@ impl crate::state::ServerState {
                 timestamp: sim_now(),
                 params: serde_json::json!({}),
                 idempotency_key: None,
+                idempotency_binding: None,
+                idempotency_result: None,
+                idempotency_reply: None,
             };
             stream.state.sequence_nr += 1;
             stream.state.push_event_bounded(created);
@@ -902,7 +913,8 @@ impl crate::state::ServerState {
         let mut event = result
             .event
             .expect("successful process_action returns an event");
-        event.idempotency_key = Some(write.idempotency_key.clone());
+        let (key, action, params) = (&write.idempotency_key, &write.action, &write.params);
+        crate::idempotency::stamp_keyed_commit(&mut event, key, action, params, &stream.state);
         stream.state.sequence_nr += 1;
         stream.state.push_event_bounded(event);
         pending_overflow_blobs.extend(result.overflow_blobs);

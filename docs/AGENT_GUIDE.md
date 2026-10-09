@@ -434,6 +434,11 @@ The server exposes OData v4 endpoints:
 | POST | `/tdata/Orders('id')/Ns.SubmitOrder` | Invoke bound action |
 | GET | `/tdata/Orders('id')/Ns.GetOrderTotal()` | Invoke bound function |
 
+Bound actions require an existing entity. First POST to the collection (for example,
+`/tdata/Orders`), then use that entity's ID in the action URL. An authorized action
+on a missing entity returns `404 EntityNotFound`; even an action allowed in the
+initial state (such as `Define`, `Issue`, or `AddItem`) does not create its target.
+
 Use the `X-Tenant-Id` header for multi-tenant dispatch. If omitted, the server falls back to the first registered tenant.
 
 ### What Responses Look Like

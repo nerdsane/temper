@@ -118,6 +118,9 @@ fn redact_adapter_execution(
         Err(AdapterError::Execution(error)) => Err(AdapterError::Execution(redact_adapter_text(
             error, redactions,
         ))),
+        Err(AdapterError::CompletionUnknown(error)) => Err(AdapterError::CompletionUnknown(
+            redact_adapter_text(error, redactions),
+        )),
         Err(AdapterError::Parse(error)) => {
             Err(AdapterError::Parse(redact_adapter_text(error, redactions)))
         }
@@ -127,6 +130,7 @@ fn redact_adapter_execution(
 async fn execute_adapter_with_budget(
     adapter: Arc<dyn AgentAdapter>,
     adapter_ctx: AdapterContext,
+    completion: &crate::request_context::LocalCompletionEvidence,
 ) -> Result<AdapterResult, AdapterError> {
     let redactions = adapter_redactions(&adapter_ctx);
     let execution = AssertUnwindSafe(tokio::time::timeout(
@@ -136,13 +140,24 @@ async fn execute_adapter_with_budget(
     .catch_unwind()
     .await;
     let execution = match execution {
-        Ok(Ok(result)) => result,
-        Ok(Err(_elapsed)) => Err(AdapterError::Execution(format!(
-            "adapter invocation exceeded its {ADAPTER_INVOCATION_BUDGET_SECS}-second budget"
-        ))),
-        Err(_) => Err(AdapterError::Execution(
-            "adapter invocation panicked".to_string(),
-        )),
+        Ok(Ok(result)) => {
+            if matches!(&result, Err(AdapterError::CompletionUnknown(_))) {
+                completion.mark_unknown();
+            }
+            result
+        }
+        Ok(Err(_elapsed)) => {
+            completion.mark_unknown();
+            Err(AdapterError::Execution(format!(
+                "adapter invocation exceeded its {ADAPTER_INVOCATION_BUDGET_SECS}-second budget"
+            )))
+        }
+        Err(_) => {
+            completion.mark_unknown();
+            Err(AdapterError::Execution(
+                "adapter invocation panicked".to_string(),
+            ))
+        }
     };
     redact_adapter_execution(execution, &redactions)
 }
@@ -380,15 +395,21 @@ impl crate::state::ServerState {
             secrets,
         };
 
-        let result = match self
-            .execute_adapter_with_credential_cleanup(
+        let execution = self
+            .execute_adapter_with_observed_cleanup(
                 adapter,
                 adapter_ctx,
                 ctx.entity_ref.tenant,
                 credential_key_hash,
+                ctx.agent_ctx.local_completion.clone(),
             )
-            .await
-        {
+            .await;
+        if let Err(unknown) = ctx.agent_ctx.local_completion.require_known_result() {
+            tracing::warn!(raw_success = execution.as_ref().is_ok_and(|result| result.success),
+                raw_error = ?execution.as_ref().err(), "native result retained as diagnostic; completion unknown");
+            return Err(unknown.to_string());
+        }
+        let result = match execution {
             Ok(result) => result,
             Err(e) => {
                 return self
@@ -425,15 +446,16 @@ impl crate::state::ServerState {
             .await
     }
 
-    async fn execute_adapter_with_credential_cleanup(
+    async fn execute_adapter_with_observed_cleanup(
         &self,
         adapter: Arc<dyn AgentAdapter>,
         adapter_ctx: AdapterContext,
         tenant: &TenantId,
         credential_key_hash: Option<String>,
+        completion: crate::request_context::LocalCompletionEvidence,
     ) -> Result<AdapterResult, AdapterError> {
         let Some(credential_key_hash) = credential_key_hash else {
-            return execute_adapter_with_budget(adapter, adapter_ctx).await;
+            return execute_adapter_with_budget(adapter, adapter_ctx, &completion).await;
         };
         let state = self.clone();
         let tenant = tenant.clone();
@@ -442,14 +464,16 @@ impl crate::state::ServerState {
         // This task owns both execution and cleanup. Dropping the caller's
         // JoinHandle detaches rather than cancels it, so request cancellation
         // cannot skip durable credential revocation.
+        let child_completion = completion.clone();
         let cleanup_task = spawn_external_adapter_task(
             async move {
                 // determinism-ok: native adapter execution is an external side effect
-                let execution = execute_adapter_with_budget(adapter, adapter_ctx).await;
+                let execution = execute_adapter_with_budget(adapter, adapter_ctx, &child_completion).await;
                 if let Err(error) = state
                     .revoke_minted_adapter_credential(&tenant, &credential_key_hash)
                     .await
                 {
+                    child_completion.mark_unknown();
                     tracing::error!(
                         tenant = %tenant,
                         adapter_execution_completed = execution.is_ok(),
@@ -464,8 +488,27 @@ impl crate::state::ServerState {
         );
 
         cleanup_task.await.map_err(|error| {
+            completion.mark_unknown();
             AdapterError::Execution(format!("adapter cleanup task failed: {error}"))
         })?
+    }
+
+    #[cfg(test)]
+    async fn execute_adapter_with_credential_cleanup(
+        &self,
+        adapter: Arc<dyn AgentAdapter>,
+        adapter_ctx: AdapterContext,
+        tenant: &TenantId,
+        credential_key_hash: Option<String>,
+    ) -> Result<AdapterResult, AdapterError> {
+        self.execute_adapter_with_observed_cleanup(
+            adapter,
+            adapter_ctx,
+            tenant,
+            credential_key_hash,
+            crate::request_context::LocalCompletionEvidence::default(),
+        )
+        .await
     }
 
     async fn revoke_minted_adapter_credential(
@@ -484,6 +527,7 @@ impl crate::state::ServerState {
             let outcome = retry::ask_with_backoff::<_, EntityResponse, _>(
                 &actor,
                 || EntityMsg::Action {
+                    reply_mode: crate::idempotency::ActionReplyMode::DirectCore,
                     name: "Revoke".to_string(),
                     params: serde_json::json!({}),
                     related: BTreeMap::new(),
@@ -535,6 +579,10 @@ impl crate::state::ServerState {
             "adapter integration failed"
         );
 
+        ctx.agent_ctx
+            .local_completion
+            .require_known_result()
+            .map_err(|e| e.to_string())?;
         let Some(callback_action) = integration.on_failure.clone() else {
             // No declared recovery: propagate the failure instead of swallowing
             // it (ADR-0152). Inline this surfaces as `success: false`;
@@ -568,6 +616,10 @@ impl crate::state::ServerState {
         agent_ctx: &AgentContext,
         mode: WasmDispatchMode,
     ) -> Result<Option<EntityResponse>, String> {
+        agent_ctx
+            .local_completion
+            .require_known_result()
+            .map_err(|e| e.to_string())?;
         let callback_ctx = match agent_ctx.for_callback() {
             Ok(context) => context,
             Err(error) => {
@@ -607,6 +659,10 @@ impl crate::state::ServerState {
                 )
                 .await
                 .map_err(|e| e.to_string())?;
+                agent_ctx
+                    .local_completion
+                    .require_known_result()
+                    .map_err(|e| e.to_string())?;
                 if !resp.success {
                     self.record_generated_callback_refusal(
                         entity_ref,

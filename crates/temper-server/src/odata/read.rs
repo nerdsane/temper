@@ -1225,6 +1225,26 @@ pub async fn handle_odata_get(
     axum::extract::Path(path): axum::extract::Path<String>,
     Query(query_params): Query<std::collections::BTreeMap<String, String>>,
 ) -> impl IntoResponse {
+    handle_odata_get_with_context(
+        State(state),
+        authenticated,
+        _headers,
+        axum::extract::Path(path),
+        Query(query_params),
+        None,
+    )
+    .await
+}
+
+/// Internal local-read entry; lineage is used only if a denial starts an audit write.
+pub(crate) async fn handle_odata_get_with_context(
+    State(state): State<ServerState>,
+    authenticated: Option<Extension<AuthenticatedRequestContext>>,
+    _headers: HeaderMap,
+    axum::extract::Path(path): axum::extract::Path<String>,
+    Query(query_params): Query<std::collections::BTreeMap<String, String>>,
+    execution_ctx: Option<&crate::request_context::AgentContext>,
+) -> axum::response::Response {
     let authenticated = match require_authenticated_context(authenticated) {
         Ok(context) => context,
         Err(error) => return error.into_response(),
@@ -1233,7 +1253,7 @@ pub async fn handle_odata_get(
     let security_ctx = authenticated.security_context().clone();
     let response =
         handle_odata_get_for_tenant(state.clone(), tenant, security_ctx, path, query_params).await;
-    crate::authz::resolve_requested_denial(&state, &authenticated, response).await
+    crate::authz::resolve_requested_denial(&state, &authenticated, response, execution_ctx).await
 }
 
 #[instrument(skip_all, fields(otel.name = "GET /odata"))]

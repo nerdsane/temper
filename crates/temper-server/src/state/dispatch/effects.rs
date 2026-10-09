@@ -548,7 +548,7 @@ impl crate::state::ServerState {
             let et = entity_type.to_string();
             let eid = entity_id.to_string();
             let action = sched.action.clone();
-            let ctx = agent_ctx.clone();
+            let ctx = agent_ctx.without_effects_ancestors();
             let delay = std::time::Duration::from_secs(sched.delay_seconds);
             let workflow_root_entity_type = ctx
                 .workflow_root_entity_type

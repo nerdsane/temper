@@ -36,6 +36,16 @@ impl DeniedResource {
         state: &ServerState,
         authenticated: &AuthenticatedRequestContext,
     ) -> (StatusCode, Json<serde_json::Value>) {
+        self.for_request_with_context(state, authenticated, None)
+            .await
+    }
+
+    async fn for_request_with_context(
+        self,
+        state: &ServerState,
+        authenticated: &AuthenticatedRequestContext,
+        execution_ctx: Option<&crate::request_context::AgentContext>,
+    ) -> (StatusCode, Json<serde_json::Value>) {
         let security_ctx = authenticated.security_context();
         let mut body = serde_json::json!({"error": {
             "code": "AuthorizationDenied", "message": self.reason,
@@ -50,6 +60,7 @@ impl DeniedResource {
             let decision = record_authz_denial(
                 state,
                 DenialInput {
+                    execution_ctx,
                     tenant: authenticated.tenant().as_str(),
                     security_ctx,
                     agent_id_override: None,
@@ -80,12 +91,13 @@ pub(crate) async fn resolve_requested_denial(
     state: &ServerState,
     authenticated: &AuthenticatedRequestContext,
     mut response: Response,
+    execution_ctx: Option<&crate::request_context::AgentContext>,
 ) -> Response {
     if response.status() == StatusCode::FORBIDDEN
         && let Some(denial) = response.extensions_mut().remove::<DeniedResource>()
     {
         return denial
-            .for_request(state, authenticated)
+            .for_request_with_context(state, authenticated, execution_ctx)
             .await
             .into_response();
     }

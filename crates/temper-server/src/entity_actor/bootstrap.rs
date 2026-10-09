@@ -19,9 +19,13 @@ struct InitialValues {
 pub(crate) fn event_payload(
     event: &EntityEvent,
     initial: &EntityState,
+    table: &temper_jit::table::TransitionTable,
 ) -> Result<Value, serde_json::Error> {
     let mut payload = serde_json::to_value(event)?;
     if event.action == "Created" && event.from_status.is_empty() {
+        let mut initial = initial.clone();
+        super::field_ownership::normalize(&mut initial, table);
+        payload["params"] = super::field_ownership::sanitize(&initial, table, &event.params);
         payload["initial_values"] = serde_json::to_value(InitialValues {
             fields: super::effects::sanitize_action_params(&initial.fields).into_owned(),
             counters: initial.counters.clone(),
@@ -50,7 +54,11 @@ pub(super) fn clear_for_replay(state: &mut EntityState, initial_status: &str) {
     super::effects::canonicalize_entity_fields(&mut state.fields, &state.entity_id, &state.status);
 }
 
-pub(super) fn restore(state: &mut EntityState, payload: &Value) -> Result<(), ActorError> {
+pub(super) fn restore(
+    state: &mut EntityState,
+    table: &temper_jit::table::TransitionTable,
+    payload: &Value,
+) -> Result<(), ActorError> {
     let Some(values) = payload.get("initial_values") else {
         return Ok(());
     };
@@ -66,6 +74,6 @@ pub(super) fn restore(state: &mut EntityState, payload: &Value) -> Result<(), Ac
     state.counters = values.counters;
     state.booleans = values.booleans;
     state.lists = values.lists;
-    super::effects::canonicalize_entity_fields(&mut state.fields, &state.entity_id, &state.status);
+    super::field_ownership::normalize(state, table);
     Ok(())
 }

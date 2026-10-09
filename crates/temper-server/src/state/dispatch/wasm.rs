@@ -882,13 +882,16 @@ impl crate::state::ServerState {
                         production_host_builder.with_secret_resolver(resolver);
                 }
                 let production_host: Arc<dyn WasmHost> = Arc::new(production_host_builder);
-                let inner: Arc<dyn WasmHost> = Arc::new(LocalTDataWasmHost::new(
-                    self.clone(),
-                    ctx.entity_ref.tenant.clone(),
-                    ctx.agent_ctx.security_ctx.as_ref(),
-                    &module_name,
-                    production_host,
-                ));
+                let inner: Arc<dyn WasmHost> = Arc::new(
+                    LocalTDataWasmHost::new(
+                        self.clone(),
+                        ctx.entity_ref.tenant.clone(),
+                        ctx.agent_ctx.security_ctx.as_ref(),
+                        &module_name,
+                        production_host,
+                    )
+                    .with_completion_context(ctx.agent_ctx),
+                );
                 let host: Arc<dyn WasmHost> =
                     Arc::new(AuthorizedWasmHost::new(inner, gate, authz_ctx));
                 let max_response_bytes = integration
@@ -1173,6 +1176,12 @@ impl crate::state::ServerState {
                 .invoke_with_blobs(hash, &inv_ctx, host, limits, streams, blob_cache),
         )
         .await;
+        if matches!(
+            &invoke_result,
+            Err(temper_wasm::WasmError::WorkerTerminated)
+        ) {
+            ctx.agent_ctx.local_completion.mark_unknown();
+        }
         match invoke_result {
             Ok(mut result) if result.success => {
                 if integration.llm {
@@ -1275,6 +1284,7 @@ impl crate::state::ServerState {
                                 "module": module_name,
                                 "trigger_action": ctx.action,
                                 "result": "success",
+                                "operation_completion": if ctx.agent_ctx.local_completion.owned_result_unknown() { "unknown" } else { "known" },
                                 "callback_action": result.callback_action.clone(),
                                 "duration_ms": result.duration_ms,
                             }),
@@ -1295,6 +1305,11 @@ impl crate::state::ServerState {
                     )
                     .await;
                 }
+
+                ctx.agent_ctx
+                    .local_completion
+                    .require_known_result()
+                    .map_err(|e| e.to_string())?;
 
                 if integration.llm {
                     instrument_wasm_dispatch_phase(
@@ -1369,6 +1384,10 @@ impl crate::state::ServerState {
                     .await
                     .map_err(|e| e.to_string())?;
 
+                ctx.agent_ctx
+                    .local_completion
+                    .require_known_result()
+                    .map_err(|e| e.to_string())?;
                 // Determine callback action: prefer static on_success from spec,
                 // fall back to dynamic callback_action from WASM result. Composite
                 // integrations may return only a data envelope for the kernel to
@@ -1430,6 +1449,7 @@ impl crate::state::ServerState {
                                 "module": module_name,
                                 "trigger_action": ctx.action,
                                 "result": "failure",
+                                "operation_completion": if ctx.agent_ctx.local_completion.owned_result_unknown() { "unknown" } else { "known" },
                                 "callback_action": result.callback_action.clone(),
                                 "duration_ms": result.duration_ms,
                                 "error": result.error.clone(),

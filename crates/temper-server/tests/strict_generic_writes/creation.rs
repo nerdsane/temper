@@ -192,8 +192,12 @@ initial = 7
         stack.metadata = audit_stack.metadata;
         state.set_storage_stack(stack);
         assert_eq!(
-            submit_absent(&state, body, direct).await,
-            StatusCode::CONFLICT
+            submit_absent(&state, body.clone(), direct).await,
+            if direct {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::NOT_FOUND
+            }
         );
         assert_eq!(
             state.active_actor_count(),
@@ -237,6 +241,24 @@ initial = 7
             })
             .await
             .unwrap();
+        }
+        if !direct {
+            // HTTP actions require an explicit entity; its contract still rejects
+            // the same malformed parameters once that entity exists.
+            assert_eq!(
+                request(&state, "POST", "/tdata/Orders", json!({"id":"absent"})).await,
+                StatusCode::CREATED
+            );
+            let before = store.read_events("default:Order:absent", 0).await.unwrap();
+            assert_eq!(
+                submit_absent(&state, body, false).await,
+                StatusCode::CONFLICT
+            );
+            assert_eq!(
+                serde_json::to_value(store.read_events("default:Order:absent", 0).await.unwrap())
+                    .unwrap(),
+                serde_json::to_value(before).unwrap()
+            );
         }
         assert_eq!(
             submit_absent(&state, json!({"Notes":"valid","expected":7}), direct).await,

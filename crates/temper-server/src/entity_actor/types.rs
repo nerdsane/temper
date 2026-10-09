@@ -48,6 +48,8 @@ pub enum EntityMsg {
         /// Digest of the exact local state used for an external Cedar
         /// decision. Internal dispatches omit it.
         expected_authorization_precondition: Option<String>,
+        /// Trusted first caller boundary; never taken from action parameters.
+        reply_mode: crate::idempotency::ActionReplyMode,
     },
     /// Get the current entity state.
     GetState,
@@ -177,6 +179,21 @@ pub struct EntityEvent {
     /// Optional idempotency key that caused this transition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
+    /// Canonical request binding (`idempotency::request_binding`) of the
+    /// request that used `idempotency_key` (ADR-0182). Absent on legacy events,
+    /// which are verified from `action` + `params` instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_binding: Option<String>,
+    /// Immutable execution provenance (ADR-0182, review correction 2): digest
+    /// of the post-commit logical state this keyed request produced. A
+    /// duplicate is answered with 200 only if the state rebuilt for it still
+    /// hashes to this value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_result: Option<String>,
+    /// Versioned authority for a cold reply. Raw JSON intentionally tolerates
+    /// invalid/legacy proof during hydration; key reuse validates it fail-closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_reply: Option<serde_json::Value>,
 }
 
 /// Default value for `spec_governed`: actions are spec-governed unless explicitly marked otherwise.

@@ -52,6 +52,23 @@ to = "Stopped"
     state.http_transports = Arc::new(registry);
     (state, count)
 }
+// Route admission is an ordinary bound action, not an entity initializer.
+async fn create_target(state: &ServerState, id: &str) {
+    let created = state
+        .get_or_create_tenant_entity(&TenantId::default(), "Target", id, json!({}))
+        .await
+        .unwrap();
+    assert_eq!(created.state.status, "Ready");
+}
+
+async fn assert_serve_ran(state: &ServerState, id: &str) {
+    let current = state
+        .get_tenant_entity_state(&TenantId::default(), "Target", id)
+        .await
+        .unwrap();
+    assert_eq!(current.state.events.back().unwrap().action, "Serve");
+}
+
 async fn install(state: &ServerState, config: Value) {
     let route = super::super::route_from_entity_fields(
         "endpoint",
@@ -97,6 +114,7 @@ fn request(user: &str) -> axum::http::Request<Body> {
 #[tokio::test]
 async fn native_route_runs_ioa_and_preserves_http() {
     let (state, count) = fixture();
+    create_target(&state, "one").await;
     install(&state, config()).await;
     let response = crate::build_router(state.clone())
         .oneshot(request("alice"))
@@ -110,8 +128,8 @@ async fn native_route_runs_ioa_and_preserves_http() {
     assert_eq!(headers["odata-version"], "4.0");
     assert_eq!(&body[..], &[0, 1, 255, 13, 10]);
     assert_eq!(count.load(Ordering::SeqCst), 1);
-    // Admission ran the real spec action; it was not a transport-side permit.
-    assert!(state.entity_exists(&TenantId::default(), "Target", "one"));
+    // The upstream 201 is preserved; admission itself only acts on the existing target.
+    assert_serve_ran(&state, "one").await;
 }
 #[tokio::test]
 async fn denied_caller_never_reaches_transport() {
@@ -128,6 +146,7 @@ async fn denied_caller_never_reaches_transport() {
 #[tokio::test]
 async fn repeated_request_rechecks_current_ioa_state() {
     let (state, count) = fixture();
+    create_target(&state, "one").await;
     install(&state, config()).await;
     assert_eq!(
         crate::build_router(state.clone())
@@ -172,12 +191,15 @@ async fn all_gates_must_pass() {
     let (state, count) = fixture();
     let mut config = config();
     config["actions"].as_array_mut().unwrap().push(json!({"name":"second","entity_set":"Targets","entity_id":"two","action":"Example.MissingAction"}));
+    create_target(&state, "one").await;
+    create_target(&state, "two").await;
     install(&state, config).await;
-    let response = crate::build_router(state)
+    let response = crate::build_router(state.clone())
         .oneshot(request("alice"))
         .await
         .unwrap();
-    assert!(!response.status().is_success());
+    assert_eq!(response.status(), 403);
+    assert_serve_ran(&state, "one").await;
     assert_eq!(count.load(Ordering::SeqCst), 0);
 }
 
@@ -227,6 +249,7 @@ async fn oversized_request_cannot_run_admission() {
 async fn quoted_parentheses_in_ids_are_data() {
     for (encoded, decoded) in [("a%29b", "a)b"), ("a%28b", "a(b")] {
         let (state, count) = fixture();
+        create_target(&state, decoded).await;
         install(&state, config()).await;
         let mut req = request("alice");
         *req.uri_mut() = format!("/things/{encoded}/tdata/Items?$filter=Value%20gt%205")
@@ -279,6 +302,7 @@ async fn response_stream_obeys_original_deadline() {
     let mut registry = TransportRegistry::default();
     registry.register("echo", Arc::new(Streaming));
     state.http_transports = Arc::new(registry);
+    create_target(&state, "one").await;
     install(&state, config()).await;
     let table = state
         .http_endpoint_tables
@@ -295,6 +319,7 @@ async fn response_stream_obeys_original_deadline() {
         .oneshot(request("alice"))
         .await
         .unwrap();
+    assert_eq!(response.status(), 200, "admission must reach the transport");
     assert!(
         to_bytes(response.into_body(), 100).await.is_err(),
         "body must fail after the exchange deadline"
@@ -304,6 +329,7 @@ async fn response_stream_obeys_original_deadline() {
 #[tokio::test]
 async fn response_stream_obeys_byte_budget() {
     let (state, _) = fixture();
+    create_target(&state, "one").await;
     install(&state, config()).await;
     let table = state
         .http_endpoint_tables
@@ -320,6 +346,7 @@ async fn response_stream_obeys_byte_budget() {
         .oneshot(request("alice"))
         .await
         .unwrap();
+    assert_eq!(response.status(), 201, "admission must reach the transport");
     assert!(
         to_bytes(response.into_body(), 100).await.is_err(),
         "five response bytes must exceed a three-byte budget"
@@ -342,3 +369,6 @@ async fn noncanonical_cedar_id_is_not_rewritten_to_bypass_authorization() {
     assert_eq!(count.load(Ordering::SeqCst), 0);
     assert!(!state.entity_exists(&TenantId::default(), "Target", "a')/b"));
 }
+
+#[path = "admission_existence_tests.rs"]
+mod admission_existence;
