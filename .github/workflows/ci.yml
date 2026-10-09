@@ -172,21 +172,11 @@ jobs:
       # (shared effect application) is complete.
       # See: .progress/012_20260217_dst_architecture_fix.md
 
+      - name: Dependency isolation regression
+        run: bash scripts/test-dependency-isolation.sh
+
       - name: Dependency isolation
-        run: |
-          # Check temper-jit has no production dep on temper-verify
-          if cargo tree --no-dev -p temper-jit 2>/dev/null | grep -q temper-verify; then
-            echo "FAIL: temper-jit has production dependency on temper-verify"
-            exit 1
-          fi
-          # Check no stateright/proptest in production crates
-          for crate in temper-jit temper-server temper-runtime; do
-            if cargo tree --no-dev -p "$crate" 2>/dev/null | grep -qE 'stateright|proptest'; then
-              echo "FAIL: $crate production binary includes stateright or proptest"
-              exit 1
-            fi
-          done
-          echo "Dependency isolation: OK"
+        run: bash scripts/check-dependency-isolation.sh
 
   # ─────────────────────────────────────────────────────
   # Gate 3: Full test suite (minutes)
