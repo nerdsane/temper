@@ -54,6 +54,10 @@ impl crate::state::ServerState {
         error: &str,
         parent_ctx: &AgentContext,
     ) {
+        if let Err(unknown) = parent_ctx.local_completion.require_known_result() {
+            tracing::warn!(tenant=%tenant, entity_type, entity_id, error=%unknown, "skipping compensation for unjoined owned work");
+            return;
+        }
         let state = self.clone();
         let tenant = tenant.clone();
         let entity_type = entity_type.to_string();

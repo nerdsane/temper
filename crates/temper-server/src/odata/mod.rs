@@ -19,12 +19,14 @@ mod storage_guardrails;
 mod stream_fast_path;
 mod stream_put;
 mod write;
+mod write_fields;
 
 pub(crate) use common::resolve_entity_type;
 pub use content_addressed::handle_blob_ingest_raw;
 pub use read::handle_hints;
 pub use read::handle_metadata;
 pub use read::handle_odata_get;
+pub(crate) use read::handle_odata_get_with_context;
 pub use read::handle_service_document;
 pub use write::handle_odata_delete;
 pub use write::handle_odata_patch;

@@ -95,7 +95,7 @@ async fn refused_missing_actions_leave_no_actor_or_journal_entry() {
             )
             .await,
             if allowed {
-                StatusCode::LOCKED
+                StatusCode::NOT_FOUND
             } else {
                 StatusCode::FORBIDDEN
             }
@@ -120,23 +120,27 @@ async fn refused_missing_actions_leave_no_actor_or_journal_entry() {
 }
 
 #[tokio::test]
-async fn implicit_creation_and_cold_recovery_use_actual_authorization_state() {
+async fn explicit_creation_and_cold_recovery_use_actual_authorization_state() {
     use temper_runtime::persistence::EventStore;
     let store = temper_store_sim::SimEventStore::no_faults(467);
     let mut initial = state();
     initial.set_storage_stack(temper_server::StorageStack::from_sim(store.clone(), None));
     assert_eq!(
+        request(&initial, "POST", "/tdata/Orders", json!({"id":"explicit"})).await,
+        StatusCode::CREATED
+    );
+    assert_eq!(
         request(
             &initial,
             "POST",
-            "/tdata/Orders('implicit')/Temper.SubmitOrder",
+            "/tdata/Orders('explicit')/Temper.SubmitOrder",
             json!({"Notes":"persisted"})
         )
         .await,
         StatusCode::OK
     );
     let before = store
-        .read_events("default:Order:implicit", 0)
+        .read_events("default:Order:explicit", 0)
         .await
         .unwrap();
     assert!(!before.is_empty());
@@ -154,14 +158,14 @@ async fn implicit_creation_and_cold_recovery_use_actual_authorization_state() {
         request(
             &recovered,
             "POST",
-            "/tdata/Orders('implicit')/Temper.SubmitOrder",
+            "/tdata/Orders('explicit')/Temper.SubmitOrder",
             json!({"Notes":"forged"})
         )
         .await,
         StatusCode::FORBIDDEN
     );
     let after = store
-        .read_events("default:Order:implicit", 0)
+        .read_events("default:Order:explicit", 0)
         .await
         .unwrap();
     assert_eq!(
@@ -225,7 +229,7 @@ async fn first_generic_stream_upload_commits_fields_and_rejected_reupload_is_not
 }
 
 #[tokio::test]
-async fn missing_commons_owner_refuses_without_materializing_target() {
+async fn missing_commons_owner_refuses_for_explicitly_created_target() {
     let state = state();
     state.registry.write().unwrap().register_tenant(
         "default",
@@ -256,6 +260,10 @@ to="Verified"
             verified_at: "2026-09-08T00:00:00Z".into(),
         }),
     );
+    assert_eq!(
+        request(&state, "POST", "/tdata/Orders", json!({"id":"created"})).await,
+        StatusCode::CREATED
+    );
     state
         .commons_guardrail_tenants
         .write()
@@ -264,13 +272,18 @@ to="Verified"
     let response = request(
         &state,
         "POST",
-        "/tdata/Orders('uncreated')/Temper.SubmitOrder",
+        "/tdata/Orders('created')/Temper.SubmitOrder",
         json!({"OwnerId":"missing-owner"}),
     )
     .await;
     assert_eq!(response, StatusCode::FORBIDDEN);
-    assert_eq!(state.active_actor_count(), 0);
-    assert!(!state.entity_exists(&TenantId::default(), "Order", "uncreated"));
+    assert_eq!(state.active_actor_count(), 1);
+    assert!(!state.entity_exists(&TenantId::default(), "Owner", "missing-owner"));
+    let order = state
+        .get_tenant_entity_state(&TenantId::default(), "Order", "created")
+        .await
+        .unwrap();
+    assert_eq!(order.state.status, "Draft");
 }
 
 #[tokio::test]

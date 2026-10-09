@@ -35,6 +35,17 @@ fn actor_idle_timeout_secs() -> i64 {
     })
 }
 
+/// Outcome of a create-only external POST attempt (temper#529 V11).
+///
+/// `Conflict` covers BOTH a live collision and a tombstoned (deleted)
+/// stream identically: this API permanently claims an id once it has any
+/// history. Explicit recreation / new generations on top of a tombstone is
+/// a separate, NOT-authorized design and must not be built from this type.
+pub(crate) enum CreateOnlyOutcome {
+    Created(Box<EntityResponse>),
+    Conflict,
+}
+
 fn is_deleted_envelope(event: &PersistenceEnvelope) -> bool {
     if event.event_type == "Deleted" {
         return true;
@@ -161,7 +172,8 @@ pub(crate) struct AuthzResourceSnapshot {
 }
 
 impl ServerState {
-    fn touch_actor_access(&self, actor_key: &str) {
+    /// Mark authorized actor use for idle passivation without creating an actor.
+    pub(super) fn touch_actor_access(&self, actor_key: &str) {
         if let Ok(mut last_accessed) = self.last_accessed.write() {
             last_accessed.insert(actor_key.to_string(), sim_now());
         }
@@ -856,6 +868,47 @@ impl ServerState {
         entity_id: &str,
         initial_fields: serde_json::Value,
     ) -> Result<ActorRef<EntityMsg>, String> {
+        self.spawn_tenant_actor(tenant, entity_type, entity_id, initial_fields, false)
+    }
+
+    /// Runtime-only admission policy; external callers cannot enable bootstrap.
+    pub(super) fn spawn_tenant_actor(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        initial_fields: serde_json::Value,
+        existing_only: bool,
+    ) -> Result<ActorRef<EntityMsg>, String> {
+        self.spawn_tenant_actor_outcome(
+            tenant,
+            entity_type,
+            entity_id,
+            initial_fields,
+            existing_only,
+        )
+        .map(|(actor_ref, _newly_spawned)| actor_ref)
+    }
+
+    /// Same admission policy as [`Self::spawn_tenant_actor`], but also reports
+    /// whether THIS call is the one that inserted a fresh actor into the
+    /// registry (`true`) versus finding one already registered (`false`).
+    ///
+    /// The registry's write-locked insert-or-return-existing check (below) is
+    /// the single in-process arbitration point for "who gets to create this
+    /// id": at most one concurrent caller for a given (tenant, entity_type,
+    /// entity_id) ever observes `true`. The create-only external POST path
+    /// (temper#529 V11) uses this to tell a legitimate creator apart from a
+    /// racing duplicate — a stale read of the registry must never decide
+    /// that, only the atomic insert does.
+    pub(super) fn spawn_tenant_actor_outcome(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        initial_fields: serde_json::Value,
+        existing_only: bool,
+    ) -> Result<(ActorRef<EntityMsg>, bool), String> {
         if !initial_fields
             .as_object()
             .is_some_and(|fields| fields.is_empty())
@@ -869,7 +922,7 @@ impl ServerState {
             let registry = self.actor_registry.read().unwrap();
             if let Some(actor_ref) = registry.get(&key).filter(|actor| !actor.is_closed()) {
                 self.touch_actor_access(&key);
-                return Ok(actor_ref.clone());
+                return Ok((actor_ref.clone(), false));
             }
         }
 
@@ -926,22 +979,28 @@ impl ServerState {
                 .with_blob_store(tenant_blob_store),
         }
         .with_legacy_blob_store(legacy_blob_store);
+        let actor = if existing_only {
+            actor.existing_only()
+        } else {
+            actor
+        };
 
         // Slow-path: atomically re-check and spawn under write lock.
         // This prevents duplicate actors when concurrent requests race to create
         // the same (tenant, entity_type, entity_id) key.
-        let actor_ref = {
+        let (actor_ref, newly_spawned) = {
             let mut registry = self.actor_registry.write().unwrap();
             if let Some(existing) = registry.get(&key).filter(|actor| !actor.is_closed()) {
-                return Ok(existing.clone());
+                return Ok((existing.clone(), false));
             }
             let actor_ref = self.actor_system.spawn(actor, &key);
             registry.insert(key.clone(), actor_ref.clone());
-            actor_ref
+            (actor_ref, true)
         };
 
-        // Track in entity index for collection queries
-        {
+        // Recovery-only admission never publishes speculative index entries.
+        // Collection discovery for these durable entities remains journal-backed.
+        if !existing_only {
             let index_key = format!("{tenant}:{entity_type}");
             let mut index = self.entity_index.write().unwrap();
             index
@@ -952,7 +1011,7 @@ impl ServerState {
         self.touch_actor_access(&key);
         runtime_metrics::record_server_state_metrics(self);
 
-        Ok(actor_ref)
+        Ok((actor_ref, newly_spawned))
     }
 
     /// Remove an entity from the index and actor registry.
@@ -1126,6 +1185,109 @@ impl ServerState {
             .map_err(|e| format!("Actor query failed: {e}"))
     }
 
+    /// Create one entity generation through a create-only external POST
+    /// (temper#529 V11): a stream with ANY prior history — live or
+    /// tombstoned — conflicts with [`CreateOnlyOutcome::Conflict`] and never
+    /// mutates anything (no new journal event, no projection write, no
+    /// implication that the old object was newly created).
+    ///
+    /// Trusted internal get-or-create callers (bootstrap, file/stream init,
+    /// cross-entity dispatch) keep using [`Self::get_or_create_tenant_entity`]
+    /// unchanged — this is a distinct operation for the external POST
+    /// contract, not a behavior change to every internal caller.
+    ///
+    /// A concurrent duplicate call for the same never-before-touched id
+    /// resolves to exactly one [`CreateOnlyOutcome::Created`] and the rest
+    /// [`CreateOnlyOutcome::Conflict`]: the data-only fast path's own
+    /// zero-history append is the authoritative compare-and-append for
+    /// data-only-eligible types (ADR-0153), and the actor registry's
+    /// write-locked single-insert (`spawn_tenant_actor_outcome`) is the
+    /// authoritative admission boundary for the governed actor path. Neither
+    /// decision is made from a preflight read or a stale index.
+    #[instrument(skip_all, fields(otel.name = "entity.create_tenant_entity_create_only", tenant = %tenant, entity_type, entity_id))]
+    pub(crate) async fn create_tenant_entity_create_only(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        initial_fields: serde_json::Value,
+    ) -> Result<CreateOnlyOutcome, String> {
+        let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
+
+        // Authoritative existence pre-check: a stale in-memory index must not
+        // decide this (temper#529), so a durable journal is read directly when
+        // one is configured. ANY recorded history — live or tombstoned — is
+        // a conflict, so sequential duplicates (RED #1) and posts to a
+        // deleted id (RED #2) are rejected here with zero side effects.
+        if let Some((store, _backend)) = self.event_journal() {
+            let existing = store.read_events(&persistence_id, 0).await.map_err(|e| {
+                format!("failed to check existing history for {entity_type}:{entity_id}: {e}")
+            })?;
+            if !existing.is_empty() {
+                return Ok(CreateOnlyOutcome::Conflict);
+            }
+        } else if self.entity_exists(tenant, entity_type, entity_id) {
+            // No durable journal configured: the in-memory index is the only
+            // existence signal available (dev/test configurations only —
+            // every production storage stack sets a journal).
+            return Ok(CreateOnlyOutcome::Conflict);
+        }
+
+        // Try the data-only fast path first, with the exact eligibility and
+        // zero-history CAS behavior already used by internal callers. `None`
+        // means either the fast path does not apply (transition rules
+        // present, pg-backed, no native store, ...) or its own append lost a
+        // race to a concurrent creator; the follow-up read below tells those
+        // two apart instead of assuming the former.
+        match self
+            .try_create_data_only_tenant_entity(
+                tenant,
+                entity_type,
+                entity_id,
+                initial_fields.clone(),
+            )
+            .await
+        {
+            Ok(Some(response)) => return Ok(CreateOnlyOutcome::Created(Box::new(response))),
+            Ok(None) => {
+                if let Some((store, _backend)) = self.event_journal() {
+                    let after = store.read_events(&persistence_id, 0).await.map_err(|e| {
+                        format!(
+                            "failed to check existing history for {entity_type}:{entity_id}: {e}"
+                        )
+                    })?;
+                    if !after.is_empty() {
+                        // The fast path's own zero-history append committed
+                        // for a concurrent creator — a real conflict, not
+                        // "this type doesn't use the fast path".
+                        return Ok(CreateOnlyOutcome::Conflict);
+                    }
+                }
+            }
+            Err(e) => return Err(e),
+        }
+
+        // Governed actor path: the registry's write-locked single-insert is
+        // the authoritative admission boundary (temper#529) — at most one
+        // concurrent caller for this id ever observes `newly_spawned`. A
+        // caller that only found an already-registered actor did not create
+        // anything and must not report success for someone else's write.
+        let (_actor_ref, newly_spawned) = self.spawn_tenant_actor_outcome(
+            tenant,
+            entity_type,
+            entity_id,
+            initial_fields.clone(),
+            false,
+        )?;
+        if !newly_spawned {
+            return Ok(CreateOnlyOutcome::Conflict);
+        }
+
+        self.get_or_create_tenant_entity(tenant, entity_type, entity_id, initial_fields)
+            .await
+            .map(|response| CreateOnlyOutcome::Created(Box::new(response)))
+    }
+
     /// Create a new entity with initial fields and return its state.
     #[instrument(skip_all, fields(otel.name = "entity.get_or_create_tenant_entity", tenant = %tenant, entity_type, entity_id))]
     pub async fn get_or_create_tenant_entity(
@@ -1285,10 +1447,10 @@ impl ServerState {
         };
 
         let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
-        let initial_fields =
-            crate::entity_actor::effects::sanitize_action_params(&initial_fields).into_owned();
         let mut state =
             EntityActor::build_initial_state(entity_type, entity_id, &table, &initial_fields);
+        let initial_fields =
+            crate::entity_actor::field_ownership::sanitize(&state, &table, &initial_fields);
 
         let created = EntityEvent {
             action: "Created".to_string(),
@@ -1297,8 +1459,11 @@ impl ServerState {
             timestamp: sim_now(),
             params: initial_fields,
             idempotency_key: None,
+            idempotency_binding: None,
+            idempotency_result: None,
+            idempotency_reply: None,
         };
-        let payload = crate::entity_actor::bootstrap::event_payload(&created, &state)
+        let payload = crate::entity_actor::bootstrap::event_payload(&created, &state, &table)
             .map_err(|e| format!("failed to serialize Created event: {e}"))?;
         let envelope = PersistenceEnvelope {
             sequence_nr: 1,

@@ -221,6 +221,7 @@ pub(crate) async fn require_policy_auth(
         let pd = record_authz_denial(
             state,
             DenialInput {
+                execution_ctx: None,
                 tenant,
                 security_ctx,
                 agent_id_override: None,

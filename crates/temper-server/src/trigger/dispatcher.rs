@@ -239,20 +239,25 @@ impl ReactionDispatcher {
             // to avoid infinite async recursion — we handle cascading ourselves).
             fired_count += 1;
             let dispatch_result = state
-                .dispatch_tenant_action_core(
-                    tenant,
-                    &rule.then.entity_type,
-                    &target_entity_id,
-                    &rule.then.action,
-                    effective_params,
-                    &dispatch_ctx,
-                    false,
+                .dispatch_tenant_action_with_completion(
+                    crate::state::DispatchCommand {
+                        tenant,
+                        entity_type: &rule.then.entity_type,
+                        entity_id: &target_entity_id,
+                        action: &rule.then.action,
+                        params: effective_params,
+                        agent_ctx: &dispatch_ctx,
+                        await_integration: false,
+                        await_reactions: true,
+                    },
                     None,
+                    Some(depth + 1),
                 )
                 .await;
 
             match dispatch_result {
-                Ok(response) => {
+                Ok(result) => {
+                    let response = result.response;
                     let target_status = response.state.status.clone();
                     if response.success {
                         success_count += 1;
@@ -269,24 +274,7 @@ impl ReactionDispatcher {
                         depth,
                     });
 
-                    // Recurse if the target action succeeded. The cascade
-                    // fires under the same dispatch context as this rule —
-                    // elevation propagates down the chain.
-                    if response.success {
-                        let cascade_results = Box::pin(self.dispatch_reactions(
-                            state,
-                            tenant,
-                            &rule.then.entity_type,
-                            &target_entity_id,
-                            &rule.then.action,
-                            &target_status,
-                            &serde_json::to_value(&response.state.fields).unwrap_or_default(),
-                            depth + 1,
-                            &dispatch_ctx,
-                        ))
-                        .await;
-                        results.extend(cascade_results);
-                    }
+                    results.extend(result.reactions);
                 }
                 Err(e) => {
                     dispatch_error_count += 1;

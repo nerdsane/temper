@@ -13,6 +13,7 @@ struct WorkflowRootSpan {
     root_entity_type: String,
     root_entity_id: String,
     span: tracing::Span,
+    drain_scheduled: bool,
 }
 
 /// Keeps workflow root spans open across asynchronous entity actions.
@@ -22,6 +23,11 @@ pub(crate) struct WorkflowSpanRegistry {
 }
 
 impl WorkflowSpanRegistry {
+    #[cfg(test)]
+    pub(crate) fn contains_run(&self, id: &str) -> bool {
+        self.spans.lock().unwrap().contains_key(id)
+    }
+
     pub(crate) fn parent_context(
         &self,
         tenant: &str,
@@ -65,6 +71,7 @@ impl WorkflowSpanRegistry {
                 root_entity_type: root_entity_type.to_string(),
                 root_entity_id: root_entity_id.to_string(),
                 span,
+                drain_scheduled: false,
             },
         );
         Some(context)
@@ -101,12 +108,16 @@ impl WorkflowSpanRegistry {
         entity_id: &str,
         status: &str,
     ) -> Option<opentelemetry::Context> {
-        let spans = self.spans.lock().ok()?;
-        let root = spans.get(workflow_run_id)?;
+        let mut spans = self.spans.lock().ok()?;
+        let root = spans.get_mut(workflow_run_id)?;
         if root.root_entity_type != entity_type || root.root_entity_id != entity_id {
             return None;
         }
 
+        if root.drain_scheduled {
+            return None;
+        }
+        root.drain_scheduled = true;
         root.span.record("workflow.terminal_status", status);
         root.span.record(
             "workflow.drain_grace_ms",
@@ -135,16 +146,19 @@ impl WorkflowSpanRegistry {
         }
 
         let registry = std::sync::Arc::clone(self);
-        let drain_context = registry.mark_terminal_drain_scheduled(
+        let Some(drain_context) = registry.mark_terminal_drain_scheduled(
             &workflow_run_id,
             &entity_type,
             &entity_id,
             &status,
-        );
+        ) else {
+            return;
+        };
         tokio::spawn(async move {
             // determinism-ok: observability-only root span cleanup after
             // post-dispatch telemetry has had a chance to attach.
-            if let Some(parent_context) = drain_context {
+            {
+                let parent_context = drain_context;
                 let span = tracing::info_span!(
                     parent: None,
                     "temper.workflow.drain_grace",
@@ -162,8 +176,6 @@ impl WorkflowSpanRegistry {
                 }
                 .instrument(span)
                 .await;
-            } else {
-                tokio::time::sleep(WORKFLOW_ROOT_DRAIN_GRACE).await;
             }
             registry.finish_if_terminal(&workflow_run_id, &entity_type, &entity_id, &status);
         });

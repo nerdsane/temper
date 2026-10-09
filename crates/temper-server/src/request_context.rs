@@ -11,7 +11,11 @@ use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, Tra
 use temper_authz::SecurityContext;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
+mod local_completion;
+mod local_dispatch;
+pub use local_dispatch::LocalDispatchContext;
 mod observation_metadata;
+pub use local_completion::LocalCompletionEvidence;
 
 /// Maximum callbacks along one server-owned internal context lineage.
 ///
@@ -45,6 +49,15 @@ pub struct AgentContext {
     pub callback_depth: u32,
     /// Runtime-owned cumulative callback count; never populated from request headers.
     pub callback_hops: u32,
+    /// Runtime-owned (actor key, idempotency key) claims whose effects await
+    /// this inline lineage. Never populated from headers; bounded on entry by
+    /// `MAX_CALLBACK_HOPS`. Detached tasks begin a new effects ancestry.
+    pub effects_ancestors: Vec<(String, String)>,
+    /// Runtime-owned local completion evidence; never accepted from headers.
+    pub local_completion: LocalCompletionEvidence,
+    /// Root completion capacity inherited by logically joined descendants.
+    /// Weak so a completed receipt never retains a root slot through context.
+    pub completion_capacity: Option<std::sync::Weak<tokio::sync::OwnedSemaphorePermit>>,
     /// Full Cedar security context when known at the request boundary.
     ///
     /// External HTTP entrypoints populate this after credential resolution so
@@ -91,6 +104,28 @@ pub struct AgentContext {
 }
 
 impl AgentContext {
+    /// Enter an owned effects pipeline without permitting unbounded ancestry.
+    pub(crate) fn with_effects_ancestor(
+        &self,
+        actor_key: &str,
+        idem_key: &str,
+    ) -> Result<Self, &'static str> {
+        if self.effects_ancestors.len() >= MAX_CALLBACK_HOPS as usize {
+            return Err("post-dispatch effects ancestor budget exhausted");
+        }
+        let mut next = self.clone();
+        next.effects_ancestors
+            .push((actor_key.into(), idem_key.into()));
+        Ok(next)
+    }
+
+    /// Whether waiting for this owner would wait for our own inline ancestor.
+    pub(crate) fn has_effects_ancestor(&self, actor_key: &str, idem_key: &str) -> bool {
+        self.effects_ancestors
+            .iter()
+            .any(|(actor, key)| actor == actor_key && key == idem_key)
+    }
+
     /// Admit a callback only within both the inline and cumulative budgets.
     pub(crate) fn for_callback(&self) -> Result<Self, CallbackBudgetExceeded> {
         if self.callback_depth >= temper_runtime::reaction::MAX_REACTION_DEPTH {
@@ -105,12 +140,24 @@ impl AgentContext {
         Ok(next)
     }
 
+    /// Detach an effects dependency without changing identity, keys, tracing,
+    /// or either callback budget. Use at fire-and-forget handoffs that did not
+    /// previously reset callback depth (timers, spawns and reactions).
+    pub(crate) fn without_effects_ancestors(&self) -> Self {
+        let mut next = self.clone();
+        next.effects_ancestors.clear();
+        next.local_completion = LocalCompletionEvidence::default();
+        next.completion_capacity = None;
+        next
+    }
+
     /// Begin a detached task without replenishing its causal callback budget.
     ///
     /// Call only at a runtime-owned spawn boundary: the parent inline stack
     /// ends there, but its callback lineage continues in the detached task.
+    /// Effects ancestry ends there: the parent does not await detached work.
     pub(crate) fn for_background_task(&self) -> Self {
-        let mut next = self.clone();
+        let mut next = self.without_effects_ancestors();
         next.callback_depth = 0;
         next
     }
@@ -124,6 +171,9 @@ impl AgentContext {
         Self {
             callback_depth: 0,
             callback_hops: 0,
+            effects_ancestors: Vec::new(),
+            local_completion: LocalCompletionEvidence::default(),
+            completion_capacity: None,
             security_ctx: Some(SecurityContext::system()),
             agent_id: Some("system".to_string()),
             session_id: None,
@@ -161,6 +211,9 @@ impl AgentContext {
         Self {
             callback_depth: 0,
             callback_hops: 0,
+            effects_ancestors: Vec::new(),
+            local_completion: LocalCompletionEvidence::default(),
+            completion_capacity: None,
             security_ctx: Some(security_ctx),
             agent_id: Some(service_id),
             session_id: None,
@@ -193,10 +246,13 @@ impl AgentContext {
         Self::for_service(service_name).inherit_observability_from(parent)
     }
 
-    /// Copy the execution budget and non-authority observability fields from a parent.
+    /// Copy execution lineage/budgets and non-authority observability fields from a parent.
     pub fn inherit_observability_from(mut self, parent: &AgentContext) -> Self {
         self.callback_depth = parent.callback_depth;
         self.callback_hops = parent.callback_hops;
+        self.effects_ancestors = parent.effects_ancestors.clone();
+        self.local_completion = parent.local_completion.clone();
+        self.completion_capacity = parent.completion_capacity.clone();
         self.session_id = parent.session_id.clone();
         self.intent = parent.intent.clone();
         self.trace_id = parent.trace_id.clone();
@@ -308,6 +364,9 @@ pub(crate) fn extract_agent_context(headers: &HeaderMap) -> AgentContext {
     AgentContext {
         callback_depth: 0,
         callback_hops: 0,
+        effects_ancestors: Vec::new(),
+        local_completion: LocalCompletionEvidence::default(),
+        completion_capacity: None,
         security_ctx: None,
         agent_id: None,
         session_id,

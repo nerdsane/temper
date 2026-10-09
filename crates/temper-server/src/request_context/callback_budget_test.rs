@@ -141,3 +141,111 @@ fn detached_boundary_preserves_authority_and_idempotency() {
         serde_json::to_value(&context.security_ctx).unwrap()
     );
 }
+
+#[test]
+fn effects_ancestors_follow_inline_contexts_but_not_detached_or_http_requests() {
+    let (_guard, _, _) = temper_runtime::scheduler::install_deterministic_context(51951);
+    let parent = AgentContext::system()
+        .with_effects_ancestor("tenant:Task:one", "K")
+        .unwrap();
+    let callback = parent
+        .for_callback()
+        .unwrap()
+        .for_dispatch_root("Task", "one");
+    assert!(callback.has_effects_ancestor("tenant:Task:one", "K"));
+    let nested = callback
+        .with_effects_ancestor("tenant:Task:two", "child")
+        .unwrap();
+    assert!(nested.has_effects_ancestor("tenant:Task:one", "K"));
+    assert!(nested.has_effects_ancestor("tenant:Task:two", "child"));
+    assert_eq!(callback.effects_ancestors.len(), 1);
+    assert!(!callback.has_effects_ancestor("other-tenant:Task:one", "K"));
+    assert!(!callback.has_effects_ancestor("tenant:Task:one", "different-key"));
+    for service in [
+        "platform-dispatch",
+        "wasm-runtime",
+        "integration-compensation",
+    ] {
+        let inherited = AgentContext::for_service_inheriting(service, &callback);
+        assert!(inherited.has_effects_ancestor("tenant:Task:one", "K"));
+        assert!(inherited.for_background_task().effects_ancestors.is_empty());
+    }
+    // Narrower identities use this same inheritance path without copying keys.
+    let inherited = AgentContext::default().inherit_observability_from(&callback);
+    assert!(inherited.has_effects_ancestor("tenant:Task:one", "K"));
+    assert!(
+        parent.effects_ancestors.len() == 1,
+        "cloned child must not mutate its parent"
+    );
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-temper-effects-ancestors",
+        "tenant:Task:one:K".parse().unwrap(),
+    );
+    assert!(extract_agent_context(&headers).effects_ancestors.is_empty());
+}
+
+#[test]
+fn effects_ancestor_budget_refuses_without_extending_the_lineage() {
+    let mut context = AgentContext::default();
+    for n in 0..MAX_CALLBACK_HOPS {
+        context = context
+            .with_effects_ancestor("tenant:Task:one", &n.to_string())
+            .unwrap();
+    }
+    assert_eq!(
+        context
+            .with_effects_ancestor("tenant:Task:one", "overflow")
+            .unwrap_err(),
+        "post-dispatch effects ancestor budget exhausted"
+    );
+    assert_eq!(context.effects_ancestors.len(), MAX_CALLBACK_HOPS as usize);
+}
+
+#[test]
+fn detached_effect_clears_only_ancestry_preserving_all_other_context() {
+    let parent = AgentContext {
+        callback_depth: 7,
+        callback_hops: MAX_CALLBACK_HOPS - 1,
+        idempotency_key: Some("same-key".into()),
+        effects_ancestors: vec![("tenant:Task:one".into(), "same-key".into())],
+        session_id: Some("session".into()),
+        trace_id: Some("trace".into()),
+        parent_span_id: Some("parent-span".into()),
+        workflow_root_entity_type: Some("Task".into()),
+        workflow_root_entity_id: Some("one".into()),
+        workflow_run_id: Some("workflow".into()),
+        intent: Some("detached effect".into()),
+        observation_metadata: BTreeMap::from([("test.origin".into(), "parent".into())]),
+        ..AgentContext::system()
+    };
+    let detached = parent.without_effects_ancestors();
+    assert!(detached.effects_ancestors.is_empty());
+    assert_eq!(detached.callback_depth, 7);
+    assert_eq!(detached.callback_hops, MAX_CALLBACK_HOPS - 1);
+    assert_eq!(detached.idempotency_key, parent.idempotency_key);
+    // This context has no owned operation. Restoring its ancestors reproduces
+    // all identity, attribution, tracing and callback-budget fields.
+    let restored = AgentContext {
+        effects_ancestors: parent.effects_ancestors.clone(),
+        ..detached
+    };
+    assert_eq!(format!("{restored:?}"), format!("{parent:?}"));
+}
+
+#[test]
+fn completion_evidence_and_root_capacity_follow_only_joined_contexts() {
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+    let permit = std::sync::Arc::new(semaphore.clone().try_acquire_owned().unwrap());
+    let parent = AgentContext {
+        completion_capacity: Some(std::sync::Arc::downgrade(&permit)),
+        ..AgentContext::system()
+    };
+    parent.local_completion.mark_unknown();
+    let child = AgentContext::default().inherit_observability_from(&parent);
+    assert!(child.local_completion.is_unknown());
+    assert!(child.completion_capacity.unwrap().upgrade().is_some());
+    let detached = parent.for_background_task();
+    assert!(!detached.local_completion.is_unknown());
+    assert!(detached.completion_capacity.is_none());
+}

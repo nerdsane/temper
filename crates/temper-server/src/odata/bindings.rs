@@ -16,9 +16,20 @@ use super::rate_limit::{enforce_commons_write_rate_limit, owner_id_from_action};
 use super::response::annotate_entity;
 use crate::authz::{DenialInput, record_authz_denial};
 use crate::blobs::hydrate_blob_refs_for_tenant;
+use crate::idempotency::IdempotencyLookup;
 use crate::request_context::AgentContext;
 use crate::response::{ODataResponse, odata_denial, odata_error};
 use crate::state::{BoundActionHookContext, DispatchCommand, DispatchError, ServerState};
+
+/// 422 for an `Idempotency-Key` reused with a different action or body (ADR-0182).
+fn idempotency_mismatch_response() -> axum::response::Response {
+    odata_error(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "IdempotencyKeyMismatch",
+        crate::idempotency::IDEMPOTENCY_KEY_MISMATCH,
+    )
+    .into_response()
+}
 
 fn idempotency_actor_key(tenant: &TenantId, entity_type: &str, entity_id: &str) -> String {
     format!("{tenant}:{entity_type}:{entity_id}")
@@ -102,7 +113,7 @@ pub(super) async fn dispatch_bound_action(
     }
 
     let authz_snapshot = match state
-        .load_authz_resource_snapshot(tenant, entity_type, key_str)
+        .load_bound_action_snapshot(tenant, entity_type, key_str)
         .await
     {
         Ok(v) => v,
@@ -134,6 +145,7 @@ pub(super) async fn dispatch_bound_action(
         let pd = record_authz_denial(
             state,
             DenialInput {
+                execution_ctx: Some(agent_ctx),
                 tenant: tenant.as_str(),
                 security_ctx,
                 agent_id_override: agent_ctx.agent_id.as_deref(),
@@ -158,6 +170,16 @@ pub(super) async fn dispatch_bound_action(
         http_span.end_with_timestamp(end_time);
         let reason_with_id = format!("{reason} (decision: {})", pd.id);
         return odata_denial(&reason_with_id, &pd.id).into_response();
+    }
+
+    // Authorization precedes existence disclosure, including actions named Create.
+    if !authz_snapshot.exists {
+        let error = DispatchError::NotFound(format!("{entity_type}:{key_str}"));
+        http_span.set_status(Status::error(error.to_string()));
+        http_span.set_attribute(OtelKeyValue::new("http.status_code", 404i64));
+        http_span.end_with_timestamp(sim_now().into());
+        return odata_error(StatusCode::NOT_FOUND, "EntityNotFound", &error.to_string())
+            .into_response();
     }
 
     if let Err(error) = state.check_verification_gate(tenant, entity_type) {
@@ -209,6 +231,7 @@ pub(super) async fn dispatch_bound_action(
         entity_type,
         owner_id_from_action(&current_state.state.fields, &resolved_body),
         security_ctx,
+        agent_ctx,
     )
     .await
     {
@@ -238,76 +261,49 @@ pub(super) async fn dispatch_bound_action(
         return resp;
     }
 
-    if !authz_snapshot.exists {
-        let validation = state
-            .transition_table_for_dispatch(tenant, entity_type)
-            .map_err(|error| error.to_string())
-            .and_then(|table| {
-                table.validate_action_params(
-                    action.rsplit('.').next().unwrap_or(action),
-                    &resolved_body,
-                    &current_state.state.fields,
-                    &current_state.state.counters,
-                    &current_state.state.booleans,
-                )
-            });
-        if let Err(error) = validation {
-            http_span.set_status(Status::error("StrictActionContract"));
-            http_span.set_attribute(OtelKeyValue::new("http.status_code", 409i64));
-            http_span.end_with_timestamp(sim_now().into());
-            return odata_error(StatusCode::CONFLICT, "StrictActionContract", &error)
-                .into_response();
-        }
-    }
-
-    let snapshot = match state
-        .materialize_authorized_snapshot(tenant, entity_type, key_str, authz_snapshot)
-        .await
-    {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            return odata_error(
-                if matches!(error, DispatchError::Conflict(_)) {
-                    StatusCode::CONFLICT
-                } else {
-                    StatusCode::INTERNAL_SERVER_ERROR
-                },
-                "AuthorizationStateChanged",
-                &error.to_string(),
-            )
-            .into_response();
-        }
-    };
-    let current_state = snapshot.current_state;
+    let current_state = authz_snapshot.current_state;
     let expected_authorization_precondition =
         crate::entity_actor::effects::entity_authorization_precondition(&current_state.state);
 
-    // Idempotency cache check
+    // Idempotency cache check, bound to the canonical request (ADR-0182).
     let actor_key = idempotency_actor_key(tenant, entity_type, key_str);
-    if let Some(ref idem_key) = idempotency_key
-        && let Some(cached) = state
-            .idempotency_cache
-            .get_after_effects_applied(&actor_key, idem_key)
-    {
-        let body = annotate_entity(
-            serde_json::to_value(&cached.state).unwrap_or_default(),
-            format!("$metadata#{set_name}/$entity"),
-            None,
-        );
-        http_span.set_attribute(OtelKeyValue::new("idempotency.hit", true));
-        http_span.set_status(Status::Ok);
-        http_span.set_attribute(OtelKeyValue::new("http.status_code", 200i64));
-        let end_time: std::time::SystemTime = sim_now().into();
-        http_span.end_with_timestamp(end_time);
-        return ODataResponse {
-            status: StatusCode::OK,
-            body,
+    let request_binding = crate::idempotency::request_binding(action, &resolved_body);
+    if let Some(ref idem_key) = idempotency_key {
+        match state.idempotency_cache.lookup_after_completion(
+            &actor_key,
+            idem_key,
+            &request_binding,
+        ) {
+            IdempotencyLookup::Hit(cached) => {
+                let body = annotate_entity(
+                    serde_json::to_value(&cached.state).unwrap_or_default(),
+                    format!("$metadata#{set_name}/$entity"),
+                    None,
+                );
+                http_span.set_attribute(OtelKeyValue::new("idempotency.hit", true));
+                http_span.set_status(Status::Ok);
+                http_span.set_attribute(OtelKeyValue::new("http.status_code", 200i64));
+                let end_time: std::time::SystemTime = sim_now().into();
+                http_span.end_with_timestamp(end_time);
+                return ODataResponse {
+                    status: StatusCode::OK,
+                    body,
+                }
+                .into_response();
+            }
+            IdempotencyLookup::Mismatch => {
+                http_span.set_attribute(OtelKeyValue::new("idempotency.mismatch", true));
+                http_span.set_status(Status::error("IdempotencyKeyMismatch"));
+                http_span.set_attribute(OtelKeyValue::new("http.status_code", 422i64));
+                http_span.end_with_timestamp(sim_now().into());
+                return idempotency_mismatch_response();
+            }
+            IdempotencyLookup::Miss => {}
         }
-        .into_response();
     }
 
     let result = state
-        .dispatch_tenant_action_ext_typed_if_current(
+        .dispatch_bound_action_if_current(
             DispatchCommand {
                 tenant,
                 entity_type,
@@ -326,15 +322,8 @@ pub(super) async fn dispatch_bound_action(
     let response = match result {
         Ok(response) => {
             if response.success {
-                // Cache for idempotency
-                if let Some(ref idem_key) = idempotency_key {
-                    state.idempotency_cache.put_effects_applied(
-                        &actor_key,
-                        idem_key,
-                        response.clone(),
-                    );
-                }
-
+                // Dispatch's effects owner publishes the final cached result.
+                // A protocol replay must never complete or replace its claim.
                 http_span.set_status(Status::Ok);
                 http_span.set_attribute(OtelKeyValue::new("http.status_code", 200i64));
 
@@ -394,6 +383,11 @@ pub(super) async fn dispatch_bound_action(
                 .into_response()
             }
         }
+        Err(error @ DispatchError::NotFound(_)) => {
+            http_span.set_status(Status::error(error.to_string()));
+            http_span.set_attribute(OtelKeyValue::new("http.status_code", 404i64));
+            odata_error(StatusCode::NOT_FOUND, "EntityNotFound", &error.to_string()).into_response()
+        }
         Err(DispatchError::Ungoverned(entity)) => {
             let reason = format!(
                 "Entity type '{entity}' has no registered spec — actions are denied by default"
@@ -412,6 +406,16 @@ pub(super) async fn dispatch_bound_action(
             http_span.set_attribute(OtelKeyValue::new("http.status_code", 413i64));
             odata_error(StatusCode::PAYLOAD_TOO_LARGE, "StorageCapExceeded", &reason)
                 .into_response()
+        }
+        Err(DispatchError::IdempotencyKeyMismatch(_)) => {
+            http_span.set_status(Status::error("IdempotencyKeyMismatch"));
+            http_span.set_attribute(OtelKeyValue::new("http.status_code", 422i64));
+            idempotency_mismatch_response()
+        }
+        Err(DispatchError::IdempotencyKeyUnverifiable(reason)) => {
+            http_span.set_status(Status::error("IdempotencyKeyUnverifiable"));
+            http_span.set_attribute(OtelKeyValue::new("http.status_code", 409i64));
+            odata_error(StatusCode::CONFLICT, "IdempotencyKeyUnverifiable", &reason).into_response()
         }
         Err(DispatchError::Conflict(reason)) => {
             http_span.set_status(Status::error(reason.clone()));

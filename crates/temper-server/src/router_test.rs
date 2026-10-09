@@ -1882,6 +1882,17 @@ async fn commons_app_name_unique_per_owner_on_create_and_patch() {
 #[tokio::test]
 async fn test_post_bound_action() {
     let app = authenticated_router(test_state_with_ioa());
+    let created = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Orders")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"Id":"abc-123"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
     let response = app
         .oneshot(
             Request::post("/tdata/Orders('abc-123')/Temper.Example.CancelOrder")

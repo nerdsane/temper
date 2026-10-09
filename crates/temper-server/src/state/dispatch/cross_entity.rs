@@ -109,7 +109,7 @@ impl crate::state::ServerState {
             let child_id = req.entity_id.clone();
             let initial_action = req.initial_action.clone();
             let parent_params = action_params.clone();
-            let agent = agent_ctx.clone();
+            let agent = agent_ctx.without_effects_ancestors();
             let workflow_root_entity_type = agent
                 .workflow_root_entity_type
                 .clone()

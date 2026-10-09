@@ -32,6 +32,7 @@ pub(super) async fn enforce_commons_write_rate_limit(
     entity_type: &str,
     owner_id: Option<String>,
     security_context: &SecurityContext,
+    execution_ctx: &crate::request_context::AgentContext,
 ) -> Result<(), axum::response::Response> {
     if !state.commons_guardrails_enabled(tenant) || rate_limit_exempt_entity(entity_type) {
         return Ok(());
@@ -43,7 +44,12 @@ pub(super) async fn enforce_commons_write_rate_limit(
     }
 
     match state
-        .consume_commons_rate_limit_token(tenant, &owner_id, state.commons_write_action_class())
+        .consume_commons_rate_limit_token(
+            tenant,
+            &owner_id,
+            state.commons_write_action_class(),
+            execution_ctx,
+        )
         .await
     {
         Ok(()) => Ok(()),

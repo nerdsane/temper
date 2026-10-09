@@ -2210,3 +2210,11 @@ async fn strict_composite_compares_uncommitted_overflow_from_earlier_subwrite() 
         }
     }
 }
+
+#[cfg(feature = "sim")]
+#[path = "composite_reply_proof_test.rs"]
+mod reply_proof_tests;
+
+#[cfg(feature = "sim")]
+#[path = "composite_reply_projection_test.rs"]
+mod reply_proof_projection_tests;

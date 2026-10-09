@@ -321,10 +321,12 @@ pub(super) fn composite_envelope(
     persistence_id: &str,
     event: &crate::entity_actor::EntityEvent,
     initial: &EntityState,
+    table: &temper_jit::table::TransitionTable,
 ) -> Result<PersistenceEnvelope, DispatchError> {
-    let payload = crate::entity_actor::bootstrap::event_payload(event, initial).map_err(|e| {
-        DispatchError::Internal(format!("failed to serialize composite event: {e}"))
-    })?;
+    let payload =
+        crate::entity_actor::bootstrap::event_payload(event, initial, table).map_err(|e| {
+            DispatchError::Internal(format!("failed to serialize composite event: {e}"))
+        })?;
     Ok(PersistenceEnvelope {
         sequence_nr: 0,
         event_type: event.action.clone(),

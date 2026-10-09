@@ -1,4 +1,6 @@
 //! Unit and integration tests for the WASM engine.
+#[path = "tests/worker_completion.rs"]
+mod worker_completion;
 
 use std::sync::Arc;
 use std::sync::RwLock;

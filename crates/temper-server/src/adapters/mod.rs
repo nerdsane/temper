@@ -151,6 +151,9 @@ pub enum AdapterError {
     /// Adapter output could not be parsed.
     #[error("adapter output parse failed: {0}")]
     Parse(String),
+    /// Local execution or required process cleanup could not be joined.
+    #[error("adapter completion unknown: {0}")]
+    CompletionUnknown(String),
 }
 
 /// Trait implemented by all native adapter integrations.
@@ -166,6 +169,9 @@ pub trait AgentAdapter: Send + Sync {
     }
 
     /// Execute this adapter with the provided invocation context.
+    /// Ordinary returned results/errors require owned local work to be joined;
+    /// report `CompletionUnknown` when that cannot be established. This does
+    /// not assert that remote side effects were rolled back.
     async fn execute(&self, ctx: AdapterContext) -> Result<AdapterResult, AdapterError>;
 }
 
@@ -257,10 +263,10 @@ pub(super) async fn execute_cli_command(
         AdapterError::Invocation(format!("failed to spawn '{command_name}': {error}"))
     })?;
     let stdout = child.stdout.take().ok_or_else(|| {
-        AdapterError::Invocation(format!("failed to capture '{command_name}' stdout"))
+        AdapterError::CompletionUnknown(format!("failed to capture '{command_name}' stdout"))
     })?;
     let stderr = child.stderr.take().ok_or_else(|| {
-        AdapterError::Invocation(format!("failed to capture '{command_name}' stderr"))
+        AdapterError::CompletionUnknown(format!("failed to capture '{command_name}' stderr"))
     })?;
 
     enum Completion {
@@ -337,7 +343,11 @@ pub(super) async fn execute_cli_command(
         Completion::Complete(output) => Ok(output),
         Completion::Failed(error) => {
             let _ = child.kill().await;
-            let _ = child.wait().await;
+            if let Err(join_error) = child.wait().await {
+                return Err(AdapterError::CompletionUnknown(format!(
+                    "{error}; failed joining '{command_name}': {join_error}"
+                )));
+            }
             Err(error)
         }
     }
