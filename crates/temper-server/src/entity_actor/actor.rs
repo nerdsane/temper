@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Instant;
 
-use temper_jit::table::{Effect, TransitionTable};
+use temper_jit::table::TransitionTable;
 use temper_observe::wide_event;
 use temper_runtime::actor::{Actor, ActorContext, ActorError};
 use temper_runtime::persistence::{
@@ -36,9 +36,8 @@ pub(super) use tokio::time::sleep as sleep_persistence_retry; // determinism-ok:
 use crate::storage::{BackendLabel, BoxedEventStore};
 
 use super::action_input::process_action_with_blob_prestate;
-use super::effects::{
-    FieldSyncMode, build_eval_context_with_xref, prune_transient_action_fields_from_state,
-};
+use super::effects::FieldSyncMode;
+use super::idempotency_replay::{DuplicateRequest, idempotency_rejection};
 use super::snapshot_queue::{SnapshotEnqueueOutcome, SnapshotWriteQueue};
 use super::types::{
     EntityEvent, EntityMsg, EntityResponse, EntityState, MAX_EVENTS_SINCE_SNAPSHOT,
@@ -49,6 +48,14 @@ pub(super) enum ReplayPolicy {
     LenientSnapshot,
     StrictSnapshot,
     StrictFullJournal,
+}
+
+/// How far a replay goes (ADR-0182).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ReplayTarget<'a> {
+    pub(super) policy: ReplayPolicy,
+    /// Stop after the first journal event carrying this idempotency key.
+    pub(super) stop_after_idempotency_key: Option<&'a str>,
 }
 
 impl ReplayPolicy {
@@ -84,33 +91,6 @@ pub(super) fn event_budget_workspace_id(state: &EntityState) -> String {
     String::new()
 }
 
-fn duplicate_idempotency_custom_effects(
-    table: &TransitionTable,
-    state: &EntityState,
-    action: &str,
-    related: &temper_jit::table::RelatedMap,
-) -> Vec<String> {
-    if !table.composite_actions.contains_key(action) {
-        return Vec::new();
-    }
-
-    let ctx = build_eval_context_with_xref(state, related, table, Some(action));
-    table
-        .evaluate_ctx(&state.status, &ctx, action)
-        .filter(|result| result.success)
-        .map(|result| {
-            result
-                .effects
-                .into_iter()
-                .filter_map(|effect| match effect {
-                    Effect::Custom(name) => Some(name),
-                    _ => None,
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 /// The entity actor -- processes actions through a TransitionTable.
 /// Optionally persists events to the configured backend. Wide events are emitted
 /// via the OTEL SDK (no-op when OTEL is not initialised).
@@ -134,7 +114,7 @@ pub struct EntityActor {
     /// Shared idempotency cache (ADR-0048 sub-decision 5). Consulted before
     /// executing an action whose `idempotency_key` is set, so dispatch-layer
     /// retries that race past the caller's timeout cannot double-execute.
-    idempotency_cache: Option<Arc<crate::idempotency::IdempotencyCache>>,
+    pub(super) idempotency_cache: Option<Arc<crate::idempotency::IdempotencyCache>>,
     /// Object store for field-overflow blob bytes. SQL stores only refs.
     pub(super) blob_store: Option<crate::blob_store::BlobStore>,
     legacy_blob_store: Option<Arc<dyn crate::storage::BlobStore>>,
@@ -549,6 +529,27 @@ impl EntityActor {
         blob_store: Option<&crate::blob_store::BlobStore>,
         replay_policy: ReplayPolicy,
     ) -> Result<(), ActorError> {
+        let target = ReplayTarget {
+            policy: replay_policy,
+            stop_after_idempotency_key: None,
+        };
+        Self::replay_events_until(table, store, backend, state, tenant, blob_store, target).await
+    }
+
+    /// [`Self::replay_events`], optionally stopping right after the first
+    /// journal event carrying `target.stop_after_idempotency_key` (ADR-0182).
+    /// When the key is absent from the journal no event is replayed.
+    pub(super) async fn replay_events_until(
+        table: &TransitionTable,
+        store: &BoxedEventStore,
+        backend: BackendLabel,
+        state: &mut EntityState,
+        tenant: &str,
+        blob_store: Option<&crate::blob_store::BlobStore>,
+        target: ReplayTarget<'_>,
+    ) -> Result<(), ActorError> {
+        let replay_policy = target.policy;
+        let stop_after_idempotency_key = target.stop_after_idempotency_key;
         let replay_start = Instant::now(); // determinism-ok: wall-clock for production replay duration metric only
         let persistence_id = format!("{tenant}:{}:{}", state.entity_type, state.entity_id);
         let persistence_id = persistence_id.as_str();
@@ -586,7 +587,16 @@ impl EntityActor {
         }
 
         match store.read_events(persistence_id, from_sequence).await {
-            Ok(envelopes) => {
+            Ok(mut envelopes) => {
+                if let Some(key) = stop_after_idempotency_key {
+                    let stop = envelopes.iter().position(|env| {
+                        env.payload
+                            .get("idempotency_key")
+                            .and_then(serde_json::Value::as_str)
+                            == Some(key)
+                    });
+                    envelopes.truncate(stop.map_or(0, |index| index + 1));
+                }
                 if envelopes.len() > MAX_EVENTS_SINCE_SNAPSHOT {
                     return Err(ActorError::custom(format!(
                         "snapshot tail replay budget exceeded for {}:{} ({} > {} events since snapshot)",
@@ -668,6 +678,9 @@ impl EntityActor {
                                 timestamp: env.metadata.timestamp,
                                 params: serde_json::json!({}),
                                 idempotency_key: None,
+                                idempotency_binding: None,
+                                idempotency_result: None,
+                                idempotency_reply: None,
                             },
                         };
                         state.status = tombstone.to_status.clone();
@@ -1043,6 +1056,9 @@ impl Actor for EntityActor {
                 timestamp: sim_now(),
                 params: initial_params,
                 idempotency_key: None,
+                idempotency_binding: None,
+                idempotency_result: None,
+                idempotency_reply: None,
             };
 
             if let (Some(store), Some(backend)) = (self.event_journal.as_ref(), self.event_backend)
@@ -1070,6 +1086,7 @@ impl Actor for EntityActor {
     ) -> Result<(), ActorError> {
         match msg {
             EntityMsg::Action {
+                reply_mode,
                 name,
                 params,
                 related,
@@ -1119,32 +1136,48 @@ impl Actor for EntityActor {
                 // execute. Here we consult the shared cache keyed on the
                 // caller's `Idempotency-Key` before executing; on a hit, the
                 // previously-computed response is returned as the reply.
+                //
+                // ADR-0182: the key is bound to the canonical request. Reusing
+                // it for a different action or body is rejected, never served
+                // from the cache.
                 let actor_key = self.persistence_id();
-                if let (Some(key), Some(cache)) =
-                    (idempotency_key.as_ref(), self.idempotency_cache.as_ref())
-                    && let Some(cached) = cache.get(&actor_key, key)
-                {
-                    ctx.reply(cached);
-                    return Ok(());
+                let idempotency_binding = idempotency_key
+                    .as_ref()
+                    .map(|_| crate::idempotency::request_binding(&name, &params));
+                if let (Some(key), Some(binding), Some(cache)) = (
+                    idempotency_key.as_ref(),
+                    idempotency_binding.as_deref(),
+                    self.idempotency_cache.as_ref(),
+                ) {
+                    match cache.lookup(&actor_key, key, binding) {
+                        crate::idempotency::IdempotencyLookup::Hit(cached) => {
+                            ctx.reply(*cached);
+                            return Ok(());
+                        }
+                        crate::idempotency::IdempotencyLookup::Mismatch => {
+                            ctx.reply(idempotency_rejection(
+                                state,
+                                crate::idempotency::IDEMPOTENCY_KEY_MISMATCH,
+                            ));
+                            return Ok(());
+                        }
+                        crate::idempotency::IdempotencyLookup::Miss => {}
+                    }
                 }
-                if let Some(key) = idempotency_key.as_deref()
+                if let (Some(key), Some(binding)) =
+                    (idempotency_key.as_deref(), idempotency_binding.as_deref())
                     && state.has_processed_idempotency_key(key)
                 {
-                    let custom_effects =
-                        duplicate_idempotency_custom_effects(&table, state, &name, &related);
-                    let mut response_state = state.clone();
-                    if !custom_effects.is_empty() {
-                        prune_transient_action_fields_from_state(&mut response_state);
-                    }
-                    ctx.reply(EntityResponse {
-                        success: true,
-                        state: response_state,
-                        error: None,
-                        custom_effects,
-                        scheduled_actions: vec![],
-                        spawn_requests: vec![],
-                        spec_governed: true,
-                    });
+                    let request = DuplicateRequest {
+                        key,
+                        action: &name,
+                        params: &params,
+                        binding,
+                    };
+                    let response = self
+                        .idempotent_duplicate_reply(&table, state, request)
+                        .await;
+                    ctx.reply(response);
                     return Ok(());
                 }
 
@@ -1259,7 +1292,11 @@ impl Actor for EntityActor {
                         .event
                         .clone()
                         .expect("successful process_action always returns event"); // ci-ok: post-assertion, success guarantees Some
-                    event.idempotency_key = idempotency_key.clone();
+                    if let Some(key) = idempotency_key.as_deref() {
+                        crate::idempotency::stamp_keyed_reply(
+                            &mut event, key, &name, &params, state, reply_mode,
+                        );
+                    }
 
                     if !result.overflow_blobs.is_empty()
                         && let Err(e) = Self::persist_overflow_blobs(
@@ -1377,6 +1414,29 @@ impl Actor for EntityActor {
                                     state_before = state.clone();
                                     event_count_before = state.total_event_count;
 
+                                    // ADR-0182 review correction 3: a racing
+                                    // writer may have committed this very key.
+                                    // Recheck after catch-up and never re-run
+                                    // the losing request.
+                                    if let (Some(key), Some(binding)) =
+                                        (idempotency_key.as_deref(), idempotency_binding.as_deref())
+                                        && state.has_processed_idempotency_key(key)
+                                    {
+                                        retry_span.record("attempts", u64::from(1 + retry_idx));
+                                        retry_span.record("outcome", "idempotent_replay");
+                                        let request = DuplicateRequest {
+                                            key,
+                                            action: &name,
+                                            params: &params,
+                                            binding,
+                                        };
+                                        let response = self
+                                            .idempotent_duplicate_reply(&table, state, request)
+                                            .await;
+                                        ctx.reply(response);
+                                        return Ok(());
+                                    }
+
                                     // Re-evaluate the action against the caught-up
                                     // state. It may now fail (entity reached a
                                     // terminal state during the race) — if so,
@@ -1414,7 +1474,16 @@ impl Actor for EntityActor {
                                         .clone()
                                         .expect("successful process_action always returns event"); // ci-ok: post-assertion, success guarantees Some
                                     let mut retry_event = retry_event;
-                                    retry_event.idempotency_key = idempotency_key.clone();
+                                    if let Some(key) = idempotency_key.as_deref() {
+                                        crate::idempotency::stamp_keyed_reply(
+                                            &mut retry_event,
+                                            key,
+                                            &name,
+                                            &params,
+                                            state,
+                                            reply_mode,
+                                        );
+                                    }
 
                                     // Overflow blobs for the re-evaluated result.
                                     if !retry_result.overflow_blobs.is_empty()
@@ -1639,10 +1708,12 @@ impl Actor for EntityActor {
                     // ADR-0048 sub-decision 5: cache the successful response
                     // so a racing retry that lands after this reply returns
                     // the cached value instead of re-executing.
-                    if let (Some(key), Some(cache)) =
-                        (idempotency_key.as_ref(), self.idempotency_cache.as_ref())
-                    {
-                        cache.put(&actor_key, key, response.clone());
+                    if let (Some(key), Some(binding), Some(cache)) = (
+                        idempotency_key.as_ref(),
+                        idempotency_binding.as_deref(),
+                        self.idempotency_cache.as_ref(),
+                    ) {
+                        cache.put_committed(&actor_key, key, binding, response.clone(), reply_mode);
                     }
                     ctx.reply(response);
                 } else {
@@ -1780,6 +1851,9 @@ impl Actor for EntityActor {
                     timestamp: sim_now(),
                     params: serde_json::json!({}),
                     idempotency_key: None,
+                    idempotency_binding: None,
+                    idempotency_result: None,
+                    idempotency_reply: None,
                 };
 
                 if let (Some(store), Some(backend)) =

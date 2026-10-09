@@ -128,6 +128,8 @@ pub(crate) fn require_resource_authorization(
 
 /// Input for recording an authorization denial.
 pub(crate) struct DenialInput<'a> {
+    /// Trusted lineage of a synchronously awaited caller, never transport authority.
+    pub execution_ctx: Option<&'a AgentContext>,
     /// Tenant where the denial occurred.
     pub tenant: &'a str,
     /// Security context of the requester.
@@ -241,6 +243,7 @@ pub(crate) async fn require_governed_mutation_auth(
         let pd = record_authz_denial(
             state,
             DenialInput {
+                execution_ctx: None,
                 tenant: input.tenant,
                 security_ctx,
                 agent_id_override: None,
@@ -349,21 +352,38 @@ pub(crate) async fn record_authz_denial(
         "pending_decision_id": pd.id,
     });
     let system_tenant = TenantId::new("temper-system");
-    if let Err(e) = state
+    let agent = input.execution_ctx.map_or_else(
+        || AgentContext::for_service("platform-dispatch"),
+        |parent| AgentContext::for_service_inheriting("platform-dispatch", parent),
+    );
+    // Observe only this known audit write, not an arbitrary GET/read wait.
+    let wait = input
+        .execution_ctx
+        .map(|parent| parent.local_completion.observe_wait());
+    let result = state
         .dispatch_tenant_action(
             &system_tenant,
             "GovernanceDecision",
             &gd_id,
             "CreateGovernanceDecision",
             gd_params,
-            &AgentContext::for_service("platform-dispatch"),
+            &agent,
         )
-        .await
-    {
-        tracing::warn!(
-            error = %e,
-            "failed to create GovernanceDecision entity for denial"
-        );
+        .await;
+    if let Some(wait) = wait {
+        wait.joined();
+    }
+    // Interrupted receipts already marked the inherited evidence Unknown;
+    // keep the original denial response, while surfacing audit failure.
+    let error = match result {
+        Err(error) => Some(error),
+        Ok(response) if !response.success => response
+            .error
+            .or_else(|| Some("audit action rejected".into())),
+        Ok(_) => None,
+    };
+    if let Some(error) = error {
+        tracing::warn!(%error, "failed to create GovernanceDecision entity for denial");
     }
     pd.governance_decision_id = Some(gd_id.clone());
 

@@ -102,3 +102,9 @@ async fn retry_after_dropped_reply_replays_success_response_and_runs_effects_wit
         "post-dispatch effects from the successful Start transition must arm the state_timeout"
     );
 }
+
+#[path = "dispatch_retry_idempotency/overlap.rs"]
+mod overlap;
+
+#[path = "dispatch_retry_idempotency/historical.rs"]
+mod historical;

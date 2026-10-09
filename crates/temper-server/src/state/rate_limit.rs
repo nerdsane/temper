@@ -82,6 +82,7 @@ impl ServerState {
         tenant: &TenantId,
         owner_id: &str,
         action_class: &str,
+        execution_ctx: &AgentContext,
     ) -> Result<(), CommonsRateLimitError> {
         if owner_id.trim().is_empty() || action_class.trim().is_empty() {
             return Ok(());
@@ -135,23 +136,26 @@ impl ServerState {
             (bucket.tokens, bucket.last_refill_at, bucket_before_consume)
         };
 
-        let mut agent = AgentContext::for_service("commons-rate-limit");
+        let mut agent = AgentContext::for_service_inheriting("commons-rate-limit", execution_ctx);
         agent.idempotency_key = Some(format!(
             "commons-rate-limit:{tenant}:{bucket_id}:{}:{tokens_after_consume}",
             refill_time.timestamp_millis(),
         ));
         let result = self
             .dispatch_tenant_action_core(
-                tenant,
-                RATE_LIMIT_ENTITY_TYPE,
-                &bucket_id,
-                "Consume",
-                serde_json::json!({
-                    "Tokens": tokens_after_consume,
-                    "LastRefillAt": refill_time.to_rfc3339(),
-                }),
-                &agent,
-                false,
+                super::DispatchCommand {
+                    tenant,
+                    entity_type: RATE_LIMIT_ENTITY_TYPE,
+                    entity_id: &bucket_id,
+                    action: "Consume",
+                    params: serde_json::json!({
+                        "Tokens": tokens_after_consume,
+                        "LastRefillAt": refill_time.to_rfc3339(),
+                    }),
+                    agent_ctx: &agent,
+                    await_integration: false,
+                    await_reactions: false,
+                },
                 None,
             )
             .await

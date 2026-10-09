@@ -13,11 +13,13 @@ mod actions;
 mod adapter;
 mod authenticated_params;
 mod compensation;
+mod completion;
 mod composite;
 mod cross_entity;
 mod effects;
 mod generated_callbacks;
 mod projection_barrier;
+mod request;
 pub(crate) mod retry;
 pub(crate) mod state_timeouts;
 #[cfg(test)]
@@ -121,6 +123,17 @@ pub enum DispatchError {
     #[error("conflict: {0}")]
     Conflict(String),
 
+    /// The `Idempotency-Key` was already used for a different action or
+    /// request body (ADR-0182). Client error; nothing was appended.
+    #[error("idempotency key mismatch: {0}")]
+    IdempotencyKeyMismatch(String),
+
+    /// The `Idempotency-Key` was already used but its request or logical reply
+    /// cannot be verified from the journal. Fails closed; nothing was
+    /// appended.
+    #[error("idempotency key unverifiable: {0}")]
+    IdempotencyKeyUnverifiable(String),
+
     /// The entity type has no registered spec — all actions are denied by default.
     #[error("entity type '{0}' is not governed by any registered spec")]
     Ungoverned(String),
@@ -131,6 +144,20 @@ pub enum DispatchError {
 }
 
 impl DispatchError {
+    /// Map an actor idempotency rejection (ADR-0182) to its typed error.
+    pub(crate) fn from_idempotency_rejection(error: Option<&str>) -> Option<Self> {
+        match error? {
+            crate::idempotency::IDEMPOTENCY_KEY_MISMATCH => Some(Self::IdempotencyKeyMismatch(
+                crate::idempotency::IDEMPOTENCY_KEY_MISMATCH.to_string(),
+            )),
+            message @ (crate::idempotency::IDEMPOTENCY_KEY_UNVERIFIABLE
+            | crate::idempotency::IDEMPOTENCY_REPLY_UNVERIFIABLE) => {
+                Some(Self::IdempotencyKeyUnverifiable(message.to_string()))
+            }
+            _ => None,
+        }
+    }
+
     /// Classify an `ActorError` into the appropriate `DispatchError` variant
     /// based on ADR-0048's transient/permanent taxonomy.
     ///

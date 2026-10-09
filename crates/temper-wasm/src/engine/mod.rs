@@ -57,6 +57,10 @@ pub enum WasmError {
     /// WASM function invocation failed.
     #[error("invocation failed: {0}")]
     Invocation(String),
+    /// Invocation worker exited without delivering its result. Local child
+    /// completion is unknown; this is not an ordinary returned guest error.
+    #[error("WASM invocation worker terminated without a result")]
+    WorkerTerminated,
     /// Module exceeded its instruction fuel budget.
     #[error("fuel exhausted -- module exceeded instruction budget")]
     FuelExhausted,
@@ -478,8 +482,7 @@ impl WasmEngine {
             })
             .map_err(|e| WasmError::Invocation(format!("failed to spawn WASM thread: {e}")))?;
 
-        rx.await
-            .map_err(|e| WasmError::Invocation(format!("WASM thread terminated: {e}")))?
+        rx.await.map_err(|_| WasmError::WorkerTerminated)?
     }
 
     fn invoke_blocking(

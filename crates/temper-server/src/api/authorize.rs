@@ -89,6 +89,7 @@ pub(crate) async fn handle_authorize(
             let pd = record_authz_denial(
                 &state,
                 DenialInput {
+                    execution_ctx: None,
                     tenant: tenant.as_str(),
                     security_ctx,
                     agent_id_override: None,
