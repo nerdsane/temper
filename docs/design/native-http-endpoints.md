@@ -32,6 +32,13 @@ transport execution. The caller's idempotency header is not used for admission:
 every new request must check the current policy/state, even when it retries an
 upstream operation. The original header remains available to the transport.
 
+Admission requires an existing target, including for actions allowed in the initial
+state. A declared route is not a creation grant: an authorized request selecting a
+missing or deleted ID returns `404 EntityNotFound` without executing the transport.
+Create the entity explicitly before using such a route. A successful transport's
+HTTP status (including 201) describes the upstream exchange, not creation of the
+local admission target. WASM endpoint `AdmissionActions` use this same boundary.
+
 Successful action responses are delivered under their declared names alongside
 method, URI, sanitized headers, public prefix and request bytes. Request bodies
 and transport responses are request-scoped; they do not become entity fields.

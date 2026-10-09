@@ -47,6 +47,7 @@ async fn actor_project_full_lifecycle() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                reply_mode: temper_server::idempotency::ActionReplyMode::DirectCore,
                 name: "UpdateSpecs".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -64,6 +65,7 @@ async fn actor_project_full_lifecycle() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                reply_mode: temper_server::idempotency::ActionReplyMode::DirectCore,
                 name: "Verify".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -81,6 +83,7 @@ async fn actor_project_full_lifecycle() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                reply_mode: temper_server::idempotency::ActionReplyMode::DirectCore,
                 name: "Archive".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -106,6 +109,7 @@ async fn actor_project_verify_requires_building_state() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                reply_mode: temper_server::idempotency::ActionReplyMode::DirectCore,
                 name: "Verify".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -137,6 +141,7 @@ async fn actor_tenant_full_lifecycle() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                reply_mode: temper_server::idempotency::ActionReplyMode::DirectCore,
                 name: "Deploy".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -154,6 +159,7 @@ async fn actor_tenant_full_lifecycle() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                reply_mode: temper_server::idempotency::ActionReplyMode::DirectCore,
                 name: "Suspend".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -171,6 +177,7 @@ async fn actor_tenant_full_lifecycle() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                reply_mode: temper_server::idempotency::ActionReplyMode::DirectCore,
                 name: "Reactivate".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -188,6 +195,7 @@ async fn actor_tenant_full_lifecycle() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                reply_mode: temper_server::idempotency::ActionReplyMode::DirectCore,
                 name: "Archive".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -212,6 +220,7 @@ async fn actor_tenant_cannot_deploy_archived() {
     let _: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                reply_mode: temper_server::idempotency::ActionReplyMode::DirectCore,
                 name: "Deploy".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -225,6 +234,7 @@ async fn actor_tenant_cannot_deploy_archived() {
     let _: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                reply_mode: temper_server::idempotency::ActionReplyMode::DirectCore,
                 name: "Archive".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -240,6 +250,7 @@ async fn actor_tenant_cannot_deploy_archived() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                reply_mode: temper_server::idempotency::ActionReplyMode::DirectCore,
                 name: "Deploy".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -276,6 +287,7 @@ async fn actor_catalog_publish_and_fork() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                reply_mode: temper_server::idempotency::ActionReplyMode::DirectCore,
                 name: "Publish".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -293,6 +305,7 @@ async fn actor_catalog_publish_and_fork() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                reply_mode: temper_server::idempotency::ActionReplyMode::DirectCore,
                 name: "Fork".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -310,6 +323,7 @@ async fn actor_catalog_publish_and_fork() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                reply_mode: temper_server::idempotency::ActionReplyMode::DirectCore,
                 name: "Deprecate".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -345,6 +359,7 @@ async fn actor_collaborator_invite_accept_remove() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                reply_mode: temper_server::idempotency::ActionReplyMode::DirectCore,
                 name: "Accept".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -362,6 +377,7 @@ async fn actor_collaborator_invite_accept_remove() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                reply_mode: temper_server::idempotency::ActionReplyMode::DirectCore,
                 name: "ChangeRole".into(),
                 params: serde_json::json!({"role": "editor"}),
                 related: std::collections::BTreeMap::new(),
@@ -378,6 +394,7 @@ async fn actor_collaborator_invite_accept_remove() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                reply_mode: temper_server::idempotency::ActionReplyMode::DirectCore,
                 name: "Remove".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -408,6 +425,7 @@ async fn actor_version_lifecycle() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                reply_mode: temper_server::idempotency::ActionReplyMode::DirectCore,
                 name: "MarkDeployed".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -424,6 +442,7 @@ async fn actor_version_lifecycle() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                reply_mode: temper_server::idempotency::ActionReplyMode::DirectCore,
                 name: "Supersede".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -478,6 +497,7 @@ async fn actor_multiple_system_entities_independent() {
     let _: EntityResponse = p
         .ask(
             EntityMsg::Action {
+                reply_mode: temper_server::idempotency::ActionReplyMode::DirectCore,
                 name: "UpdateSpecs".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -491,6 +511,7 @@ async fn actor_multiple_system_entities_independent() {
     let _: EntityResponse = t
         .ask(
             EntityMsg::Action {
+                reply_mode: temper_server::idempotency::ActionReplyMode::DirectCore,
                 name: "Deploy".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -504,6 +525,7 @@ async fn actor_multiple_system_entities_independent() {
     let _: EntityResponse = c
         .ask(
             EntityMsg::Action {
+                reply_mode: temper_server::idempotency::ActionReplyMode::DirectCore,
                 name: "Publish".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),

@@ -308,13 +308,14 @@ async fn adapter_success_revokes_captured_token_and_never_persists_plaintext() {
 #[tokio::test]
 async fn adapter_error_still_revokes_captured_token() {
     let fixture = persisted_identity_fixture().await;
+    let completion = crate::request_context::LocalCompletionEvidence::default();
     let credential = mint(&fixture).await;
     let plaintext = credential.plaintext.clone();
     let (sender, receiver) = oneshot::channel();
 
     let error = fixture
         .first
-        .execute_adapter_with_credential_cleanup(
+        .execute_adapter_with_observed_cleanup(
             Arc::new(ResultAdapter {
                 captured: Mutex::new(Some(sender)),
                 fails: true,
@@ -322,6 +323,7 @@ async fn adapter_error_still_revokes_captured_token() {
             adapter_context(credential.plaintext),
             &TenantId::default(),
             Some(credential.key_hash),
+            completion.clone(),
         )
         .await
         .expect_err("adapter error should propagate after cleanup");
@@ -335,15 +337,30 @@ async fn adapter_error_still_revokes_captured_token() {
         plaintext
     );
     assert_token_resolves(&fixture.second, &plaintext, false).await;
+    assert!(
+        !completion.is_unknown(),
+        "joined ordinary errors must remain retryable"
+    );
 }
 
 #[tokio::test]
 async fn adapter_success_is_preserved_when_credential_cleanup_fails() {
     let fixture = persisted_identity_fixture().await;
+    // A missing entity can revoke successfully from the initial state. Remove
+    // the transition table to exercise an actual required-cleanup failure.
+    assert!(
+        fixture
+            .first
+            .registry
+            .write()
+            .unwrap()
+            .remove_tenant(&TenantId::default())
+    );
+    let completion = crate::request_context::LocalCompletionEvidence::default();
 
     let result = fixture
         .first
-        .execute_adapter_with_credential_cleanup(
+        .execute_adapter_with_observed_cleanup(
             Arc::new(ResultAdapter {
                 captured: Mutex::new(None),
                 fails: false,
@@ -351,16 +368,31 @@ async fn adapter_success_is_preserved_when_credential_cleanup_fails() {
             adapter_context("ephemeral-token".to_string()),
             &TenantId::default(),
             Some("missing-credential-key-hash".to_string()),
+            completion.clone(),
         )
         .await
         .expect("successful adapter result must survive cleanup failure");
 
     assert!(result.success);
+    assert!(
+        completion.is_unknown(),
+        "unjoined execution/cleanup must pin the receipt"
+    );
 }
 
 #[tokio::test]
 async fn adapter_error_is_preserved_and_redacted_when_credential_cleanup_fails() {
     let fixture = persisted_identity_fixture().await;
+    // A missing entity can revoke successfully from the initial state. Remove
+    // the transition table to exercise an actual required-cleanup failure.
+    assert!(
+        fixture
+            .first
+            .registry
+            .write()
+            .unwrap()
+            .remove_tenant(&TenantId::default())
+    );
     let plaintext = "ephemeral-token".to_string();
 
     let error = fixture
@@ -388,21 +420,27 @@ async fn adapter_error_is_preserved_and_redacted_when_credential_cleanup_fails()
 #[tokio::test]
 async fn adapter_panic_is_contained_and_still_revokes_token() {
     let fixture = persisted_identity_fixture().await;
+    let completion = crate::request_context::LocalCompletionEvidence::default();
     let credential = mint(&fixture).await;
     let plaintext = credential.plaintext.clone();
 
     let error = fixture
         .first
-        .execute_adapter_with_credential_cleanup(
+        .execute_adapter_with_observed_cleanup(
             Arc::new(PanicAdapter),
             adapter_context(credential.plaintext),
             &TenantId::default(),
             Some(credential.key_hash),
+            completion.clone(),
         )
         .await
         .expect_err("adapter panic should become a typed error after cleanup");
     assert!(error.to_string().contains("adapter invocation panicked"));
     assert_token_resolves(&fixture.second, &plaintext, false).await;
+    assert!(
+        completion.is_unknown(),
+        "unjoined execution/cleanup must pin the receipt"
+    );
 }
 
 #[tokio::test(start_paused = true)]

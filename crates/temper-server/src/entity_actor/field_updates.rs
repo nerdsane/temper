@@ -183,6 +183,9 @@ fn field_event(action: &str, state: &EntityState, fields: &Value) -> EntityEvent
         timestamp: sim_now(),
         params: fields.clone(),
         idempotency_key: None,
+        idempotency_binding: None,
+        idempotency_result: None,
+        idempotency_reply: None,
     }
 }
 

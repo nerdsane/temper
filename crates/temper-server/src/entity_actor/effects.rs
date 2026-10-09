@@ -397,6 +397,9 @@ pub(crate) fn process_action_with_xref_and_field_mode(
                 timestamp: sim_now(),
                 params: params.clone(),
                 idempotency_key: None,
+                idempotency_binding: None,
+                idempotency_result: None,
+                idempotency_reply: None,
             };
 
             ProcessResult {
@@ -575,7 +578,7 @@ fn validate_ref_action_contract(
     }
 }
 
-fn normalize_ref_action_params<'a>(
+pub(crate) fn normalize_ref_action_params<'a>(
     state: &EntityState,
     action: &str,
     params: &'a serde_json::Value,
@@ -1011,12 +1014,6 @@ fn prune_transient_action_fields(
 fn is_transient_action_field(entity_type: &str, field_name: &str) -> bool {
     entity_type == "Repository"
         && matches!(field_name, "PackBytes" | "RefUpdates" | "ClientRequestId")
-}
-
-pub(crate) fn prune_transient_action_fields_from_state(state: &mut EntityState) {
-    if let Some(obj) = state.fields.as_object_mut() {
-        prune_transient_action_fields(&state.entity_type, obj);
-    }
 }
 
 fn project_field_value(

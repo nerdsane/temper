@@ -3,6 +3,7 @@
 pub(crate) mod account_verification;
 pub mod admission;
 pub(crate) mod app_uniqueness;
+mod bound_actions;
 pub mod custom_effects;
 mod dispatch;
 mod entity_ops;

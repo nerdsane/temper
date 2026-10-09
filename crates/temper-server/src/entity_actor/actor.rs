@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Instant;
 
-use temper_jit::table::{Effect, TransitionTable};
+use temper_jit::table::TransitionTable;
 use temper_observe::wide_event;
 use temper_runtime::actor::{Actor, ActorContext, ActorError};
 use temper_runtime::persistence::{
@@ -36,9 +36,8 @@ pub(super) use tokio::time::sleep as sleep_persistence_retry; // determinism-ok:
 use crate::storage::{BackendLabel, BoxedEventStore};
 
 use super::action_input::process_action_with_blob_prestate;
-use super::effects::{
-    FieldSyncMode, build_eval_context_with_xref, prune_transient_action_fields_from_state,
-};
+use super::effects::FieldSyncMode;
+use super::idempotency_replay::{DuplicateRequest, idempotency_rejection};
 use super::snapshot_queue::{SnapshotEnqueueOutcome, SnapshotWriteQueue};
 use super::types::{
     EntityEvent, EntityMsg, EntityResponse, EntityState, MAX_EVENTS_SINCE_SNAPSHOT,
@@ -49,6 +48,15 @@ pub(super) enum ReplayPolicy {
     LenientSnapshot,
     StrictSnapshot,
     StrictFullJournal,
+    ExistingSnapshot,
+}
+
+/// How far a replay goes (ADR-0182).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ReplayTarget<'a> {
+    pub(super) policy: ReplayPolicy,
+    /// Stop after the first journal event carrying this idempotency key.
+    pub(super) stop_after_idempotency_key: Option<&'a str>,
 }
 
 impl ReplayPolicy {
@@ -60,8 +68,26 @@ impl ReplayPolicy {
         self != Self::LenientSnapshot
     }
 
-    fn strict_event_validation(self) -> bool {
-        self == Self::StrictFullJournal
+    fn strict_journal_integrity(self) -> bool {
+        matches!(self, Self::StrictFullJournal | Self::ExistingSnapshot)
+    }
+
+    fn validate_entity_event(
+        self,
+        table: &TransitionTable,
+        state: &EntityState,
+        envelope: &PersistenceEnvelope,
+        event: &EntityEvent,
+    ) -> Result<(), ActorError> {
+        match self {
+            Self::ExistingSnapshot => {
+                super::replay_validation::validate_entity_event_integrity(state, envelope, event)
+            }
+            Self::StrictFullJournal => super::replay_validation::validate_strict_entity_event(
+                table, state, envelope, event,
+            ),
+            Self::LenientSnapshot | Self::StrictSnapshot => Ok(()),
+        }
     }
 }
 
@@ -82,33 +108,6 @@ pub(super) fn event_budget_workspace_id(state: &EntityState) -> String {
     }
 
     String::new()
-}
-
-fn duplicate_idempotency_custom_effects(
-    table: &TransitionTable,
-    state: &EntityState,
-    action: &str,
-    related: &temper_jit::table::RelatedMap,
-) -> Vec<String> {
-    if !table.composite_actions.contains_key(action) {
-        return Vec::new();
-    }
-
-    let ctx = build_eval_context_with_xref(state, related, table, Some(action));
-    table
-        .evaluate_ctx(&state.status, &ctx, action)
-        .filter(|result| result.success)
-        .map(|result| {
-            result
-                .effects
-                .into_iter()
-                .filter_map(|effect| match effect {
-                    Effect::Custom(name) => Some(name),
-                    _ => None,
-                })
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 /// The entity actor -- processes actions through a TransitionTable.
@@ -134,10 +133,12 @@ pub struct EntityActor {
     /// Shared idempotency cache (ADR-0048 sub-decision 5). Consulted before
     /// executing an action whose `idempotency_key` is set, so dispatch-layer
     /// retries that race past the caller's timeout cannot double-execute.
-    idempotency_cache: Option<Arc<crate::idempotency::IdempotencyCache>>,
+    pub(super) idempotency_cache: Option<Arc<crate::idempotency::IdempotencyCache>>,
     /// Object store for field-overflow blob bytes. SQL stores only refs.
     pub(super) blob_store: Option<crate::blob_store::BlobStore>,
     legacy_blob_store: Option<Arc<dyn crate::storage::BlobStore>>,
+    /// External admission may recover an entity, but must never bootstrap it.
+    existing_only: bool,
 }
 
 impl EntityActor {
@@ -273,6 +274,7 @@ impl EntityActor {
             idempotency_cache: None,
             blob_store: None,
             legacy_blob_store: None,
+            existing_only: false,
         }
     }
 
@@ -298,7 +300,14 @@ impl EntityActor {
             idempotency_cache: None,
             blob_store: None,
             legacy_blob_store: None,
+            existing_only: false,
         }
+    }
+
+    /// Forbid bootstrap, including when supervision restarts this actor.
+    pub(crate) fn existing_only(mut self) -> Self {
+        self.existing_only = true;
+        self
     }
 
     /// Set the tenant for this actor (must be called before spawning).
@@ -549,6 +558,27 @@ impl EntityActor {
         blob_store: Option<&crate::blob_store::BlobStore>,
         replay_policy: ReplayPolicy,
     ) -> Result<(), ActorError> {
+        let target = ReplayTarget {
+            policy: replay_policy,
+            stop_after_idempotency_key: None,
+        };
+        Self::replay_events_until(table, store, backend, state, tenant, blob_store, target).await
+    }
+
+    /// [`Self::replay_events`], optionally stopping right after the first
+    /// journal event carrying `target.stop_after_idempotency_key` (ADR-0182).
+    /// When the key is absent from the journal no event is replayed.
+    pub(super) async fn replay_events_until(
+        table: &TransitionTable,
+        store: &BoxedEventStore,
+        backend: BackendLabel,
+        state: &mut EntityState,
+        tenant: &str,
+        blob_store: Option<&crate::blob_store::BlobStore>,
+        target: ReplayTarget<'_>,
+    ) -> Result<(), ActorError> {
+        let replay_policy = target.policy;
+        let stop_after_idempotency_key = target.stop_after_idempotency_key;
         let replay_start = Instant::now(); // determinism-ok: wall-clock for production replay duration metric only
         let persistence_id = format!("{tenant}:{}:{}", state.entity_type, state.entity_id);
         let persistence_id = persistence_id.as_str();
@@ -566,6 +596,10 @@ impl EntityActor {
                             seq = snapshot_seq,
                             "loaded snapshot before replay"
                         );
+                    } else if replay_policy == ReplayPolicy::ExistingSnapshot {
+                        return Err(ActorError::custom(
+                            "invalid entity snapshot during bound-action admission",
+                        ));
                     } else {
                         tracing::warn!(
                             entity = %state.entity_id,
@@ -575,6 +609,11 @@ impl EntityActor {
                     }
                 }
                 Ok(None) => {}
+                Err(e) if replay_policy == ReplayPolicy::ExistingSnapshot => {
+                    return Err(ActorError::custom(format!(
+                        "failed to load entity snapshot: {e}"
+                    )));
+                }
                 Err(e) => {
                     tracing::warn!(
                         entity = %state.entity_id,
@@ -586,7 +625,16 @@ impl EntityActor {
         }
 
         match store.read_events(persistence_id, from_sequence).await {
-            Ok(envelopes) => {
+            Ok(mut envelopes) => {
+                if let Some(key) = stop_after_idempotency_key {
+                    let stop = envelopes.iter().position(|env| {
+                        env.payload
+                            .get("idempotency_key")
+                            .and_then(serde_json::Value::as_str)
+                            == Some(key)
+                    });
+                    envelopes.truncate(stop.map_or(0, |index| index + 1));
+                }
                 if envelopes.len() > MAX_EVENTS_SINCE_SNAPSHOT {
                     return Err(ActorError::custom(format!(
                         "snapshot tail replay budget exceeded for {}:{} ({} > {} events since snapshot)",
@@ -601,7 +649,7 @@ impl EntityActor {
                 }
                 let mut expected_sequence = from_sequence.saturating_add(1);
                 for (index, env) in envelopes.iter().enumerate() {
-                    if replay_policy.strict_event_validation() {
+                    if replay_policy.strict_journal_integrity() {
                         if env.sequence_nr != expected_sequence {
                             return Err(ActorError::custom(format!(
                                 "non-contiguous journal for {}:{}: expected sequence {}, found {}",
@@ -629,7 +677,7 @@ impl EntityActor {
                     }
 
                     if env.event_type == COMPOSITE_EVENT_TYPE {
-                        if replay_policy.strict_event_validation() {
+                        if replay_policy.strict_journal_integrity() {
                             super::replay_validation::validate_strict_composite_event(
                                 tenant, state, env,
                             )?;
@@ -645,17 +693,13 @@ impl EntityActor {
                     if env.event_type == "Deleted" {
                         let tombstone = match parsed_event {
                             Ok(mut event) => {
-                                if replay_policy.strict_event_validation() {
-                                    super::replay_validation::validate_strict_entity_event(
-                                        table, state, env, &event,
-                                    )?;
-                                }
+                                replay_policy.validate_entity_event(table, state, env, &event)?;
                                 event.params =
                                     super::effects::sanitize_action_params(&event.params)
                                         .into_owned();
                                 event
                             }
-                            Err(error) if replay_policy.strict_event_validation() => {
+                            Err(error) if replay_policy.strict_journal_integrity() => {
                                 return Err(ActorError::custom(format!(
                                     "invalid tombstone event for {}:{} at sequence {}: {error}",
                                     state.entity_type, state.entity_id, env.sequence_nr
@@ -668,6 +712,9 @@ impl EntityActor {
                                 timestamp: env.metadata.timestamp,
                                 params: serde_json::json!({}),
                                 idempotency_key: None,
+                                idempotency_binding: None,
+                                idempotency_result: None,
+                                idempotency_reply: None,
                             },
                         };
                         state.status = tombstone.to_status.clone();
@@ -679,7 +726,8 @@ impl EntityActor {
                         }
                         state.push_event_bounded(tombstone);
                         state.sequence_nr = env.sequence_nr;
-                        if replay_policy.strict_event_validation() && index + 1 != envelopes.len() {
+                        if replay_policy.strict_journal_integrity() && index + 1 != envelopes.len()
+                        {
                             return Err(ActorError::custom(format!(
                                 "journal for {}:{} contains events after terminal tombstone at sequence {}",
                                 state.entity_type, state.entity_id, env.sequence_nr
@@ -710,7 +758,7 @@ impl EntityActor {
                                     // predates the live guard. It is as dropped as
                                     // one that failed to deserialize, so it fails
                                     // or counts the same way.
-                                    if replay_policy.strict_event_validation() {
+                                    if replay_policy.strict_journal_integrity() {
                                         return Err(ActorError::custom(format!(
                                             "non-object field-update event for {}:{} at sequence {}",
                                             state.entity_type, state.entity_id, env.sequence_nr
@@ -732,7 +780,7 @@ impl EntityActor {
                                 // dropping a field update there can preserve
                                 // exactly the authority a `FieldsReplaced` was
                                 // meant to revoke. Fail instead of skipping.
-                                if replay_policy.strict_event_validation() {
+                                if replay_policy.strict_journal_integrity() {
                                     return Err(ActorError::custom(format!(
                                         "invalid field-update event for {}:{} at sequence {}: {e}",
                                         state.entity_type, state.entity_id, env.sequence_nr
@@ -758,11 +806,7 @@ impl EntityActor {
 
                     match parsed_event {
                         Ok(mut event) => {
-                            if replay_policy.strict_event_validation() {
-                                super::replay_validation::validate_strict_entity_event(
-                                    table, state, env, &event,
-                                )?;
-                            }
+                            replay_policy.validate_entity_event(table, state, env, &event)?;
                             let frozen_bootstrap = event.action == "Created"
                                 && event.from_status.is_empty()
                                 && env.payload.get("initial_values").is_some();
@@ -849,7 +893,7 @@ impl EntityActor {
                             state.push_event_bounded(event);
                         }
                         Err(e) => {
-                            if replay_policy.strict_event_validation() {
+                            if replay_policy.strict_journal_integrity() {
                                 return Err(ActorError::custom(format!(
                                     "invalid event for {}:{} at sequence {}: {e}",
                                     state.entity_type, state.entity_id, env.sequence_nr
@@ -1013,6 +1057,26 @@ impl Actor for EntityActor {
             &self.initial_fields,
         );
 
+        if self.existing_only {
+            let (Some(store), Some(backend)) = (self.event_journal.as_ref(), self.event_backend)
+            else {
+                return Err(ActorError::custom(
+                    "existing-only startup requires a journal",
+                ));
+            };
+            return super::admission::recover_existing_state(
+                &self.tenant,
+                &self.entity_type,
+                &self.entity_id,
+                &table,
+                store,
+                backend,
+                self.blob_store.as_ref(),
+            )
+            .await?
+            .ok_or_else(|| ActorError::custom("entity disappeared during bound-action admission"));
+        }
+
         // Replay events from Postgres to rebuild state (if persistence is configured).
         // Re-evaluates each event through the TransitionTable to reconstruct
         // all state variables (status, counters, booleans) — not just item_count.
@@ -1043,6 +1107,9 @@ impl Actor for EntityActor {
                 timestamp: sim_now(),
                 params: initial_params,
                 idempotency_key: None,
+                idempotency_binding: None,
+                idempotency_result: None,
+                idempotency_reply: None,
             };
 
             if let (Some(store), Some(backend)) = (self.event_journal.as_ref(), self.event_backend)
@@ -1070,6 +1137,7 @@ impl Actor for EntityActor {
     ) -> Result<(), ActorError> {
         match msg {
             EntityMsg::Action {
+                reply_mode,
                 name,
                 params,
                 related,
@@ -1119,37 +1187,53 @@ impl Actor for EntityActor {
                 // execute. Here we consult the shared cache keyed on the
                 // caller's `Idempotency-Key` before executing; on a hit, the
                 // previously-computed response is returned as the reply.
+                //
+                // ADR-0182: the key is bound to the canonical request. Reusing
+                // it for a different action or body is rejected, never served
+                // from the cache.
                 let actor_key = self.persistence_id();
-                if let (Some(key), Some(cache)) =
-                    (idempotency_key.as_ref(), self.idempotency_cache.as_ref())
-                    && let Some(cached) = cache.get(&actor_key, key)
-                {
-                    ctx.reply(cached);
-                    return Ok(());
+                let idempotency_binding = idempotency_key
+                    .as_ref()
+                    .map(|_| crate::idempotency::request_binding(&name, &params));
+                if let (Some(key), Some(binding), Some(cache)) = (
+                    idempotency_key.as_ref(),
+                    idempotency_binding.as_deref(),
+                    self.idempotency_cache.as_ref(),
+                ) {
+                    match cache.lookup(&actor_key, key, binding) {
+                        crate::idempotency::IdempotencyLookup::Hit(cached) => {
+                            ctx.reply(*cached);
+                            return Ok(());
+                        }
+                        crate::idempotency::IdempotencyLookup::Mismatch => {
+                            ctx.reply(idempotency_rejection(
+                                state,
+                                crate::idempotency::IDEMPOTENCY_KEY_MISMATCH,
+                            ));
+                            return Ok(());
+                        }
+                        crate::idempotency::IdempotencyLookup::Miss => {}
+                    }
                 }
-                if let Some(key) = idempotency_key.as_deref()
+                if let (Some(key), Some(binding)) =
+                    (idempotency_key.as_deref(), idempotency_binding.as_deref())
                     && state.has_processed_idempotency_key(key)
                 {
-                    let custom_effects =
-                        duplicate_idempotency_custom_effects(&table, state, &name, &related);
-                    let mut response_state = state.clone();
-                    if !custom_effects.is_empty() {
-                        prune_transient_action_fields_from_state(&mut response_state);
-                    }
-                    ctx.reply(EntityResponse {
-                        success: true,
-                        state: response_state,
-                        error: None,
-                        custom_effects,
-                        scheduled_actions: vec![],
-                        spawn_requests: vec![],
-                        spec_governed: true,
-                    });
+                    let request = DuplicateRequest {
+                        key,
+                        action: &name,
+                        params: &params,
+                        binding,
+                    };
+                    let response = self
+                        .idempotent_duplicate_reply(&table, state, request)
+                        .await;
+                    ctx.reply(response);
                     return Ok(());
                 }
 
-                if let Some(expected) = expected_authorization_precondition
-                    && super::effects::entity_authorization_precondition(state) != expected
+                if let Some(expected) = expected_authorization_precondition.as_ref()
+                    && &super::effects::entity_authorization_precondition(state) != expected
                 {
                     ctx.reply(EntityResponse {
                         success: false,
@@ -1259,7 +1343,11 @@ impl Actor for EntityActor {
                         .event
                         .clone()
                         .expect("successful process_action always returns event"); // ci-ok: post-assertion, success guarantees Some
-                    event.idempotency_key = idempotency_key.clone();
+                    if let Some(key) = idempotency_key.as_deref() {
+                        crate::idempotency::stamp_keyed_reply(
+                            &mut event, key, &name, &params, state, reply_mode,
+                        );
+                    }
 
                     if !result.overflow_blobs.is_empty()
                         && let Err(e) = Self::persist_overflow_blobs(
@@ -1353,9 +1441,11 @@ impl Actor for EntityActor {
                                         state,
                                         &self.tenant,
                                         self.blob_store.as_ref(),
-                                        // Actor hydration keeps the lenient "start
-                                        // fresh on read error" behavior (unchanged).
-                                        ReplayPolicy::LenientSnapshot,
+                                        if expected_authorization_precondition.is_some() {
+                                            ReplayPolicy::ExistingSnapshot
+                                        } else {
+                                            ReplayPolicy::LenientSnapshot
+                                        },
                                     )
                                     .await?;
 
@@ -1376,6 +1466,45 @@ impl Actor for EntityActor {
                                     // pre-race snapshot.
                                     state_before = state.clone();
                                     event_count_before = state.total_event_count;
+
+                                    // ADR-0182 review correction 3: a racing
+                                    // writer may have committed this very key.
+                                    // Recheck after catch-up and never re-run
+                                    // the losing request.
+                                    if let (Some(key), Some(binding)) =
+                                        (idempotency_key.as_deref(), idempotency_binding.as_deref())
+                                        && state.has_processed_idempotency_key(key)
+                                    {
+                                        retry_span.record("attempts", u64::from(1 + retry_idx));
+                                        retry_span.record("outcome", "idempotent_replay");
+                                        let request = DuplicateRequest {
+                                            key,
+                                            action: &name,
+                                            params: &params,
+                                            binding,
+                                        };
+                                        let response = self
+                                            .idempotent_duplicate_reply(&table, state, request)
+                                            .await;
+                                        ctx.reply(response);
+                                        return Ok(());
+                                    }
+
+                                    // A raced deletion or update invalidates the Cedar
+                                    // decision too. Never retry against new authority.
+                                    if expected_authorization_precondition.as_ref().is_some_and(
+                                        |expected| {
+                                            &super::effects::entity_authorization_precondition(
+                                                state,
+                                            ) != expected
+                                        },
+                                    ) {
+                                        retry_final = Some((
+                                            crate::runtime_metrics::ConcurrencyRetryOutcome::ActionIllegal,
+                                            Some("action authorization became stale; retry against current state".into()),
+                                        ));
+                                        break;
+                                    }
 
                                     // Re-evaluate the action against the caught-up
                                     // state. It may now fail (entity reached a
@@ -1414,7 +1543,16 @@ impl Actor for EntityActor {
                                         .clone()
                                         .expect("successful process_action always returns event"); // ci-ok: post-assertion, success guarantees Some
                                     let mut retry_event = retry_event;
-                                    retry_event.idempotency_key = idempotency_key.clone();
+                                    if let Some(key) = idempotency_key.as_deref() {
+                                        crate::idempotency::stamp_keyed_reply(
+                                            &mut retry_event,
+                                            key,
+                                            &name,
+                                            &params,
+                                            state,
+                                            reply_mode,
+                                        );
+                                    }
 
                                     // Overflow blobs for the re-evaluated result.
                                     if !retry_result.overflow_blobs.is_empty()
@@ -1639,10 +1777,12 @@ impl Actor for EntityActor {
                     // ADR-0048 sub-decision 5: cache the successful response
                     // so a racing retry that lands after this reply returns
                     // the cached value instead of re-executing.
-                    if let (Some(key), Some(cache)) =
-                        (idempotency_key.as_ref(), self.idempotency_cache.as_ref())
-                    {
-                        cache.put(&actor_key, key, response.clone());
+                    if let (Some(key), Some(binding), Some(cache)) = (
+                        idempotency_key.as_ref(),
+                        idempotency_binding.as_deref(),
+                        self.idempotency_cache.as_ref(),
+                    ) {
+                        cache.put_committed(&actor_key, key, binding, response.clone(), reply_mode);
                     }
                     ctx.reply(response);
                 } else {
@@ -1780,6 +1920,9 @@ impl Actor for EntityActor {
                     timestamp: sim_now(),
                     params: serde_json::json!({}),
                     idempotency_key: None,
+                    idempotency_binding: None,
+                    idempotency_result: None,
+                    idempotency_reply: None,
                 };
 
                 if let (Some(store), Some(backend)) =

@@ -482,6 +482,7 @@ async fn authorize_prospective_mutation(
 pub async fn handle_odata_post(
     State(state): State<ServerState>,
     authenticated: Option<Extension<AuthenticatedRequestContext>>,
+    local_dispatch: Option<Extension<crate::request_context::LocalDispatchContext>>,
     headers: HeaderMap,
     axum::extract::Path(path): axum::extract::Path<String>,
     Query(query_params): Query<std::collections::BTreeMap<String, String>>,
@@ -495,6 +496,9 @@ pub async fn handle_odata_post(
     let security_ctx = authenticated.security_context().clone();
     let mut agent_ctx = extract_agent_context(&headers);
     apply_authenticated_context(&mut agent_ctx, &security_ctx);
+    if let Some(Extension(local)) = local_dispatch {
+        agent_ctx = local.apply_to(agent_ctx);
+    }
     if let Some(remote_parent) = remote_parent_context(&agent_ctx) {
         tracing::Span::current().set_parent(remote_parent);
     }
@@ -626,6 +630,7 @@ pub async fn handle_odata_post(
                 &entity_type,
                 owner_id_from_fields(&initial_fields),
                 &security_ctx,
+                &agent_ctx,
             )
             .await
             {
@@ -1117,6 +1122,7 @@ pub async fn handle_odata_patch(
                 &entity_type,
                 owner_id_from_fields(&prospective_fields),
                 &security_ctx,
+                &agent_ctx,
             )
             .await
             {
@@ -1327,6 +1333,7 @@ pub async fn handle_odata_put(
                 &entity_type,
                 owner_id_from_fields(&body_json),
                 &security_ctx,
+                &agent_ctx,
             )
             .await
             {
@@ -1507,6 +1514,7 @@ pub async fn handle_odata_delete(
                 &entity_type,
                 owner_id_from_fields(&existing.fields),
                 &security_ctx,
+                &agent_ctx,
             )
             .await
             {

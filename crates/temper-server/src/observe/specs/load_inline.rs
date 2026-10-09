@@ -88,6 +88,7 @@ pub(crate) async fn handle_load_inline(
         let pending_decision = record_authz_denial(
             &state,
             DenialInput {
+                execution_ctx: None,
                 tenant: &tenant,
                 security_ctx,
                 agent_id_override: None,
