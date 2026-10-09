@@ -37,6 +37,32 @@ async fn parent_gated_contracted_creation_preserves_defaults_on_both_recovery_pa
         .unwrap()
         .state;
     assert_eq!(staged.counters["revision"], 7);
+    let events = store.dump_journal("default:Ref:ref");
+    let bootstrap = events
+        .iter()
+        .find(|event| event.event_type == "Created")
+        .unwrap();
+    assert_eq!(bootstrap.payload["params"], json!({}));
+    assert_eq!(
+        bootstrap.payload["initial_values"]["counters"],
+        json!({"revision":7})
+    );
+    assert_eq!(
+        bootstrap.payload["initial_values"]["fields"],
+        json!({"TargetCommitSha":"", "revision":7})
+    );
+    let create = events
+        .iter()
+        .find(|event| event.event_type == "Create")
+        .unwrap();
+    assert_eq!(
+        create.payload["params"],
+        json!({
+            "RepositoryId":"repo", "Name":"refs/heads/topic", "TargetCommitSha":"abc", "Kind":"branch"
+        }),
+        "bootstrap normalization must not change declared Create action parameters"
+    );
+
     let table = state.transition_table_for_dispatch(&tenant, "Ref").unwrap();
     let journal = crate::storage::BoxedEventStore::new(store);
     let authoritative = crate::entity_actor::recover_authoritative_entity_state_from_store(

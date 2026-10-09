@@ -36,6 +36,7 @@ async fn dispatch(
     actor_ref
         .ask(
             EntityMsg::Action {
+                reply_mode: temper_server::idempotency::ActionReplyMode::DirectCore,
                 name: action.to_string(),
                 params,
                 related: BTreeMap::new(),

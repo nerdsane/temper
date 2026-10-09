@@ -34,12 +34,8 @@ pub(super) async fn commit_field_update(
     replace: bool,
     expected_precondition: Option<String>,
 ) -> Result<(), String> {
-    if actor
-        .table
-        .read()
-        .expect("table lock poisoned")
-        .strict_action_params
-    {
+    let table = actor.table.read().expect("table lock poisoned").clone();
+    if table.strict_action_params {
         return Err("Strict entities require a declared action for field changes".to_owned());
     }
     let has_precondition = expected_precondition.is_some();
@@ -69,12 +65,11 @@ pub(super) async fn commit_field_update(
         return Err(reason);
     }
 
-    // Sanitize once and use the same value for state and journal.
-    // `apply_field_update` sanitizes internally as well — it must, so that
-    // replaying an event written before this guard still lands on clean state —
-    // but the event written now must not carry a caller's forged `has_spec` or
-    // `ctx_owner_status` into the journal in the first place.
-    let fields = effects::sanitize_action_params(&fields).into_owned();
+    // Use the same sanitized value for state and journal. Re-sanitize after
+    // conflict recovery in case replay materialized another owned state variable.
+    // `apply_field_update` also sanitizes old journal payloads, but new events
+    // must never carry forged counters, booleans, lists or runtime context.
+    let mut fields = super::field_ownership::sanitize(state, &table, &fields);
 
     let action = if replace {
         effects::FIELDS_REPLACED_EVENT
@@ -88,7 +83,7 @@ pub(super) async fn commit_field_update(
     let mut previous_fields = state.fields.clone();
     // Bind the result: `debug_assert!` does not evaluate its argument in release
     // builds, so asserting the call directly would skip the update in production.
-    let applied = effects::apply_field_update(state, &fields, replace);
+    let applied = effects::apply_field_update(state, &table, &fields, replace);
     debug_assert!(
         applied,
         "object-ness was checked above; the apply cannot decline"
@@ -133,7 +128,8 @@ pub(super) async fn commit_field_update(
                 // Re-apply onto the caught-up state and rebuild the event against
                 // its (possibly new) status.
                 previous_fields = state.fields.clone();
-                let applied = effects::apply_field_update(state, &fields, replace);
+                fields = super::field_ownership::sanitize(state, &table, &fields);
+                let applied = effects::apply_field_update(state, &table, &fields, replace);
                 debug_assert!(
                     applied,
                     "object-ness was checked above; the apply cannot decline"
@@ -183,6 +179,9 @@ fn field_event(action: &str, state: &EntityState, fields: &Value) -> EntityEvent
         timestamp: sim_now(),
         params: fields.clone(),
         idempotency_key: None,
+        idempotency_binding: None,
+        idempotency_result: None,
+        idempotency_reply: None,
     }
 }
 

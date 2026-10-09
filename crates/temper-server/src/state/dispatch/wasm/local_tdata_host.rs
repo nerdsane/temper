@@ -15,6 +15,7 @@ use temper_wasm::http_stream::{
 };
 use tracing::Instrument;
 
+use crate::request_context::{AgentContext, LocalDispatchContext};
 use crate::state::ServerState;
 
 const LOCAL_TDATA_RESPONSE_LIMIT_BYTES: usize = 64 * 1024 * 1024;
@@ -27,6 +28,7 @@ pub(super) struct LocalTDataWasmHost {
     state: ServerState,
     authenticated: Option<AuthenticatedRequestContext>,
     delegate: Arc<dyn WasmHost>,
+    completion_context: Option<AgentContext>,
 }
 
 impl LocalTDataWasmHost {
@@ -48,7 +50,15 @@ impl LocalTDataWasmHost {
                 AuthenticatedRequestContext::new(tenant, security_ctx)
             }),
             delegate,
+            completion_context: None,
         }
+    }
+
+    /// Attach only runtime lineage; authentication remains the constructor's
+    /// separately verified security context.
+    pub(super) fn with_completion_context(mut self, context: &AgentContext) -> Self {
+        self.completion_context = Some(context.clone());
+        self
     }
 
     async fn local_http_call(
@@ -70,6 +80,18 @@ impl LocalTDataWasmHost {
         let Some(authenticated) = self.authenticated.clone() else {
             return Ok(None);
         };
+        let local_dispatch = if method_upper == "POST" {
+            self.completion_context
+                .as_ref()
+                .map(LocalDispatchContext::for_child)
+                .transpose()
+                .map_err(|error| error.to_string())?
+        } else {
+            None
+        };
+        let local_wait = local_dispatch
+            .as_ref()
+            .map(LocalDispatchContext::observe_wait);
         let headers = header_map(headers);
         let path_for_span = request.path.clone();
         let span = tracing::info_span!(
@@ -82,18 +104,20 @@ impl LocalTDataWasmHost {
 
         let response = async {
             match method_upper.as_str() {
-                "GET" => crate::odata::handle_odata_get(
+                "GET" => crate::odata::handle_odata_get_with_context(
                     State(self.state.clone()),
                     Some(Extension(authenticated.clone())),
                     headers,
                     Path(request.path),
                     Query(request.query),
+                    self.completion_context.as_ref(),
                 )
                 .await
                 .into_response(),
                 "POST" => crate::odata::handle_odata_post(
                     State(self.state.clone()),
                     Some(Extension(authenticated)),
+                    local_dispatch.map(Extension),
                     headers,
                     Path(request.path),
                     Query(request.query),
@@ -107,6 +131,13 @@ impl LocalTDataWasmHost {
         .instrument(span)
         .await;
 
+        // The handler wait returned; this is not universal actor/initialization
+        // quiescence or proof of non-application (including PG enqueue/202).
+        // Disarming never clears uncertainty inherited from adopted descendants.
+        // GET observes only its audit write, not a potentially slow read itself.
+        if let Some(wait) = local_wait {
+            wait.joined();
+        }
         let status = response.status().as_u16();
         let body = to_bytes(response.into_body(), LOCAL_TDATA_RESPONSE_LIMIT_BYTES)
             .await

@@ -189,6 +189,7 @@ pub(super) async fn authorize_mutation(
     let decision = record_authz_denial(
         state,
         DenialInput {
+            execution_ctx: Some(agent_ctx),
             tenant: tenant.as_str(),
             security_ctx,
             agent_id_override: agent_ctx.agent_id.as_deref(),

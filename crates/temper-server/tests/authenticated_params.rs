@@ -119,6 +119,7 @@ async fn post(state: &ServerState, path: &str, params: Value) -> (StatusCode, Va
             TenantId::new("cp"),
             identity,
         ))),
+        None,
         HeaderMap::new(),
         Path(path.into()),
         Query(Default::default()),
@@ -134,6 +135,8 @@ async fn post(state: &ServerState, path: &str, params: Value) -> (StatusCode, Va
 #[tokio::test]
 async fn owner_is_bound_to_authenticated_subject() {
     let state = fixture("");
+    let (status, body) = post(&state, "Instances", json!({"Id":"probe"})).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
     let (status, body) = post(&state, "Instances('probe')/Probe.Create", json!({})).await;
     assert!(status.is_success(), "{status}: {body}");
     let stored = state
@@ -146,6 +149,8 @@ async fn owner_is_bound_to_authenticated_subject() {
 #[tokio::test]
 async fn caller_cannot_supply_bound_parameter() {
     let state = fixture("");
+    let (status, body) = post(&state, "Instances", json!({"Id":"probe"})).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
     for owner in ["bob", "alice"] {
         let (status, body) = post(
             &state,
@@ -153,16 +158,15 @@ async fn caller_cannot_supply_bound_parameter() {
             json!({"owner_id": owner}),
         )
         .await;
-        assert!(
-            !status.is_success(),
-            "supplied owner must be refused: {body}"
-        );
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"]["code"], "AuthenticatedParameter");
     }
-    assert!(
-        !state
-            .ensure_entity_loaded(&TenantId::new("cp"), "OwnedInstance", "probe")
-            .await
-    );
+    let unchanged = state
+        .get_tenant_entity_state(&TenantId::new("cp"), "OwnedInstance", "probe")
+        .await
+        .unwrap();
+    assert_eq!(unchanged.state.status, "Requested");
+    assert_eq!(unchanged.state.fields["owner_id"], "");
 }
 
 #[tokio::test]
@@ -244,6 +248,8 @@ async fn authenticated_owner_survives_libsql_replay() {
     state.set_storage_stack(StorageStack::from_turso(
         TursoEventStore::new(&url, None).await.unwrap(),
     ));
+    let (status, body) = post(&state, "Instances", json!({"Id":"durable"})).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
     let (status, body) = post(&state, "Instances('durable')/Probe.Create", json!({})).await;
     assert!(status.is_success(), "{body}");
     let mut restored = fixture("");
@@ -346,4 +352,14 @@ fn binding_survives_transition_table_serialization() {
         restored.action_contracts["Create"].param_sources["owner_id"],
         temper_spec::automaton::ParameterSource::AuthenticatedSubject,
     );
+}
+
+#[tokio::test]
+async fn bound_create_on_an_absent_instance_is_not_collection_creation() {
+    let state = fixture("");
+    let (status, body) = post(&state, "Instances('absent')/Probe.Create", json!({})).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["error"]["code"], "EntityNotFound");
+    assert_eq!(state.active_actor_count(), 0);
+    assert!(!state.entity_exists(&TenantId::new("cp"), "OwnedInstance", "absent"));
 }

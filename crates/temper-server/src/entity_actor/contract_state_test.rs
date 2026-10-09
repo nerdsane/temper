@@ -36,6 +36,7 @@ constraints = [{kind="param_not_equals_field", param="expected", field="Name"}]
 
 fn overflow_action(name: &str, params: serde_json::Value) -> EntityMsg {
     EntityMsg::Action {
+        reply_mode: crate::idempotency::ActionReplyMode::DirectCore,
         name: name.into(),
         params,
         related: BTreeMap::new(),

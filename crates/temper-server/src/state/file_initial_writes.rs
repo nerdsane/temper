@@ -97,6 +97,9 @@ impl ServerState {
             timestamp: sim_now(),
             params: serde_json::json!({}),
             idempotency_key: None,
+            idempotency_binding: None,
+            idempotency_result: None,
+            idempotency_reply: None,
         };
         push_synthetic_event(&mut state, &mut events, created);
 
@@ -151,7 +154,7 @@ impl ServerState {
             .iter()
             .enumerate()
             .map(|(idx, event)| {
-                synthetic_envelope(&persistence_id, (idx + 1) as u64, event, &initial)
+                synthetic_envelope(&persistence_id, (idx + 1) as u64, event, &initial, &table)
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -398,8 +401,9 @@ fn synthetic_envelope(
     sequence_nr: u64,
     event: &EntityEvent,
     initial: &EntityState,
+    table: &temper_jit::table::TransitionTable,
 ) -> Result<PersistenceEnvelope, FileStreamContentError> {
-    let payload = crate::entity_actor::bootstrap::event_payload(event, initial)
+    let payload = crate::entity_actor::bootstrap::event_payload(event, initial, table)
         .map_err(|e| FileStreamContentError::State(format!("failed to serialize event: {e}")))?;
     Ok(PersistenceEnvelope {
         sequence_nr,
@@ -416,43 +420,5 @@ fn synthetic_envelope(
 }
 
 #[cfg(test)]
-mod default_tests {
-    use super::*;
-
-    #[test]
-    fn round_four_atomic_file_initial_state_materializes_declared_defaults() {
-        let table = temper_jit::table::TransitionTable::from_ioa_source(
-            r#"
-[automaton]
-name = "File"
-states = ["Active"]
-initial = "Active"
-strict_action_params = true
-[[state]]
-name = "revision"
-type = "counter"
-initial = 3
-[[action]]
-name = "StreamUpdated"
-kind = "input"
-from = ["Active"]
-to = "Active"
-params = ["expected"]
-constraints = [{kind="param_equals_field",param="expected",field="revision"}]
-"#,
-        );
-        let mut state = initial_file_state("file", &table, serde_json::json!({}));
-        assert_eq!(state.counters.get("revision"), Some(&3));
-        let result = apply_synthetic_file_action(
-            &mut state,
-            &table,
-            "StreamUpdated",
-            serde_json::json!({"expected":3}),
-            &Default::default(),
-        );
-        assert!(
-            result.is_ok(),
-            "fresh File cannot use its declared initial state: {result:?}"
-        );
-    }
-}
+#[path = "file_initial_writes_test.rs"]
+mod default_tests;

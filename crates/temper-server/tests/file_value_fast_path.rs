@@ -534,33 +534,47 @@ async fn read_file_stream_indexed_reports_missing_index_for_unprojected_file() {
 
 #[tokio::test]
 async fn read_file_stream_indexed_falls_back_to_file_state_when_projection_is_missing() {
-    let (state, store) = build_turso_file_state("missing-projection-fallback").await;
+    let (mut state, store) = build_turso_file_state("missing-projection-fallback").await;
     let tenant = TenantId::default();
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    state.data_dir = data_dir.path().to_path_buf();
     let bytes = b"<main>projection lag should not break publishing</main>";
-    let content_hash = "sha256:file-state-fallback";
+    let content_hash = format!("sha256:{:x}", Sha256::digest(bytes));
 
-    store
-        .put_blob(&format!("temper-fs/{content_hash}"), bytes)
-        .await
-        .expect("put blob");
-
-    state
-        .get_or_create_tenant_entity(
+    // has_content is effect-owned: seed it through StreamUpdated, not a
+    // caller-supplied field mirror that generic creation correctly ignores.
+    let response = state
+        .create_file_with_initial_stream_content(
             &tenant,
-            "File",
             "fl-state-only",
-            serde_json::json!({
-                "content_hash": content_hash,
-                "mime_type": "text/html",
-                "has_content": true,
-            }),
+            serde_json::json!({}),
+            bytes,
+            "text/html",
+            &AgentContext::for_service("test-writer"),
         )
         .await
-        .expect("create File state");
+        .expect("create File with authoritative content state");
+    assert_eq!(response.state.booleans.get("has_content"), Some(&true));
+    assert_eq!(response.state.fields["has_content"], true);
+    assert_eq!(response.state.fields["content_hash"], content_hash);
+    assert_local_blob(data_dir.path(), &content_hash, bytes).await;
     store
         .remove_query_projection(tenant.as_str(), "File", "fl-state-only")
         .await
         .expect("remove File projection");
+    assert!(
+        store
+            .load_query_projection_fields_many(
+                tenant.as_str(),
+                "File",
+                &["fl-state-only".to_string()],
+                &["content_hash"],
+            )
+            .await
+            .expect("inspect missing projection")
+            .is_empty(),
+        "the read must exercise the missing-projection fallback"
+    );
 
     let read = state
         .read_file_stream_indexed(&tenant, "fl-state-only")
@@ -570,7 +584,7 @@ async fn read_file_stream_indexed_falls_back_to_file_state_when_projection_is_mi
     assert_eq!(
         read,
         IndexedFileStreamRead::Content {
-            content_hash: content_hash.to_string(),
+            content_hash,
             mime_type: "text/html".to_string(),
             bytes: bytes.to_vec(),
         }
@@ -579,46 +593,32 @@ async fn read_file_stream_indexed_falls_back_to_file_state_when_projection_is_mi
 
 #[tokio::test]
 async fn read_file_stream_indexed_falls_back_to_file_state_when_projection_is_stale() {
-    let (state, store) = build_turso_file_state("stale-projection-fallback").await;
+    let (mut state, store) = build_turso_file_state("stale-projection-fallback").await;
     let tenant = TenantId::default();
+    let data_dir = tempfile::tempdir().expect("temp data dir");
+    state.data_dir = data_dir.path().to_path_buf();
     let current_bytes = b"<main>current file state should win</main>";
-    let current_hash = "sha256:current-file-state";
+    let current_hash = format!("sha256:{:x}", Sha256::digest(current_bytes));
     let stale_hash = "sha256:stale-projection";
 
-    store
-        .upsert_query_projection(
-            tenant.as_str(),
-            "File",
-            "fl-stale-state",
-            "Ready",
-            &serde_json::json!({
-                "content_hash": stale_hash,
-                "mime_type": "text/html",
-                "has_content": true,
-            }),
-            1,
-        )
-        .await
-        .expect("upsert stale File projection");
-    store
-        .put_blob(&format!("temper-fs/{current_hash}"), current_bytes)
-        .await
-        .expect("put current blob");
-
-    state
-        .get_or_create_tenant_entity(
+    let response = state
+        .create_file_with_initial_stream_content(
             &tenant,
-            "File",
             "fl-stale-state",
-            serde_json::json!({
-                "content_hash": current_hash,
-                "mime_type": "text/html",
-                "has_content": true,
-            }),
+            serde_json::json!({}),
+            current_bytes,
+            "text/html",
+            &AgentContext::for_service("test-writer"),
         )
         .await
-        .expect("create File state");
+        .expect("create File with authoritative content state");
+    assert_eq!(response.state.booleans.get("has_content"), Some(&true));
+    assert_eq!(response.state.fields["has_content"], true);
+    assert_eq!(response.state.fields["content_hash"], current_hash);
+    assert_local_blob(data_dir.path(), &current_hash, current_bytes).await;
 
+    // Inject stale metadata at the committed sequence so the store's monotonic
+    // projection upsert does not silently ignore the fixture after StreamUpdated.
     store
         .upsert_query_projection(
             tenant.as_str(),
@@ -630,10 +630,25 @@ async fn read_file_stream_indexed_falls_back_to_file_state_when_projection_is_st
                 "mime_type": "text/html",
                 "has_content": true,
             }),
-            1,
+            response.state.sequence_nr,
         )
         .await
         .expect("restore stale File projection after state write");
+    let projected = store
+        .load_query_projection_fields_many(
+            tenant.as_str(),
+            "File",
+            &["fl-stale-state".to_string()],
+            &["content_hash"],
+        )
+        .await
+        .expect("inspect stale projection");
+    assert_eq!(projected.len(), 1);
+    assert_eq!(
+        projected[0].fields["content_hash"].as_deref(),
+        Some(stale_hash),
+        "the read must exercise the stale-projection fallback"
+    );
 
     let read = state
         .read_file_stream_indexed(&tenant, "fl-stale-state")
@@ -643,7 +658,7 @@ async fn read_file_stream_indexed_falls_back_to_file_state_when_projection_is_st
     assert_eq!(
         read,
         IndexedFileStreamRead::Content {
-            content_hash: current_hash.to_string(),
+            content_hash: current_hash,
             mime_type: "text/html".to_string(),
             bytes: current_bytes.to_vec(),
         }

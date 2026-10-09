@@ -1,4 +1,4 @@
-//! Semantic validation for security-sensitive full-journal replay.
+//! Journal-integrity checks, plus current-spec compatibility for security-sensitive replay.
 
 use temper_jit::table::{Effect, TransitionTable};
 use temper_runtime::actor::ActorError;
@@ -30,8 +30,8 @@ pub(super) fn validate_strict_composite_event(
     Ok(())
 }
 
-pub(super) fn validate_strict_entity_event(
-    table: &TransitionTable,
+/// Validate committed history without requiring its action to exist in today's spec.
+pub(super) fn validate_entity_event_integrity(
     state: &EntityState,
     envelope: &PersistenceEnvelope,
     event: &EntityEvent,
@@ -62,17 +62,11 @@ pub(super) fn validate_strict_entity_event(
     }
 
     if event.action == "Created" && event.from_status.is_empty() {
-        if envelope.sequence_nr != 1
-            || state.total_event_count != 0
-            || event.to_status != table.initial_state
-        {
+        if envelope.sequence_nr != 1 || state.total_event_count != 0 || event.to_status.is_empty() {
             return Err(incompatible_event(
                 state,
                 envelope,
-                format!(
-                    "bootstrap Created event must be sequence 1 and target initial state '{}'",
-                    table.initial_state
-                ),
+                "bootstrap Created event must be sequence 1 with a target status".into(),
             ));
         }
         return Ok(());
@@ -87,6 +81,36 @@ pub(super) fn validate_strict_entity_event(
                 event.from_status, state.status
             ),
         ));
+    }
+
+    Ok(())
+}
+
+/// Security-sensitive full replay additionally requires the active spec to
+/// certify each transition. Ordinary admission must not impose that contract
+/// on historical events after a spec update.
+pub(super) fn validate_strict_entity_event(
+    table: &TransitionTable,
+    state: &EntityState,
+    envelope: &PersistenceEnvelope,
+    event: &EntityEvent,
+) -> Result<(), ActorError> {
+    validate_entity_event_integrity(state, envelope, event)?;
+    if event.action == "Deleted" {
+        return Ok(());
+    }
+    if event.action == "Created" && event.from_status.is_empty() {
+        if event.to_status != table.initial_state {
+            return Err(incompatible_event(
+                state,
+                envelope,
+                format!(
+                    "bootstrap Created event must target initial state '{}'",
+                    table.initial_state
+                ),
+            ));
+        }
+        return Ok(());
     }
 
     let Some(rule) = table.rules.iter().find(|rule| {

@@ -20,57 +20,15 @@ pub(crate) const FIELDS_UPDATED_EVENT: &str = "FieldsUpdated";
 /// Journal event type for a PUT-style field replacement (ARN-189).
 pub(crate) const FIELDS_REPLACED_EVENT: &str = "FieldsReplaced";
 
-/// Apply a PATCH/PUT field update to entity state (ARN-189).
-///
-/// The single source of truth for field-update semantics, called by BOTH the
-/// live `EntityMsg::UpdateFields` handler and journal replay, so a rehydrated
-/// entity reaches exactly the state the live update produced.
-///
-/// - `replace == false` (PATCH): merge `fields` into the existing object.
-///   A non-object existing/incoming value leaves state unchanged, matching
-///   the historical live behavior.
-/// - `replace == true` (PUT): replace all fields, preserving `Id` and
-///   `Status` from the entity itself.
+/// Apply the shared ownership-normalized PATCH/PUT operation, live or during replay.
 #[must_use = "a field update that did not apply is a dropped update; count or refuse it"]
 pub(crate) fn apply_field_update(
     state: &mut EntityState,
+    table: &TransitionTable,
     fields: &serde_json::Value,
     replace: bool,
 ) -> bool {
-    // One helper for both the live `UpdateFields` arm and journal replay
-    // (ARN-189). Replay must reproduce the live result exactly, so every
-    // transformation belongs here — a step applied only on the live path would
-    // silently rewrite the entity on the next rehydration.
-    //
-    // `canonicalize_entity_fields` is the single enforcement point for
-    // runtime-owned fields: it both strips the keys a caller must not set
-    // (`has_spec`, `ctx_owner_status`, ...) and restores the authoritative
-    // `Id`/`Status` (and their lowercase aliases). The live arm additionally
-    // sanitizes the *event payload* before journaling (see
-    // `field_updates::commit_field_update`) so the journal never records a forged
-    // key, which canonicalizing `state.fields` alone would not prevent.
-    //
-    // Guard here, not only at the live arm: replay feeds this the `params` of
-    // whatever is in the journal, including events written by a build that
-    // predates the live guard. A `FieldsReplaced` carrying `[1,2,3]` would set
-    // `fields` to an array, after which `canonicalize_entity_fields` cannot
-    // restore `Id`/`Status` — there is no object to insert into. Refusing in the
-    // shared helper is what makes live and replay agree on every input, not just
-    // the ones the live path screens.
-    if !fields.is_object() {
-        return false;
-    }
-    if replace {
-        state.fields = fields.clone();
-    } else if let (Some(existing), Some(updates)) =
-        (state.fields.as_object_mut(), fields.as_object())
-    {
-        for (k, v) in updates {
-            existing.insert(k.clone(), v.clone());
-        }
-    }
-    canonicalize_entity_fields(&mut state.fields, &state.entity_id, &state.status);
-    true
+    super::field_ownership::apply(state, table, fields, replace)
 }
 
 /// A scheduled action to fire after a delay.
@@ -385,6 +343,9 @@ pub(crate) fn process_action_with_xref_and_field_mode(
                 field_sync_mode,
                 Some(&table.state_var_metadata),
             );
+            // Projected mirrors must agree with recovery regardless of snapshot
+            // placement. Action admission and the journaled params stay unchanged.
+            super::field_ownership::normalize(state, table);
 
             // Resolve deferred schedule_at requests now that fields are synced
             let mut all_scheduled = scheduled_actions;
@@ -397,6 +358,9 @@ pub(crate) fn process_action_with_xref_and_field_mode(
                 timestamp: sim_now(),
                 params: params.clone(),
                 idempotency_key: None,
+                idempotency_binding: None,
+                idempotency_result: None,
+                idempotency_reply: None,
             };
 
             ProcessResult {
@@ -575,7 +539,7 @@ fn validate_ref_action_contract(
     }
 }
 
-fn normalize_ref_action_params<'a>(
+pub(crate) fn normalize_ref_action_params<'a>(
     state: &EntityState,
     action: &str,
     params: &'a serde_json::Value,
@@ -1013,13 +977,7 @@ fn is_transient_action_field(entity_type: &str, field_name: &str) -> bool {
         && matches!(field_name, "PackBytes" | "RefUpdates" | "ClientRequestId")
 }
 
-pub(crate) fn prune_transient_action_fields_from_state(state: &mut EntityState) {
-    if let Some(obj) = state.fields.as_object_mut() {
-        prune_transient_action_fields(&state.entity_type, obj);
-    }
-}
-
-fn project_field_value(
+pub(super) fn project_field_value(
     field_name: &str,
     value: &serde_json::Value,
     mode: FieldSyncMode,
