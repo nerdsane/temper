@@ -190,10 +190,6 @@ export default function AgentDetailPage() {
               ))}
             </select>
           )}
-          {lastUpdated && (
-            <span className="text-xs text-[var(--color-text-muted)]">
-            </span>
-          )}
         </div>
       </div>
 
