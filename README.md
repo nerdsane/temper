@@ -60,6 +60,7 @@ Temper is an HTTP server with an OData API. Agents talk to it directly, through 
 
 ```bash
 temper serve --port 3000          # HTTP server, OData API, Observe UI
+temper serve --bind 127.0.0.1     # loopback only; default binds all interfaces (env: TEMPER_BIND_ADDR)
 temper decide --port 3000         # interactive review of pending governance decisions
 ```
 

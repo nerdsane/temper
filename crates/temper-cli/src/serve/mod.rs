@@ -15,6 +15,7 @@ pub(crate) mod options;
 mod storage;
 
 use std::collections::{BTreeMap, HashMap};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::{path::Path, sync::Arc};
 
 use anyhow::{Context, Result};
@@ -56,6 +57,7 @@ struct LoadedTenantSpecs {
 /// 8. Tenant bootstrap  9. Server start
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
+    bind: Ipv4Addr,
     port: u16,
     apps: Vec<(String, String)>,
     os_app_installs: Vec<String>,
@@ -193,16 +195,21 @@ pub async fn run(
                     let _ = std::fs::create_dir_all("/workspace");
 
                     // determinism-ok: subprocess spawn at startup for local dev sandbox
-                    match std::process::Command::new("python3")
+                    let mut sandbox_cmd = std::process::Command::new("python3");
+                    sandbox_cmd
                         .arg(sandbox_script)
                         .arg("--port")
                         .arg(sandbox_port.to_string())
                         .arg("--workdir")
                         .arg("/tmp/temper-sandbox")
                         .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .spawn()
-                    {
+                        .stderr(std::process::Stdio::null());
+                    if bind != Ipv4Addr::UNSPECIFIED {
+                        // Keep the sandbox no more reachable than the API. Passed
+                        // only when non-default, so older sandbox scripts still start.
+                        sandbox_cmd.arg("--host").arg(bind.to_string());
+                    }
+                    match sandbox_cmd.spawn() {
                         Ok(_child) => {
                             println!("  Local sandbox: {sandbox_url} (auto-started)");
                         }
@@ -262,9 +269,9 @@ pub async fn run(
 
     // Phase 9: Bind, start background tasks, serve
     let router = build_platform_router(state.clone());
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
+    let listener = tokio::net::TcpListener::bind(SocketAddr::from((bind, port)))
         .await
-        .with_context(|| format!("Failed to bind to port {port}"))?;
+        .with_context(|| format!("Failed to bind to {bind}:{port}"))?;
     let actual_port = listener
         .local_addr()
         .context("Failed to get listener local address")?
@@ -272,7 +279,7 @@ pub async fn run(
     let _ = state.server.listen_port.set(actual_port);
 
     if observe {
-        observe_ui::spawn(actual_port);
+        observe_ui::spawn(bind, actual_port);
     }
     for (tenant, dir) in &apps {
         spawn_background_verification(&state, dir, tenant).await;
@@ -329,7 +336,7 @@ pub async fn run(
         }
     }
 
-    println!("Listening on http://0.0.0.0:{actual_port}");
+    println!("Listening on http://{bind}:{actual_port}");
     axum::serve(listener, router)
         .await
         .context("Server error")?;

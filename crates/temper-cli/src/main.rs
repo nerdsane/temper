@@ -129,6 +129,16 @@ enum Commands {
         /// Port to listen on
         #[arg(short, long, default_value = "3000")]
         port: u16,
+        /// IP address to bind the API to. The default, all interfaces, is
+        /// unchanged; `--bind 127.0.0.1` keeps Temper loopback-only, for a
+        /// server reached through an SSH tunnel or a local proxy. The Observe
+        /// UI and the local sandbox follow it.
+        ///
+        /// Only `0.0.0.0` and `127.0.0.1` are accepted: Temper's own
+        /// components reach the API at 127.0.0.1, so any other address would
+        /// break them. If omitted, `TEMPER_BIND_ADDR` can select the address.
+        #[arg(long, default_value = "0.0.0.0")]
+        bind: String,
         /// Storage backend (`postgres`, `turso`, `redis`).
         ///
         /// If omitted, `TEMPER_EVENT_STORE` can select the backend. When neither
@@ -339,6 +349,7 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
         Commands::MigratePredicates { paths, check } => migrate_predicates::run(&paths, check)?,
         Commands::Serve {
             port,
+            bind,
             storage,
             actor_runtime,
             actor_backed_type,
@@ -349,6 +360,12 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
             verify_subprocess,
             discord_bot_token,
         } => {
+            let bind = serve::options::resolve_bind_addr(
+                &bind,
+                serve::options::flag_given("--bind"),
+                std::env::var("TEMPER_BIND_ADDR").ok().as_deref(),
+            )
+            .map_err(|err| anyhow::anyhow!(err))?;
             let storage_explicit = serve::options::flag_given("--storage");
             let storage_env = std::env::var("TEMPER_EVENT_STORE").ok();
             let storage_config_explicit = storage_explicit
@@ -398,6 +415,7 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
             let discord_token =
                 discord_bot_token.or_else(|| std::env::var("DISCORD_BOT_TOKEN").ok()); // determinism-ok: read once at startup
             serve::run(
+                bind,
                 port,
                 apps,
                 os_app_installs,
@@ -597,6 +615,23 @@ mod tests {
         let cli = Cli::parse_from(["temper", "serve", "--port", "8080"]);
         match cli.command {
             Commands::Serve { port, .. } => assert_eq!(port, 8080),
+            _ => panic!("expected Serve command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_serve_bind() {
+        let cli = Cli::parse_from(["temper", "serve", "--bind", "127.0.0.1", "--port", "3300"]);
+        match cli.command {
+            Commands::Serve { bind, port, .. } => {
+                assert_eq!(bind, "127.0.0.1");
+                assert_eq!(port, 3300);
+            }
+            _ => panic!("expected Serve command"),
+        }
+        let cli = Cli::parse_from(["temper", "serve"]);
+        match cli.command {
+            Commands::Serve { bind, .. } => assert_eq!(bind, "0.0.0.0", "the default is unchanged"),
             _ => panic!("expected Serve command"),
         }
     }

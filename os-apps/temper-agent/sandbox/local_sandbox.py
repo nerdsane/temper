@@ -136,6 +136,10 @@ def main():
         help="Port to listen on (default: 9999)"
     )
     parser.add_argument(
+        "--host", type=str, default="0.0.0.0",
+        help="Address to bind (default: 0.0.0.0; 127.0.0.1 for loopback only)"
+    )
+    parser.add_argument(
         "--workdir", type=str, default="/tmp/sandbox",
         help="Working directory for file operations (default: /tmp/sandbox)"
     )
@@ -143,10 +147,10 @@ def main():
 
     os.makedirs(args.workdir, exist_ok=True)
 
-    server = HTTPServer(("0.0.0.0", args.port), SandboxHandler)
+    server = HTTPServer((args.host, args.port), SandboxHandler)
     server.workdir = args.workdir
 
-    print(f"Local sandbox server listening on :{args.port}", file=sys.stderr)
+    print(f"Local sandbox server listening on {args.host}:{args.port}", file=sys.stderr)
     print(f"Working directory: {args.workdir}", file=sys.stderr)
     print(f"Endpoints:", file=sys.stderr)
     print(f"  GET  http://localhost:{args.port}/health", file=sys.stderr)

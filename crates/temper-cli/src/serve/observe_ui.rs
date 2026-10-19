@@ -1,5 +1,6 @@
 //! The Observe UI: a Next.js dev server spawned alongside `temper serve`.
 
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 
 use tokio::io::AsyncBufReadExt;
@@ -8,7 +9,8 @@ use tokio::io::AsyncBufReadExt;
 ///
 /// Looks for the `ui/observe/` directory relative to the binary or cwd.
 /// Falls back gracefully if npm/node_modules are unavailable.
-pub(crate) fn spawn(api_port: u16) {
+/// The dev server binds the same address as the API it proxies.
+pub(crate) fn spawn(bind: Ipv4Addr, api_port: u16) {
     // The workspace root is embedded at compile time so `temper serve` works
     // regardless of the current working directory.
     const WORKSPACE_ROOT: &str = env!("CARGO_MANIFEST_DIR");
@@ -64,7 +66,7 @@ pub(crate) fn spawn(api_port: u16) {
     let observe_port = {
         let mut port = api_port.saturating_add(1);
         loop {
-            match std::net::TcpListener::bind(("0.0.0.0", port)) {
+            match std::net::TcpListener::bind(SocketAddr::from((bind, port))) {
                 Ok(_listener) => break port, // port is free; listener drops and releases it
                 Err(_) => {
                     port = port.saturating_add(1);
@@ -84,8 +86,8 @@ pub(crate) fn spawn(api_port: u16) {
     println!();
 
     tokio::spawn(async move {
-        let result = tokio::process::Command::new("npm")
-            .arg("run")
+        let mut npm = tokio::process::Command::new("npm");
+        npm.arg("run")
             .arg("dev")
             .env("TEMPER_API_URL", format!("http://127.0.0.1:{api_port}"))
             .env("NEXT_PUBLIC_TEMPER_API_PORT", api_port.to_string())
@@ -93,8 +95,12 @@ pub(crate) fn spawn(api_port: u16) {
             .current_dir(&observe_dir)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn();
+            .kill_on_drop(true);
+        if bind != Ipv4Addr::UNSPECIFIED {
+            // next dev binds all interfaces unless told otherwise; follow the API.
+            npm.arg("--").arg("-H").arg(bind.to_string());
+        }
+        let result = npm.spawn();
 
         match result {
             Ok(mut child) => {
