@@ -12,24 +12,27 @@ permit(
   resource is Remediation
 );
 
-// --- Approval: humans only ---
+// --- Approval: the human, holding the operator credential, only ---
+// The deployment operator credential (TEMPER_API_KEY) is Ben's own key and
+// resolves as verified agent_type "operator" — it IS the human gate in v1.
+// Plain agents can never approve their own remediations.
 
 permit(
   principal,
   action in [Action::"Approve", Action::"Reject"],
   resource is Remediation
 ) when {
-  principal.agent_type == "human" &&
+  ["human", "operator"].contains(principal.agent_type) &&
   context.agentTypeVerified == true
 };
 
-// --- Execution: supervisor agent or human, after approval ---
+// --- Execution: supervisor agent, operator, or human, after approval ---
 
 permit(
   principal,
   action in [Action::"Execute", Action::"Succeed", Action::"Fail", Action::"Retry"],
   resource is Remediation
 ) when {
-  ["supervisor", "human"].contains(principal.agent_type) &&
+  ["supervisor", "human", "operator"].contains(principal.agent_type) &&
   context.agentTypeVerified == true
 };

@@ -42,6 +42,13 @@ Agent-drafted analysis of a closed incident. **States**: Draft → InReview → 
 
 `tailnet-diagnose.py` classifies tunnel health (HEALTHY / ENROLLMENT_DOWN / ADDRESS_APPROVAL_LAPSED / TUNNEL_DOWN). On a non-healthy classification from a tunnel-dependent job's failure path, the sensor opens an Incident (or reopens/dedupes by failure mode). Because a down tunnel also blocks VM→Mac API access, detections queue on the side that observed them and file — timestamped at detection — when connectivity allows; a Mac-local probe covers Mac-side state.
 
+## As built (2026-10-22)
+
+- Kernel: `temper serve` from the fork, run as LaunchAgent `com.bencharney.temper` on the Mac mini, bound to 127.0.0.1:3000, app loaded as tenant `incident-rca`; Tailscale Serve (tailnet-only) at `https://bens-mac-mini.taila1553c.ts.net:10240`. State persists in the Turso store (`~/.local/share/temper/agents.db`).
+- Identity: Temper's credential registry is per-tenant and the operator bootstrap covers only the `default` tenant, so app access uses the platform's trusted-issuer JWT path. A local ES256 issuer key lives in `~/temper-server/` (0600, never leaves the Mac); `~/temper-server/mint_token.py` mints tokens — `supervisor`/`astro` for investigation work, `operator`/`ben` for the human approval gate. The signing key staying on the Mac is what makes an `operator` token Ben's approval, not an agent's.
+- Sensor wiring: `sensor/tailnet-sensor.py` (VM side) runs the classifier on a tunnel job's failure path and files through `sensor/file_incident.py` (Mac side) over SSH — SSH is the proven channel and needs no HTTP path through the tunnel; when SSH itself is down the detection queues on the VM and files on the next healthy run. First wired job: the 15-minute architecture-foundation Obsidian sync.
+- Seed corpus loaded 2026-10-22: all 8 historical incidents walked to Closed through the governed workflow itself.
+
 ## Setup
 
 ```

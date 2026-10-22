@@ -22,13 +22,13 @@ permit(
   context.agentTypeVerified == true
 };
 
-// --- Review & publish: supervisor or human ---
+// --- Review & publish: supervisor, operator, or human ---
 
 permit(
   principal,
   action in [Action::"RequestRevision", Action::"ApprovePostmortem", Action::"Publish"],
   resource is Postmortem
 ) when {
-  ["supervisor", "human"].contains(principal.agent_type) &&
+  ["supervisor", "human", "operator"].contains(principal.agent_type) &&
   context.agentTypeVerified == true
 };

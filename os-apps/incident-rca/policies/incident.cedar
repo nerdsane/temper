@@ -14,14 +14,14 @@ permit(
   resource is Incident
 );
 
-// --- Investigation & documentation: agents and supervisor ---
+// --- Investigation & documentation: agents, supervisor, operator ---
 
 permit(
   principal,
   action in [Action::"BeginInvestigation", Action::"AttachEvidence", Action::"RecordPriorReview", Action::"CompleteDocumentation", Action::"StateHypothesis", Action::"ProposeFix", Action::"BeginVerification", Action::"RecordVerification", Action::"Close"],
   resource is Incident
 ) when {
-  ["agent", "supervisor", "human"].contains(principal.agent_type) &&
+  ["agent", "supervisor", "human", "operator"].contains(principal.agent_type) &&
   context.agentTypeVerified == true
 };
 
