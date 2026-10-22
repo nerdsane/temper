@@ -1,0 +1,3 @@
+name = "incident-rca"
+description = "Governed incident + root-cause-analysis workflow: detected failures are investigated against the full prior-incident corpus, documented, fixed only through human-approved remediations, and verified closed. First deployment: the VM↔Mac mini Tailscale tunnel."
+version = "0.1.0"

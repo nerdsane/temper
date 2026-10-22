@@ -1,0 +1,82 @@
+# Remediation Entity — I/O Automaton Specification
+#
+# A concrete fix action proposed against an Incident. Adapted from the
+# on-call reference app, with one deliberate difference: there is NO
+# AutoApprove action. In v1 every remediation requires explicit human
+# approval (Ben, via `temper decide` or the API). Auto-approval for proven
+# low-risk fixes is a v2 question, to be earned by the incident record.
+
+[automaton]
+name = "Remediation"
+states = ["Proposed", "Approved", "Executing", "Succeeded", "Failed", "Rejected"]
+initial = "Proposed"
+terminal = ["Succeeded", "Rejected"]
+
+# --- State Variables ---
+
+[[state]]
+name = "human_approved"
+type = "bool"
+initial = false
+
+[[state]]
+name = "attempts"
+type = "counter"
+initial = 0
+
+# --- Actions ---
+
+[[action]]
+name = "Approve"
+kind = "input"
+from = ["Proposed"]
+to = "Approved"
+effect = ["human_approved = true"]
+params = ["ApproverId"]
+hint = "Human approves the proposed remediation. Cedar restricts this to human principals."
+
+[[action]]
+name = "Reject"
+kind = "input"
+from = ["Proposed"]
+to = "Rejected"
+params = ["Reason"]
+hint = "Human rejects the proposed remediation."
+
+[[action]]
+name = "Execute"
+kind = "internal"
+from = ["Approved"]
+to = "Executing"
+effect = ["attempts += 1"]
+hint = "Begin executing the approved remediation."
+
+[[action]]
+name = "Succeed"
+kind = "internal"
+from = ["Executing"]
+to = "Succeeded"
+hint = "Remediation completed. The parent Incident still must pass verification before closing."
+
+[[action]]
+name = "Fail"
+kind = "internal"
+from = ["Executing"]
+to = "Failed"
+params = ["ErrorMessage"]
+hint = "Remediation failed during execution."
+
+[[action]]
+name = "Retry"
+kind = "internal"
+from = ["Failed"]
+to = "Approved"
+hint = "Retry a failed remediation. Preserves approval state."
+
+[[invariant]]
+name = "ExecutionTracked"
+assert = "status in ['Executing', 'Succeeded', 'Failed'] => attempts > 0"
+
+[[invariant]]
+name = "ApprovalRequired"
+assert = "status in ['Approved', 'Executing', 'Succeeded', 'Failed'] => human_approved"

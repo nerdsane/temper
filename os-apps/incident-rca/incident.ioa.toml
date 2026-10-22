@@ -1,0 +1,147 @@
+# Incident Entity — I/O Automaton Specification
+#
+# A detected failure (e.g. the VM↔Mac Tailscale tunnel dropping) becomes a
+# governed incident. The compounding rule is enforced by the state machine,
+# not by convention: an incident cannot reach FixProposed until the
+# investigator has recorded a review of prior incidents of the same failure
+# mode AND stated a root-cause hypothesis that explains why previous fixes
+# did not hold. Closure requires recorded verification evidence. A closed
+# incident whose failure mode recurs is Reopened, and its recurrence count
+# becomes part of what the next investigation must confront.
+
+[automaton]
+name = "Incident"
+states = ["Detected", "Investigating", "Documented", "HypothesisStated", "FixProposed", "Verifying", "Closed", "Reopened"]
+initial = "Detected"
+
+# --- State Variables ---
+
+[[state]]
+name = "evidence_attached"
+type = "bool"
+initial = false
+
+[[state]]
+name = "prior_incidents_reviewed"
+type = "bool"
+initial = false
+
+[[state]]
+name = "has_root_cause_hypothesis"
+type = "bool"
+initial = false
+
+[[state]]
+name = "verification_passed"
+type = "bool"
+initial = false
+
+[[state]]
+name = "recurrence_count"
+type = "counter"
+initial = 0
+
+# --- Actions: Investigation ---
+
+[[action]]
+name = "BeginInvestigation"
+kind = "input"
+from = ["Detected", "Reopened"]
+to = "Investigating"
+params = ["InvestigatorId"]
+hint = "An agent begins investigating the incident. From Reopened, the recurrence count and the prior closure record are part of the case."
+
+[[action]]
+name = "AttachEvidence"
+kind = "input"
+from = ["Investigating"]
+effect = ["evidence_attached = true"]
+params = ["EvidenceRef"]
+hint = "Attach evidence (classifier output, job failure reports, log excerpts, timestamps). Required before documentation can complete."
+
+[[action]]
+name = "RecordPriorReview"
+kind = "input"
+from = ["Investigating", "Documented"]
+effect = ["prior_incidents_reviewed = true"]
+params = ["PriorIncidentRefs"]
+hint = "Record that all prior incidents of this failure mode were reviewed. Name them. This is the compounding step: skipping it blocks any fix proposal."
+
+[[action]]
+name = "CompleteDocumentation"
+kind = "internal"
+from = ["Investigating"]
+to = "Documented"
+guard = "evidence_attached"
+hint = "Close the documentation phase: timeline, blast radius (which jobs/surfaces were affected), and evidence are on record."
+
+[[action]]
+name = "StateHypothesis"
+kind = "input"
+from = ["Documented"]
+to = "HypothesisStated"
+guard = "prior_incidents_reviewed"
+effect = ["has_root_cause_hypothesis = true"]
+params = ["RootCauseHypothesis", "WhyPriorFixesFailed"]
+hint = "State the root-cause hypothesis AND why previous fixes for this failure mode did not hold. 'Unknown' is an acceptable hypothesis only when stated explicitly with what was checked."
+
+# --- Actions: Fix + Verification ---
+
+[[action]]
+name = "ProposeFix"
+kind = "internal"
+from = ["HypothesisStated"]
+to = "FixProposed"
+guard = "has_root_cause_hypothesis"
+hint = "Propose the fix (creates a Remediation in Proposed state). Unreachable without prior review and a hypothesis — that is the point."
+
+[[action]]
+name = "BeginVerification"
+kind = "input"
+from = ["FixProposed"]
+to = "Verifying"
+params = ["RemediationRef"]
+hint = "Begin verification after the linked Remediation reaches Succeeded. Verification is against explicit criteria, not vibes."
+
+[[action]]
+name = "RecordVerification"
+kind = "input"
+from = ["Verifying"]
+effect = ["verification_passed = true"]
+params = ["VerificationEvidence"]
+hint = "Record verification evidence: e.g. classifier HEALTHY plus dependent jobs green across the agreed window."
+
+[[action]]
+name = "Close"
+kind = "internal"
+from = ["Verifying"]
+to = "Closed"
+guard = "verification_passed"
+hint = "Close the incident. A recurrence of the same failure mode reopens it."
+
+[[action]]
+name = "Reopen"
+kind = "input"
+from = ["Closed"]
+to = "Reopened"
+effect = ["recurrence_count += 1"]
+params = ["RecurrenceEvidence"]
+hint = "Reopen on recurrence of the same failure mode. Increments recurrence_count; the failed closure becomes evidence in the new investigation."
+
+# --- Invariants ---
+
+[[invariant]]
+name = "FixRequiresPriorReview"
+assert = "status in ['FixProposed', 'Verifying', 'Closed'] => prior_incidents_reviewed"
+
+[[invariant]]
+name = "FixRequiresHypothesis"
+assert = "status in ['FixProposed', 'Verifying', 'Closed'] => has_root_cause_hypothesis"
+
+[[invariant]]
+name = "ClosureRequiresVerification"
+assert = "status in ['Closed'] => verification_passed"
+
+[[invariant]]
+name = "DocumentationRequiresEvidence"
+assert = "status in ['Documented', 'HypothesisStated', 'FixProposed', 'Verifying', 'Closed'] => evidence_attached"
