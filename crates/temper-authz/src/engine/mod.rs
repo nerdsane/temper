@@ -749,7 +749,8 @@ impl AuthzEngine {
 pub const VERIFIED_OPERATOR_WHEN: &str = "principal has agent_type && principal.agent_type == \"operator\" && principal has agentTypeVerified && principal.agentTypeVerified == true";
 
 /// Built the built-in system-platform Cedar policy, interpolating the shared
-/// [`VERIFIED_OPERATOR_WHEN`] predicate into the four identity-entity clauses.
+/// [`VERIFIED_OPERATOR_WHEN`] predicate into the four identity-entity clauses
+/// and the count-only entity totals clause (`GET /_admin/entity-counts`).
 fn system_platform_policy() -> String {
     format!(
         r#"
@@ -771,6 +772,10 @@ unless {{ principal is System || principal is Admin || ({op}) }};
 @id("system-platform:protect-principal-generation")
 forbid(principal, action, resource is PrincipalGeneration)
 unless {{ principal is System || principal is Admin || ({op}) }};
+
+@id("system-platform:read-entity-counts")
+permit(principal, action == Action::"read_entity_counts", resource is EntityCounts)
+when {{ principal is System || principal is Admin || ({op}) }};
 "#,
         op = VERIFIED_OPERATOR_WHEN
     )

@@ -1,8 +1,9 @@
 //! Admin endpoints for runtime tuning of platform primitives.
 //!
-//! Currently exposes a single endpoint for admission-cap overrides per
-//! ADR-0051 sub-decision 5. SRE can retune caps without a redeploy when a
-//! customer saturates unexpectedly.
+//! Exposes admission-cap overrides per ADR-0051 sub-decision 5 (SRE can
+//! retune caps without a redeploy when a customer saturates unexpectedly),
+//! on-demand profiles, and count-only entity totals for checking an app's
+//! records across a binary handoff.
 
 use std::collections::BTreeMap;
 
@@ -21,6 +22,9 @@ use crate::authz::require_tenant_match;
 use crate::profiling::{CpuProfileQuery, cpu_profile_handler, wall_profile_handler};
 use crate::state::ServerState;
 
+mod entity_counts;
+use entity_counts::read_entity_counts;
+
 /// Build the `/admin` sub-router.
 pub fn build_admin_router() -> Router<ServerState> {
     Router::new()
@@ -32,6 +36,7 @@ pub fn build_admin_router() -> Router<ServerState> {
         // Gated by TEMPER_PROFILING_ENABLED at request time.
         .route("/profile/cpu", get(capture_cpu_profile))
         .route("/profile/wall", get(capture_wall_profile))
+        .route("/entity-counts", get(read_entity_counts))
 }
 
 fn require_admin_operation(

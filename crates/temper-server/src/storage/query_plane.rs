@@ -178,4 +178,13 @@ pub trait QueryPlaneStore: Send + Sync {
     async fn projected_entity_counts_by_tenant(
         &self,
     ) -> Result<Option<Vec<(String, u64)>>, PersistenceError>;
+
+    /// Count one tenant's catalog rows grouped by entity type, without loading
+    /// any row. Returns `None` if the backend keeps no durable catalog.
+    async fn projected_entity_counts_by_type(
+        &self,
+        _tenant: &str,
+    ) -> Result<Option<BTreeMap<String, u64>>, PersistenceError> {
+        Ok(None)
+    }
 }

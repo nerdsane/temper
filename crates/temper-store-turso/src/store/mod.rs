@@ -22,6 +22,7 @@ mod append_config;
 mod authz;
 mod blobs;
 mod constraints;
+mod entity_counts;
 mod entity_listing;
 mod event_store;
 mod evolution;

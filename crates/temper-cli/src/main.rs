@@ -11,6 +11,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 mod audit;
 mod codegen;
 mod decide;
+mod entity_counts;
 mod init;
 mod install;
 mod mcp;
@@ -242,6 +243,17 @@ enum Commands {
         #[arg(long)]
         database_url: Option<String>,
     },
+    /// Print one tenant's durable entity totals per type from a stopped
+    /// server's local database file, opened read-only. Same JSON shape as
+    /// `GET /_admin/entity-counts`; no ids, fields or values.
+    EntityCounts {
+        /// Local database file `temper serve` wrote (its `TURSO_URL` path).
+        #[arg(long)]
+        db: PathBuf,
+        /// Tenant whose totals to print.
+        #[arg(long, default_value = "default")]
+        tenant: String,
+    },
     /// Start the stdio MCP server for Code Mode
     Mcp {
         /// Port where Temper HTTP server is running.
@@ -435,6 +447,7 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
             url,
             agent_id,
         } => mcp::run(port, url, agent_id).await?,
+        Commands::EntityCounts { db, tenant } => entity_counts::run(&db, &tenant).await?,
         Commands::MigrateTursoToPostgres {
             tenant,
             dry_run,

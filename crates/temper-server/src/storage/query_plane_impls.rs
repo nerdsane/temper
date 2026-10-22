@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use temper_runtime::persistence::PersistenceError;
 use temper_store_postgres::PostgresEventStore;
 use temper_store_turso::{
@@ -173,6 +175,15 @@ impl QueryPlaneStore for PostgresEventStore {
             .await
             .map(Some)
     }
+
+    async fn projected_entity_counts_by_type(
+        &self,
+        tenant: &str,
+    ) -> Result<Option<BTreeMap<String, u64>>, PersistenceError> {
+        PostgresEventStore::projected_entity_counts_by_type(self, tenant)
+            .await
+            .map(Some)
+    }
 }
 
 #[async_trait::async_trait]
@@ -313,6 +324,15 @@ impl QueryPlaneStore for TursoEventStore {
         &self,
     ) -> Result<Option<Vec<(String, u64)>>, PersistenceError> {
         TursoEventStore::projected_entity_counts_by_tenant(self)
+            .await
+            .map(Some)
+    }
+
+    async fn projected_entity_counts_by_type(
+        &self,
+        tenant: &str,
+    ) -> Result<Option<BTreeMap<String, u64>>, PersistenceError> {
+        TursoEventStore::projected_entity_counts_by_type(self, tenant)
             .await
             .map(Some)
     }
@@ -478,6 +498,16 @@ impl QueryPlaneStore for TenantStoreRouter {
             }
         }
         Ok(Some(counts))
+    }
+
+    async fn projected_entity_counts_by_type(
+        &self,
+        tenant: &str,
+    ) -> Result<Option<BTreeMap<String, u64>>, PersistenceError> {
+        let store = self.store_for_tenant(tenant).await?;
+        TursoEventStore::projected_entity_counts_by_type(&store, tenant)
+            .await
+            .map(Some)
     }
 }
 

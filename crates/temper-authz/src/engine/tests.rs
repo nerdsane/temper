@@ -1136,3 +1136,44 @@ fn verified_and_unverified_operator_contexts_disagree_on_identity_entities() {
         }
     }
 }
+
+/// Count-only entity totals (`GET /_admin/entity-counts`) are granted by the
+/// system-platform policy alone, under an app bundle that names nothing about
+/// them: System, Admin and the verified operator may read them; a customer, a
+/// contributor agent and a self-declared operator may not. The grant covers
+/// only this action on this resource type.
+#[test]
+fn entity_counts_are_platform_granted_to_verified_operators_only() {
+    let engine = AuthzEngine::new("permit(principal, action, resource is DesignLanguage);")
+        .expect("policy parses");
+    let attrs = HashMap::new();
+    let read = |ctx: &SecurityContext, action: &str, resource: &str| {
+        engine.authorize(ctx, action, resource, &attrs).is_allowed()
+    };
+
+    let operator = agent_context("operator", "operator");
+    assert!(read(
+        &SecurityContext::system(),
+        "read_entity_counts",
+        "EntityCounts"
+    ));
+    assert!(read(&admin_context(), "read_entity_counts", "EntityCounts"));
+    assert!(read(&operator, "read_entity_counts", "EntityCounts"));
+
+    let unverified_operator =
+        SecurityContext::anonymous().with_agent_context(Some("operator"), None, Some("operator"));
+    for denied in [
+        customer_context("rita"),
+        agent_context("kc_contributor", "contributor"),
+        unverified_operator,
+    ] {
+        assert!(
+            !read(&denied, "read_entity_counts", "EntityCounts"),
+            "{:?} must not read entity counts",
+            denied.principal.kind
+        );
+    }
+
+    assert!(!read(&operator, "update", "EntityCounts"));
+    assert!(!read(&operator, "read_entity_counts", "Order"));
+}
