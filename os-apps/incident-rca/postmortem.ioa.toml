@@ -1,0 +1,74 @@
+# Postmortem Entity — I/O Automaton Specification
+#
+# Agent drafts a postmortem from the investigation trail of an Incident.
+# Humans review and may request revisions before publishing. A published
+# postmortem is part of the corpus the next investigation of the same
+# failure mode must review (see Incident.RecordPriorReview).
+
+[automaton]
+name = "Postmortem"
+states = ["Draft", "InReview", "Approved", "Published"]
+initial = "Draft"
+terminal = ["Published"]
+
+# --- State Variables ---
+
+[[state]]
+name = "has_root_cause"
+type = "bool"
+initial = false
+
+[[state]]
+name = "review_rounds"
+type = "counter"
+initial = 0
+
+# --- Actions ---
+
+[[action]]
+name = "AddRootCause"
+kind = "input"
+from = ["Draft"]
+effect = ["has_root_cause = true"]
+params = ["RootCauseDescription"]
+hint = "Agent adds the root cause analysis to the postmortem draft."
+
+[[action]]
+name = "SubmitForReview"
+kind = "internal"
+from = ["Draft"]
+to = "InReview"
+guard = "has_root_cause"
+hint = "Submit postmortem for human review. Requires a root cause."
+
+[[action]]
+name = "RequestRevision"
+kind = "input"
+from = ["InReview"]
+to = "Draft"
+effect = ["review_rounds += 1"]
+params = ["Feedback"]
+hint = "Human requests changes to the postmortem."
+
+[[action]]
+name = "ApprovePostmortem"
+kind = "input"
+from = ["InReview"]
+to = "Approved"
+effect = ["review_rounds += 1"]
+hint = "Human approves the postmortem after review."
+
+[[action]]
+name = "Publish"
+kind = "internal"
+from = ["Approved"]
+to = "Published"
+hint = "Publish the approved postmortem into the incident corpus."
+
+[[invariant]]
+name = "ReviewRequiresRootCause"
+assert = "status in ['InReview', 'Approved', 'Published'] => has_root_cause"
+
+[[invariant]]
+name = "ApprovedHasReview"
+assert = "status in ['Approved', 'Published'] => review_rounds > 0"

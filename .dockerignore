@@ -4,7 +4,9 @@ target/
 .desloppify/
 .progress/
 .vision/
-ui/
+!ui/
+!ui/observe/
+!ui/observe/**
 node_modules/
 *.png
 *.bak

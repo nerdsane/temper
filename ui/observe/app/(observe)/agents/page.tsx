@@ -86,10 +86,6 @@ export default function AgentsPage() {
           </p>
         </div>
         <div className="flex items-center gap-3">
-          {lastUpdated && (
-            <span className="text-xs text-[var(--color-text-muted)]">
-            </span>
-          )}
         </div>
       </div>
 

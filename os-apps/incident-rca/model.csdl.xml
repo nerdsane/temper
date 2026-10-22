@@ -1,0 +1,411 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Temper Incident RCA Application
+
+  Governed incident + root-cause-analysis workflow. A detected failure
+  becomes an Incident that cannot reach FixProposed until prior incidents
+  of the same failure mode have been reviewed and a root-cause hypothesis
+  (including why previous fixes did not hold) is on record. Fixes are
+  Remediations gated on human approval. Closure requires verification
+  evidence. Postmortems publish the analysis back into the corpus.
+
+  Entities: Incident, Remediation, Postmortem
+-->
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+
+    <!-- ================================================================== -->
+    <!-- Custom Vocabulary: Temper Extensions                                -->
+    <!-- ================================================================== -->
+    <Schema Namespace="Temper.Vocab" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <Term Name="StateMachine.States" Type="Collection(Edm.String)"
+            AppliesTo="EntityType"
+            Description="Valid states for this entity's state machine"/>
+      <Term Name="StateMachine.InitialState" Type="Edm.String"
+            AppliesTo="EntityType"
+            Description="The initial state when an entity is created"/>
+      <Term Name="StateMachine.ValidFromStates" Type="Collection(Edm.String)"
+            AppliesTo="Action"
+            Description="States from which this action can be invoked"/>
+      <Term Name="StateMachine.TargetState" Type="Edm.String"
+            AppliesTo="Action"
+            Description="State the entity transitions to after this action"/>
+      <Term Name="Agent.Hint" Type="Edm.String"
+            AppliesTo="Action Function EntityType"
+            Description="Usage hint for LLM agents"/>
+      <Term Name="Agent.CommonPattern" Type="Edm.String"
+            AppliesTo="Action Function"
+            Description="Common successful trajectory pattern"/>
+      <Term Name="ShardKey" Type="Edm.String"
+            AppliesTo="EntityType"
+            Description="Comma-separated property names used as shard key"/>
+    </Schema>
+
+    <!-- ================================================================== -->
+    <!-- Incident RCA Domain Model                                           -->
+    <!-- ================================================================== -->
+    <Schema Namespace="Temper.IncidentRCA" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+
+      <!-- ============ Enums ============ -->
+
+      <EnumType Name="IncidentStatus">
+        <Member Name="Detected" Value="0"/>
+        <Member Name="Investigating" Value="1"/>
+        <Member Name="Documented" Value="2"/>
+        <Member Name="HypothesisStated" Value="3"/>
+        <Member Name="FixProposed" Value="4"/>
+        <Member Name="Verifying" Value="5"/>
+        <Member Name="Closed" Value="6"/>
+        <Member Name="Reopened" Value="7"/>
+      </EnumType>
+
+      <EnumType Name="RemediationStatus">
+        <Member Name="Proposed" Value="0"/>
+        <Member Name="Approved" Value="1"/>
+        <Member Name="Executing" Value="2"/>
+        <Member Name="Succeeded" Value="3"/>
+        <Member Name="Failed" Value="4"/>
+        <Member Name="Rejected" Value="5"/>
+      </EnumType>
+
+      <EnumType Name="PostmortemStatus">
+        <Member Name="Draft" Value="0"/>
+        <Member Name="InReview" Value="1"/>
+        <Member Name="Approved" Value="2"/>
+        <Member Name="Published" Value="3"/>
+      </EnumType>
+
+      <!-- ============ Entity Types ============ -->
+
+      <!-- Incident: a detected failure under governed investigation -->
+      <EntityType Name="Incident">
+        <Key>
+          <PropertyRef Name="Id"/>
+        </Key>
+        <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="Title" Type="Edm.String" Nullable="false"/>
+        <Property Name="FailureMode" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Temper.IncidentRCA.IncidentStatus" Nullable="false"/>
+        <Property Name="SourceSignal" Type="Edm.String"/>
+        <Property Name="DetectedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="EvidenceAttached" Type="Edm.Boolean" DefaultValue="false"/>
+        <Property Name="PriorIncidentsReviewed" Type="Edm.Boolean" DefaultValue="false"/>
+        <Property Name="HasRootCauseHypothesis" Type="Edm.Boolean" DefaultValue="false"/>
+        <Property Name="RootCauseHypothesis" Type="Edm.String"/>
+        <Property Name="WhyPriorFixesFailed" Type="Edm.String"/>
+        <Property Name="VerificationPassed" Type="Edm.Boolean" DefaultValue="false"/>
+        <Property Name="RecurrenceCount" Type="Edm.Int32" DefaultValue="0"/>
+        <NavigationProperty Name="Remediations" Type="Collection(Temper.IncidentRCA.Remediation)"/>
+        <NavigationProperty Name="Postmortem" Type="Temper.IncidentRCA.Postmortem"/>
+
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Detected</String>
+            <String>Investigating</String>
+            <String>Documented</String>
+            <String>HypothesisStated</String>
+            <String>FixProposed</String>
+            <String>Verifying</String>
+            <String>Closed</String>
+            <String>Reopened</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Detected"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="Id"/>
+      </EntityType>
+
+      <!-- Remediation: a human-approved fix action against an Incident -->
+      <EntityType Name="Remediation">
+        <Key>
+          <PropertyRef Name="Id"/>
+        </Key>
+        <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="IncidentId" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="Status" Type="Temper.IncidentRCA.RemediationStatus" Nullable="false"/>
+        <Property Name="ActionType" Type="Edm.String" Nullable="false"/>
+        <Property Name="Description" Type="Edm.String"/>
+        <Property Name="Attempts" Type="Edm.Int32" DefaultValue="0"/>
+        <Property Name="HumanApproved" Type="Edm.Boolean" DefaultValue="false"/>
+        <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <NavigationProperty Name="Incident" Type="Temper.IncidentRCA.Incident" Nullable="false">
+          <ReferentialConstraint Property="IncidentId" ReferencedProperty="Id"/>
+        </NavigationProperty>
+
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Proposed</String>
+            <String>Approved</String>
+            <String>Executing</String>
+            <String>Succeeded</String>
+            <String>Failed</String>
+            <String>Rejected</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Proposed"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="Id"/>
+      </EntityType>
+
+      <!-- Postmortem: the published root-cause record of an Incident -->
+      <EntityType Name="Postmortem">
+        <Key>
+          <PropertyRef Name="Id"/>
+        </Key>
+        <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="IncidentId" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="Status" Type="Temper.IncidentRCA.PostmortemStatus" Nullable="false"/>
+        <Property Name="Title" Type="Edm.String" Nullable="false"/>
+        <Property Name="RootCause" Type="Edm.String"/>
+        <Property Name="ReviewRounds" Type="Edm.Int32" DefaultValue="0"/>
+        <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <Property Name="PublishedAt" Type="Edm.DateTimeOffset"/>
+        <NavigationProperty Name="Incident" Type="Temper.IncidentRCA.Incident" Nullable="false">
+          <ReferentialConstraint Property="IncidentId" ReferencedProperty="Id"/>
+        </NavigationProperty>
+
+        <Annotation Term="Temper.Vocab.StateMachine.States">
+          <Collection>
+            <String>Draft</String>
+            <String>InReview</String>
+            <String>Approved</String>
+            <String>Published</String>
+          </Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Draft"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="Id"/>
+      </EntityType>
+
+      <!-- ============ Actions ============ -->
+
+      <!-- Incident Actions -->
+      <Action Name="BeginInvestigation" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.IncidentRCA.Incident"/>
+        <Parameter Name="InvestigatorId" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.IncidentRCA.Incident"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Detected</String><String>Reopened</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Investigating"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="Begin investigating. From Reopened, the recurrence count and failed closure are part of the case."/>
+      </Action>
+
+      <Action Name="AttachEvidence" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.IncidentRCA.Incident"/>
+        <Parameter Name="EvidenceRef" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.IncidentRCA.Incident"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Investigating</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="Attach classifier output, failure reports, log excerpts. Required before documentation completes."/>
+      </Action>
+
+      <Action Name="RecordPriorReview" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.IncidentRCA.Incident"/>
+        <Parameter Name="PriorIncidentRefs" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.IncidentRCA.Incident"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Investigating</String><String>Documented</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="Record review of ALL prior incidents of this failure mode. Blocks any fix proposal until done."/>
+      </Action>
+
+      <Action Name="CompleteDocumentation" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.IncidentRCA.Incident"/>
+        <ReturnType Type="Temper.IncidentRCA.Incident"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Investigating</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Documented"/>
+      </Action>
+
+      <Action Name="StateHypothesis" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.IncidentRCA.Incident"/>
+        <Parameter Name="RootCauseHypothesis" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="WhyPriorFixesFailed" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.IncidentRCA.Incident"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Documented</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="HypothesisStated"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="Requires prior-incident review. The hypothesis must explain why previous fixes for this mode did not hold; an explicit 'unknown' with what was checked is acceptable."/>
+      </Action>
+
+      <Action Name="ProposeFix" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.IncidentRCA.Incident"/>
+        <ReturnType Type="Temper.IncidentRCA.Incident"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>HypothesisStated</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="FixProposed"/>
+      </Action>
+
+      <Action Name="BeginVerification" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.IncidentRCA.Incident"/>
+        <Parameter Name="RemediationRef" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.IncidentRCA.Incident"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>FixProposed</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Verifying"/>
+      </Action>
+
+      <Action Name="RecordVerification" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.IncidentRCA.Incident"/>
+        <Parameter Name="VerificationEvidence" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.IncidentRCA.Incident"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Verifying</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="Record verification evidence against explicit criteria (e.g. classifier HEALTHY + dependent jobs green across the window)."/>
+      </Action>
+
+      <Action Name="Close" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.IncidentRCA.Incident"/>
+        <ReturnType Type="Temper.IncidentRCA.Incident"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Verifying</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Closed"/>
+      </Action>
+
+      <Action Name="Reopen" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.IncidentRCA.Incident"/>
+        <Parameter Name="RecurrenceEvidence" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.IncidentRCA.Incident"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Closed</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Reopened"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="Reopen on recurrence of the same failure mode. Increments the recurrence count."/>
+      </Action>
+
+      <!-- Remediation Actions -->
+      <Action Name="Approve" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.IncidentRCA.Remediation"/>
+        <Parameter Name="ApproverId" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.IncidentRCA.Remediation"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Proposed</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Approved"/>
+        <Annotation Term="Temper.Vocab.Agent.Hint"
+                    String="Human-only in v1 (Cedar). There is no auto-approve path."/>
+      </Action>
+
+      <Action Name="Reject" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.IncidentRCA.Remediation"/>
+        <Parameter Name="Reason" Type="Edm.String"/>
+        <ReturnType Type="Temper.IncidentRCA.Remediation"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Proposed</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Rejected"/>
+      </Action>
+
+      <Action Name="Execute" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.IncidentRCA.Remediation"/>
+        <ReturnType Type="Temper.IncidentRCA.Remediation"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Approved</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Executing"/>
+      </Action>
+
+      <Action Name="Succeed" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.IncidentRCA.Remediation"/>
+        <ReturnType Type="Temper.IncidentRCA.Remediation"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Executing</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Succeeded"/>
+      </Action>
+
+      <Action Name="Fail" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.IncidentRCA.Remediation"/>
+        <Parameter Name="ErrorMessage" Type="Edm.String"/>
+        <ReturnType Type="Temper.IncidentRCA.Remediation"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Executing</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Failed"/>
+      </Action>
+
+      <Action Name="Retry" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.IncidentRCA.Remediation"/>
+        <ReturnType Type="Temper.IncidentRCA.Remediation"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Failed</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Approved"/>
+      </Action>
+
+      <!-- Postmortem Actions -->
+      <Action Name="AddRootCause" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.IncidentRCA.Postmortem"/>
+        <Parameter Name="RootCauseDescription" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.IncidentRCA.Postmortem"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Draft</String></Collection>
+        </Annotation>
+      </Action>
+
+      <Action Name="SubmitForReview" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.IncidentRCA.Postmortem"/>
+        <ReturnType Type="Temper.IncidentRCA.Postmortem"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Draft</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="InReview"/>
+      </Action>
+
+      <Action Name="RequestRevision" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.IncidentRCA.Postmortem"/>
+        <Parameter Name="Feedback" Type="Edm.String" Nullable="false"/>
+        <ReturnType Type="Temper.IncidentRCA.Postmortem"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>InReview</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Draft"/>
+      </Action>
+
+      <Action Name="ApprovePostmortem" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.IncidentRCA.Postmortem"/>
+        <ReturnType Type="Temper.IncidentRCA.Postmortem"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>InReview</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Approved"/>
+      </Action>
+
+      <Action Name="Publish" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.IncidentRCA.Postmortem"/>
+        <ReturnType Type="Temper.IncidentRCA.Postmortem"/>
+        <Annotation Term="Temper.Vocab.StateMachine.ValidFromStates">
+          <Collection><String>Approved</String></Collection>
+        </Annotation>
+        <Annotation Term="Temper.Vocab.StateMachine.TargetState" String="Published"/>
+      </Action>
+
+      <!-- ============ Entity Container ============ -->
+
+      <EntityContainer Name="IncidentRCAService">
+        <EntitySet Name="Incidents" EntityType="Temper.IncidentRCA.Incident">
+          <NavigationPropertyBinding Path="Remediations" Target="Remediations"/>
+          <NavigationPropertyBinding Path="Postmortem" Target="Postmortems"/>
+        </EntitySet>
+        <EntitySet Name="Remediations" EntityType="Temper.IncidentRCA.Remediation">
+          <NavigationPropertyBinding Path="Incident" Target="Incidents"/>
+        </EntitySet>
+        <EntitySet Name="Postmortems" EntityType="Temper.IncidentRCA.Postmortem">
+          <NavigationPropertyBinding Path="Incident" Target="Incidents"/>
+        </EntitySet>
+      </EntityContainer>
+
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>
