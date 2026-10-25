@@ -75,6 +75,9 @@ pub struct TursoEventStore {
     /// True when connected to a remote Turso Cloud instance (libsql:// URL).
     /// PRAGMAs are skipped for remote connections.
     is_remote: bool,
+    /// One SQLite writer. Set for a Turso Sync file: concurrent appends that
+    /// bypass the write gate wait on that lock until the attempt timeout.
+    serial_writes: bool,
     /// Set when the local file's commits are copied to Turso Cloud.
     sync_copy: Option<SyncCopy>,
 }
@@ -132,13 +135,17 @@ impl TursoEventStore {
         is_remote: bool,
         sync_copy: Option<SyncCopy>,
     ) -> Result<Self, PersistenceError> {
+        let serial_writes = sync_copy.is_some();
         let store = Self {
             db: Arc::new(db),
+            // A synced file is a local path, so `is_remote` is false, but it
+            // still has one writer. Treat it like remote Turso.
             write_gate: Arc::new(Semaphore::new(write_gate::configured_write_concurrency(
-                is_remote,
+                is_remote || serial_writes,
             ))),
             high_priority_write_waiters: Arc::new(AtomicUsize::new(0)),
             is_remote,
+            serial_writes,
             sync_copy,
         };
         store.migrate().await?;

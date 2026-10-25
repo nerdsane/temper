@@ -1024,7 +1024,16 @@ impl TursoEventStore {
         let attempt_timeout = append_attempt_timeout();
         let total_attempts = append_max_attempts();
         let mut last_err: Option<PersistenceError> = None;
-        let bypass_write_gate = events.len() == 1 && !scheduled.changes_scheduled_actions();
+        // A plain local file and remote libsql still let one atomic append
+        // skip the permit: remote Turso serializes on the server, and the
+        // permit would sit the foreground write behind low-priority work.
+        // A Turso Sync file cannot. It has one SQLite writer, and the sync
+        // engine holds its mutex across a push. Every actor appending at
+        // once waits on that lock until the 5s attempt timeout. The actor
+        // rolls its memory back, but the INSERT may already have committed,
+        // so the next attempt is a concurrency violation.
+        let bypass_write_gate =
+            events.len() == 1 && !scheduled.changes_scheduled_actions() && !self.serial_writes;
         for attempt in 0..total_attempts {
             if attempt > 0 {
                 tokio::time::sleep(Duration::from_millis(retry_delay_ms(attempt - 1))).await;

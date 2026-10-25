@@ -20,8 +20,13 @@ impl WritePriority {
     }
 }
 
-pub(super) fn configured_write_concurrency(is_remote: bool) -> usize {
-    let default = if is_remote { 1 } else { 4 };
+/// Permit count for the process-local write lane.
+///
+/// Remote Turso and a Turso Sync file both have one writer. A plain local
+/// file, used by tests and by a server with no remote copy, allows a few
+/// in-process writers.
+pub(super) fn configured_write_concurrency(single_writer: bool) -> usize {
+    let default = if single_writer { 1 } else { 4 };
     std::env::var("TEMPER_TURSO_WRITE_CONCURRENCY")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())

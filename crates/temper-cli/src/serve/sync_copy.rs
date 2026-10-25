@@ -17,12 +17,14 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use temper_store_turso::{CopyState, SyncCopy};
 
-/// How long a request that can change data may take, its push included,
-/// before its change is reported as not confirmed.
-const ANSWER_BUDGET: Duration = Duration::from_secs(10);
-
-/// The least time left for the push of a slow request.
-const MIN_PUSH_BUDGET: Duration = Duration::from_secs(1);
+/// How long the copy may take to push after the handler returns.
+///
+/// This is one push attempt, not the leftover of the handler's time. A slow
+/// write used to keep 1s (`turso.sync push not done within 1000 ms`): that
+/// lost to the upkeep push already in flight and answered 503 while the
+/// change was still in the local log, and the client retried onto a writer
+/// that was already stalled.
+const CONFIRM_PUSH_BUDGET: Duration = Duration::from_secs(10);
 
 /// Default period of the background push.
 const DEFAULT_UPKEEP_INTERVAL: Duration = Duration::from_secs(1);
@@ -64,10 +66,10 @@ async fn push_before_answering(
     }
     let started = Instant::now();
     let response = next.run(request).await;
-    let budget = ANSWER_BUDGET
-        .saturating_sub(started.elapsed())
-        .max(MIN_PUSH_BUDGET);
-    match copy.push_committed_within(budget).await {
+    match copy
+        .push_committed_within(confirm_push_budget(started.elapsed()))
+        .await
+    {
         Ok(()) => response,
         // The request ran, so whatever the copy's state now, the change may
         // have been saved here: never answer as if nothing happened.
@@ -80,6 +82,14 @@ async fn push_before_answering(
             )
         }
     }
+}
+
+/// Budget for copying a handler's commits off this server.
+///
+/// `handler_elapsed` is how long the handler already ran. It does not shrink
+/// the budget: the copy gets one full push attempt either way.
+fn confirm_push_budget(_handler_elapsed: Duration) -> Duration {
+    CONFIRM_PUSH_BUDGET
 }
 
 /// The answer to a request that can change data in `state`, if it is refused.
@@ -188,6 +198,17 @@ mod tests {
         assert!(!reads_only(&Method::GET, "/static/app-page"));
         assert!(!reads_only(&Method::GET, "/observer"));
         assert!(!reads_only(&Method::GET, "/genesisx"));
+    }
+
+    #[test]
+    fn a_slow_handler_still_gets_one_full_push_attempt() {
+        // A handler that already ran for 9s used to leave the push 1s, which
+        // is the "within 1000 ms" failure on a busy copy.
+        assert_eq!(
+            confirm_push_budget(Duration::from_secs(9)),
+            Duration::from_secs(10)
+        );
+        assert_eq!(confirm_push_budget(Duration::ZERO), Duration::from_secs(10));
     }
 
     #[test]

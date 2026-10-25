@@ -461,6 +461,50 @@ async fn single_event_append_bypasses_process_write_gate() {
 }
 
 #[tokio::test]
+async fn synced_single_event_append_waits_for_the_write_gate() {
+    let mut store = make_store("single-append-synced-gate").await;
+    store.serial_writes = true;
+    store.write_gate = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+    let held_gate = store
+        .write_gate
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("hold gate");
+
+    let blocked = tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        store.append(
+            "tenant-a:Order:ord-synced",
+            0,
+            &[test_envelope(
+                "OrderCreated",
+                serde_json::json!({ "id": "ord-synced" }),
+            )],
+        ),
+    )
+    .await;
+    assert!(
+        blocked.is_err(),
+        "a synced file has one writer; the append must wait for the permit"
+    );
+    drop(held_gate);
+
+    let new_seq = store
+        .append(
+            "tenant-a:Order:ord-synced",
+            0,
+            &[test_envelope(
+                "OrderCreated",
+                serde_json::json!({ "id": "ord-synced" }),
+            )],
+        )
+        .await
+        .expect("append after the permit is released");
+    assert_eq!(new_seq, 1);
+}
+
+#[tokio::test]
 async fn snapshot_save_and_load_roundtrip() {
     let store = make_store("snapshot").await;
     let persistence_id = "tenant-a:Order:ord-3";
