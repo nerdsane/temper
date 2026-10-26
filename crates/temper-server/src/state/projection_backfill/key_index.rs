@@ -18,9 +18,12 @@ use super::{EntityLoadOutcome, load_entity_current_fields, transition_table_for}
 /// boot — the original bug that left ~0 of N entities keyed.
 ///
 /// Robustness at scale (tenants hold 10k–100k+ entities of a keyed type):
-/// - **Resumable**: already-keyed entities are skipped (the costly step is loading
-///   each entity's state), so a re-run after a partial pass only processes the
-///   remainder instead of re-loading all N.
+/// - **Resumable, with a healing exception (ARN-238)**: every entity is loaded
+///   (pre-watermark only — the watermark still ends all re-runs), because an
+///   already-keyed entity may hold STALE ownership: a tombstone, or a key whose
+///   components were nulled before release-on-delete/null existed. Living,
+///   fully-resolvable already-keyed entities skip the index write, so a resumed
+///   pass re-loads but does not re-write the finished remainder.
 /// - **Sound**: a type is watermarked only if EVERY existing entity was either keyed
 ///   or is definitively skippable (deleted/phantom). One entity that exists but
 ///   cannot be loaded fails the type — it is not watermarked, and keyed misses keep
@@ -105,15 +108,21 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
         // Resumability: on a FIRST-TIME backfill, skip entities already keyed (avoids
         // re-loading their state). On a key-set change we must re-key already-keyed
         // entities with the new key, so process all.
-        let already_keyed: BTreeSet<String> = if force_full_rekey {
-            BTreeSet::new()
+        // `membership_known` tracks whether the empty/filled set is AUTHORITATIVE.
+        // On force_full_rekey and on a membership fetch error the set is empty by
+        // construction, which must mean "process everything" — including releasing
+        // stale rows of entities whose keys are all unresolvable — not "known to
+        // be unindexed" (ARN-238: skipping them here would let the watermark end
+        // their healing silently).
+        let (already_keyed, membership_known): (BTreeSet<String>, bool) = if force_full_rekey {
+            (BTreeSet::new(), false)
         } else {
             match store
                 .keyed_entity_ids_for_type(tenant.as_str(), entity_type)
                 .await
             {
-                Ok(ids) => ids.into_iter().collect(),
-                Err(_) => BTreeSet::new(), // cannot resume → process all (correct, slower)
+                Ok(ids) => (ids.into_iter().collect(), true),
+                Err(_) => (BTreeSet::new(), false), // cannot resume → process all
             }
         };
 
@@ -121,15 +130,18 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
         let blob_store = state.blob_store_for_tenant(tenant).ok();
         let total = entity_ids.len();
         let mut newly_keyed = 0usize;
+        let mut healed = 0usize;
         let mut already = 0usize;
         let mut skipped = 0usize;
         let mut failed = 0usize;
 
         for entity_id in &entity_ids {
-            if already_keyed.contains(entity_id) {
-                already += 1;
-                continue;
-            }
+            // ARN-238: an already-keyed entity cannot be fast-skipped without
+            // loading it — its rows may be STALE ownership from a delete that
+            // predates release-on-delete, and healing requires seeing the
+            // tombstone. Living already-keyed entities still skip the upsert
+            // below; only the cheap membership shortcut moved.
+            let was_already_keyed = already_keyed.contains(entity_id);
             match load_entity_current_fields(
                 tenant,
                 entity_type,
@@ -146,22 +158,49 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
                         skipped += 1;
                         continue;
                     };
-                    let mut key_rows = Vec::new();
-                    for key in keys {
-                        if let Some(hash) = crate::key_index::canonical_key_hash(
-                            &key.name,
-                            &key.properties,
-                            field_map,
-                        ) {
-                            key_rows.push(temper_runtime::persistence::EntityKeyRow {
-                                key_name: key.name.clone(),
-                                key_hash: hash,
-                            });
-                        }
+                    // One row per declared key: a real hash when the key resolves,
+                    // a RELEASE marker when it does not (ARN-238 — a key whose
+                    // components were nulled must stop owning its old value; the
+                    // stale row is exactly why the entity looks already-keyed).
+                    let mut any_release = false;
+                    let mut any_hash = false;
+                    let key_rows: Vec<temper_runtime::persistence::EntityKeyRow> = keys
+                        .iter()
+                        .map(|key| {
+                            let hash = crate::key_index::canonical_key_hash(
+                                &key.name,
+                                &key.properties,
+                                field_map,
+                            );
+                            match hash {
+                                Some(hash) => {
+                                    any_hash = true;
+                                    temper_runtime::persistence::EntityKeyRow {
+                                        key_name: key.name.clone(),
+                                        key_hash: hash,
+                                    }
+                                }
+                                None => {
+                                    any_release = true;
+                                    temper_runtime::persistence::EntityKeyRow {
+                                        key_name: key.name.clone(),
+                                        key_hash: String::new(),
+                                    }
+                                }
+                            }
+                        })
+                        .collect();
+                    if was_already_keyed && !any_release {
+                        // Alive, fully resolvable, already indexed — nothing to write.
+                        already += 1;
+                        continue;
                     }
-                    if key_rows.is_empty() {
-                        // No resolvable key (all key components absent/null) — the
-                        // entity is not addressable by this key, so skipping is sound.
+                    if !any_hash && !was_already_keyed && membership_known {
+                        // Authoritatively not indexed and nothing resolvable — the
+                        // entity is not addressable by any declared key. Without
+                        // membership authority we fall through and write the
+                        // release markers (bounded no-op deletes), because the
+                        // entity may hold stale rows we cannot see from here.
                         skipped += 1;
                         continue;
                     }
@@ -169,7 +208,11 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
                         .backfill_entity_keys(tenant.as_str(), entity_type, entity_id, &key_rows)
                         .await
                     {
-                        Ok(()) => newly_keyed += 1,
+                        // A write with at least one real hash is a claim; a
+                        // release-only write is a heal — kept separate so the
+                        // completion log's newly_keyed stays an honest claim count.
+                        Ok(()) if any_hash => newly_keyed += 1,
+                        Ok(()) => healed += 1,
                         Err(e) => {
                             failed += 1;
                             tracing::warn!(
@@ -180,6 +223,36 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
                     }
                 }
                 EntityLoadOutcome::Skip => skipped += 1,
+                EntityLoadOutcome::Tombstoned => {
+                    // ARN-238 healing pass: a deleted entity must not keep its
+                    // declared keys. Emit a release marker per declared key so
+                    // rows written before release-on-delete are purged.
+                    let release_rows: Vec<temper_runtime::persistence::EntityKeyRow> = keys
+                        .iter()
+                        .map(|key| temper_runtime::persistence::EntityKeyRow {
+                            key_name: key.name.clone(),
+                            key_hash: String::new(),
+                        })
+                        .collect();
+                    match store
+                        .backfill_entity_keys(
+                            tenant.as_str(),
+                            entity_type,
+                            entity_id,
+                            &release_rows,
+                        )
+                        .await
+                    {
+                        Ok(()) => healed += 1,
+                        Err(e) => {
+                            failed += 1;
+                            tracing::warn!(
+                                error = %e, entity_type = %entity_type, entity_id = %entity_id,
+                                "key index backfill: tombstone release failed"
+                            );
+                        }
+                    }
+                }
                 EntityLoadOutcome::LoadFailed => {
                     failed += 1;
                     tracing::warn!(
@@ -200,13 +273,13 @@ pub(in crate::state) async fn populate_key_index_from_snapshots(
                 .await;
             tracing::info!(
                 tenant = %tenant, entity_type = %entity_type, key_set = %current_key_set,
-                total, newly_keyed, already, skipped,
+                total, newly_keyed, healed, already, skipped,
                 "entity_key_index backfill complete; type watermarked"
             );
         } else {
             tracing::warn!(
                 tenant = %tenant, entity_type = %entity_type,
-                total, newly_keyed, already, skipped, failed,
+                total, newly_keyed, healed, already, skipped, failed,
                 "key index backfill: {failed} entities unresolved; type NOT watermarked (keyed misses keep scanning; will resume next run)"
             );
         }
