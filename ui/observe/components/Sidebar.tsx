@@ -108,6 +108,7 @@ export default function Sidebar() {
   useEffect(() => {
     let mounted = true;
     const poll = async () => {
+      if (document.hidden) return;
       try {
         const data = await fetchUnmetIntents();
         if (mounted) setUnmetCount(data.open_count);
