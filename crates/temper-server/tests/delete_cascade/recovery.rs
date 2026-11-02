@@ -38,8 +38,6 @@ fn server(name: &str, store: &SimEventStore) -> ServerState {
             None,
             None,
             None,
-            None,
-            None,
         ),
     )
 }

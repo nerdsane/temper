@@ -154,3 +154,59 @@ fn equality_delta_on_postgres_reads_matches_and_gap_not_the_type() {
             .unwrap();
     });
 }
+
+/// A value longer than the field index keeps (2000 bytes) has no index row,
+/// and a projected record leaves no gap mark, so neither can find it. An
+/// equality on such a literal is not answered from the index: the reconciled
+/// read drops it (`equality.rs`, `value.len() <= 2000`) and the native page
+/// does not count it as a complete proof (`filter_sql.rs`,
+/// `lossless_eq_comparison`), so the read checks the catalog rows.
+/// Gated on DATABASE_URL; the store works in a schema of its own.
+#[test]
+fn equality_on_a_value_past_the_index_cap_reads_the_catalog() {
+    let Some(database_url) = temper_test_resource::env_var("DATABASE_URL") else {
+        return;
+    };
+    sqlx::test_block_on(async {
+        let pool = sqlx::PgPool::connect(&database_url).await.unwrap();
+        let name = format!("equality_long_{}", sim_uuid().simple());
+        let schema = PostgresSchema::new(name.clone()).unwrap();
+        temper_store_postgres::migration::run_migrations_in_schema(&pool, &schema)
+            .await
+            .unwrap();
+        let store = PostgresEventStore::with_schema(pool.clone(), schema);
+        let mut state = build_order_state("equality-long-postgres");
+        state.set_storage_stack(StorageStack::from_postgres(store.clone()));
+        let tenant = TenantId::default();
+        let long = "x".repeat(2001);
+        for (id, notes) in [("ord-long", long.as_str()), ("ord-short", "noise")] {
+            state
+                .get_or_create_tenant_entity(
+                    &tenant,
+                    "Order",
+                    id,
+                    serde_json::json!({ "Notes": notes }),
+                )
+                .await
+                .unwrap();
+        }
+        let marks: i64 = sqlx::query_scalar(&format!(
+            "SELECT count(*) FROM \"{name}\".entity_projection_delta WHERE entity_id = 'ord-long'"
+        ))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(marks, 0, "a projected record leaves no gap mark");
+
+        let found = read_orders(&state, &long).await;
+        assert_eq!(found.count, Some(1));
+        assert_eq!(entity_ids(&found), vec!["ord-long"]);
+        let missed = read_orders(&state, &"y".repeat(2001)).await;
+        assert_eq!(missed.count, Some(0));
+
+        sqlx::query(&format!("DROP SCHEMA \"{name}\" CASCADE"))
+            .execute(&pool)
+            .await
+            .unwrap();
+    });
+}

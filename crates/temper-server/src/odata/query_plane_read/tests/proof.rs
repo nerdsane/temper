@@ -417,7 +417,7 @@ fn native_plan_pushes_file_lookup_equalities_with_status_ne_recheck() {
         plan.params,
         vec!["Path", "/proofs/live.txt", "WorkspaceId", "ws-1"]
     );
-    assert!(should_try_native_before_catalog_coverage(&request, &plan));
+    assert!(should_try_native_page_first(&request, &plan));
 }
 
 #[tokio::test]

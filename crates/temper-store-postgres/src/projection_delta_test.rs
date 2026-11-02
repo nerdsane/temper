@@ -226,6 +226,8 @@ fn projection_delta_covers_batch_snapshot_wrapped_removed_and_native_rows() {
                 persistence_id: "t:Payment:batch".into(),
                 expected_sequence: 0,
                 events: vec![created()],
+                state_timer: None,
+                projection: None,
             }])
             .await
             .unwrap();
@@ -252,14 +254,21 @@ fn projection_delta_covers_batch_snapshot_wrapped_removed_and_native_rows() {
         // A create that commits its projection with its event is not behind.
         let mut first = created();
         first.sequence_nr = 1;
+        let native_fields = serde_json::json!({"Id": "native", "app": "needle"});
+        let native_state = serde_json::json!({"status": "Draft", "sequence_nr": 1});
         store
-            .create_data_only_entity_native(
-                "t",
-                "Payment",
-                "native",
-                "Draft",
-                &serde_json::json!({"Id": "native", "app": "needle"}),
-                &first,
+            .append_with_rows(
+                "t:Payment:native",
+                0,
+                &[first],
+                temper_runtime::persistence::CommitRows {
+                    projection: Some(temper_runtime::persistence::ProjectionRow::Upsert {
+                        status: "Draft",
+                        fields: &native_fields,
+                        state: &native_state,
+                    }),
+                    ..Default::default()
+                },
             )
             .await
             .unwrap();

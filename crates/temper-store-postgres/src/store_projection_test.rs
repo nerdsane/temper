@@ -711,7 +711,7 @@ fn upsert_query_projection_diffs_field_index_rows() {
 }
 
 #[test]
-fn native_data_only_create_inserts_event_catalog_and_index_atomically() {
+fn append_with_projection_commits_event_catalog_and_index_together() {
     let Some(database_url) = temper_test_resource::env_var("DATABASE_URL") else {
         return;
     };
@@ -734,15 +734,26 @@ fn native_data_only_create_inserts_event_catalog_and_index_atomically() {
         let mut envelope = test_envelope("Created", fields.clone());
         envelope.sequence_nr = 1;
 
+        let state = serde_json::json!({
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "status": "Active",
+            "fields": fields,
+            "events": [],
+            "total_event_count": 1,
+            "sequence_nr": 1
+        });
+        let rows = || temper_runtime::persistence::CommitRows {
+            projection: Some(temper_runtime::persistence::ProjectionRow::Upsert {
+                status: "Active",
+                fields: &fields,
+                state: &state,
+            }),
+            ..Default::default()
+        };
+        let pid = format!("{tenant}:{entity_type}:{entity_id}");
         let sequence_nr = store
-            .create_data_only_entity_native(
-                &tenant,
-                entity_type,
-                entity_id,
-                "Active",
-                &fields,
-                &envelope,
-            )
+            .append_with_rows(&pid, 0, std::slice::from_ref(&envelope), rows())
             .await
             .unwrap();
 
@@ -773,7 +784,7 @@ fn native_data_only_create_inserts_event_catalog_and_index_atomically() {
         let (status, stored_fields, stored_state, stored_sequence) = catalog.unwrap();
         assert_eq!(status, "Active");
         assert_eq!(stored_fields, fields);
-        let stored_state = stored_state.expect("native create should store catalog state");
+        let stored_state = stored_state.expect("the append stores the catalog state");
         assert!(
             stored_state.get("fields").is_none(),
             "the stored state leaves out fields the fields column holds"
@@ -804,14 +815,7 @@ fn native_data_only_create_inserts_event_catalog_and_index_atomically() {
         assert!(indexed_count >= 5);
 
         let duplicate = store
-            .create_data_only_entity_native(
-                &tenant,
-                entity_type,
-                entity_id,
-                "Active",
-                &fields,
-                &envelope,
-            )
+            .append_with_rows(&pid, 0, std::slice::from_ref(&envelope), rows())
             .await;
         assert!(matches!(
             duplicate,

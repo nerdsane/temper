@@ -88,9 +88,7 @@ fn server_with_spec(store: &SimEventStore, spec: &str) -> ServerState {
         ),
     );
     let mut state = ServerState::from_registry(ActorSystem::new("last-event"), registry);
-    state.set_storage_stack(
-        StorageStack::from_sim(store.clone(), None).with_entity_rows_in_journal(),
-    );
+    state.set_storage_stack(StorageStack::from_sim(store.clone(), None));
     state
         .authz
         .reload_tenant_policies("default", "permit(principal, action, resource);")

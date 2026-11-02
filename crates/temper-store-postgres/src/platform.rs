@@ -599,6 +599,43 @@ impl PostgresEventStore {
         state: &serde_json::Value,
         sequence_nr: u64,
     ) -> Result<(), PersistenceError> {
+        let row = [tenant, entity_type, entity_id, status];
+        self.write_query_projection(row, fields, state, sequence_nr, MissingCatalogRow::Insert)
+            .await
+    }
+
+    /// Rewrite an existing catalog row and its field index from `state`, as
+    /// [`Self::upsert_query_projection_with_state`] does, and leave a record
+    /// with no catalog row alone. While the server serves, only the record's
+    /// own commit creates its row (boot repair creates the missing ones before
+    /// serving): a commit locks the catalog row before it reads the field
+    /// index, so a row created by another writer while that commit runs is one
+    /// it cannot lock, and its field-index rows are ones it cannot see. A
+    /// record deleted after `state` was read stays deleted.
+    #[expect(clippy::too_many_arguments, reason = "projection upsert boundary")]
+    pub async fn refresh_query_projection_with_state(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+        fields: &serde_json::Value,
+        state: &serde_json::Value,
+        sequence_nr: u64,
+    ) -> Result<(), PersistenceError> {
+        let row = [tenant, entity_type, entity_id, status];
+        self.write_query_projection(row, fields, state, sequence_nr, MissingCatalogRow::Leave)
+            .await
+    }
+
+    async fn write_query_projection(
+        &self,
+        [tenant, entity_type, entity_id, status]: [&str; 4],
+        fields: &serde_json::Value,
+        state: &serde_json::Value,
+        sequence_nr: u64,
+        missing: MissingCatalogRow,
+    ) -> Result<(), PersistenceError> {
         let status = canonical_projection_status(status, state);
         // The row holds each field once: in `fields`, not again in `state`.
         let stored_state = temper_runtime::persistence::catalog_state_for_storage(fields, state);
@@ -709,6 +746,10 @@ impl PostgresEventStore {
             )
             .await?;
             previous_catalog
+        } else if missing == MissingCatalogRow::Leave {
+            tx.commit().await.map_err(storage_error)?;
+            transaction_timer.set_outcome("missing_left");
+            return Ok(());
         } else {
             let inserted: Option<i32> = crate::dbm::postgres_query_scalar!(&self.schema,
                 "INSERT INTO {schema}entity_catalog \
@@ -2568,4 +2609,13 @@ pub(crate) fn postgres_placeholders(sql: &str, max_index: usize) -> String {
         out = out.replace(&format!("?{index}"), &format!("${index}"));
     }
     out
+}
+
+/// What a projection write does for a record with no catalog row.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MissingCatalogRow {
+    /// Create it: boot repair, before the server serves.
+    Insert,
+    /// Leave it missing: a background refresh while the server serves.
+    Leave,
 }

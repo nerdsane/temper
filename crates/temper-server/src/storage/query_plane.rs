@@ -106,19 +106,6 @@ impl CatalogGroup {
     }
 }
 
-/// Backend-neutral durable projection upsert.
-#[derive(Clone, Debug, PartialEq)]
-pub struct QueryProjectionUpsert {
-    pub entity_type: String,
-    pub entity_id: String,
-    pub status: String,
-    pub fields: serde_json::Value,
-    pub state: serde_json::Value,
-    pub indexed_fields: serde_json::Value,
-    pub sequence_nr: u64,
-    pub known_new: bool,
-}
-
 /// Durable query-plane capability.
 #[async_trait::async_trait]
 pub trait QueryPlaneStore: Send + Sync {
@@ -174,25 +161,22 @@ pub trait QueryPlaneStore: Send + Sync {
         sequence_nr: u64,
     ) -> Result<(), PersistenceError>;
 
-    async fn upsert_projections(
+    /// Rewrite an existing catalog row and its field index, as
+    /// [`Self::upsert_projection`] does, and leave a record with no catalog row
+    /// alone. A background pass while the server serves uses this: only a
+    /// record's own commit creates its row then, and boot repair creates the
+    /// missing ones before serving.
+    #[expect(clippy::too_many_arguments, reason = "projection upsert boundary")]
+    async fn refresh_projection(
         &self,
         tenant: &str,
-        projections: &[QueryProjectionUpsert],
-    ) -> Result<(), PersistenceError> {
-        for projection in projections {
-            self.upsert_projection(
-                tenant,
-                &projection.entity_type,
-                &projection.entity_id,
-                &projection.status,
-                &projection.fields,
-                &projection.state,
-                projection.sequence_nr,
-            )
-            .await?;
-        }
-        Ok(())
-    }
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+        fields: &serde_json::Value,
+        state: &serde_json::Value,
+        sequence_nr: u64,
+    ) -> Result<(), PersistenceError>;
 
     async fn remove_projection(
         &self,

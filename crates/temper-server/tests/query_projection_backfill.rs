@@ -251,10 +251,26 @@ async fn startup_backfill_rebuilds_query_projection_without_hydrating_actors() {
         "fixture should exercise the no-snapshot replay path"
     );
 
-    store
-        .remove_query_projection(tenant.as_str(), entity_type, entity_id)
+    // A catalog row as current as its journal whose field index is out of
+    // step with it, as one written before its spec indexed these fields.
+    let head = store
+        .read_events(&persistence_id, 0)
         .await
-        .expect("clear existing query projection");
+        .expect("read journal")
+        .len() as u64;
+    let stale_fields = serde_json::json!({"Title": "Before The Index"});
+    store
+        .upsert_query_projection_with_state(
+            tenant.as_str(),
+            entity_type,
+            entity_id,
+            "Open",
+            &stale_fields,
+            &serde_json::json!({"fields": stale_fields, "sequence_nr": head}),
+            head,
+        )
+        .await
+        .expect("write an out-of-step projection");
 
     let restarted = build_state_with_turso("test-query-projection-restart", store.clone());
     restarted.populate_index_from_store(&tenant).await;
@@ -281,6 +297,20 @@ async fn startup_backfill_rebuilds_query_projection_without_hydrating_actors() {
         .await
         .expect("query rebuilt field index");
     assert_eq!(ids, vec![entity_id.to_string()]);
+    let stale = store
+        .query_field_index(
+            tenant.as_str(),
+            entity_type,
+            "entity_id IN (SELECT entity_id FROM entity_field_index \
+             WHERE tenant = ?1 AND entity_type = ?2 AND field_name = ?3 AND field_value = ?4)",
+            vec!["Title".to_string(), "Before The Index".to_string()],
+        )
+        .await
+        .expect("query the out-of-step value");
+    assert!(
+        stale.is_empty(),
+        "the backfill replaces the out-of-step index rows"
+    );
 
     let counts = store
         .projected_entity_counts_by_tenant()

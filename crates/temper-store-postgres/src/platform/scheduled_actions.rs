@@ -10,35 +10,6 @@ use crate::PostgresEventStore;
 type ScheduledActionColumns = (String, String, String, String, String, String);
 
 impl PostgresEventStore {
-    /// Write the scheduled actions an appended event armed, on the append's
-    /// transaction. Writing the same arm again leaves its row as it is.
-    pub(crate) async fn insert_scheduled_actions(
-        &self,
-        conn: &mut PgConnection,
-        actions: &[ScheduledActionRecord],
-    ) -> Result<(), PersistenceError> {
-        for action in actions {
-            crate::dbm::postgres_query!(
-                &self.schema,
-                "INSERT INTO {schema}scheduled_actions \
-                     (tenant, entity_type, entity_id, arm_id, action, due_at, armed_by) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7) \
-                 ON CONFLICT (tenant, entity_type, entity_id, arm_id) DO NOTHING",
-            )
-            .bind(&action.tenant)
-            .bind(&action.entity_type)
-            .bind(&action.entity_id)
-            .bind(&action.arm_id)
-            .bind(&action.action)
-            .bind(&action.due_at)
-            .bind(&action.armed_by)
-            .execute(&mut *conn)
-            .await
-            .map_err(storage_error)?;
-        }
-        Ok(())
-    }
-
     /// Remove one scheduled action's row.
     pub(crate) async fn remove_scheduled_action(
         &self,

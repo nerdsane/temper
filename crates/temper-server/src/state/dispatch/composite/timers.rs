@@ -4,12 +4,14 @@
 //! goes through `run_post_dispatch_effects`, which cancels the timers the
 //! transition supersedes and arms the ones its state declares. The atomic
 //! batch appends every sub-write's event in one journal write instead, so it
-//! does the same bookkeeping itself once the batch commits: cancel before
-//! waiting for visibility, arm after. Each timer fires as the sub-write's
-//! agent, which is the caller whose action set the composite going.
+//! commits the last timer mutation for each stream with its events. Once
+//! committed, it cancels superseded live timers and arms the committed ones.
+//! Each timer fires as the sub-write's agent, the caller whose action set
+//! the composite going.
 
 use super::*;
 use crate::entity_actor::EntityResponse;
+use crate::state::ServerState;
 use crate::state::dispatch::effects::PostDispatchContext;
 
 /// One staged sub-write on an entity type that declares state timers, with
@@ -21,6 +23,29 @@ pub(super) struct TimedTransition<'a> {
 }
 
 impl TimedTransition<'_> {
+    /// The same durable timer mutation a single dispatch commits. Capture it
+    /// at this transition, before later sub-writes can change the fields.
+    pub(super) fn timer_row(
+        &self,
+        server: &ServerState,
+        tenant: &TenantId,
+    ) -> Option<temper_runtime::persistence::AppendStateTimer> {
+        server.committed_timer_row(
+            tenant,
+            &self.write.entity_type,
+            &crate::entity_actor::entity_rows::RowsInput {
+                state: &self.response.state,
+                event: self
+                    .response
+                    .state
+                    .events
+                    .back()
+                    .expect("staged transition has an event"),
+                caller: Some(&self.agent_ctx),
+            },
+        )
+    }
+
     /// The context the sub-write's own dispatch would hand its post-dispatch
     /// effects.
     fn post_dispatch_context<'c>(&'c self, tenant: &'c TenantId) -> PostDispatchContext<'c> {

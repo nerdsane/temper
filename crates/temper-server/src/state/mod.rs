@@ -20,7 +20,6 @@ mod persistence;
 pub mod policy_suggestions;
 mod projection_backfill;
 mod published_artifacts;
-mod query_projection_queue;
 pub(crate) mod rate_limit;
 pub(crate) mod redecide;
 pub(crate) mod runtime_metrics;
@@ -60,7 +59,6 @@ pub use published_artifacts::PublishFileArtifactRequest;
 pub(crate) use published_artifacts::{
     PUBLISH_ARTIFACT_STALE_AUTHORIZATION, PublishArtifactAuthorization,
 };
-pub(crate) use query_projection_queue::{ProjectionEnqueueOutcome, QueryProjectionWriteQueue};
 pub use spec_change::{
     CarryMove, CarryReport, SpecChange, SpecChangePlan, SpecChangeRefused, StuckRecords,
 };
@@ -94,8 +92,8 @@ use crate::ots_trajectory_outbox::OtsTrajectoryOutbox;
 use crate::registry::SpecRegistry;
 use crate::secrets::vault::SecretsVault;
 use crate::storage::{
-    BackendLabel, BoxedEventStore, DataOnlyCreateStore, MetadataStore, PolicyStore,
-    QueryPlaneStore, StorageStack, TrajectorySink,
+    BackendLabel, BoxedEventStore, MetadataStore, PolicyStore, QueryPlaneStore, StorageStack,
+    TrajectorySink,
 };
 use crate::trigger::ReactionDispatcher;
 use crate::wasm_registry::WasmModuleRegistry;
@@ -448,8 +446,6 @@ pub struct ServerState {
     pub last_accessed: Arc<RwLock<BTreeMap<String, chrono::DateTime<chrono::Utc>>>>,
     /// First-class storage capabilities selected for this runtime.
     pub storage_stack: Option<Arc<StorageStack>>,
-    /// Bounded background writer for derived query-plane projection rows.
-    pub(crate) query_projection_queue: Arc<Mutex<Option<Arc<QueryProjectionWriteQueue>>>>,
     /// Bounded background writer for durable actor recovery snapshots.
     pub(crate) snapshot_write_queue: Arc<Mutex<Option<Arc<SnapshotWriteQueue>>>>,
     /// Bounded background writer for full OTS trajectory artifacts.
@@ -723,12 +719,15 @@ impl ServerState {
         if let Ok(mut slot) = self.snapshot_write_queue.lock() {
             *slot = Some(snapshot_queue);
         }
-        if let Some(query_plane) = stack.query_plane.clone() {
-            let queue = QueryProjectionWriteQueue::start(query_plane);
-            if let Ok(mut slot) = self.query_projection_queue.lock() {
-                *slot = Some(queue);
-            }
-        }
+        // A stack reads only the query plane its journal writes
+        // (`StorageStack::with_query_plane`); `events` is public, so a stack
+        // whose journal was replaced since is refused here.
+        assert!(
+            stack.query_plane().is_none()
+                || stack.query_plane_is_journal()
+                || stack.reads_through_probe(),
+            "the storage stack's query plane is not its journal's store"
+        );
         if let Some(metadata) = stack.metadata.clone() {
             let queue = OtsTrajectoryOutbox::start();
             queue.recover_queued_metadata_stores(stack.backend.as_str(), metadata);
@@ -743,14 +742,7 @@ impl ServerState {
     pub(crate) fn query_plane_store(&self) -> Option<Arc<dyn QueryPlaneStore>> {
         self.storage_stack
             .as_ref()
-            .and_then(|stack| stack.query_plane.clone())
-    }
-
-    /// Return the native data-only create capability when the backend supports it.
-    pub(crate) fn data_only_create_store(&self) -> Option<Arc<dyn DataOnlyCreateStore>> {
-        self.storage_stack
-            .as_ref()
-            .and_then(|stack| stack.data_only_create.clone())
+            .and_then(|stack| stack.query_plane().cloned())
     }
 
     /// Return the runtime event journal capability plus backend label.
@@ -821,7 +813,6 @@ impl ServerState {
             actor_registry: Arc::new(RwLock::new(BTreeMap::new())),
             last_accessed: Arc::new(RwLock::new(BTreeMap::new())),
             storage_stack: None,
-            query_projection_queue: Arc::new(Mutex::new(None)),
             snapshot_write_queue: Arc::new(Mutex::new(None)),
             ots_trajectory_outbox: Arc::new(Mutex::new(None)),
             data_dir: std::path::PathBuf::new(),
@@ -1107,7 +1098,6 @@ impl ServerState {
             actor_registry: Arc::new(RwLock::new(BTreeMap::new())),
             last_accessed: Arc::new(RwLock::new(BTreeMap::new())),
             storage_stack: None,
-            query_projection_queue: Arc::new(Mutex::new(None)),
             snapshot_write_queue: Arc::new(Mutex::new(None)),
             ots_trajectory_outbox: Arc::new(Mutex::new(None)),
             data_dir: std::path::PathBuf::new(),

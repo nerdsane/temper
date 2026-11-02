@@ -127,7 +127,7 @@ async fn actor_backed_lists_return_null_for_absent_agent_metadata() {
             .storage_stack
             .as_ref()
             .expect("sim storage")
-            .query_plane
+            .query_plane()
             .is_none()
     );
     act(&state, "person", "Touch", &person()).await;

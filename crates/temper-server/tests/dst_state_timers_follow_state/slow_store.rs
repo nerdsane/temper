@@ -16,7 +16,7 @@ use temper_spec::csdl::parse_csdl;
 
 use super::check_seeds;
 use super::process_clock::ProcessClock;
-use super::slow_store_env::{Publications, SlowStore};
+use super::slow_store_env::SlowStore;
 use super::specs::CSDL;
 use super::world::SimTimerRows;
 
@@ -49,12 +49,7 @@ fn runtime() -> tokio::runtime::Runtime {
         .unwrap()
 }
 
-fn server(
-    store: &SlowStore,
-    rows: &Arc<SimTimerRows>,
-    pubs: &Arc<Publications>,
-    seed: u64,
-) -> ServerState {
+fn server(store: &SlowStore, rows: &Arc<SimTimerRows>, seed: u64) -> ServerState {
     let mut registry = SpecRegistry::new();
     registry.register_tenant(
         "alpha",
@@ -64,7 +59,6 @@ fn server(
     );
     let mut storage = StorageStack::from_sim(store.journal.clone(), None);
     storage.events = BoxedEventStore::new(store.clone());
-    storage.query_plane = Some(pubs.clone());
     let mut state = ServerState::from_registry(ActorSystem::new(format!("slow-{seed}")), registry);
     state.set_storage_stack(storage);
     state.state_timer_rows = Some(rows.clone());
@@ -72,7 +66,7 @@ fn server(
 }
 
 #[test]
-fn dst_slow_store_fire_keeps_timer_gate_and_publications() {
+fn dst_slow_store_fire_keeps_timer_gate_and_broadcasts() {
     check_seeds(run_seed);
 }
 
@@ -81,14 +75,13 @@ fn run_seed(seed: u64) -> Result<(), String> {
     let _sim = install_sim_context(clock.clone(), Arc::new(DeterministicIdGen::new(seed)));
     let store = SlowStore::new(seed);
     let rows = Arc::new(SimTimerRows::new(seed));
-    let pubs = Arc::new(Publications::default());
     let mut rng = DeterministicRng::new(seed ^ 0xb007);
     let count = 2 * GATE + 1 + rng.next_bound(8);
     let tenant = TenantId::new("alpha");
     let first = runtime();
     first.block_on(async {
         clock.begin();
-        let state = server(&store, &rows, &pubs, seed);
+        let state = server(&store, &rows, seed);
         tokio::time::timeout(Duration::from_secs(60), async {
             state.start_runtime().await.unwrap().await.unwrap();
         })
@@ -122,7 +115,7 @@ fn run_seed(seed: u64) -> Result<(), String> {
     let second = runtime();
     second.block_on(async {
         clock.begin();
-        let state = server(&store, &rows, &pubs, seed);
+        let state = server(&store, &rows, seed);
         let mut events = state.event_tx.subscribe();
         state.start_runtime().await.unwrap();
         let mut broadcasts: BTreeMap<String, usize> = BTreeMap::new();
@@ -177,11 +170,9 @@ fn run_seed(seed: u64) -> Result<(), String> {
                 for event in &fires {
                     let seq = event.sequence_nr;
                     let broadcast = broadcasts.get(&id).copied().unwrap_or(0) == fires.len();
-                    let projected = pubs.0.lock().unwrap().get(&id)
-                        .is_some_and(|seqs| seqs.contains(&seq));
-                    if !broadcast || !projected {
+                    if !broadcast {
                         broken.entry("publication").or_insert_with(|| {
-                            fail(format!("committed {id} at {seq} lacks broadcast or projection"))
+                            fail(format!("committed {id} at {seq} lacks its broadcast"))
                         });
                     }
                 }

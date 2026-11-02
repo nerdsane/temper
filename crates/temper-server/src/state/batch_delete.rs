@@ -21,7 +21,7 @@
 //! a committed tombstone.
 
 use temper_runtime::persistence::{
-    EventMetadata, PersistenceAppend, PersistenceEnvelope, PersistenceError,
+    AppendProjection, EventMetadata, PersistenceAppend, PersistenceEnvelope, PersistenceError,
 };
 use temper_runtime::scheduler::sim_uuid;
 use temper_runtime::tenant::TenantId;
@@ -97,6 +97,9 @@ impl ServerState {
     ) -> Result<(), BatchDeleteError> {
         let mut appends = Vec::with_capacity(members.len());
         let mut deleted = Vec::with_capacity(members.len());
+        // Each record's query-plane row goes in the batch's commit, as in a
+        // single delete's.
+        let commits_rows = store.commits_entity_rows();
         for mut member in members {
             debug_assert!(member.sequence_nr > 0, "a journaled entity has events");
             let persistence_id = format!("{tenant}:{}:{}", member.entity_type, member.entity_id);
@@ -118,6 +121,9 @@ impl ServerState {
                         actor_id: persistence_id,
                     },
                 }],
+                state_timer: commits_rows
+                    .then_some(temper_runtime::persistence::AppendStateTimer::End),
+                projection: commits_rows.then_some(AppendProjection::Remove),
             });
             member.record_tombstone(tombstone);
             member.sequence_nr += 1;
@@ -162,21 +168,7 @@ impl ServerState {
             self.cache_entity_status(tenant, member);
             self.stop_and_remove_entity(tenant, &member.entity_type, &member.entity_id);
         }
-        // The batch commits only the tombstones, so their query-plane rows go
-        // after it, also on a store that keeps them in a single delete's
-        // commit, as a composite batch's do.
-        let query_plane = self.query_plane_store();
         for member in &deleted {
-            if let Some(query_plane) = &query_plane {
-                self.remove_deleted_entity_projection(
-                    query_plane.as_ref(),
-                    tenant,
-                    &member.entity_type,
-                    &member.entity_id,
-                    member.sequence_nr,
-                )
-                .await;
-            }
             // A deleted record keeps no timer, as a single delete does.
             self.reconcile_state_timers(
                 tenant,

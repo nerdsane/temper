@@ -186,9 +186,7 @@ fn server(store: &SimEventStore, tenants: &[&TenantId], name: &str) -> ServerSta
         registry.register_tenant((*tenant).clone(), csdl, CSDL.to_string(), &[("Job", JOB)]);
     }
     let mut state = ServerState::from_registry(ActorSystem::new(name), registry);
-    state.set_storage_stack(
-        StorageStack::from_sim(store.clone(), None).with_entity_rows_in_journal(),
-    );
+    state.set_storage_stack(StorageStack::from_sim(store.clone(), None));
     state.state_timer_rows = Some(Arc::new(TimerRows(store.clone())));
     for tenant in tenants {
         state

@@ -54,26 +54,10 @@ impl ServerState {
         Some(Arc::new(MetadataTimerRows(store)))
     }
 
-    /// The record's timer row, when the event store commits timer rows with
-    /// the events that change them ([`Self::entity_rows_follow_commits`]).
-    /// None: no row, or rows that do not follow commits. An error is a row
-    /// that could not be read (logged): it may hold the committed arm, so it
-    /// is not "no row".
-    pub(super) async fn committed_state_timer_row(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-    ) -> Result<Option<StateTimerRecord>, PersistenceError> {
-        if !self.entity_rows_follow_commits() {
-            return Ok(None);
-        }
-        self.stored_state_timer_row(tenant, entity_type, entity_id)
-            .await
-    }
-
-    /// Read the durable row even when it is written after the event commit.
-    /// An ended, withheld task leaves this row as the record of its setter.
+    /// The record's timer row, which the event store commits with the events
+    /// that change it. None: no row. An error is a row that could not be read
+    /// (logged): it may hold the committed arm, so it is not "no row". An
+    /// ended, withheld task leaves this row as the record of its setter.
     pub(super) async fn stored_state_timer_row(
         &self,
         tenant: &TenantId,
@@ -93,15 +77,15 @@ impl ServerState {
     }
 
     /// Write a newly armed timer's row. A failed write leaves the timer armed
-    /// in this process; only a restart before it fires would lose it. When
-    /// rows follow commits the event that armed the timer usually wrote its
-    /// row, and this writes only a row that is missing.
+    /// in this process; only a restart before it fires would lose it. The
+    /// event that armed the timer usually wrote its row, and this writes only
+    /// a row that is missing.
     pub(super) async fn persist_state_timer(&self, timer: &ArmedTimer) {
         let Some(store) = self.timer_rows_for_tenant(timer.tenant.as_str()).await else {
             return;
         };
         let committed = self
-            .committed_state_timer_row(&timer.tenant, &timer.entity_type, &timer.entity_id)
+            .stored_state_timer_row(&timer.tenant, &timer.entity_type, &timer.entity_id)
             .await;
         if committed.is_ok_and(|row| row.is_some_and(|row| row.arm_id == timer.arm_id)) {
             return;
@@ -121,20 +105,18 @@ impl ServerState {
         }
     }
 
-    /// Remove an ended timer's row, unless a newer arm has replaced it. When
-    /// rows follow commits the event that ended the timer usually removed or
-    /// replaced its row, and this removes only a row the timer still holds.
+    /// Remove an ended timer's row, unless a newer arm has replaced it. The
+    /// event that ended the timer usually removed or replaced its row, and
+    /// this removes only a row the timer still holds.
     pub(super) async fn forget_state_timer(&self, timer: &ArmedTimer) {
         let Some(store) = self.timer_rows_for_tenant(timer.tenant.as_str()).await else {
             return;
         };
-        if self.entity_rows_follow_commits() {
-            let held = self
-                .committed_state_timer_row(&timer.tenant, &timer.entity_type, &timer.entity_id)
-                .await;
-            if !held.is_ok_and(|row| row.is_some_and(|row| row.arm_id == timer.arm_id)) {
-                return;
-            }
+        let held = self
+            .stored_state_timer_row(&timer.tenant, &timer.entity_type, &timer.entity_id)
+            .await;
+        if !held.is_ok_and(|row| row.is_some_and(|row| row.arm_id == timer.arm_id)) {
+            return;
         }
         if let Err(error) = store
             .delete_state_timer(

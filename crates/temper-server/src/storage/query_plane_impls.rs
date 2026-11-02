@@ -1,11 +1,10 @@
 use temper_runtime::persistence::PersistenceError;
 use temper_store_postgres::PostgresEventStore;
-use temper_store_turso::{QueryProjectionUpsert as TursoQueryProjectionUpsert, TursoEventStore};
+use temper_store_turso::TursoEventStore;
 
 use super::{
     CatalogGroup, CatalogRowFreshness, EntityCatalogRow, QueryFieldIndexOrder,
     QueryFieldIndexOrderDirection, QueryFieldIndexPage, QueryPlaneStore, QueryProjectionFieldsRow,
-    QueryProjectionUpsert,
 };
 
 pub(super) fn catalog_freshness(
@@ -81,6 +80,28 @@ impl QueryPlaneStore for PostgresEventStore {
         sequence_nr: u64,
     ) -> Result<(), PersistenceError> {
         self.upsert_query_projection_with_state(
+            tenant,
+            entity_type,
+            entity_id,
+            status,
+            fields,
+            state,
+            sequence_nr,
+        )
+        .await
+    }
+
+    async fn refresh_projection(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+        fields: &serde_json::Value,
+        state: &serde_json::Value,
+        sequence_nr: u64,
+    ) -> Result<(), PersistenceError> {
+        self.refresh_query_projection_with_state(
             tenant,
             entity_type,
             entity_id,
@@ -282,17 +303,26 @@ impl QueryPlaneStore for TursoEventStore {
         .await
     }
 
-    async fn upsert_projections(
+    async fn refresh_projection(
         &self,
         tenant: &str,
-        projections: &[QueryProjectionUpsert],
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+        fields: &serde_json::Value,
+        state: &serde_json::Value,
+        sequence_nr: u64,
     ) -> Result<(), PersistenceError> {
-        let turso_projections = projections
-            .iter()
-            .map(to_turso_projection)
-            .collect::<Vec<_>>();
-        self.upsert_query_projections(tenant, &turso_projections)
-            .await
+        self.refresh_query_projection_with_state(
+            tenant,
+            entity_type,
+            entity_id,
+            status,
+            fields,
+            state,
+            sequence_nr,
+        )
+        .await
     }
 
     async fn remove_projection(
@@ -442,20 +472,5 @@ impl QueryPlaneStore for TursoEventStore {
         let rows =
             TursoEventStore::catalog_groups(self, tenant, entity_type, fields, statuses).await?;
         Ok(Some(CatalogGroup::from_rows(rows, fields)))
-    }
-}
-
-pub(super) fn to_turso_projection(
-    projection: &QueryProjectionUpsert,
-) -> TursoQueryProjectionUpsert {
-    TursoQueryProjectionUpsert {
-        entity_type: projection.entity_type.clone(),
-        entity_id: projection.entity_id.clone(),
-        status: projection.status.clone(),
-        fields: projection.fields.clone(),
-        state: projection.state.clone(),
-        indexed_fields: projection.indexed_fields.clone(),
-        sequence_nr: projection.sequence_nr,
-        known_new: projection.known_new,
     }
 }

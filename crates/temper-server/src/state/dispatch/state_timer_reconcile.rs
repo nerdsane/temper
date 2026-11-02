@@ -199,31 +199,20 @@ impl ServerState {
         // the process never armed it (the move's answer was lost, or the
         // actor rebuilt from its journal). Read even with a live arm: a
         // committed reset can have superseded it without post-dispatch work.
-        // A withheld task releases its live arm but keeps its row. When no
-        // task is live, recover that row even in stores that write it after
-        // commit, so an install never replaces its setter with the service.
-        let row = if armed.is_none() {
-            self.stored_state_timer_row(tenant, entity_type, entity_id)
-                .await
-        } else {
-            self.committed_state_timer_row(tenant, entity_type, entity_id)
-                .await
-        };
+        // A withheld task releases its live arm but keeps its row, so an
+        // install never replaces its setter with the service.
+        let row = self
+            .stored_state_timer_row(tenant, entity_type, entity_id)
+            .await;
         let Ok(row) = row else {
             // An unread row may hold the committed arm: a timer built from the
             // record's fields now would replace its deadline, arguments and
             // caller. Leave the record's timer as it is.
             return TimerFollow::RetryRead;
         };
-        // A row written after commit can lag a reset. Reuse it only for
-        // the current state clock; a committed row is authoritative itself.
-        let row = row.filter(|row| {
-            row.state == st.state
-                && row.sequence_nr <= current.sequence_nr
-                && (self.entity_rows_follow_commits()
-                    || DateTime::parse_from_rfc3339(&row.started_at)
-                        .is_ok_and(|start| start == started_at))
-        });
+        // The row committed with the record's events, so it is the current
+        // state's clock when it names the state.
+        let row = row.filter(|row| row.state == st.state && row.sequence_nr <= current.sequence_nr);
         let committed = row.as_ref().and_then(|row| {
             match super::state_timer_rows::armed_timer(
                 tenant,

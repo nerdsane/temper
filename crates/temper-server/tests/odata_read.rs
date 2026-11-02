@@ -592,8 +592,11 @@ async fn entity_set_authorizes_against_fields_omitted_by_select() {
     let _ = std::fs::remove_file(db_path);
 }
 
+/// A record whose catalog row is missing while its actor has state still shows
+/// in a filtered read. The read does not write the row back: boot repair does
+/// that, before the server serves.
 #[tokio::test]
-async fn filtered_entity_set_repairs_missing_catalog_rows_before_trusting_pushdown() {
+async fn filtered_entity_set_shows_a_record_whose_catalog_row_is_missing() {
     let db_path = std::env::temp_dir().join(format!(
         "temper-odata-read-missing-catalog-filter-{}.db",
         uuid::Uuid::new_v4()
@@ -629,21 +632,7 @@ async fn filtered_entity_set_repairs_missing_catalog_rows_before_trusting_pushdo
         values
             .iter()
             .any(|value| value["entity_id"].as_str() == Some(entity_id)),
-        "filtered reads should hydrate missing catalog rows before trusting pushdown: {body:?}"
-    );
-
-    let repaired = store
-        .query_field_index(
-            TenantId::default().as_str(),
-            "Order",
-            "status = ?3",
-            vec!["Draft".to_string()],
-        )
-        .await
-        .expect("query repaired status projection");
-    assert!(
-        repaired.iter().any(|id| id == entity_id),
-        "actor fallback should repair the durable catalog for future pushdown reads: {repaired:?}"
+        "a filtered read shows the record from its actor: {body:?}"
     );
 
     let _ = std::fs::remove_file(db_path);

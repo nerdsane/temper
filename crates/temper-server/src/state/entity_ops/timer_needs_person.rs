@@ -1,4 +1,5 @@
-//! Recording a stopped state timer through the entity actor and read projection.
+//! Recording a stopped state timer through the entity actor; its event's
+//! commit writes the record's read projection.
 
 use temper_runtime::tenant::TenantId;
 
@@ -39,14 +40,6 @@ impl ServerState {
                 .error
                 .unwrap_or_else(|| "the stopped timer was not recorded".to_owned()));
         }
-        self.upsert_kernel_write_projection(
-            tenant,
-            entity_type,
-            entity_id,
-            &response,
-            "timer_needs_person",
-        )
-        .await?;
         Ok(TimerStop::Said)
     }
 }

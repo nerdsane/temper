@@ -207,7 +207,7 @@ async fn server_over(
         ],
     );
     let mut state = ServerState::from_registry(ActorSystem::new(name), registry);
-    let mut storage = StorageStack::from_sim(store.clone(), None).with_entity_rows_in_journal();
+    let mut storage = StorageStack::from_sim(store.clone(), None);
     if let Some(events) = events {
         storage.events = events;
     }

@@ -1,9 +1,11 @@
 //! The query-plane row and timer row a record's event commits with it.
 //!
-//! When the event store keeps them in the journal's transaction
-//! (`EventStore::commits_entity_rows`), each event writes them as it leaves
-//! the record, and nothing after the commit writes them again: a move is one
-//! commit, and a caller that hangs up after it cannot leave its rows behind.
+//! The event store keeps them in the journal's transaction
+//! (`EventStore::commits_entity_rows`); a stack reads no query plane its
+//! journal does not write (`StorageStack::with_query_plane`). Each event
+//! writes them as it leaves the record, and nothing after the commit writes
+//! them again: a move is one commit, and a caller that hangs up after it
+//! cannot leave its rows behind.
 //!
 //! The timer row follows the same rule a dispatch arms by
 //! (`arm_state_timeouts_if_needed`): an event that enters a timed state, or
@@ -16,7 +18,7 @@
 //! that timer after the commit, and the boot walk arms a record left without
 //! one.
 
-use temper_runtime::persistence::StateTimerRecord;
+use temper_runtime::persistence::{AppendProjection, StateTimerRecord};
 use temper_runtime::tenant::TenantId;
 
 use super::state_timeouts::{rearm_clock_start, timer_agent};
@@ -35,42 +37,32 @@ pub(crate) fn timer_arm_id(state: &str, sequence_nr: u64) -> String {
 }
 
 impl ServerState {
-    /// Whether the event store writes each event's query-plane and timer
-    /// rows in its commit, and they are the rows this server reads
-    /// ([`crate::storage::StorageStack::entity_rows_in_commit`]). Then
-    /// nothing writes them after it.
-    pub(crate) fn entity_rows_follow_commits(&self) -> bool {
-        self.storage_stack
-            .as_ref()
-            .is_some_and(|stack| stack.entity_rows_in_commit())
-    }
-
-    /// The query plane, when the server writes a record's row after its
-    /// commit. None when there is none, or when the commit wrote it.
-    pub(crate) fn query_plane_written_after_commit(
-        &self,
-    ) -> Option<std::sync::Arc<dyn crate::storage::QueryPlaneStore>> {
-        if self.entity_rows_follow_commits() {
-            return None;
-        }
-        self.query_plane_store()
-    }
-
     /// What says which rows an event of `entity_type` writes, for its actor.
-    /// None when the store does not keep them with the journal.
-    pub(crate) fn entity_rows_hook(
+    /// The actor asks it only of a store that keeps them with the journal.
+    pub(crate) fn entity_rows_hook(&self, tenant: &TenantId, entity_type: &str) -> EntityRowsHook {
+        let server = self.clone();
+        let (tenant, entity_type) = (tenant.clone(), entity_type.to_string());
+        std::sync::Arc::new(move |input: &RowsInput<'_>| {
+            server.entity_rows(&tenant, &entity_type, input)
+        })
+    }
+
+    /// The query-plane row a record's append in a batch commits with its
+    /// events, as [`Self::entity_rows`] gives a single append's.
+    pub(crate) fn append_projection(
         &self,
         tenant: &TenantId,
         entity_type: &str,
-    ) -> Option<EntityRowsHook> {
-        if !self.entity_rows_follow_commits() {
-            return None;
+        after: &crate::entity_actor::EntityState,
+    ) -> AppendProjection {
+        if after.is_tombstoned() {
+            return AppendProjection::Remove;
         }
-        let server = self.clone();
-        let (tenant, entity_type) = (tenant.clone(), entity_type.to_string());
-        Some(std::sync::Arc::new(move |input: &RowsInput<'_>| {
-            server.entity_rows(&tenant, &entity_type, input)
-        }))
+        AppendProjection::Upsert {
+            status: after.status.clone(),
+            fields: self.query_projection_fields(tenant, entity_type, &after.fields),
+            state: self.query_projection_state(after),
+        }
     }
 
     fn entity_rows(
@@ -98,7 +90,7 @@ impl ServerState {
     }
 
     /// The timer row `input`'s event writes, or None to leave it.
-    fn committed_timer_row(
+    pub(super) fn committed_timer_row(
         &self,
         tenant: &TenantId,
         entity_type: &str,

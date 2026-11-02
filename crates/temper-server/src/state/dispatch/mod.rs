@@ -25,7 +25,6 @@ pub(crate) mod entity_rows;
 mod generated_callbacks;
 mod outside_write;
 pub(crate) mod owed_writes;
-mod projection_barrier;
 pub(crate) mod spawn_plan;
 pub use outside_write::StaleWrite;
 pub(crate) mod retry;

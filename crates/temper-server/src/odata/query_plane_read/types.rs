@@ -96,8 +96,6 @@ pub(in crate::odata::query_plane_read) enum QueryPlaneFallbackReason {
     NativePageUnavailable,
     /// A translated filter could not be pushed into the query projection.
     FilterPushdownUnavailable,
-    /// Catalog coverage was incomplete, so catalog-only pages would be unsafe.
-    CatalogCoverageGap,
     /// Candidate evaluation exceeded the bounded proof budget.
     FallbackCandidateBudget,
     /// An exact-match resolution returned an empty native page that may be a
@@ -118,7 +116,6 @@ impl QueryPlaneFallbackReason {
             Self::NoFilterPushdown => "no_filter_pushdown",
             Self::NativePageUnavailable => "native_page_unavailable",
             Self::FilterPushdownUnavailable => "filter_pushdown_unavailable",
-            Self::CatalogCoverageGap => "catalog_coverage_gap",
             Self::FallbackCandidateBudget => "fallback_candidate_budget",
             Self::ProjectionLagReconcile => "projection_lag_reconcile",
             Self::KeyedAbsence => "keyed_absence",

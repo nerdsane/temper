@@ -322,10 +322,11 @@ impl EventStore for TursoEventStore {
         }
         if let [append] = appends {
             let sequence_nr = self
-                .append(
+                .append_with_rows(
                     &append.persistence_id,
                     append.expected_sequence,
                     &append.events,
+                    append.commit_rows(),
                 )
                 .await?;
             return Ok(vec![PersistenceAppendResult {

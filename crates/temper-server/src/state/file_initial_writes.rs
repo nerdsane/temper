@@ -1,6 +1,8 @@
 use std::sync::{Arc, RwLock};
 
-use temper_runtime::persistence::{EventMetadata, PersistenceEnvelope, PersistenceError};
+use temper_runtime::persistence::{
+    AppendProjection, CommitRows, EventMetadata, PersistenceEnvelope, PersistenceError,
+};
 use temper_runtime::scheduler::sim_uuid;
 use tracing::Instrument;
 
@@ -188,7 +190,20 @@ impl ServerState {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        match store.append(&persistence_id, 0, &envelopes).await {
+        // The record's query-plane row commits with its events, as a move's.
+        let mut after = state.clone();
+        after.sequence_nr = envelopes.len() as u64;
+        let projection = store
+            .commits_entity_rows()
+            .then(|| self.append_projection(tenant, "File", &after));
+        let rows = CommitRows {
+            projection: projection.as_ref().map(AppendProjection::as_row),
+            ..CommitRows::default()
+        };
+        match store
+            .append_with_rows(&persistence_id, 0, &envelopes, rows)
+            .await
+        {
             Ok(sequence_nr) => state.sequence_nr = sequence_nr,
             Err(PersistenceError::ConcurrencyViolation { .. }) => {
                 return Err(FileStreamContentError::ActionRejected(format!(
@@ -200,27 +215,6 @@ impl ServerState {
                     "failed to persist atomic File initial content events for File('{file_id}'): {error}"
                 )));
             }
-        }
-
-        if let Some(query_plane) = self.query_plane_store() {
-            let fields = self.query_projection_fields(tenant, "File", &state.fields);
-            let projected_state = self.query_projection_state(&state);
-            query_plane
-                .upsert_projection(
-                    tenant.as_str(),
-                    "File",
-                    file_id,
-                    &state.status,
-                    &fields,
-                    &projected_state,
-                    state.sequence_nr,
-                )
-                .await
-                .map_err(|error| {
-                    FileStreamContentError::State(format!(
-                        "query projection write failed during atomic File initial content create: {error}"
-                    ))
-                })?;
         }
 
         self.stop_and_remove_entity(tenant, "File", file_id);

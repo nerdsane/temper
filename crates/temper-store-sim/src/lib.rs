@@ -1204,10 +1204,8 @@ impl EventStore for SimEventStore {
                 stored.sequence_nr = new_seq;
                 journal.push(stored);
             }
-            *inner
-                .commits
-                .entry(append.persistence_id.clone())
-                .or_default() += 1;
+            // The record's rows commit with its events, as in one append.
+            inner.commit_entity_rows(&append.persistence_id, new_seq, &append.commit_rows());
             results.push(PersistenceAppendResult {
                 persistence_id: append.persistence_id.clone(),
                 sequence_nr: new_seq,

@@ -287,9 +287,9 @@ pub(super) async fn server_with(
     let mut specs = vec![("Job", job.as_str()), ("Child", CHILD_IOA)];
     specs.extend_from_slice(more);
     let mut state = PlatformState::new(None);
-    state.server.set_storage_stack(
-        StorageStack::from_sim(store.clone(), None).with_entity_rows_in_journal(),
-    );
+    state
+        .server
+        .set_storage_stack(StorageStack::from_sim(store.clone(), None));
     state.server.state_timer_rows = Some(Arc::new(CommittedRows(store.clone())));
     let cache = BTreeMap::new();
     bootstrap_system_tenant(&state, &cache);

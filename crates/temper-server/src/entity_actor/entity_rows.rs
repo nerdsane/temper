@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use temper_runtime::persistence::{CommitRows, ProjectionRow, StateTimerRecord, StateTimerRow};
+use temper_runtime::persistence::{CommitRows, ProjectionRow};
 
 use super::types::{EntityEvent, EntityState};
 use crate::request_context::AgentContext;
@@ -44,12 +44,8 @@ pub(crate) enum Projection {
     Remove,
 }
 
-/// The record's timer row.
-#[derive(Debug)]
-pub(crate) enum TimerRow {
-    Arm(StateTimerRecord),
-    End,
-}
+/// The record's timer mutation, shared with atomic batch appends.
+pub(crate) use temper_runtime::persistence::AppendStateTimer as TimerRow;
 
 /// Says which rows an event writes.
 pub(crate) type EntityRowsHook = Arc<dyn Fn(&RowsInput<'_>) -> EntityRows + Send + Sync>;
@@ -70,10 +66,7 @@ impl EntityRows {
                 },
                 Projection::Remove => ProjectionRow::Remove,
             }),
-            state_timer: self.state_timer.as_ref().map(|timer| match timer {
-                TimerRow::Arm(row) => StateTimerRow::Arm(row),
-                TimerRow::End => StateTimerRow::End,
-            }),
+            state_timer: self.state_timer.as_ref().map(TimerRow::as_row),
             ..rows
         }
     }

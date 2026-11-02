@@ -462,11 +462,9 @@ impl crate::state::ServerState {
             ctx.agent_ctx,
             started_at,
         );
-        if self.entity_rows_follow_commits() {
-            // The event that entered or reset the state committed this
-            // timer's row under this id (`committed_timer_row`).
-            timer.arm_id = super::entity_rows::timer_arm_id(&st.state, response.state.sequence_nr);
-        }
+        // The event that entered or reset the state committed this timer's
+        // row under this id (`committed_timer_row`).
+        timer.arm_id = super::entity_rows::timer_arm_id(&st.state, response.state.sequence_nr);
         self.start_armed_timer(timer, Reservation::Fresh).await;
     }
 
@@ -891,18 +889,6 @@ pub(super) fn deadline(started_at: DateTime<Utc>, after_seconds: u64) -> DateTim
         .and_then(chrono::TimeDelta::try_seconds)
         .and_then(|budget| started_at.checked_add_signed(budget))
         .unwrap_or(DateTime::<Utc>::MAX_UTC)
-}
-
-#[cfg(test)]
-impl StateTimeoutTracker {
-    pub(crate) fn sequence_for_test(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-    ) -> u64 {
-        self.current(&EntityKey::new(tenant, entity_type, entity_id))
-    }
 }
 
 #[cfg(test)]

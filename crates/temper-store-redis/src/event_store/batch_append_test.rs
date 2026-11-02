@@ -33,6 +33,8 @@ fn append(persistence_id: &str, expected_sequence: u64) -> PersistenceAppend {
         persistence_id: persistence_id.to_string(),
         expected_sequence,
         events: vec![envelope("Deleted")],
+        state_timer: None,
+        projection: None,
     }
 }
 
