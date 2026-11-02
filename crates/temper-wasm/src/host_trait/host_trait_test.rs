@@ -686,6 +686,8 @@ fn guest_log_span_event_is_named_for_trace_export() {
 mod host_boundary_observability;
 #[path = "tests/log_correlation.rs"]
 mod log_correlation;
+#[path = "tests/raw_url_tracing.rs"]
+mod raw_url_tracing;
 #[path = "tests/span_hint_tests.rs"]
 mod span_hint_tests;
 

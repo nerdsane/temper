@@ -273,6 +273,46 @@ async fn a_key_in_a_called_url_reaches_no_span_log_or_error() {
     }
 }
 
+/// The stream path is where the interface builder's key was seen, on 1 Nov 2026.
+#[tokio::test]
+async fn a_key_in_a_streamed_call_reaches_no_span_log_or_response_head() {
+    for key in KEYS {
+        let (spans, events, _guard) = capture_spans_and_events();
+        let host = ProductionWasmHost::new(BTreeMap::new());
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let down = closed.local_addr().expect("address");
+        drop(closed);
+        let handles = host
+            .http_stream_begin_outbound(crate::http_stream::HttpRequestHead {
+                method: "POST".to_string(),
+                url: format!("http://{down}/{key}/build?token={key}"),
+                headers: Vec::new(),
+            })
+            .await
+            .expect("open outbound exchange");
+        host.http_stream_try_write(handles.request_body, b"{}".to_vec())
+            .await
+            .expect("queue the request");
+        let head = host
+            .http_stream_response_head(handles.response_body)
+            .await
+            .expect("receive the transport failure");
+        assert_eq!(head.status, 0);
+
+        let url_field = spans
+            .lock()
+            .expect("span capture lock poisoned")
+            .iter()
+            .find(|span| span.name == "wasm.host.http_stream")
+            .and_then(|span| span.fields.get("http.url").cloned())
+            .expect("the call's span names its URL");
+        assert!(url_field.ends_with("/<redacted>/build"), "{url_field}");
+        assert_no_key(key, &spans, &events, &format!("{:?}", head.headers));
+    }
+}
+
 #[test]
 fn a_url_in_telemetry_keeps_what_a_reader_needs() {
     use crate::host_trait::telemetry_url as seen;
