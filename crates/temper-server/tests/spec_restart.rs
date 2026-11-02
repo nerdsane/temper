@@ -305,3 +305,6 @@ async fn replace_mode_load_dir_removes_dropped_types_durably() {
         "a type a replace-mode load dropped must stay dropped after restart"
     );
 }
+
+#[path = "spec_restart/principal_collision.rs"]
+mod principal_collision;

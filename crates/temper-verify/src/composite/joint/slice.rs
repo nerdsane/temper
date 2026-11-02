@@ -74,6 +74,7 @@ fn effect_var(effect: &ModelEffect) -> &str {
         | ModelEffect::SetBool { var, .. }
         | ModelEffect::SetString { var, .. }
         | ModelEffect::ListAppend { var, .. }
+        | ModelEffect::ListRemove { var, .. }
         | ModelEffect::ListRemoveAt { var, .. } => var,
     }
 }
@@ -85,7 +86,8 @@ pub(super) fn effect_reads(effect: &ModelEffect) -> Option<&str> {
         | ModelEffect::AddCounter { value, .. }
         | ModelEffect::SubCounter { value, .. }
         | ModelEffect::SetBool { value, .. }
-        | ModelEffect::ListAppend { value, .. } => value,
+        | ModelEffect::ListAppend { value, .. }
+        | ModelEffect::ListRemove { value, .. } => value,
         ModelEffect::ListRemoveAt { index, .. } => index,
         ModelEffect::SetString { .. } => return None,
     };

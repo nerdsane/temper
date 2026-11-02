@@ -243,13 +243,7 @@ fn resolve_transitions(
                     params.entry(param.name().to_string()).or_insert(kind);
                 }
             }
-            let string_params = string_params(
-                action,
-                tracked_strings,
-                &params,
-                !automaton.entry_rules.is_empty()
-                    || automaton.liveness.iter().any(|l| !l.can_reach.is_empty()),
-            );
+            let string_params = string_params(action, tracked_strings, &params);
             ResolvedTransition {
                 name: a.name,
                 from_states: a.from_states,
@@ -323,6 +317,7 @@ fn convert_effect(effect: ResolvedEffect) -> Option<ModelEffect> {
         ResolvedEffect::SetString { var, value } => ModelEffect::SetString { var, value },
         ResolvedEffect::ListAppend { var, value } => ModelEffect::ListAppend { var, value },
         ResolvedEffect::ListRemoveAt { var, index } => ModelEffect::ListRemoveAt { var, index },
+        ResolvedEffect::ListRemove { var, value } => ModelEffect::ListRemove { var, value },
         ResolvedEffect::Dispatch(_)
         | ResolvedEffect::Schedule { .. }
         | ResolvedEffect::ScheduleAt { .. }
@@ -344,6 +339,7 @@ fn holds_written(
         | ModelEffect::SubCounter { var, .. }
         | ModelEffect::SetBool { var, .. }
         | ModelEffect::ListAppend { var, .. }
+        | ModelEffect::ListRemove { var, .. }
         | ModelEffect::ListRemoveAt { var, .. } => read.contains(var),
     }
 }
@@ -358,7 +354,9 @@ pub(crate) fn effect_params(effects: &[ModelEffect]) -> BTreeMap<String, ParamKi
             | ModelEffect::SubCounter { value, .. } => (value, ParamKind::Count),
             ModelEffect::SetBool { value, .. } => (value, ParamKind::Bool),
             ModelEffect::SetString { .. } => continue,
-            ModelEffect::ListAppend { value, .. } => (value, ParamKind::Str),
+            ModelEffect::ListAppend { value, .. } | ModelEffect::ListRemove { value, .. } => {
+                (value, ParamKind::Str)
+            }
             ModelEffect::ListRemoveAt { index, .. } => (index, ParamKind::Count),
         };
         if let Arg::Param(name) = arg {

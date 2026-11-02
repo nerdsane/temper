@@ -68,6 +68,7 @@ effect = [
   "ready = true",                       # bool set: true/false, bool var, or params.p
   "append(tags, params.tag)",           # list append: 'string' or params.p
   "remove_at(tags, params.tag_index)",  # list remove by index; out of range is a no-op
+  "remove(tags, params.tag)",           # list remove by value: every copy; absent is a no-op
   "schedule('Expire', 3600)",           # dispatch an action on this entity after N seconds
   "schedule_at('Expire', expires_at)",  # dispatch at the timestamp in a field
   "spawn('Task', 'Create', last_task_id)",  # create a child, run 'Create' on it, store its id
@@ -77,14 +78,15 @@ effect = [
 ```text
 effect  = assign | call
 assign  = name ( "=" | "+=" | "-=" ) arg
-call    = "append" "(" name "," arg ")" | "remove_at" "(" name "," arg ")"
+call    = "append" "(" name "," arg ")" | "remove" "(" name "," arg ")"
+        | "remove_at" "(" name "," arg ")"
         | "schedule" "(" 'action' "," integer ")" | "schedule_at" "(" 'action' "," name ")"
         | "spawn" "(" 'type' "," 'action' [ "," name [ "," arg ] ] ")"
 arg     = integer | 'string' | true | false | name | "params" "." name
 ```
 
 - **`params.p`** is the action parameter `p`.
-- **Counters, bools and strings are assigned**; a string accepts only `=` with a string literal, and its target must be a declared string state variable. String copies, expressions and `params.p` assignments are refused at load. `+=` and `-=` apply only to counters. Lists take `append`/`remove_at`, and their elements are strings.
+- **Counters, bools and strings are assigned**; a string accepts only `=` with a string literal, and its target must be a declared string state variable. String copies, expressions and `params.p` assignments are refused at load. `+=` and `-=` apply only to counters. Lists take `append`/`remove`/`remove_at`, and their elements are strings. To keep a list as a set, guard `append` with `params.p not in list`; `remove` takes out every copy of a value, so two removes of different values never take out the wrong one.
 - **`schedule`/`schedule_at` targets** must be declared actions.
 - **`spawn`** creates a child with a fresh id, or the id in its optional fourth argument (`'string'` or `params.p`). The child's initial action receives the parent action's params plus `parent_type`, `parent_id` and `<parent>_id`.
 - **Nothing is implied by an action's name.** An action with no `effect` changes only `status`.

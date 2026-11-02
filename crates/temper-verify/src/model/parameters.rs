@@ -39,6 +39,12 @@ impl Env for MoveEnv<'_> {
     }
 }
 
+/// Whether chosen inputs are checked against the move's guard. Candidate
+/// ranges must preserve guard distinctions whenever this check runs.
+pub(super) fn checks_inputs(model: &TemperModel, t: &ResolvedTransition) -> bool {
+    !model.entry_rules.is_empty() || !t.string_params.is_empty()
+}
+
 /// Whether these inputs can satisfy the move's guard and comparison
 /// constraints. String nonempty constraints are decided when inputs are made.
 pub(super) fn inputs_allow(

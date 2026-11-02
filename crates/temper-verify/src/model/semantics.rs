@@ -12,7 +12,7 @@ use super::types::{
 
 use super::count_bounds::{CountRange, count_ranges};
 pub(crate) use super::expansion::Expansion;
-use super::parameters::any_inputs;
+use super::parameters::{any_inputs, checks_inputs, inputs_allow};
 pub use super::strings::{
     apply_string_params, canonical_state, canonical_strings, canonical_values, string_values,
 };
@@ -103,8 +103,8 @@ pub fn guard_may_hold(
 ///
 /// A parameter is an unknown value, so each candidate is explored:
 /// counts up to as far as the move's effects can carry them inside the
-/// bounds (`count_bounds`), both booleans, and for list elements every literal a
-/// guard or invariant compares that list against plus one fresh string.
+/// bounds (`count_bounds`), both booleans, and for list elements held values,
+/// relevant literals and concrete fresh equality symbols.
 /// Assignments that grow a counter or a list past its bound are pruned, as
 /// in bounded exploration.
 pub fn successors(
@@ -180,9 +180,7 @@ fn successors_with(
 ) -> Vec<(BTreeMap<String, ParamValue>, TemperModelState)> {
     let mut out = Vec::new();
     any_inputs(model, t, state, values, budget, |params| {
-        if !model.entry_rules.is_empty()
-            && !super::parameters::inputs_allow(model, t, state, &params)
-        {
+        if checks_inputs(model, t) && !inputs_allow(model, t, state, &params) {
             return false;
         }
         let mut next = state.clone();
@@ -272,12 +270,16 @@ fn param_candidates(
     }
 }
 
-/// The literals a list `t` appends string parameter `name` to is compared
-/// against: the strings worth choosing for it.
+/// The literals a list `t` appends string parameter `name` to, or removes it
+/// from, is compared against: the strings worth choosing for it.
 fn string_literals(model: &TemperModel, t: &ResolvedTransition, name: &str) -> BTreeSet<String> {
     let mut values: BTreeSet<String> = BTreeSet::new();
     for effect in &t.effects {
         if let ModelEffect::ListAppend {
+            var,
+            value: Arg::Param(p),
+        }
+        | ModelEffect::ListRemove {
             var,
             value: Arg::Param(p),
         } = effect
@@ -379,8 +381,8 @@ fn outgrown<'a>(
 }
 
 /// Apply model effects to the provided state, reading `params.p` from
-/// `params`. Mirrors the runtime: `-=` stops at 0 and `remove_at` out of
-/// range is a no-op.
+/// `params`. Mirrors the runtime: `-=` stops at 0, `remove_at` out of
+/// range is a no-op and `remove` of an absent value is a no-op.
 ///
 /// `action_name` is used to generate deterministic fresh list elements.
 /// Third interpreter. Production apply is `temper-server` `entity_actor/effects.rs`.
@@ -447,6 +449,19 @@ pub fn apply_effects(
                     _ => placeholder(),
                 };
                 state.lists.entry(var.clone()).or_default().push(element);
+            }
+            ModelEffect::ListRemove { var, value } => {
+                let element = match value {
+                    Arg::Lit(Literal::Str(text)) => Some(text.clone().into()),
+                    Arg::Param(name) => match params.get(name) {
+                        Some(ParamValue::Str(value)) => Some(value.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let (Some(element), Some(entry)) = (element, state.lists.get_mut(var)) {
+                    entry.retain(|item| *item != element);
+                }
             }
             ModelEffect::ListRemoveAt { var, index } => {
                 let index = count(index, state);

@@ -1,5 +1,7 @@
 //! A user's Temper with a trusted issuer, an app's `Member` type marked
-//! `principal_record`, and a `Note` the app's Cedar opens to members. Every
+//! `principal_record`, a `Role` type whose `roles` list is its
+//! `principal_record_set`, and a `Note` the app's Cedar opens to members and
+//! lets those who hold the role `Cook` cook. Every
 //! call goes through the platform router with a real ES256 token, so the
 //! bearer boundary, the resolver and Cedar all run as in production.
 
@@ -41,6 +43,12 @@ const CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
         <Property Name="Status" Type="Edm.String"/>
       </EntityType>
+      <EntityType Name="Role">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="roles" Type="Collection(Edm.String)"/>
+      </EntityType>
       <EntityType Name="Note">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.String" Nullable="false"/>
@@ -51,8 +59,12 @@ const CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
       <Action Name="Touch" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.PrincipalRecord.Note"/>
       </Action>
+      <Action Name="Cook" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.PrincipalRecord.Note"/>
+      </Action>
       <EntityContainer Name="Container">
         <EntitySet Name="Members" EntityType="Temper.PrincipalRecord.Member"/>
+        <EntitySet Name="Roles" EntityType="Temper.PrincipalRecord.Role"/>
         <EntitySet Name="Notes" EntityType="Temper.PrincipalRecord.Note"/>
       </EntityContainer>
     </Schema>
@@ -81,6 +93,40 @@ from = ["Removed"]
 to = "Active"
 "#;
 
+/// The roles one user holds, keyed by the user's `sub`. A grant adds a role
+/// the record does not hold yet; a revoke takes one out by its name.
+const ROLE_IOA: &str = r#"
+[automaton]
+name = "Role"
+states = ["Active"]
+initial = "Active"
+allow_indefinite_states = ["Active"]
+principal_record = true
+principal_record_set = "roles"
+
+[[state]]
+name = "roles"
+type = "list"
+initial = []
+
+[[action]]
+name = "Grant"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["role"]
+guard = "params.role not in roles"
+effect = ["append(roles, params.role)"]
+
+[[action]]
+name = "Revoke"
+kind = "input"
+from = ["Active"]
+to = "Active"
+params = ["role"]
+effect = ["remove(roles, params.role)"]
+"#;
+
 /// Its fields carry the attribute names, as a user who writes a note could.
 const NOTE_IOA: &str = r#"
 [automaton]
@@ -104,6 +150,12 @@ name = "Touch"
 kind = "input"
 from = ["Open"]
 to = "Open"
+
+[[action]]
+name = "Cook"
+kind = "input"
+from = ["Open"]
+to = "Open"
 "#;
 
 /// Reading is for a member in person; `Touch` also for an agent acting for one.
@@ -115,6 +167,13 @@ permit(principal, action == Action::"Touch", resource is Note)
 when {
     (principal has Member && principal.Member == "Active") ||
     (principal has actingForMember && principal.actingForMember == "Active")
+};
+permit(principal, action == Action::"Cook", resource is Note)
+when {
+    (principal has Role && principal.Role == "Active" &&
+     principal has Role_roles && principal.Role_roles.contains("Cook")) ||
+    (principal has actingForRole && principal.actingForRole == "Active" &&
+     principal has actingForRole_roles && principal.actingForRole_roles.contains("Cook"))
 };
 "#;
 
@@ -182,12 +241,16 @@ pub async fn app(seed: u64) -> PlatformState {
                 tenant(),
                 parse_csdl(CSDL).expect("app CSDL parses"),
                 CSDL.to_string(),
-                &[("Member", MEMBER_IOA), ("Note", NOTE_IOA)],
+                &[
+                    ("Member", MEMBER_IOA),
+                    ("Role", ROLE_IOA),
+                    ("Note", NOTE_IOA),
+                ],
                 None,
                 true,
             )
             .expect("the app's specs merge into the tenant");
-        for entity_type in ["Member", "Note"] {
+        for entity_type in ["Member", "Role", "Note"] {
             registry.set_verification_status(
                 &tenant(),
                 entity_type,
@@ -261,6 +324,76 @@ pub async fn move_member(state: &PlatformState, sub: &str, action: &str) -> Stri
     response.state.status
 }
 
+/// Install `specs` into the app's tenant beside the types it holds; the
+/// registry's refusal, if any.
+pub fn install_more(state: &PlatformState, specs: &[(&str, &str)]) -> Result<(), String> {
+    state
+        .registry
+        .write()
+        .expect("registry lock")
+        .try_register_tenant_with_constraints(
+            tenant(),
+            parse_csdl(CSDL).expect("app CSDL parses"),
+            CSDL.to_string(),
+            specs,
+            None,
+            true,
+        )
+        .map_err(|error| error.to_string())
+}
+
+/// The entity types the app's tenant holds.
+pub fn entity_types(state: &PlatformState) -> Vec<String> {
+    let registry = state.registry.read().expect("registry lock");
+    registry
+        .entity_types(&tenant())
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Make `sub`'s Role record, holding no role.
+pub async fn add_role_record(state: &PlatformState, sub: &str) {
+    state
+        .server
+        .get_or_create_tenant_entity(&tenant(), "Role", sub, serde_json::json!({}))
+        .await
+        .unwrap_or_else(|error| panic!("{sub}'s Role record: {error}"));
+}
+
+/// Move `sub`'s Role record (`Grant`, `Revoke`) for `role`; whether the move
+/// was taken.
+pub async fn move_role(state: &PlatformState, sub: &str, action: &str, role: &str) -> bool {
+    state
+        .server
+        .dispatch_tenant_action(
+            &tenant(),
+            "Role",
+            sub,
+            action,
+            serde_json::json!({ "role": role }),
+            &AgentContext::system(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{action} {role} for {sub}: {error}"))
+        .success
+}
+
+/// The roles `sub`'s Role record holds, read from its actor.
+pub async fn roles(state: &PlatformState, sub: &str) -> Vec<String> {
+    let response = state
+        .server
+        .get_tenant_entity_state(&tenant(), "Role", sub)
+        .await
+        .unwrap_or_else(|error| panic!("read {sub}'s Role record: {error}"));
+    response
+        .state
+        .lists
+        .get("roles")
+        .cloned()
+        .unwrap_or_default()
+}
+
 /// Let `sub`'s Member actor go idle past the timeout and passivate it.
 pub async fn passivate_member(state: &PlatformState, sub: &str) {
     let actor_key = format!("{}:Member:{sub}", tenant());
@@ -307,6 +440,18 @@ pub async fn read_note(state: &PlatformState, token: &str) -> StatusCode {
 pub async fn touch_note(state: &PlatformState, token: &str) -> StatusCode {
     let request = Request::post(format!(
         "/tdata/Notes('{NOTE}')/Temper.PrincipalRecord.Touch"
+    ))
+    .header("Authorization", format!("Bearer {token}"))
+    .header("Content-Type", "application/json")
+    .body(Body::from("{}"))
+    .unwrap();
+    call(state, request).await.0
+}
+
+/// `POST /tdata/Notes('n-1')/Temper.PrincipalRecord.Cook` with `token`.
+pub async fn cook_note(state: &PlatformState, token: &str) -> StatusCode {
+    let request = Request::post(format!(
+        "/tdata/Notes('{NOTE}')/Temper.PrincipalRecord.Cook"
     ))
     .header("Authorization", format!("Bearer {token}"))
     .header("Content-Type", "application/json")

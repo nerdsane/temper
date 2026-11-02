@@ -58,7 +58,7 @@ pub struct ResolvedIdentity {
     /// attribute each becomes (`<Type>` in person, `actingFor<Type>` for an
     /// agent's user). Read through each record's actor on every request.
     #[serde(default)]
-    pub principal_records: BTreeMap<String, String>,
+    pub principal_records: BTreeMap<String, serde_json::Value>,
     /// JWT agents only: what the token was issued under, kept on the agent's
     /// security context so a timer it sets can ask, when it fires, whether
     /// the token would still be accepted

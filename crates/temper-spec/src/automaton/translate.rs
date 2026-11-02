@@ -36,6 +36,8 @@ pub enum ResolvedEffect {
     ListAppend { var: String, value: Arg },
     /// `remove_at(var, index)`; out of range is a no-op.
     ListRemoveAt { var: String, index: Arg },
+    /// `remove(var, value)`: every element equal to `value`; none is a no-op.
+    ListRemove { var: String, value: Arg },
 
     // -- Runtime-only effects --
     /// Post-commit dispatch by name: an external trigger's dispatch record
@@ -68,6 +70,7 @@ impl ResolvedEffect {
                 | ResolvedEffect::SetString { .. }
                 | ResolvedEffect::ListAppend { .. }
                 | ResolvedEffect::ListRemoveAt { .. }
+                | ResolvedEffect::ListRemove { .. }
         )
     }
 }
@@ -191,6 +194,7 @@ fn resolve_effect(effect: &Effect, kinds: &BTreeMap<&str, VarKind>) -> ResolvedE
         }
         Effect::Append { list, value } => ResolvedEffect::ListAppend { var: list, value },
         Effect::RemoveAt { list, index } => ResolvedEffect::ListRemoveAt { var: list, index },
+        Effect::Remove { list, value } => ResolvedEffect::ListRemove { var: list, value },
         Effect::Schedule {
             action,
             delay_seconds,

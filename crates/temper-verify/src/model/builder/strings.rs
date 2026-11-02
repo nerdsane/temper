@@ -15,13 +15,13 @@ use crate::model::types::StringParam;
 /// a constraint ties to one (`failed_commit` must equal `commit`), with the
 /// action's constraints on each. The model needs the value of the second
 /// kind to decide whether the record takes the action, though it writes
-/// nothing it tracks. Entry and route checks also track guard/list inputs
-/// so chosen inputs retain their equality across uses.
+/// nothing it tracks. List effects also need concrete inputs, whether they
+/// check membership or only length: removal can choose a held value, and
+/// every use of one input must retain the same equality.
 pub(super) fn string_params(
     action: &temper_spec::automaton::Action,
     tracked_strings: &BTreeSet<String>,
     effect_params: &BTreeMap<String, ParamKind>,
-    checks_inputs: bool,
 ) -> Vec<StringParam> {
     let tied = |name: &str| {
         action.constraints.iter().any(|c| {
@@ -35,14 +35,23 @@ pub(super) fn string_params(
                     .is_some_and(|field| tracked_strings.contains(field))
         })
     };
-    action
+    let names: BTreeSet<&str> = action
         .params
         .iter()
         .map(|param| param.name())
+        .chain(
+            effect_params
+                .iter()
+                .filter(|(_, kind)| **kind == ParamKind::Str)
+                .map(|(name, _)| name.as_str()),
+        )
+        .collect();
+    names
+        .into_iter()
         .filter(|name| {
             tracked_strings.contains(*name)
                 || tied(name)
-                || (checks_inputs && effect_params.get(*name) == Some(&ParamKind::Str))
+                || effect_params.get(*name) == Some(&ParamKind::Str)
         })
         .map(|name| {
             let mut param = StringParam {
@@ -310,7 +319,7 @@ pub(super) fn string_literals(
         for effect in &action.effect {
             let (target, value) = match effect {
                 Effect::Assign { var, value, .. } => (var, value),
-                Effect::Append { list, value } => (list, value),
+                Effect::Append { list, value } | Effect::Remove { list, value } => (list, value),
                 _ => continue,
             };
             match value {

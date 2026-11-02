@@ -245,6 +245,8 @@ pub enum Effect {
     ListAppend { var: String, value: Arg },
     /// `remove_at(var, index)`; out of range is a no-op.
     ListRemoveAt { var: String, index: Arg },
+    /// `remove(var, value)`: every element equal to `value`; none is a no-op.
+    ListRemove { var: String, value: Arg },
     /// Post-commit dispatch by name: an external trigger's dispatch record
     /// or a platform hook (e.g. "DispatchCallback").
     ///

@@ -193,6 +193,12 @@ pub struct AutomatonMeta {
     /// calls for them, read from the record's actor on every request.
     #[serde(default)]
     pub principal_record: bool,
+    /// A list state variable of a `principal_record` type whose items Cedar
+    /// also sees on the principal, as a set: `principal.<Type>_<field>` in
+    /// person and `principal.actingFor<Type>_<field>` for an agent's user,
+    /// such as the roles one person holds in an app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal_record_set: Option<String>,
 }
 
 /// A safety invariant, proven by the verification cascade.

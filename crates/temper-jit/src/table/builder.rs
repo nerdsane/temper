@@ -222,6 +222,7 @@ fn convert_effect(effect: ResolvedEffect) -> Effect {
         ResolvedEffect::SetString { var, value } => Effect::SetString { var, value },
         ResolvedEffect::ListAppend { var, value } => Effect::ListAppend { var, value },
         ResolvedEffect::ListRemoveAt { var, index } => Effect::ListRemoveAt { var, index },
+        ResolvedEffect::ListRemove { var, value } => Effect::ListRemove { var, value },
         ResolvedEffect::Dispatch(name) => Effect::Custom(name),
         ResolvedEffect::Schedule {
             action,

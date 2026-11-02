@@ -160,6 +160,8 @@ pub enum ModelEffect {
     ListAppend { var: String, value: Arg },
     /// `remove_at(var, index)`; out of range is a no-op.
     ListRemoveAt { var: String, index: Arg },
+    /// `remove(var, value)`: every element equal to `value`; none is a no-op.
+    ListRemove { var: String, value: Arg },
 }
 
 /// A resolved transition used internally by the model, pre-computed from a

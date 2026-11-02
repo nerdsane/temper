@@ -39,6 +39,22 @@ pub(super) fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError>
              lowercase, so only such a name cannot stand in for one"
         )));
     }
+    if let Some(field) = &automaton.automaton.principal_record_set {
+        if !automaton.automaton.principal_record {
+            return Err(AutomatonParseError::Validation(format!(
+                "principal_record_set = '{field}' needs principal_record = true: only a \
+                 principal record's fields reach the principal"
+            )));
+        }
+        let declared = automaton.state.iter().find(|var| &var.name == field);
+        if declared.map(|var| var.var_type) != Some(VarType::List) {
+            return Err(AutomatonParseError::Validation(format!(
+                "principal_record_set = '{field}' must name a list state variable of \
+                 '{name}' (a [[state]] with type = \"list\"), which Cedar reads as the set \
+                 principal.{name}_{field}"
+            )));
+        }
+    }
 
     // 2. Runtime-owned fields cannot also be mutable spec variables or action
     //    params. That would create a second identity/lifecycle/context truth.

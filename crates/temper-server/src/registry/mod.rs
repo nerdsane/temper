@@ -5,6 +5,7 @@
 //! in `ServerState`, enabling multi-tenant deployments where each tenant has
 //! its own entity types and specs.
 
+mod principal_attributes;
 mod relations;
 mod server_derived_names;
 pub mod types;
@@ -174,6 +175,31 @@ impl SpecRegistry {
             .transpose()?;
         warn_on_server_derived_csdl_properties(&tenant_name, &csdl);
 
+        // Parse every incoming spec, and refuse the install, before anything
+        // in the tenant changes.
+        let mut parsed = Vec::with_capacity(ioa_sources.len());
+        for (entity_type, ioa_source) in ioa_sources {
+            let automaton =
+                automaton::parse_automaton(ioa_source).map_err(|e| RegistryError::IoaParse {
+                    tenant: tenant_name.clone(),
+                    entity_type: (*entity_type).to_string(),
+                    source: e.to_string(),
+                })?;
+            // Restoring an old spec must not turn a new install check into
+            // a boot refusal. Use the registered type, not just its TOML name.
+            for finding in automaton::lint_trigger_target_args(&automaton, entity_type) {
+                tracing::warn!(tenant = %tenant_name, entity_type, "{}", finding.message);
+            }
+            parsed.push((*entity_type, *ioa_source, automaton));
+        }
+        self.check_principal_attribute_metas(
+            &tenant,
+            parsed
+                .iter()
+                .map(|(name, _, automaton)| (*name, &automaton.automaton)),
+            merge,
+        )?;
+
         let relation_graph = build_relation_graph(&csdl, cross_invariants.as_ref());
 
         // Build entity set map from CSDL
@@ -233,28 +259,16 @@ impl SpecRegistry {
             };
             existing_config.relation_graph = rebuilt_relation_graph;
 
-            for (entity_type, ioa_source) in ioa_sources {
-                let automaton = automaton::parse_automaton(ioa_source).map_err(|e| {
-                    RegistryError::IoaParse {
-                        tenant: tenant_name.clone(),
-                        entity_type: (*entity_type).to_string(),
-                        source: e.to_string(),
-                    }
-                })?;
-                // Restoring an old spec must not turn a new install check into
-                // a boot refusal. Use the registered type, not just its TOML name.
-                for finding in automaton::lint_trigger_target_args(&automaton, entity_type) {
-                    tracing::warn!(tenant = %tenant_name, entity_type, "{}", finding.message);
-                }
+            for (entity_type, ioa_source, automaton) in parsed {
                 let table = transition_table(&tenant_name, entity_type, &automaton);
                 let integrations = automaton.integrations.clone();
 
-                if let Some(existing_spec) = existing_config.entities.get_mut(*entity_type) {
+                if let Some(existing_spec) = existing_config.entities.get_mut(entity_type) {
                     let timed = !existing_spec.automaton.state_timeouts.is_empty()
                         || !automaton.state_timeouts.is_empty();
-                    if timed && existing_spec.ioa_source != *ioa_source {
+                    if timed && existing_spec.ioa_source != ioa_source {
                         self.changed_types
-                            .insert((tenant.clone(), (*entity_type).to_string()));
+                            .insert((tenant.clone(), entity_type.to_string()));
                     }
                     // Hot-swap: write new table into the SAME RwLock that actors hold.
                     let result = existing_spec.swap_controller().swap(table);
@@ -311,19 +325,7 @@ impl SpecRegistry {
         } else {
             // First registration: create new TenantConfig.
             let mut entities = BTreeMap::new();
-            for (entity_type, ioa_source) in ioa_sources {
-                let automaton = automaton::parse_automaton(ioa_source).map_err(|e| {
-                    RegistryError::IoaParse {
-                        tenant: tenant_name.clone(),
-                        entity_type: (*entity_type).to_string(),
-                        source: e.to_string(),
-                    }
-                })?;
-                // Restoring an old spec must not turn a new install check into
-                // a boot refusal. Use the registered type, not just its TOML name.
-                for finding in automaton::lint_trigger_target_args(&automaton, entity_type) {
-                    tracing::warn!(tenant = %tenant_name, entity_type, "{}", finding.message);
-                }
+            for (entity_type, ioa_source, automaton) in parsed {
                 let table = transition_table(&tenant_name, entity_type, &automaton);
                 let integrations = automaton.integrations.clone();
                 entities.insert(
@@ -502,15 +504,19 @@ impl SpecRegistry {
     }
 
     /// The tenant's types marked `principal_record`: a record of one, keyed by
-    /// a user's `sub`, describes that user to Cedar.
-    pub fn principal_record_types(&self, tenant: &TenantId) -> Vec<String> {
+    /// a user's `sub`, describes that user to Cedar. Each comes with its
+    /// `principal_record_set` field, if it names one.
+    pub fn principal_record_types(&self, tenant: &TenantId) -> Vec<(String, Option<String>)> {
         self.tenants
             .get(tenant)
             .map(|tc| {
                 tc.entities
                     .iter()
                     .filter(|(_, spec)| spec.automaton.automaton.principal_record)
-                    .map(|(name, _)| name.clone())
+                    .map(|(name, spec)| {
+                        let set = spec.automaton.automaton.principal_record_set.clone();
+                        (name.clone(), set)
+                    })
                     .collect()
             })
             .unwrap_or_default()

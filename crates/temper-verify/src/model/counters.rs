@@ -45,7 +45,8 @@ pub(super) fn leave_out_unread_counters(automaton: &Automaton, model: &mut Tempe
                 | ModelEffect::AddCounter { var, value }
                 | ModelEffect::SubCounter { var, value }
                 | ModelEffect::SetBool { var, value }
-                | ModelEffect::ListAppend { var, value } => (var, value),
+                | ModelEffect::ListAppend { var, value }
+                | ModelEffect::ListRemove { var, value } => (var, value),
                 ModelEffect::ListRemoveAt { var, index } => (var, index),
                 ModelEffect::SetString { .. } => continue,
             };
@@ -70,6 +71,7 @@ pub(super) fn leave_out_unread_counters(automaton: &Automaton, model: &mut Tempe
             ModelEffect::SetBool { .. }
             | ModelEffect::SetString { .. }
             | ModelEffect::ListAppend { .. }
+            | ModelEffect::ListRemove { .. }
             | ModelEffect::ListRemoveAt { .. } => true,
         });
         let effect_params = effect_params(&t.effects);

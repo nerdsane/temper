@@ -415,6 +415,12 @@ pub(super) async fn check_spec_changes(
         .iter()
         .map(|(entity_type, source)| (entity_type.as_str(), source.as_str()))
         .collect();
+    state
+        .registry
+        .read()
+        .expect("registry lock poisoned")
+        .check_principal_attributes(tenant, &sources, true)
+        .map_err(|error| format!("os-app '{app_name}' was not installed. {error}"))?;
     let changes = state
         .server
         .spec_changes(tenant, &sources)

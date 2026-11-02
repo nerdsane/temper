@@ -421,21 +421,23 @@ impl SecurityContext {
         self
     }
 
-    /// Put the statuses of the records that describe the caller (types marked
+    /// Put what the records that describe the caller say (types marked
     /// `principal_record`) on the principal, as Cedar's `principal.<name>`.
     /// Only the identity boundary calls this, with names it built from the
-    /// verified token: `<Type>` for the user in person, `actingFor<Type>` for
-    /// the user an agent acts for. A record type's name starts uppercase (the
-    /// spec refuses others), so none of them replaces an attribute set here.
+    /// verified token: `<Type>` for the status of the user's record in person,
+    /// `actingFor<Type>` for the user an agent acts for, and `<name>_<field>`
+    /// for a record's set (an array, which Cedar reads as a set). A record
+    /// type's name starts uppercase (the spec refuses others), so none of them
+    /// replaces an attribute set here.
     #[must_use]
     pub fn with_principal_records(
         mut self,
-        records: &std::collections::BTreeMap<String, String>,
+        records: &std::collections::BTreeMap<String, serde_json::Value>,
     ) -> Self {
-        for (name, status) in records {
+        for (name, value) in records {
             self.principal
                 .attributes
-                .insert(name.clone(), serde_json::Value::String(status.clone()));
+                .insert(name.clone(), value.clone());
         }
         self
     }
