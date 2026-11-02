@@ -1,8 +1,11 @@
 name: CI
 
 on:
+  # Every pull request, whatever its base. A stacked pull request's base is another branch until that branch
+  # merges, and GitHub's move of the base to main is an 'edited' event that starts nothing, so a push made
+  # before the move got no CI at all (temper #330, 2 Nov 2026: fix-up 10bcdce3 at 05:47:00, base moved
+  # 05:48:07, no run). Its checks run against the base it had; the merge queue tests it on main before it lands.
   pull_request:
-    branches: [main, staging]
   # The merge queue tests each group (the queued pull requests on top of main) before it
   # lands. Every required check comes from this workflow, so without this trigger the
   # queue would wait for checks that never start.
