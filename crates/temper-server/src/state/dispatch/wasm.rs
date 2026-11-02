@@ -1371,6 +1371,30 @@ impl crate::state::ServerState {
                 } else {
                     &named
                 };
+                // A silent exit (ADR-0056 Sub-Decision 3): the module succeeded
+                // but sends no answer, did not say it has none (`"empty":
+                // true`), and wrote nothing as a composite, so the record waits
+                // for a move that will not come. An answer that keeps the
+                // record's status is a move, and one the record refuses is
+                // journaled as a rejected answer; neither is counted here.
+                if answers.is_empty() && !result.empty_answer && !composite_result_consumed {
+                    tracing::warn!(
+                        target: "temper_server::integration",
+                        tenant = %ctx.entity_ref.tenant,
+                        entity_type = ctx.entity_ref.entity_type,
+                        entity_id = ctx.entity_ref.entity_id,
+                        action = ctx.action,
+                        integration = %integration.name,
+                        state = %entity_state.status,
+                        "integration answered no move"
+                    );
+                    crate::runtime_metrics::record_integration_silent_exit(
+                        ctx.entity_ref.tenant.as_str(),
+                        ctx.entity_ref.entity_type,
+                        ctx.action,
+                        &entity_state.status,
+                    );
+                }
                 let callback_action = self
                     .choose_answer(ctx.entity_ref, answers, &callback_params)
                     .await;

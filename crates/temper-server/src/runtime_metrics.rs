@@ -245,13 +245,13 @@ fn metrics() -> &'static RuntimeMetrics {
             integration_silent_exit_total: meter
                 .u64_counter("temper_integration_silent_exit_total")
                 .with_description(
-                    "ADR-0056: inline WASM trigger-integration invocations that returned \
-                     successfully without causing any state transition on the triggering \
-                     entity. Under healthy operation this counter is permanently zero; any \
+                    "ADR-0056: WASM trigger invocations that succeeded but sent no answer: \
+                     the module named no move, did not answer empty, and wrote nothing as a \
+                     composite. An answer that keeps the record's status is a move and is not \
+                     counted. Under healthy operation this counter is permanently zero; any \
                      nonzero reading is a regression of the consumer-side \
-                     exit-dispatches-an-action invariant (openpaw ADR-0039 Sub-Decision 3a) \
-                     or a transient persist failure that slipped past the retry layer \
-                     (ADR-0056 Sub-Decision 2). Alerts on this counter are critical-severity.",
+                     exit-dispatches-an-action invariant (openpaw ADR-0039 Sub-Decision 3a). \
+                     Alerts on this counter are critical-severity.",
                 )
                 .build(),
             integration_failure_dropped_total: meter
@@ -783,9 +783,8 @@ pub fn record_undeclared_action_params(
     );
 }
 
-/// Record a silent integration exit — an inline trigger invocation that
-/// returned successfully without causing a state transition on the
-/// triggering entity. Emits `temper_integration_silent_exit_total` (ADR-0056
+/// Record a silent integration exit: a trigger invocation that succeeded but
+/// sent no answer to the triggering entity. Emits `temper_integration_silent_exit_total` (ADR-0056
 /// Sub-Decision 3).
 pub fn record_integration_silent_exit(
     tenant: &str,
