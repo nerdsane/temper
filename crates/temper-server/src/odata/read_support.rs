@@ -6,6 +6,7 @@ use futures_util::stream::{self, StreamExt};
 use temper_runtime::tenant::TenantId;
 
 use super::read_defaults::ReadDefaults;
+use super::response::fill_event_metadata;
 use crate::state::ServerState;
 use crate::storage::{
     CatalogRowsLoad, EntityCatalogRow, load_catalog_rows_by_id, load_selected_catalog_rows_by_id,
@@ -55,10 +56,7 @@ fn catalog_row_to_entity_body(
             .or_insert(serde_json::json!({}));
         obj.entry("lists".to_string())
             .or_insert(serde_json::json!({}));
-        for property in temper_spec::automaton::EVENT_METADATA_FIELDS {
-            obj.entry(property.to_string())
-                .or_insert(serde_json::Value::Null);
-        }
+        fill_event_metadata(obj);
         obj.insert("events".to_string(), serde_json::json!([]));
         obj.entry("total_event_count".to_string())
             .or_insert(serde_json::json!(row.sequence_nr));
@@ -89,6 +87,9 @@ fn catalog_row_to_entity_body(
         "last_event_at": null,
         "last_event_via": null,
         "last_event_by": null,
+        "last_event_for": null,
+        "last_event_agent_type": null,
+        "last_event_label": null,
         "timer_needs_person": null,
         "@odata.id": format!("{entity_set_name}('{id}')"),
     })
@@ -395,6 +396,7 @@ pub(super) async fn materialize_entity_set_entities(
                         let mut entity = serde_json::to_value(&response.state).unwrap_or_default();
                         defaults.apply(&mut entity);
                         if let Some(obj) = entity.as_object_mut() {
+                            fill_event_metadata(obj);
                             obj.insert(
                                 "@odata.id".into(),
                                 serde_json::json!(format!("{entity_set_name}('{id}')")),

@@ -80,6 +80,7 @@ async fn send(state: &ServerState, request: Request<Body>) -> (StatusCode, Strin
                     role: None,
                     acting_for: None,
                     agent_type: None,
+                    label: None,
                     attributes: Default::default(),
                 },
                 context_attrs: Default::default(),

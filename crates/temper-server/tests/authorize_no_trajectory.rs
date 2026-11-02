@@ -32,6 +32,7 @@ fn request(path: &str, body: serde_json::Value) -> Request<Body> {
                     role: None,
                     acting_for: None,
                     agent_type: None,
+                    label: None,
                     attributes: Default::default(),
                 },
                 context_attrs: Default::default(),

@@ -9,6 +9,7 @@ fn principal_of_kind(kind: PrincipalKind) -> SecurityContext {
         role: None,
         acting_for: None,
         agent_type: None,
+        label: None,
         attributes: HashMap::new(),
     };
     ctx

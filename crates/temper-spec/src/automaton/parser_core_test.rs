@@ -192,6 +192,9 @@ fn last_event_properties_are_reserved_for_the_kernel() {
         "last_event_at",
         "last_event_via",
         "last_event_by",
+        "last_event_for",
+        "last_event_agent_type",
+        "last_event_label",
     ] {
         let source = format!(
             r#"

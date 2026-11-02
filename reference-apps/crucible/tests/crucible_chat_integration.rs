@@ -181,6 +181,7 @@ async fn authenticate_test_request(mut request: Request, next: Next) -> Response
             role: None,
             acting_for: None,
             agent_type: None,
+            label: None,
             attributes: Default::default(),
         },
         context_attrs: Default::default(),

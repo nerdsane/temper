@@ -76,6 +76,9 @@ pub(super) async fn try_reconciled_equality_read(
                     | "last_event_at"
                     | "last_event_via"
                     | "last_event_by"
+                    | "last_event_for"
+                    | "last_event_agent_type"
+                    | "last_event_label"
                     | "timer_needs_person"
             ) || !request.state.query_projection_indexes_field(
                 request.tenant,

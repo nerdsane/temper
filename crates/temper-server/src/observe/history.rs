@@ -231,6 +231,7 @@ fn history_event_json(sequence: u64, event: &EntityEvent) -> serde_json::Value {
         "by": event.origin.by,
         "for": event.origin.acting_for,
         "agent_type": event.origin.agent_type,
+        "label": event.origin.label,
         "params": event.params,
     })
 }

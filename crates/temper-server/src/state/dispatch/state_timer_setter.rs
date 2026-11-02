@@ -112,7 +112,8 @@ fn named_by(origin: &EventOrigin) -> Option<AgentContext> {
             Some(acting_for),
             Some(origin.role.as_deref()?),
             None,
-        ),
+        )
+        .with_label(origin.label.as_deref()),
         _ => return None,
     };
     Some(AgentContext {

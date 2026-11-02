@@ -39,11 +39,14 @@ pub fn is_server_derived_field_name(name: &str) -> bool {
 
 /// What the kernel keeps of a record's events, read at the top of the record
 /// and never from an app's fields.
-pub const EVENT_METADATA_FIELDS: [&str; 5] = [
+pub const EVENT_METADATA_FIELDS: [&str; 8] = [
     "first_event_at",
     "last_event_at",
     "last_event_via",
     "last_event_by",
+    "last_event_for",
+    "last_event_agent_type",
+    "last_event_label",
     "timer_needs_person",
 ];
 

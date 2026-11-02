@@ -1,6 +1,6 @@
 # Kernel event metadata
 
-Every entity row exposes four read-only kernel properties, alongside `entity_id`,
+Every entity row exposes these read-only kernel properties, alongside `entity_id`,
 `status`, and `sequence_nr`:
 
 | Property | Value |
@@ -8,15 +8,27 @@ Every entity row exposes four read-only kernel properties, alongside `entity_id`
 | `first_event_at` | The first committed event's UTC timestamp, with fractional seconds; set once. |
 | `last_event_at` | The newest committed event's UTC timestamp (RFC 3339). |
 | `last_event_via` | `request`, `timer`, or `reaction`. |
-| `last_event_by` | The authenticated subject for a request; null for timers and reactions. |
+| `last_event_by` | The principal the move ran as, however it came about. Null for a move the kernel's own identities made. |
+| `last_event_for` | Whom that principal acted for, when it is an agent. Otherwise null. |
+| `last_event_agent_type` | That agent's type. Otherwise null. |
+| `last_event_label` | The name of that agent instance, from its token's `agent_label` claim. Otherwise null. |
+| `timer_needs_person` | The action a stopped state timer could not make because nothing named its caller. Otherwise null. |
 
 A state timer and a scheduled action are `timer`. A spec trigger, reaction, or
-integration callback is `reaction`, including a reaction to a timer. The identity
-used to authorize such work is separate from the subject that made a request.
-The kernel never attributes a timer or a reaction to that acting identity.
+integration callback is `reaction`, including a reaction to a timer. `via` says
+how a move came about and `by` says who it ran as, so a timer's or a reaction's
+move names whoever set it going. A move made by the state-timer service, a
+declared service, System or anonymous names no one, so a service can never be
+read back as a person.
+
+`agent_label` is an optional claim on a trusted issuer's agent token. It stays
+with the agent through its reactions and timers, and an empty one is no label. A
+person's token never gives one. It is a name for people to read: Cedar sees
+neither the claim nor the label. Whatever length the issuer signs is kept: the
+token's own size in the request's header is its limit.
 
 Creation and field updates are events too. `first_event_at` stays fixed across
-requests, timers, reactions, field updates and deletion. The three `last_event_*`
+requests, timers, reactions, field updates and deletion. The `last_event_*`
 properties follow each committed event. Refused actions and idempotent retries
 do not change these properties. Time comes from the event, through the kernel's
 simulation clock; applications do not need a clock or bookkeeping parameters.
@@ -36,8 +48,8 @@ parameters. Client-supplied values are removed by the existing kernel field
 sanitizer. Application fields such as `moved_at`, `moved_via`, and `moved_by` remain
 separate and can be migrated by applications at their own pace.
 
-Observe history returns each event's `via` and `by` beside its `timestamp`.
-Older events lack provenance: their `via` and `by` are null rather than guessed
+Observe history returns each event's `via`, `by`, `for`, `agent_type` and `label`
+beside its `timestamp`. Older events lack provenance: these are null rather than guessed
 from action names or parameters. Replaying them recovers their timestamp. A
 snapshot written by an older kernel without latest-event metadata cannot recover
 that provenance before its snapshot boundary; the `last_event_*` properties stay

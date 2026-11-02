@@ -67,14 +67,18 @@ pub(crate) fn bind_authenticated_params(
         let principal = &context.principal;
         let value = match source {
             ParameterSource::AuthenticatedSubject => {
-                principal.acting_for.as_deref().unwrap_or(&principal.id)
+                let subject = principal.acting_for.as_deref().unwrap_or(&principal.id);
+                if subject.is_empty() {
+                    return Err(DispatchError::AuthzDenied(
+                        "Authenticated subject is empty".into(),
+                    ));
+                }
+                subject
+            }
+            ParameterSource::AuthenticatedAgentLabel => {
+                principal.label.as_deref().unwrap_or_default()
             }
         };
-        if value.is_empty() {
-            return Err(DispatchError::AuthzDenied(
-                "Authenticated subject is empty".into(),
-            ));
-        }
         fields.insert(name.clone(), Value::String(value.to_owned()));
     }
     Ok(params)

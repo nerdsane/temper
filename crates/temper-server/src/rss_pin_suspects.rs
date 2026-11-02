@@ -36,6 +36,7 @@ fn customer() -> SecurityContext {
             role: None,
             acting_for: None,
             agent_type: None,
+            label: None,
             attributes: HashMap::new(), // determinism-ok: SecurityContext field type
         },
         context_attrs: HashMap::new(), // determinism-ok: SecurityContext field type

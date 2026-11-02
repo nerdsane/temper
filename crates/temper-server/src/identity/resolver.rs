@@ -49,6 +49,10 @@ pub struct ResolvedIdentity {
     pub is_human: bool,
     /// Verified `role` claim (Cedar), when the issuer stamped one.
     pub role: Option<String>,
+    /// JWT agents only: the verified `agent_label` claim, the name of this
+    /// agent instance. Left out when empty; a person's token never gives one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     /// JWT path only: the statuses of the `principal_record` records that
     /// describe the user behind the token, keyed by the Cedar principal
     /// attribute each becomes (`<Type>` in person, `actingFor<Type>` for an
@@ -189,6 +193,7 @@ impl IdentityResolver {
             from_jwt: false,
             is_human: false,
             role: None,
+            label: None,
             principal_records: BTreeMap::new(),
             credential: None,
         };
@@ -303,6 +308,7 @@ impl IdentityResolver {
                     from_jwt: true,
                     is_human: false,
                     role: claims.role.clone(),
+                    label: claims.agent_label.clone().filter(|label| !label.is_empty()),
                     principal_records: principal_records(
                         state,
                         tenant,
@@ -328,6 +334,7 @@ impl IdentityResolver {
                     from_jwt: true,
                     is_human: true,
                     role: claims.role.clone(),
+                    label: None,
                     credential: None,
                 }
             }

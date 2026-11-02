@@ -1,7 +1,5 @@
 //! Entity lifecycle methods for ServerState (spawn, query, delete, index).
 
-mod timer_needs_person;
-
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Instant;
@@ -24,6 +22,8 @@ use crate::registry::{VerificationDetail, VerificationStatus};
 use crate::request_context::AgentContext;
 use crate::runtime_metrics;
 use crate::storage::DataOnlyCreateRecord;
+
+mod timer_needs_person;
 
 /// Idle actors snapshotted and stopped in one `passivate_idle_actors` tick.
 /// Remainder stay registered for the next tick so snapshot writes cannot

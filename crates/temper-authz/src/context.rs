@@ -31,6 +31,10 @@ pub struct Principal {
     pub acting_for: Option<String>,
     /// Agent type classification (e.g. "claude-code", "openclaw").
     pub agent_type: Option<String>,
+    /// The name its issuer gave this agent instance, for people to know it by.
+    /// It says nothing about what the agent may do, so it is never a Cedar input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     /// Arbitrary attributes for ABAC evaluation.
     pub attributes: HashMap<String, serde_json::Value>,
 }
@@ -169,6 +173,7 @@ impl SecurityContext {
                 role: None,
                 acting_for: None,
                 agent_type: None,
+                label: None,
                 attributes: HashMap::new(),
             },
             context_attrs: HashMap::new(),
@@ -200,6 +205,7 @@ impl SecurityContext {
                 role: None,
                 acting_for: None,
                 agent_type: None,
+                label: None,
                 attributes: HashMap::new(),
             },
             context_attrs: HashMap::new(),
@@ -221,6 +227,7 @@ impl SecurityContext {
                 role: None,
                 acting_for: None,
                 agent_type: None,
+                label: None,
                 attributes: HashMap::new(),
             },
             context_attrs: HashMap::new(),
@@ -274,6 +281,7 @@ impl SecurityContext {
                 role: None,
                 acting_for: None,
                 agent_type: Some(agent_type_name.to_string()),
+                label: None,
                 attributes,
             },
             context_attrs,
@@ -341,6 +349,7 @@ impl SecurityContext {
                 role: role.map(|r| r.to_string()),
                 acting_for: acting_for.map(|a| a.to_string()),
                 agent_type: agent_type.map(|a| a.to_string()),
+                label: None,
                 attributes,
             },
             context_attrs,
@@ -437,6 +446,12 @@ impl SecurityContext {
     #[must_use]
     pub fn with_credential(mut self, credential: Option<IssuedCredential>) -> Self {
         self.credential = credential;
+        self
+    }
+
+    /// The name its issuer gave this agent instance ([`Principal::label`]).
+    pub fn with_label(mut self, label: Option<&str>) -> Self {
+        self.principal.label = label.map(str::to_string);
         self
     }
 

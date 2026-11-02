@@ -24,11 +24,12 @@ pub enum EventVia {
 /// and names them. A move the kernel's own identities made (`names_a_caller`)
 /// names no one, so a service can never be read back as a person.
 ///
-/// `for`, `agent_type` and `role` are recorded only with `by`, and only when
-/// the subject carries them: an agent acting for a person names that person,
-/// its type and its role. A person acting in person records `by` and any role
-/// their token gave them. They are left out of the event when absent, so
-/// events without them keep their old shape.
+/// `for`, `agent_type`, `role` and `label` are recorded only with `by`, and only
+/// when the subject carries them: an agent acting for a person names that
+/// person, its type, its role and the name its issuer gave this instance. A
+/// person acting in person records `by` and any role their token gave them.
+/// They are left out of the event when absent, so events without them keep
+/// their old shape.
 ///
 /// They are what a record's journal says of who moved it, so a timer nothing
 /// else names a setter for can be set as that principal
@@ -49,6 +50,10 @@ pub struct EventOrigin {
     /// The role of `by`, as its authenticated principal names it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    /// The name of the agent instance `by`, as its authenticated principal
+    /// names it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 impl EventOrigin {
@@ -91,6 +96,7 @@ impl EventOrigin {
             acting_for: present(&principal.acting_for),
             agent_type: present(&principal.agent_type),
             role: present(&principal.role),
+            label: present(&principal.label),
         }
     }
 }
@@ -139,6 +145,16 @@ pub struct LastEvent {
     pub last_event_via: Option<EventVia>,
     /// The principal that same event ran as, or null when it names no caller.
     pub last_event_by: Option<String>,
+    /// Whom that principal acted for, when it is an agent. Saved only when
+    /// present, as are its type and label: a read fills null for them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_event_for: Option<String>,
+    /// That agent's type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_event_agent_type: Option<String>,
+    /// The name of that agent instance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_event_label: Option<String>,
     /// The action no one could make, once a state timer stopped for it
     /// (`timer_needs_person`): a move that names someone clears it, and its
     /// timer is armed as them. Left out while there is none.
@@ -151,6 +167,9 @@ impl LastEvent {
         self.last_event_at = Some(event.timestamp);
         self.last_event_via = event.origin.via;
         self.last_event_by = event.origin.by.clone();
+        self.last_event_for = event.origin.acting_for.clone();
+        self.last_event_agent_type = event.origin.agent_type.clone();
+        self.last_event_label = event.origin.label.clone();
         if event.action == super::timer_needs_person::TIMER_NEEDS_PERSON_EVENT {
             self.timer_needs_person = super::timer_needs_person::refused_action(event);
         } else if event.origin.by.is_some() {
@@ -248,6 +267,7 @@ mod tests {
             acting_for: Some("ann".into()),
             agent_type: Some("claude-code".into()),
             role: Some("contributor".into()),
+            label: None,
         }
     }
 
@@ -303,6 +323,7 @@ mod tests {
                 acting_for: Some("ann".into()),
                 agent_type: Some("claude-code".into()),
                 role: Some("contributor".into()),
+                label: None,
             }
         );
         // The journaled event carries them at its top level, as `for`,
@@ -330,6 +351,7 @@ mod tests {
                 acting_for: None,
                 agent_type: None,
                 role: Some("owner".into()),
+                label: None,
             }
         );
         let mut event = super::super::EntityEvent::bootstrap("Idle".into());

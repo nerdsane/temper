@@ -52,6 +52,7 @@ fn wasm_module_security_context(module_name: &str) -> SecurityContext {
             role: Some("wasm_module".to_string()),
             acting_for: None,
             agent_type: None,
+            label: None,
             attributes: std::collections::HashMap::new(), // determinism-ok: Principal uses HashMap
         },
         context_attrs: std::collections::HashMap::new(), // determinism-ok: SecurityContext uses HashMap

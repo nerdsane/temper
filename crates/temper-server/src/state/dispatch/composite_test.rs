@@ -666,6 +666,7 @@ async fn composite_app_create_sub_write_authorization_can_enforce_owner_scope() 
                 role: None,
                 acting_for: None,
                 agent_type: None,
+                label: None,
                 attributes: std::collections::HashMap::new(),
             },
             context_attrs: std::collections::HashMap::new(),

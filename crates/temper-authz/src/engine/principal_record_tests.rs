@@ -20,6 +20,7 @@ fn user(id: &str, status: &str) -> SecurityContext {
             role: None,
             acting_for: None,
             agent_type: None,
+            label: None,
             attributes,
         },
         context_attrs: HashMap::new(),
