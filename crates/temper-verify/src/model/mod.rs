@@ -11,11 +11,13 @@
 //! (not a capturing closure), all invariant data lives inside `TemperModel`
 //! and is accessed via the `&TemperModel` reference in property conditions.
 
+mod assignments;
 pub mod builder;
 mod count_bounds;
 mod counters;
 mod entry;
 mod expansion;
+pub(crate) mod heap;
 mod parameters;
 pub mod semantics;
 mod silent;

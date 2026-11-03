@@ -658,6 +658,64 @@ fn initial_partitions_stop_within_a_tiny_room() {
     assert_eq!(room.held(), 0, "the walk gives back what it took");
 }
 
+/// A record whose one move sets off `reactions` reactions, each with a
+/// guard on another record that the model cannot decide, so the move goes
+/// two ways for each: what it builds doubles with every reaction, while the
+/// states it leads to are all the same one.
+fn many_undecided(reactions: usize) -> Vec<String> {
+    let mut many = String::from(
+        "[automaton]\nname = 'Many'\nstates = ['Start', 'Done']\ninitial = 'Start'\n\n\
+         [[action]]\nname = 'Go'\nkind = 'input'\nfrom = ['Start', 'Done']\nto = 'Done'\n",
+    );
+    for i in 0..reactions {
+        many.push_str(&format!(
+            "\n[[action.triggers]]\nname = 'again{i}'\nkind = 'entity'\n\
+             target_entity = 'Many'\ntarget_action = 'Go'\n\
+             guard = \"Other[Id].status == 'Open'\"\n\
+             [action.triggers.resolve_target]\nkind = 'same_id'\n"
+        ));
+    }
+    many.push_str(
+        "\n[[invariant]]\nname = 'rule'\n\
+         assert = \"status == 'Start' || status == 'Done' || Other[Id].status == 'Open'\"\n",
+    );
+    let other = "[automaton]\nname = 'Other'\nstates = ['Open']\ninitial = 'Open'\n\n\
+                 [[action]]\nname = 'Stay'\nkind = 'input'\nfrom = ['Open']\nto = 'Open'\n";
+    vec![many, other.to_string()]
+}
+
+fn check_in(sources: &[String], room: &Bytes) -> JointInvariantResult {
+    let automatons = parse(&sources.iter().map(String::as_str).collect::<Vec<_>>());
+    let progress = Progress::default();
+    let bound = Bound {
+        room,
+        progress: &progress,
+    };
+    let mut results = verify_joint_invariants(&automatons.iter().collect::<Vec<_>>(), None, bound);
+    assert_eq!(results.len(), 1);
+    results.remove(0)
+}
+
+#[test]
+fn what_one_move_builds_counts_against_the_room() {
+    // 2^12 ways for one move, a few KB each: tens of MB built before the
+    // walk keeps the one state they all lead to.
+    let sources = many_undecided(12);
+    let room = Bytes::new(1 << 20);
+    let result = check_in(&sources, &room);
+    let JointOutcome::Incomplete { reason } = &result.outcome else {
+        panic!("a move that builds more than the room holds is not checked, got {result}");
+    };
+    assert!(reason.contains("does not fit"), "{reason}");
+    assert_eq!(room.held(), 0, "the walk gives back what it took");
+
+    // With room for what the move builds, the rule is checked and holds.
+    let room = Bytes::new(1 << 30);
+    let result = check_in(&sources, &room);
+    assert!(matches!(result.outcome, JointOutcome::Holds), "{result}");
+    assert_eq!(room.held(), 0, "the walk gives back what it took");
+}
+
 #[test]
 fn replay_distinguishes_two_new_values_in_one_request() {
     let pair = r#"

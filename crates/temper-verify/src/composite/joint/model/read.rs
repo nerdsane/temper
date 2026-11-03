@@ -374,12 +374,15 @@ impl Unchecked {
 
     /// The fields an `entity` record's module call keeps as it started:
     /// those the actions it may answer with (`answers`) tie a parameter to.
-    pub(super) fn asked(&self, entity: &str, answers: impl Fn(&str) -> bool) -> BTreeSet<String> {
+    pub(super) fn asked<'a>(
+        &'a self,
+        entity: &'a str,
+        answers: impl Fn(&str) -> bool + 'a,
+    ) -> impl Iterator<Item = &'a String> + 'a {
         self.equals
             .iter()
-            .filter(|((e, action), _)| e == entity && answers(action))
-            .flat_map(|(_, fields)| fields.iter().cloned())
-            .collect()
+            .filter(move |((e, action), _)| e == entity && answers(action))
+            .flat_map(|(_, fields)| fields.iter())
     }
 }
 

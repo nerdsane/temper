@@ -149,15 +149,7 @@ impl Drop for Held<'_> {
     }
 }
 
-/// The bytes a heap block of `size` bytes takes: jemalloc's size classes,
-/// 16 bytes apart up to 128, then four to each doubling.
-pub(super) fn block(size: usize) -> usize {
-    if size <= 128 {
-        return size.next_multiple_of(16).max(16);
-    }
-    let spacing = size.next_power_of_two() / 8;
-    size.next_multiple_of(spacing)
-}
+pub(super) use crate::model::heap::{Heap, block};
 
 /// The bytes a `HashMap<K, V>` that holds `capacity` entries takes: a
 /// bucket and a control byte for each, at most seven of eight buckets full.
@@ -214,8 +206,9 @@ pub(super) fn grow<L: List>(list: &mut L, spare: usize, held: &mut Held<'_>) -> 
     }
     let wanted = (len + spare).max(list.capacity() * 2);
     held.add(wanted * L::ENTRY)?;
+    let old = bytes(list);
     list.reserve_exact(wanted - len);
-    held.sub(wanted * L::ENTRY);
+    held.sub(old);
     Ok(())
 }
 
@@ -230,8 +223,49 @@ pub(super) fn grow_map<K: Eq + Hash, V>(
         return Ok(());
     }
     let wanted = (len + spare).max(map.capacity() * 2);
-    held.add(map_bytes::<K, V>(wanted))?;
+    // Hash tables round their bucket count up to a power of two, leaving
+    // one bucket empty for small tables and an eighth empty thereafter.
+    let buckets = (wanted * 8).div_ceil(7).next_power_of_two().max(4);
+    let capacity = if buckets < 8 {
+        buckets - 1
+    } else {
+        buckets / 8 * 7
+    };
+    held.add(map_bytes::<K, V>(capacity))?;
+    let old = map_bytes::<K, V>(map.capacity());
     map.reserve(wanted - len);
-    held.sub(map_bytes::<K, V>(wanted));
+    held.sub(old);
     Ok(())
+}
+
+impl Heap for super::ReactionStep {
+    fn heap(&self) -> usize {
+        self.entity_type.heap() + self.action.heap() + self.generated_for.heap()
+    }
+}
+
+impl Heap for super::Dispatch {
+    fn heap(&self) -> usize {
+        self.to.heap()
+            + self.action.heap()
+            + self.target_state.heap()
+            + self.params.heap()
+            + self.chain.heap()
+    }
+}
+
+impl Heap for super::Call {
+    fn heap(&self) -> usize {
+        self.to.heap()
+            + self.module.heap()
+            + self.on_success.heap()
+            + self.on_failure.heap()
+            + self.asked.heap()
+    }
+}
+
+impl Heap for super::JointState {
+    fn heap(&self) -> usize {
+        self.records.heap() + self.inflight.heap() + self.calls.heap() + self.armed.heap()
+    }
 }

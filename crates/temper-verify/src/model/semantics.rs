@@ -10,8 +10,10 @@ use super::types::{
     ModelEffect, ModelString, ParamValue, ResolvedTransition, TemperModel, TemperModelState,
 };
 
-use super::count_bounds::{CountRange, count_ranges};
+use super::assignments::string_literals;
+use super::count_bounds::count_ranges;
 pub(crate) use super::expansion::Expansion;
+use super::heap::{Heap, step_room};
 use super::parameters::{any_inputs, checks_inputs, inputs_allow};
 pub use super::strings::{
     apply_string_params, canonical_state, canonical_strings, canonical_values, string_values,
@@ -181,7 +183,14 @@ fn successors_with(
     let mut out = Vec::new();
     any_inputs(model, t, state, values, budget, |params| {
         if checks_inputs(model, t) && !inputs_allow(model, t, state, &params) {
+            let bytes = params.heap();
+            drop(params);
+            budget.give(bytes);
             return false;
+        }
+        let room = step_room(state, t, &params);
+        if !budget.hold(room) {
+            return true;
         }
         let mut next = state.clone();
         if let Some(to) = &t.to_state {
@@ -190,10 +199,21 @@ fn successors_with(
         apply_effects(&t.effects, &mut next, &t.name, &params);
         apply_string_params(&t.string_params, &mut next, &params);
         canonical_state(&mut next);
+        debug_assert!(next.heap() <= room, "step estimate covers the built record");
+        budget.give(room - next.heap());
         if within_bounds(model, state, &next) {
+            // The input map remains charged while it is moved into the result.
+            // Reserve the result vector before keeping the charged state.
+            if !budget.reserve(&mut out) {
+                return true;
+            }
             out.push((params, next));
         } else {
             left_out(&next);
+            let bytes = next.heap() + params.heap();
+            drop(next);
+            drop(params);
+            budget.give(bytes);
         }
         false
     });
@@ -249,78 +269,6 @@ pub fn oversized_transition(model: &TemperModel) -> Option<(&str, usize)> {
         });
         (assignments > MAX_PARAM_ASSIGNMENTS).then_some((t.name.as_str(), assignments))
     })
-}
-
-/// The values explored for one parameter of `t`.
-fn param_candidates(
-    model: &TemperModel,
-    t: &ResolvedTransition,
-    name: &str,
-    kind: &ParamKind,
-    ranges: &BTreeMap<&str, CountRange>,
-) -> Vec<ParamValue> {
-    match kind {
-        ParamKind::Count => (0..=ranges[name].largest).map(ParamValue::Count).collect(),
-        ParamKind::Bool => vec![ParamValue::Bool(false), ParamValue::Bool(true)],
-        ParamKind::Str => string_literals(model, t, name)
-            .into_iter()
-            .map(|s| ParamValue::Str(s.into()))
-            .chain(std::iter::once(ParamValue::Fresh))
-            .collect(),
-    }
-}
-
-/// The literals a list `t` appends string parameter `name` to, or removes it
-/// from, is compared against: the strings worth choosing for it.
-fn string_literals(model: &TemperModel, t: &ResolvedTransition, name: &str) -> BTreeSet<String> {
-    let mut values: BTreeSet<String> = BTreeSet::new();
-    for effect in &t.effects {
-        if let ModelEffect::ListAppend {
-            var,
-            value: Arg::Param(p),
-        }
-        | ModelEffect::ListRemove {
-            var,
-            value: Arg::Param(p),
-        } = effect
-            && p == name
-            && let Some(literals) = model.list_literals.get(var)
-        {
-            values.extend(literals.iter().cloned());
-        }
-    }
-    values
-}
-
-/// The cartesian product of each parameter's candidate values.
-pub(super) fn param_assignments(
-    model: &TemperModel,
-    t: &ResolvedTransition,
-) -> Vec<BTreeMap<String, ParamValue>> {
-    let ranges = count_ranges(model, t);
-    let mut assignments = vec![BTreeMap::new()];
-    for (name, kind) in &t.params {
-        if *kind == ParamKind::Str && t.string_params.iter().any(|p| p.name == *name) {
-            continue; // String products, including list inputs, use equality classes.
-        }
-        let candidates = param_candidates(model, t, name, kind, &ranges);
-        assert!(
-            assignments.len() * candidates.len() <= MAX_PARAM_ASSIGNMENTS,
-            "transition '{}' has more than {MAX_PARAM_ASSIGNMENTS} parameter assignments",
-            t.name
-        );
-        assignments = assignments
-            .into_iter()
-            .flat_map(|assignment| {
-                candidates.iter().map(move |value| {
-                    let mut next = assignment.clone();
-                    next.insert(name.clone(), value.clone());
-                    next
-                })
-            })
-            .collect();
-    }
-    assignments
 }
 
 /// The largest value counter `var` is explored up to.

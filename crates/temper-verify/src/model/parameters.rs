@@ -5,8 +5,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use temper_spec::automaton::{Action, ActionConstraint};
 use temper_spec::predicate::{CmpOp, Env, Expr, Literal, Operand, Set, Val, eval};
 
+use super::assignments::param_assignments_budgeted;
 use super::count_bounds::CountRange;
-use super::semantics::{Expansion, ModelEnv, evaluate_guard, param_assignments};
+use super::heap::{Heap, tree_bytes};
+use super::semantics::{Expansion, ModelEnv, evaluate_guard};
 use super::strings::string_assignments;
 use super::types::{ModelString, ParamValue, ResolvedTransition, TemperModel, TemperModelState};
 
@@ -174,10 +176,25 @@ pub(super) fn any_inputs(
     mut visit: impl FnMut(BTreeMap<String, ParamValue>) -> bool,
 ) -> bool {
     let strings = string_assignments(model, t, state, values, budget);
-    for params in param_assignments(model, t) {
+    let numbers = param_assignments_budgeted(model, t, budget);
+    let temporary = strings.heap() + numbers.heap();
+    let mut found = false;
+    'inputs: for params in &numbers {
         for chosen in &strings {
             if !budget.take() {
-                return false;
+                break 'inputs;
+            }
+            let nodes = tree_bytes::<String, ParamValue>(params.len() + chosen.len());
+            let entries = params
+                .iter()
+                .map(|(k, v)| k.heap() + v.heap())
+                .sum::<usize>()
+                + chosen
+                    .iter()
+                    .map(|(k, v)| k.heap() + v.heap())
+                    .sum::<usize>();
+            if !budget.hold(nodes + entries) {
+                break 'inputs;
             }
             let mut params = params.clone();
             params.extend(
@@ -186,11 +203,15 @@ pub(super) fn any_inputs(
                     .map(|(k, v)| (k.clone(), ParamValue::Str(v.clone()))),
             );
             if visit(params) {
-                return true;
+                found = true;
+                break 'inputs;
             }
         }
     }
-    false
+    drop(strings);
+    drop(numbers);
+    budget.give(temporary);
+    found
 }
 
 /// Whether some allowed input makes the guard definitely true locally.

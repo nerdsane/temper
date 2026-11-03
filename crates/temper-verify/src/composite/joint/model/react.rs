@@ -1,12 +1,13 @@
 //! What a record's commit sets off: its reactions, as dispatches, and the
 //! module calls its triggers start.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use temper_spec::automaton::TargetResolver;
 use temper_spec::predicate::{Arg, Literal, ParamKind, Truth, eval};
 
 use super::super::env::{Blind, Found, ID, resolve};
+use super::super::room::Heap;
 use super::super::senders::Senders;
 use super::super::state::ReactionStep;
 use super::super::{Call, Dispatch, JointState};
@@ -36,7 +37,7 @@ impl JointModel {
             generated_for: None,
         }];
         let chain = if chain.is_empty() { &root } else { chain };
-        let outcomes = self.react(state, source, action, chain, by);
+        let mut outcomes = self.react(state, source, action, chain, by);
         let key = (source.to_string(), action.to_string());
         let Some(specs) = self.kernel.calls_on.get(&key).filter(|_| self.kernel_moves) else {
             return outcomes;
@@ -49,42 +50,51 @@ impl JointModel {
             Senders::anyone(by)
         };
         let internal = self.kernel.internal.get(source);
-        let asked: Vec<BTreeSet<String>> = specs
-            .iter()
-            .map(|spec| {
-                self.unchecked.asked(source, |action| {
+        for (outcome, _) in &mut outcomes {
+            if !self.expansion.take() {
+                return Vec::new();
+            }
+            for spec in specs {
+                let answers = |action: &str| {
                     if spec.on_success.is_empty() {
                         internal.is_some_and(|names| names.contains(action))
                     } else {
                         spec.on_success.iter().any(|name| name == action)
                     }
-                })
-            })
-            .collect();
-        let mut started = Vec::new();
-        for (mut outcome, known) in outcomes {
-            if !self.expansion.take() {
-                return Vec::new();
-            }
-            for (spec, asked) in specs.iter().zip(&asked) {
+                };
                 let strings = &outcome.records[source].strings;
+                let asked_entries = || {
+                    self.unchecked
+                        .asked(source, answers)
+                        .filter_map(|field| strings.get(field).map(|value| (field, value)))
+                };
+                let count = asked_entries().count();
+                let call_heap = crate::model::heap::block(source.len())
+                    + spec.module.heap()
+                    + spec.on_success.heap()
+                    + spec.on_failure.heap()
+                    + crate::model::heap::tree_bytes::<String, crate::model::ModelString>(count)
+                    + asked_entries()
+                        .map(|(k, v)| k.heap() + v.heap())
+                        .sum::<usize>();
+                if !self.expansion.hold(call_heap) || !self.expansion.reserve(&mut outcome.calls) {
+                    return Vec::new();
+                }
                 let call = Call {
                     to: source.to_string(),
                     module: spec.module.clone(),
                     on_success: spec.on_success.clone(),
                     on_failure: spec.on_failure.clone(),
                     by: answer_as,
-                    asked: asked
-                        .iter()
-                        .filter_map(|field| Some((field.clone(), strings.get(field)?.clone())))
+                    asked: asked_entries()
+                        .map(|(field, value)| (field.clone(), value.clone()))
                         .collect(),
                 };
                 let at = outcome.calls.partition_point(|c| c < &call);
                 outcome.calls.insert(at, call);
             }
-            started.push((outcome, known));
         }
-        started
+        outcomes
     }
 
     /// Send the reactions of `source.action` between types in scope, in
@@ -103,7 +113,10 @@ impl JointModel {
         chain: &[ReactionStep],
         by: u32,
     ) -> Vec<(JointState, Certainty)> {
-        let mut outcomes = vec![(state, Certainty::Sure)];
+        let mut outcomes = Vec::new();
+        if !self.keep(&mut outcomes, state, Certainty::Sure) {
+            return outcomes;
+        }
         for (index, reaction) in self
             .reactions
             .iter()
@@ -111,6 +124,9 @@ impl JointModel {
             .filter(|(_, r)| r.from == source && r.source_action == action)
         {
             let mut after = Vec::new();
+            // The ways before this reaction are dropped as the next ones are
+            // made; [`Self::keep`] counted each.
+            let before = outcomes.heap();
             for (state, known) in outcomes {
                 if !self.expansion.take() {
                     return Vec::new();
@@ -121,8 +137,8 @@ impl JointModel {
                 };
                 let known =
                     known.then(Certainty::unless(fires != Truth::Unknown, Certainty::OneOf));
-                if fires != Truth::True {
-                    after.push((state.clone(), known));
+                if fires != Truth::True && !self.keep(&mut after, state.clone(), known) {
+                    return Vec::new();
                 }
                 if fires == Truth::False {
                     continue;
@@ -142,12 +158,14 @@ impl JointModel {
                     _ => Found::Unknown,
                 };
                 if reaches == Found::Missing {
-                    after.push((state, known));
+                    if !self.keep(&mut after, state, known) {
+                        return Vec::new();
+                    }
                     continue;
                 }
                 let known = known.then(Certainty::unless(reaches == Found::Yes, Certainty::OneOf));
-                if reaches == Found::Unknown {
-                    after.push((state.clone(), known));
+                if reaches == Found::Unknown && !self.keep(&mut after, state.clone(), known) {
+                    return Vec::new();
                 }
                 let generated_for = match &reaction.resolve {
                     Some(TargetResolver::Create) => Some(reaction.to.clone()),
@@ -173,7 +191,9 @@ impl JointModel {
                     generated_for,
                 };
                 if chain.iter().any(|taken| step.repeats(taken)) {
-                    after.push((state, known));
+                    if !self.keep(&mut after, state, known) {
+                        return Vec::new();
+                    }
                     continue;
                 }
                 let mut next_chain = chain.to_vec();
@@ -194,10 +214,14 @@ impl JointModel {
                 };
                 let mut next = state;
                 add(&mut next, dispatch);
-                after.push((next, known));
+                if !self.keep(&mut after, next, known) {
+                    return Vec::new();
+                }
             }
+            self.expansion.give(before);
             outcomes = after;
         }
+        // Keep the states charged through module calls and next-state packing.
         outcomes
     }
 

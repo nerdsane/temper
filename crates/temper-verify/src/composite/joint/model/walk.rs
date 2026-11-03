@@ -4,9 +4,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use super::super::JointOutcome;
 use super::super::pack::{Packed, Packer};
-use super::super::room::{Bound, Held, MB, block, bytes, grow, grow_map, map_bytes};
+use super::super::room::{Bound, Held, MB, block};
 use super::super::state::render;
 use super::super::{JointState, JointStep, premise};
+use super::held::Tables;
 use super::step::Certainty;
 use super::{JointModel, Walk};
 use temper_spec::predicate::{Expr, Name, Truth, eval};
@@ -38,8 +39,8 @@ pub(in crate::composite::joint) struct Edge {
 pub(in crate::composite::joint) struct Explored<'a> {
     /// Each state walked, packed, with the state and move (a name in
     /// `packer`) it was first reached by.
-    nodes: Vec<(Packed, Option<(u32, u32)>)>,
-    packer: Packer,
+    pub(super) nodes: Vec<(Packed, Option<(u32, u32)>)>,
+    pub(super) packer: Packer,
     /// Every move made from a walked state, when asked for.
     pub(in crate::composite::joint) made: Vec<Made>,
     /// Every way those moves lead between walked states.
@@ -224,17 +225,41 @@ impl JointModel {
                 explored.made.len(),
                 explored.edges.len(),
             ];
-            for mv in self.moves(&state) {
+            let moves = match self.within(&mut explored.held, &mut tables, || self.moves(&state)) {
+                Ok(moves) => moves,
+                Err(reason) => {
+                    explored.stop_for_room(reason);
+                    break;
+                }
+            };
+            for mv in &moves.0 {
                 if !self.expansion.take() {
                     break;
                 }
-                let (nexts, held) = self.next(&state, &mv);
+                let ((nexts, held), room) =
+                    match self.within(&mut explored.held, &mut tables, || self.next(&state, mv)) {
+                        Ok(built) => built,
+                        Err(reason) => {
+                            explored.stop_for_room(reason);
+                            break;
+                        }
+                    };
                 explored.held_back |= held;
+                tables.decided = self.senders.held();
+                // Every outcome needs an edge; state slots are reserved only
+                // when an unseen packed state is about to be kept.
+                let reserved =
+                    tables.reserve(&mut explored, &mut seen, &mut queue, edges, 0, nexts.len());
+                if let Err(reason) = reserved {
+                    tables.give(&mut explored.held, room);
+                    explored.stop_for_room(reason);
+                    break;
+                }
                 if edges {
                     explored.made.push(Made {
                         from: index as u32,
                         by_system: mv.by_system(),
-                        relied: self.relies(&mv),
+                        relied: self.relies(mv),
                         covered: !held
                             && !nexts.is_empty()
                             && nexts.iter().all(|n| n.certainty != Certainty::Unsure),
@@ -246,6 +271,12 @@ impl JointModel {
                     let at = match seen.get(&packed) {
                         Some(&at) => at,
                         None => {
+                            if let Err(reason) =
+                                tables.reserve(&mut explored, &mut seen, &mut queue, false, 1, 0)
+                            {
+                                explored.stop_for_room(reason);
+                                break;
+                            }
                             let at = explored.nodes.len() as u32;
                             let label = explored.packer.id(&next.label);
                             tables.states += block(size_of::<[usize; 2]>() + 4 * packed.len());
@@ -263,6 +294,15 @@ impl JointModel {
                         });
                     }
                 }
+                tables.give(&mut explored.held, room);
+                if let Err(reason) = tables.count(&mut explored, &seen, &queue) {
+                    explored.stop_for_room(reason);
+                    break;
+                }
+            }
+            tables.give(&mut explored.held, moves.1);
+            if explored.stopped.is_some() {
+                break;
             }
             let after = [
                 explored.nodes.len(),
@@ -275,53 +315,6 @@ impl JointModel {
             explored.stopped = Some("the joint expansion exhausted its work or time budget".into());
         }
         explored
-    }
-}
-
-/// The walk's tables as the memory it holds counts them: each at its
-/// capacity, and each packed state as its own heap block. Before each state
-/// is walked, every table is grown to hold what walking one state has added
-/// at most so far, with the memory of its new copy taken first, so a table
-/// seldom grows on its own while both copies are held.
-#[derive(Default)]
-struct Tables {
-    /// Bytes the packed states take.
-    states: usize,
-    /// The most states, moves and edges walking one state has added.
-    most: [usize; 3],
-}
-
-impl Tables {
-    fn saw(&mut self, added: [usize; 3]) {
-        for (most, added) in self.most.iter_mut().zip(added) {
-            *most = (*most).max(added);
-        }
-    }
-
-    fn make_room(
-        &mut self,
-        explored: &mut Explored<'_>,
-        seen: &mut HashMap<Packed, u32>,
-        queue: &mut VecDeque<usize>,
-        edges: bool,
-    ) -> Result<(), String> {
-        let [states, made, ends] = self.most.map(|most| most.max(1));
-        let held = &mut explored.held;
-        grow(&mut explored.nodes, states, held)?;
-        grow(queue, states, held)?;
-        grow_map(seen, states, held)?;
-        if edges {
-            grow(&mut explored.made, made, held)?;
-            grow(&mut explored.edges, ends, held)?;
-        }
-        let bytes = self.states
-            + explored.packer.bytes()
-            + bytes(&explored.nodes)
-            + bytes(queue)
-            + map_bytes::<Packed, u32>(seen.capacity())
-            + bytes(&explored.made)
-            + bytes(&explored.edges);
-        explored.held.set(bytes)
     }
 }
 

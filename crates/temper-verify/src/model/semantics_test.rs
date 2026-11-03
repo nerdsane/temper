@@ -331,3 +331,50 @@ fn field_and_list_symbols_share_one_canonical_scope() {
         BTreeSet::from([ModelString::Symbol(1), ModelString::Symbol(2), "#1".into()])
     );
 }
+
+#[test]
+fn string_choices_and_successor_states_count_against_the_room() {
+    let model = two_strings_model();
+    let initial = stateright::Model::init_states(&model).remove(0);
+    let values = (0..16)
+        .map(|i| ModelString::from(format!("{i}{}", "v".repeat(256))))
+        .collect();
+    let budget = Expansion::default();
+    budget.allow(64 << 10);
+    let next = successors_budgeted(&model, &model.transitions[0], &initial, &values, &budget);
+    assert!(
+        budget.short(),
+        "input products must stop while they are built"
+    );
+    drop(next);
+
+    budget.allow(16 << 20);
+    let next = successors_budgeted(&model, &model.transitions[0], &initial, &values, &budget);
+    assert!(
+        !budget.short(),
+        "the complete input product fits in a larger room"
+    );
+    assert_eq!(
+        next,
+        successors_among(&model, &model.transitions[0], &initial, &values)
+    );
+
+    // The input choices fit, but copying this record for each choice does not.
+    let mut large = initial;
+    large.lists.insert(
+        "payload".into(),
+        vec![ModelString::from("x".repeat(32 << 10))],
+    );
+    budget.allow(64 << 10);
+    successors_budgeted(
+        &model,
+        &model.transitions[0],
+        &large,
+        &BTreeSet::new(),
+        &budget,
+    );
+    assert!(
+        budget.short(),
+        "successor records must consume room before cloning"
+    );
+}
