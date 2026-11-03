@@ -139,6 +139,11 @@ pub struct Claims {
     /// its moves record no request subject. An issuer must never grant it.
     #[serde(default)]
     pub role: Option<String>,
+    /// On an agent's token, the name of this agent instance, for people to know
+    /// it by. It goes onto the principal and into what each move saves, and is
+    /// not an authorization input.
+    #[serde(default)]
+    pub agent_label: Option<String>,
     #[serde(default)]
     pub grant_id: Option<String>,
     #[serde(default)]

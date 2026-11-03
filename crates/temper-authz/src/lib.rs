@@ -12,14 +12,14 @@ mod metrics;
 mod policy_gen;
 pub mod statements;
 
-pub use cause::{MoveCause, ReactionHop, TimerArm};
+pub use cause::{MoveCause, ReactionHop, TimerArm, TimerRecord};
 pub use context::{
     AuthenticatedRequestContext, IssuedCredential, Principal, PrincipalKind, SecurityContext,
     is_cedar_authority_context_key, platform_keys,
 };
 pub use engine::{
-    Asker, Attr, AuthzDecision, AuthzEngine, ListReadUniformity, May, SendAnalysis,
-    VERIFIED_OPERATOR_WHEN,
+    Asker, Attr, AuthzDecision, AuthzEngine, Cause, Hop, Kind, ListRead, ListReadUniformity, May,
+    Question, RowRule, SendAnalysis, VERIFIED_OPERATOR_WHEN, permitted_resource_types,
 };
 pub use error::{AuthzDenial, AuthzError};
 pub use metrics::init_metrics;

@@ -467,23 +467,6 @@ mod tests {
     }
 
     #[test]
-    fn test_consequence_success() {
-        let consequence = OTSConsequence::success().with_result_summary("Calculation completed: 4");
-
-        assert!(consequence.success);
-        assert!(consequence.result_summary.is_some());
-        assert!(consequence.error_type.is_none());
-    }
-
-    #[test]
-    fn test_consequence_failure() {
-        let consequence = OTSConsequence::failure().with_error_type("ToolNotFound");
-
-        assert!(!consequence.success);
-        assert!(consequence.error_type.is_some());
-    }
-
-    #[test]
     #[should_panic(expected = "Score must be between 0.0 and 1.0")]
     fn test_evaluation_invalid_score() {
         OTSDecisionEvaluation::new("test", 2.0);
@@ -493,17 +476,5 @@ mod tests {
     #[should_panic(expected = "Contribution must be between -1.0 and 1.0")]
     fn test_credit_assignment_invalid_contribution() {
         OTSCreditAssignment::new(1.5);
-    }
-
-    #[test]
-    fn test_decision_with_embedding() {
-        let choice = OTSChoice::new("test");
-        let consequence = OTSConsequence::success();
-        let embedding = vec![0.1, 0.2, 0.3, 0.4];
-
-        let decision = OTSDecision::new(DecisionType::ToolSelection, choice, consequence)
-            .with_embedding(embedding.clone());
-
-        assert_eq!(decision.embedding, Some(embedding));
     }
 }

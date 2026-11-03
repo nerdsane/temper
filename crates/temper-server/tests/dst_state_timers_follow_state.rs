@@ -50,6 +50,8 @@ mod embedder;
 mod final_denials;
 #[path = "dst_state_timers_follow_state/invariants.rs"]
 mod invariants;
+#[path = "dst_state_timers_follow_state/late_reconcile.rs"]
+mod late_reconcile;
 #[path = "dst_state_timers_follow_state/process_clock.rs"]
 mod process_clock;
 #[path = "dst_state_timers_follow_state/slow_store.rs"]

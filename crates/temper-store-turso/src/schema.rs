@@ -317,6 +317,20 @@ CREATE TABLE IF NOT EXISTS spec_committed_versions (
     PRIMARY KEY(tenant, entity_type)
 );";
 
+/// What the newest review of each app's modules said, one row per app of a
+/// tenant: `result` is JSON, `{"warnings": [...], "modules_reviewed": [...]}`.
+/// `version` names what was reviewed: the commit the app's files say, else the
+/// digest of its bundle.
+pub const CREATE_MODULE_REVIEWS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS module_reviews (
+    tenant TEXT NOT NULL,
+    app_name TEXT NOT NULL,
+    version TEXT NOT NULL,
+    result TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(tenant, app_name)
+);";
+
 /// ALTER TABLE migrations for the `trajectories` table.
 ///
 /// These add columns that were previously only tracked in-memory

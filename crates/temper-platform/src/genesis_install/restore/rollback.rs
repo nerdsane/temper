@@ -39,6 +39,7 @@ pub(in crate::genesis_install) async fn rollback_to_prior(
         let matches = tenant_os_app_bundle_digest(tenant, &record.app_name).is_some_and(|digest| {
             record.bundle_digest.is_empty() || digest.bundle_digest == record.bundle_digest
         });
+        let mut recovered = None;
         let ready = if matches {
             // Pending records describe the desired version, so replay its phases rather
             // than treating its saved digest as proof that the runtime is unchanged.
@@ -51,7 +52,8 @@ pub(in crate::genesis_install) async fn rollback_to_prior(
             )
             .await
             {
-                Ok(_) => {
+                Ok(result) => {
+                    recovered = Some(result);
                     verify_install_runtime_ready(platform, ps, tenant, &record.app_name).await
                         && tenant_os_app_bundle_digest(tenant, &record.app_name).is_some_and(
                             |digest| {
@@ -80,6 +82,8 @@ pub(in crate::genesis_install) async fn rollback_to_prior(
         // Keep the recovery record failed unless this dependency independently verified.
         if let Err(error) = record_dependency_recovery(ps, record, ready).await {
             errors.push(error);
+        } else if ready && let Some(result) = recovered {
+            result.publish_reviews();
         }
     }
     let app_names = prior_records
@@ -141,6 +145,15 @@ pub(super) async fn restore_prior_dependencies(
         if record.app_name == prior.app_name || served.contains(&record.app_name) {
             continue;
         }
+        // A dependency the install left as it was (one a push resolved, not
+        // wrote) still resolves at its recorded version: nothing to restore.
+        let unchanged =
+            tenant_os_app_bundle_digest(&record.tenant, &record.app_name).is_some_and(|now| {
+                !record.bundle_digest.is_empty() && now.bundle_digest == record.bundle_digest
+            });
+        if unchanged {
+            continue;
+        }
         if let Err(error) = restore_dependency(platform, ps, record, prior_records).await {
             errors.push(format!(
                 "failed to restore prior dependency {} for rollback: {error}",
@@ -170,8 +183,8 @@ async fn restore_dependency(
         install_cache_candidates(platform, &record.tenant, registry_tenant, &record.app_ref);
     let destination = candidates[0].path.clone();
     let own = first_matching_install(ps, &candidates, record, prior_records).await;
-    let stored = match own {
-        Some((stored, _)) => stored,
+    let (stored, apps) = match own {
+        Some(found) => found,
         None => {
             // A dependency's app_ref names its version, not the closure that cached it.
             // Only this tenant's recorded installs contribute candidate directories; every
@@ -201,7 +214,7 @@ async fn restore_dependency(
                 ));
             }
             match first_matching_install(ps, &candidates, record, prior_records).await {
-                Some((stored, _)) => stored,
+                Some(found) => found,
                 None => {
                     let registry = recorded_registry(&record.registry_url)?;
                     let app_ref = parse_registry_app_ref(&record.app_ref)?;
@@ -213,22 +226,26 @@ async fn restore_dependency(
                     )
                     .await?;
                     legacy_specs::convert_legacy_bundle_specs(&destination);
-                    cached_apps_matching_records(ps, &destination, record, prior_records)
-                        .await
-                        .ok_or_else(|| format!(
+                    let apps = cached_apps_matching_records(
+                        ps,
+                        &destination,
+                        record,
+                        prior_records,
+                    )
+                    .await
+                    .ok_or_else(|| {
+                        format!(
                             "re-materialized previous version {} does not hold its recorded bundle",
                             record.app_ref
-                        ))?;
-                    destination
+                        )
+                    })?;
+                    (destination, apps)
                 }
             }
         }
     };
     // Register just this dependency; siblings are restored from their own prior records.
-    register_install_cache(
-        &record.tenant,
-        stored,
-        DirApps::Only(BTreeSet::from([record.app_name.clone()])),
-    );
+    let own = apps.into_iter().filter(|(app, _)| app == &record.app_name);
+    register_written_apps(&record.tenant, stored, own.collect());
     Ok(())
 }

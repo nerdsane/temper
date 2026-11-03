@@ -150,9 +150,7 @@ fn server_with_tally(store: &SimEventStore, seed: u64, tally: &str) -> ServerSta
         ServerState::from_registry(ActorSystem::new(format!("commit-{seed}")), registry);
     // The sim store keeps each record's rows itself, and the server reads its
     // timer rows through it: its commits write the rows this server reads.
-    state.set_storage_stack(
-        StorageStack::from_sim(store.clone(), None).with_entity_rows_in_journal(),
-    );
+    state.set_storage_stack(StorageStack::from_sim(store.clone(), None));
     state.state_timer_rows = Some(std::sync::Arc::new(rows::SimTimerRows(store.clone())));
     state.action_dispatch_timeout = Duration::from_millis(25);
     // A reaction is authorized as its own move: with no tenant policy, Cedar

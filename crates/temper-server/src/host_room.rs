@@ -28,6 +28,17 @@ pub static HOST_ROOM: HostRoom = HostRoom {
     held: AtomicUsize::new(0),
 };
 
+impl HostRoom {
+    /// The bytes joint walks may still take now: half of what the host
+    /// leaves free to them, less what they hold. `None` when this host's
+    /// free memory cannot be read.
+    pub fn left(&self) -> Option<usize> {
+        let held = self.held.load(Ordering::Relaxed);
+        let free = free_memory()?;
+        Some((free.saturating_add(held) / 2).saturating_sub(held))
+    }
+}
+
 impl Room for HostRoom {
     fn take(&self, bytes: usize) -> Result<(), String> {
         let mut held = self.held.load(Ordering::Relaxed);

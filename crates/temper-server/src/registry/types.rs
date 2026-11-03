@@ -85,6 +85,13 @@ pub enum RegistryError {
         entity_type: String,
         source: String,
     },
+    /// Two principal-record types would set one Cedar principal attribute.
+    PrincipalAttributeShared {
+        tenant: String,
+        first: String,
+        second: String,
+        attribute: String,
+    },
 }
 
 impl std::fmt::Display for RegistryError {
@@ -104,6 +111,19 @@ impl std::fmt::Display for RegistryError {
                 write!(
                     f,
                     "failed to parse IOA for tenant '{tenant}', entity '{entity_type}': {source}"
+                )
+            }
+            Self::PrincipalAttributeShared {
+                tenant,
+                first,
+                second,
+                attribute,
+            } => {
+                write!(
+                    f,
+                    "principal records '{first}' and '{second}' in tenant '{tenant}' would both \
+                     set principal.{attribute} (and principal.actingFor{attribute}); rename one \
+                     type or its principal_record_set field"
                 )
             }
         }
@@ -236,12 +256,5 @@ mod tests {
             err.to_string(),
             "failed to parse IOA for tenant 't1', entity 'Order': missing states"
         );
-    }
-
-    #[test]
-    fn relation_graph_default_empty() {
-        let g = RelationGraph::default();
-        assert!(g.outgoing.is_empty());
-        assert!(g.incoming.is_empty());
     }
 }

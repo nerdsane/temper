@@ -90,7 +90,6 @@ use temper_server::build_router;
 use temper_server::request_context::AgentContext;
 use temper_store_sim::SimEventStore;
 use tower::ServiceExt;
-use tracing_subscriber::prelude::*;
 use world::SimTimerRows;
 
 const SEEDS: u64 = 16;
@@ -468,9 +467,7 @@ fn run_seed(seed: u64, withheld: &Withheld) -> Result<(), String> {
 
 #[test]
 fn dst_a_timer_acts_with_its_setters_current_standing() {
-    let withheld = Withheld::default();
-    let _logs =
-        tracing::subscriber::set_default(tracing_subscriber::registry().with(withheld.clone()));
+    let withheld = Withheld::install();
     // Seeds that broke each invariant, and the first such seed's report.
     let mut broken: BTreeMap<String, (Vec<u64>, String)> = BTreeMap::new();
     for seed in 0..SEEDS {

@@ -23,6 +23,10 @@ mod verification_stream;
 pub(crate) use load_dir::handle_load_dir;
 pub(crate) use load_inline::handle_load_inline;
 pub(crate) use validate_ioa::handle_validate_ioa;
+pub use validate_ioa::{
+    DEFAULT_BUDGET_MS, DEFAULT_PROP_TEST_CASES, DEFAULT_SIM_SEEDS, MAX_BUDGET_MS, budget_states,
+    check_ioa,
+};
 
 /// GET /observe/specs -- list loaded specs in the credential-bound tenant.
 pub(crate) async fn handle_list_specs(

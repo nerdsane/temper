@@ -764,6 +764,13 @@ pub fn apply_effects(
                     }
                 }
             }
+            Effect::ListRemove { var, value } => {
+                if let Some(element) = effect_args::string(value, params) {
+                    declared
+                        .list_mut(&mut state.lists, var)
+                        .retain(|item| *item != element);
+                }
+            }
             Effect::Custom(effect_name) => {
                 custom_effects.push(effect_name.clone());
                 tracing::info!(

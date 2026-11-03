@@ -146,6 +146,49 @@ impl TursoEventStore {
         Ok(())
     }
 
+    /// Rewrite an existing catalog row and its field index from `state`, as
+    /// [`Self::upsert_query_projection_with_state`] does, and leave a record
+    /// with no catalog row alone: while the server serves, only the record's
+    /// own commit creates its row (boot repair creates the missing ones before
+    /// serving). A record deleted after `state` was read stays deleted.
+    #[expect(clippy::too_many_arguments, reason = "projection upsert boundary")]
+    pub async fn refresh_query_projection_with_state(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+        fields: &serde_json::Value,
+        state: &serde_json::Value,
+        sequence_nr: u64,
+    ) -> Result<(), PersistenceError> {
+        let status = canonical_projection_status(status, state);
+        let conn = self
+            .write_connection("turso.refresh_query_projection", WritePriority::Low)
+            .await?;
+        let tx = conn.begin_immediate().await.map_err(storage_error)?;
+        if existing_projection(&tx, [tenant, entity_type, entity_id])
+            .await?
+            .is_some()
+        {
+            write_projection(
+                &tx,
+                &ProjectionWrite {
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    status,
+                    fields,
+                    state,
+                    sequence_nr,
+                },
+            )
+            .await?;
+        }
+        tx.commit().await.map_err(storage_error)?;
+        Ok(())
+    }
+
     /// Upsert several durable query-plane projections in one transaction.
     #[instrument(skip_all, fields(
         otel.name = "turso.upsert_query_projections",

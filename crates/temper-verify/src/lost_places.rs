@@ -20,6 +20,7 @@ mod origins;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::model::{TemperModel, TemperModelState};
+use crate::reach::{Graph, NO_PLACE, Reach};
 
 /// A record that can never reach places another record in its place can.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -65,157 +66,18 @@ impl LostPlace {
     }
 }
 
-/// The states a whole walk found, each with the place it is in, whether a
-/// step from it was left out past a bound, how it was first reached, and the
-/// states it steps to. A state's number is the order it was found in, and a
-/// state's steps are added when the walk takes it, in that order.
-#[derive(Debug, Default)]
-pub(crate) struct Graph {
-    place: Vec<u32>,
-    cut: Vec<bool>,
-    parent: Vec<Option<(u32, u32)>>,
-    depth: Vec<u32>,
-    offsets: Vec<u32>,
-    steps: Vec<u32>,
-}
-
-/// A state's place when its status is not a declared place.
-const NO_PLACE: u32 = u32::MAX;
-
-impl Graph {
-    /// Number a newly found state, first reached from `parent` by the
-    /// transition at that index, or a start state.
-    pub(crate) fn add(
-        &mut self,
-        model: &TemperModel,
-        state: &TemperModelState,
-        parent: Option<(u32, u32)>,
-    ) -> u32 {
-        let at = u32::try_from(self.place.len()).expect("a walk numbers fewer than 2^32 states");
-        let place = model.states.iter().position(|s| *s == state.status);
-        self.place
-            .push(place.map_or(NO_PLACE, |p| u32::try_from(p).expect("places fit in u32")));
-        self.cut.push(false);
-        self.depth
-            .push(parent.map_or(0, |(from, _)| self.depth[from as usize] + 1));
-        self.parent.push(parent);
-        at
-    }
-
-    /// The steps from state `at`, the next state the walk takes, and whether
-    /// one was left out past a bound.
-    pub(crate) fn steps_from(&mut self, at: u32, cut: bool, mut to: Vec<u32>) {
-        if self.offsets.is_empty() {
-            self.offsets.push(0);
-        }
-        assert_eq!(
-            at as usize,
-            self.offsets.len() - 1,
-            "the walk takes states in the order it found them"
-        );
-        to.sort_unstable();
-        to.dedup();
-        self.cut[at as usize] = cut;
-        self.steps.extend(to);
-        self.offsets
-            .push(u32::try_from(self.steps.len()).expect("a walk has fewer than 2^32 steps"));
-    }
-
-    fn len(&self) -> usize {
-        self.place.len()
-    }
-
-    fn steps(&self, at: usize) -> &[u32] {
-        &self.steps[self.offsets[at] as usize..self.offsets[at + 1] as usize]
-    }
-
-    fn path(&self, model: &TemperModel, mut at: usize) -> Vec<String> {
-        let mut moves = Vec::new();
-        while let Some((from, t)) = self.parent[at] {
-            moves.push(model.transitions[t as usize].name.clone());
-            at = from as usize;
-        }
-        moves.reverse();
-        moves
-    }
-}
-
-/// Places as a set of bits, one word per 64 places.
-#[derive(Clone, Copy)]
-struct Bits {
-    words: usize,
-}
-
-impl Bits {
-    fn row<'a>(&self, all: &'a [u64], i: usize) -> &'a [u64] {
-        &all[i * self.words..(i + 1) * self.words]
-    }
-
-    fn names(&self, model: &TemperModel, set: &[u64]) -> Vec<String> {
-        (0..model.states.len())
-            .filter(|&p| set[p / 64] & (1 << (p % 64)) != 0)
-            .map(|p| model.states[p].clone())
-            .collect()
-    }
-}
-
 /// Every record the walk in `graph` found that loses places, one per place
-/// and set of places lost, shortest paths first. `found` maps each state to
-/// its number in `graph`.
+/// and set of places lost, shortest paths first. `reach` is what each of its
+/// states can reach, and `found` maps each state to its number in `graph`.
 pub(crate) fn lost_places(
     model: &TemperModel,
     graph: &Graph,
+    reach: &Reach,
     found: &HashMap<TemperModelState, u32>,
 ) -> Vec<LostPlace> {
     let n = graph.len();
-    if n == 0 || graph.offsets.len() != n + 1 {
-        return Vec::new();
-    }
-    let bits = Bits {
-        words: model.states.len().div_ceil(64).max(1),
-    };
-    let (component, count) = components(graph);
-
-    // What each component can reach, and whether a step past a bound lies
-    // ahead of it. A component is numbered after every one it steps to.
-    let mut first = vec![0usize; count + 1];
-    for &c in &component {
-        first[c as usize + 1] += 1;
-    }
-    for c in 0..count {
-        first[c + 1] += first[c];
-    }
-    let mut members = vec![0usize; n];
-    let mut next = first.clone();
-    for (at, &c) in component.iter().enumerate() {
-        members[next[c as usize]] = at;
-        next[c as usize] += 1;
-    }
-    let mut reach = vec![0u64; count * bits.words];
-    let mut past_bound = vec![false; count];
-    for c in 0..count {
-        let mut row = vec![0u64; bits.words];
-        let mut cut = false;
-        for &at in &members[first[c]..first[c + 1]] {
-            let place = graph.place[at];
-            if place != NO_PLACE {
-                row[place as usize / 64] |= 1 << (place % 64);
-            }
-            cut |= graph.cut[at];
-            for &to in graph.steps(at) {
-                let d = component[to as usize] as usize;
-                if d != c {
-                    for (w, word) in row.iter_mut().enumerate() {
-                        *word |= bits.row(&reach, d)[w];
-                    }
-                    cut |= past_bound[d];
-                }
-            }
-        }
-        reach[c * bits.words..(c + 1) * bits.words].copy_from_slice(&row);
-        past_bound[c] = cut;
-    }
-    let reach_of = |at: usize| bits.row(&reach, component[at] as usize);
+    let bits = reach.bits;
+    let reach_of = |at: usize| reach.places(at);
 
     // What some record in each place can reach.
     let mut anyone = vec![0u64; model.states.len() * bits.words];
@@ -234,7 +96,7 @@ pub(crate) fn lost_places(
     let mut lost: BTreeMap<usize, Vec<u64>> = BTreeMap::new();
     for at in 0..n {
         let place = graph.place[at];
-        if place == NO_PLACE || past_bound[component[at] as usize] {
+        if place == NO_PLACE || reach.past_bound(at) {
             continue;
         }
         let row: Vec<u64> = bits
@@ -248,8 +110,7 @@ pub(crate) fn lost_places(
         }
     }
 
-    let made_here =
-        origins::first_comparable(graph, &component, &first, &members, &reach, &lost, bits);
+    let made_here = origins::first_comparable(graph, reach, &lost);
 
     // One finding per place and set of places lost, with its shortest
     // record and the other record in its place that reaches the most of them.
@@ -310,82 +171,6 @@ pub(crate) fn lost_places(
         .collect()
 }
 
-/// The strongly connected components of `graph` (Tarjan's, without
-/// recursion): each state's component, numbered after every component it
-/// steps to, and how many there are.
-fn components(graph: &Graph) -> (Vec<u32>, usize) {
-    let n = graph.len();
-    let mut t = Tarjan {
-        order: vec![UNSEEN; n],
-        low: vec![0; n],
-        open: Vec::new(),
-        calls: Vec::new(),
-        seen: 0,
-    };
-    let mut component = vec![UNSEEN; n];
-    let mut count = 0u32;
-    for root in 0..n {
-        if t.order[root] != UNSEEN {
-            continue;
-        }
-        t.enter(graph, root as u32);
-        while let Some(&(v, next)) = t.calls.last() {
-            let vi = v as usize;
-            if next < graph.offsets[vi + 1] {
-                t.calls.last_mut().expect("a call is open").1 += 1;
-                let w = graph.steps[next as usize] as usize;
-                if t.order[w] == UNSEEN {
-                    t.enter(graph, w as u32);
-                } else if component[w] == UNSEEN {
-                    // Still open: on the path or in a component not yet closed.
-                    t.low[vi] = t.low[vi].min(t.order[w]);
-                }
-                continue;
-            }
-            t.calls.pop();
-            if let Some(&(u, _)) = t.calls.last() {
-                t.low[u as usize] = t.low[u as usize].min(t.low[vi]);
-            }
-            if t.low[vi] == t.order[vi] {
-                loop {
-                    let w = t.open.pop().expect("v is still open");
-                    component[w as usize] = count;
-                    if w == v {
-                        break;
-                    }
-                }
-                count += 1;
-            }
-        }
-    }
-    (component, count as usize)
-}
-
-const UNSEEN: u32 = u32::MAX;
-
-/// The walk state of [`components`].
-struct Tarjan {
-    /// The order each state was entered in.
-    order: Vec<u32>,
-    /// The earliest entered open state each state's walk reaches.
-    low: Vec<u32>,
-    /// States entered whose component is not closed yet.
-    open: Vec<u32>,
-    /// The states being walked, each with the next of its steps to take.
-    calls: Vec<(u32, u32)>,
-    seen: u32,
-}
-
-impl Tarjan {
-    fn enter(&mut self, graph: &Graph, v: u32) {
-        self.order[v as usize] = self.seen;
-        self.low[v as usize] = self.seen;
-        self.seen += 1;
-        self.open.push(v);
-        self.calls.push((v, graph.offsets[v as usize]));
-    }
-}
-
 /// The fields in which `a` and `b` differ, as "makers = 1" for each.
 fn differences(a: &TemperModelState, b: &TemperModelState) -> (String, String) {
     let mut mine = Vec::new();
@@ -420,7 +205,7 @@ fn field(value: Option<&impl ToString>) -> String {
 }
 
 /// "A", "A or B", "A, B or C".
-fn either(places: &[String]) -> String {
+pub(crate) fn either(places: &[String]) -> String {
     match places {
         [] => String::new(),
         [one] => one.clone(),

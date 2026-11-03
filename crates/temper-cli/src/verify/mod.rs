@@ -6,13 +6,13 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use temper_platform::os_apps::{AppFiles, app_dir_of, unspecified_entity_types};
 use temper_spec::automaton::{LintSeverity, lint_automata_bundle, lint_automaton};
 use temper_spec::csdl::parse_csdl;
 use temper_spec::model::build_spec_model;
 
 mod input;
 mod package;
-use input::read_ioa_sources;
 
 /// Run the `temper verify` command.
 ///
@@ -22,16 +22,23 @@ pub fn run(specs_dir: &str) -> Result<()> {
     let specs_path = Path::new(specs_dir);
     println!("Running verification cascade...");
     println!("  Specs directory: {}", specs_path.display());
-
-    // Read the CSDL model file
-    let csdl_path = specs_path.join("model.csdl.xml");
-    if !csdl_path.exists() {
-        anyhow::bail!(
-            "CSDL model file not found at {}. Run `temper init` first.",
-            csdl_path.display()
+    // The specs/ of an app is read as the whole app, the files its install
+    // reads (`AppFiles`), so what passes here is what installs.
+    let app_dir = app_dir_of(specs_path);
+    if app_dir != specs_path {
+        println!(
+            "  Reading the app at {}, as its install does",
+            app_dir.display()
         );
     }
+    let files = AppFiles::find(app_dir);
 
+    let csdl_path = files.csdl.clone().with_context(|| {
+        format!(
+            "CSDL model file not found in {}. Run `temper init` first.",
+            app_dir.display()
+        )
+    })?;
     let csdl_xml = fs::read_to_string(&csdl_path)
         .with_context(|| format!("Failed to read {}", csdl_path.display()))?;
     input::validate_xml_document(&csdl_xml)?;
@@ -41,10 +48,17 @@ pub fn run(specs_dir: &str) -> Result<()> {
     anyhow::ensure!(!csdl.schemas.is_empty(), "CSDL must contain a Schema");
 
     // Read IOA TOML specs (preferred) and TLA+ specs (legacy)
-    let ioa_sources = read_ioa_sources(specs_path)?;
+    let ioa_sources = input::read_ioa_files(&files.ioa)?;
+    // A spec may call a module of an app it depends on, which its install
+    // installs first, so modules resolve through the dependencies as there.
+    let modules = AppFiles::closure_modules(app_dir).map_err(anyhow::Error::msg)?;
     let tla_sources = read_tla_sources(specs_path)?;
     input::validate_ioa_entities(&csdl, &ioa_sources)?;
-    let policy_text = package::validate(specs_path)?;
+    let (policy_text, mut policy_warnings) =
+        package::validate(&ioa_sources, &modules, &files.policies)?;
+    policy_warnings.extend(files.unread_warnings(app_dir));
+    let specs = ioa_sources.keys().map(String::as_str).collect();
+    policy_warnings.extend(unspecified_entity_types(&csdl, &specs));
 
     // Each reports on its own: one that fails does not hide what the other
     // would find.
@@ -93,9 +107,15 @@ pub fn run(specs_dir: &str) -> Result<()> {
     }
 
     // Validation warnings
-    if !spec.validation.warnings.is_empty() {
-        println!("\nWarnings ({}):", spec.validation.warnings.len());
-        for warn in &spec.validation.warnings {
+    let warnings: Vec<&String> = spec
+        .validation
+        .warnings
+        .iter()
+        .chain(&policy_warnings)
+        .collect();
+    if !warnings.is_empty() {
+        println!("\nWarnings ({}):", warnings.len());
+        for warn in warnings {
             println!("  WARN: {warn}");
         }
     }

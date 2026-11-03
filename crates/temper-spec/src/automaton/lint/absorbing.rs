@@ -177,7 +177,9 @@ fn literal_writes(action: &Action) -> Vec<&str> {
 fn writes_var(action: &Action, var: &str) -> bool {
     action.effect.iter().any(|effect| match effect {
         Effect::Assign { var: written, .. } => written == var,
-        Effect::Append { list, .. } | Effect::RemoveAt { list, .. } => list == var,
+        Effect::Append { list, .. }
+        | Effect::RemoveAt { list, .. }
+        | Effect::Remove { list, .. } => list == var,
         _ => false,
     })
 }

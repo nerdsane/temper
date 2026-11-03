@@ -21,12 +21,16 @@ use crate::error::{AuthzDenial, AuthzError};
 use crate::metrics::{CedarCheck, CedarDecisionMetric, CedarPhaseOutcome};
 
 mod candidates;
+mod list_read;
 mod list_uniformity;
 mod may;
+mod permit_reach;
 mod platform_policy;
 
+pub use list_read::{ListRead, RowRule};
 pub use list_uniformity::ListReadUniformity;
-pub use may::{Asker, Attr, May, SendAnalysis};
+pub use may::{Asker, Attr, Cause, Hop, Kind, May, Question, SendAnalysis};
+pub use permit_reach::permitted_resource_types;
 pub use platform_policy::VERIFIED_OPERATOR_WHEN;
 use platform_policy::{
     compiled_system_platform_policies, count_user_policies, merge_system_platform_policy,

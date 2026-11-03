@@ -88,9 +88,7 @@ fn server_with_spec(store: &SimEventStore, spec: &str) -> ServerState {
         ),
     );
     let mut state = ServerState::from_registry(ActorSystem::new("last-event"), registry);
-    state.set_storage_stack(
-        StorageStack::from_sim(store.clone(), None).with_entity_rows_in_journal(),
-    );
+    state.set_storage_stack(StorageStack::from_sim(store.clone(), None));
     state
         .authz
         .reload_tenant_policies("default", "permit(principal, action, resource);")
@@ -185,12 +183,12 @@ fn dst_latest_event_survives_timers_reactions_and_snapshot_restore() {
             settle().await;
             let row = request(&state, "GET", "/tdata/Jobs('timer')", Value::Null).await;
             assert_eq!(row["status"], "Expired", "seed {seed}: timer fired");
-            assert_eq!(metadata(&row), json!([sim_now(), "timer", null]), "seed {seed}: timer");
+            assert_eq!(metadata(&row), json!([sim_now(), "timer", "ann"]), "seed {seed}: timer");
             expected.push(("timer", metadata(&row)));
             let history = request(&state, "GET", "/observe/entities/Job/timer/history", Value::Null).await;
             let events = history["events"].as_array().unwrap();
             assert_eq!(events.last().unwrap()["via"], "timer");
-            assert_eq!(events.last().unwrap()["by"], Value::Null);
+            assert_eq!(events.last().unwrap()["by"], "ann");
             assert_eq!(events[1]["via"], "request");
             assert_eq!(events[1]["by"], "ann");
             created.insert("request", sim_now());
@@ -217,25 +215,22 @@ fn dst_latest_event_survives_timers_reactions_and_snapshot_restore() {
             settle().await;
             let row = request(&state, "GET", "/tdata/Jobs('reaction')", Value::Null).await;
             assert_eq!(row["status"], "Done", "seed {seed}: reaction fired");
-            assert_eq!(metadata(&row), json!([sim_now(), "reaction", null]), "seed {seed}: reaction");
+            assert_eq!(metadata(&row), json!([sim_now(), "reaction", "ann"]), "seed {seed}: reaction");
             expected.push(("reaction", metadata(&row)));
             let history = request(&state, "GET", "/observe/entities/Job/reaction/history", Value::Null).await;
             let event = history["events"].as_array().unwrap().last().unwrap();
             assert_eq!(event["via"], "reaction");
-            assert_eq!(event["by"], Value::Null);
+            assert_eq!(event["by"], "ann");
             let rows = request(&state, "GET", "/tdata/Jobs?$orderby=last_event_at%20desc", Value::Null).await;
             assert_eq!(rows["value"][0]["entity_id"], "reaction");
             let rows = request(&state, "GET", "/tdata/Jobs?$filter=last_event_via%20eq%20'timer'", Value::Null).await;
             assert_eq!(rows["value"].as_array().unwrap().len(), 1);
             assert_eq!(rows["value"][0]["entity_id"], "timer");
-            for (query, expected_id) in [
-                ("$filter=last_event_by%20eq%20'ann'", "request"),
-                ("$filter=last_event_at%20gt%20'2026-01-01T00:03:00Z'", "reaction"),
-            ] {
-                let rows = request(&state, "GET", &format!("/tdata/Jobs?{query}"), Value::Null).await;
-                assert_eq!(rows["value"].as_array().unwrap().len(), 1, "seed {seed}: {query}");
-                assert_eq!(rows["value"][0]["entity_id"], expected_id);
-            }
+            let rows = request(&state, "GET", "/tdata/Jobs?$filter=last_event_at%20gt%20'2026-01-01T00:03:00Z'", Value::Null).await;
+            assert_eq!(rows["value"].as_array().unwrap().len(), 1, "seed {seed}");
+            assert_eq!(rows["value"][0]["entity_id"], "reaction");
+            let rows = request(&state, "GET", "/tdata/Jobs?$filter=last_event_by%20eq%20'ann'", Value::Null).await;
+            assert_eq!(rows["value"].as_array().unwrap().len(), 3, "seed {seed}: ann moved all three, by request, timer and reaction");
             let rows = request(&state, "GET", "/tdata/Jobs?$filter=last_event_at%20eq%20'2026-01-01T01:03:00%2B01:00'", Value::Null).await;
             assert_eq!(rows["value"].as_array().unwrap().len(), 2, "equivalent offset is the same instant");
             let rows = request(&state, "GET", "/tdata/Jobs?$select=entity_id,last_event_at,last_event_via,last_event_by", Value::Null).await;
@@ -243,24 +238,6 @@ fn dst_latest_event_survives_timers_reactions_and_snapshot_restore() {
             for row in rows["value"].as_array().unwrap() {
                 let expected = expected.iter().find(|(id, _)| row["entity_id"] == *id).unwrap();
                 assert_eq!(metadata(row), expected.1);
-            }
-            // Timer/reaction movers are explicit nulls. A page ending in a
-            // null must continue to the remaining null and request rows.
-            for (direction, wanted) in [
-                ("asc", ["request", "reaction", "timer"]),
-                ("desc", ["reaction", "timer", "request"]),
-            ] {
-                let mut path = format!("/tdata/Jobs?$orderby=last_event_by%20{direction}&$top=1&$select=entity_id");
-                for (page, id) in wanted.iter().enumerate() {
-                    let body = request(&state, "GET", &path, Value::Null).await;
-                    assert_eq!(body["value"].as_array().unwrap().len(), 1, "seed {seed}: {path}");
-                    assert_eq!(body["value"][0]["entity_id"], *id, "seed {seed}: {path}");
-                    if page < wanted.len() - 1 {
-                        path = format!("/tdata/{}", body["@odata.nextLink"].as_str().expect("continuation"));
-                    } else {
-                        assert!(body.get("@odata.nextLink").is_none(), "seed {seed}: no repeated nulls");
-                    }
-                }
             }
             // Move the oldest record last: creation order must stay stable.
             tokio::time::advance(Duration::from_millis(137)).await;
@@ -399,7 +376,7 @@ fn dst_history_names_whom_an_agent_acted_for() {
                     json!(["Created", "request", "hub-client", "ann", "claude-code"]),
                     json!(["Start", "request", "hub-client", "ann", "claude-code"]),
                     json!(["Poke", "request", "ann", null, null]),
-                    json!(["Expire", "timer", null, null, null]),
+                    json!(["Expire", "timer", "hub-client", "ann", "claude-code"]),
                 ],
                 "seed {seed}: {history}"
             );
@@ -462,7 +439,7 @@ to = "Done"
                 .await;
                 assert_eq!(row["status"], "Done", "seed {seed}: {action}");
                 assert_eq!(row["last_event_via"], "reaction");
-                assert_eq!(row["last_event_by"], Value::Null);
+                assert_eq!(row["last_event_by"], "ann");
                 assert!(row["first_event_at"].is_string());
                 let history = request(
                     &state,
@@ -475,7 +452,7 @@ to = "Done"
                 assert_eq!(events.len(), 2);
                 for event in events {
                     assert_eq!(event["via"], "reaction", "seed {seed}: {action}");
-                    assert_eq!(event["by"], Value::Null);
+                    assert_eq!(event["by"], "ann");
                 }
             }
             clock.end(Duration::ZERO);

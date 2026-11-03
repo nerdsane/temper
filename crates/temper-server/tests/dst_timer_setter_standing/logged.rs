@@ -1,12 +1,31 @@
 //! The withheld fires the server logs, captured from its tracing.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+
+use tracing_subscriber::prelude::*;
 
 /// The withheld fires logged: the record and the setter each names.
 #[derive(Clone, Default)]
 pub(super) struct Withheld(Arc<Mutex<Vec<(String, String)>>>);
 
 impl Withheld {
+    /// Capture across the test binary, once. With a scoped subscriber, another
+    /// test can first reach a callsite with no subscriber and cache it as
+    /// disabled, losing this test's warnings too. The global default keeps
+    /// callsite registration consistent; assertions select their own records.
+    pub(super) fn install() -> Self {
+        static LOGS: OnceLock<Withheld> = OnceLock::new();
+        LOGS.get_or_init(|| {
+            let logs = Self::default();
+            tracing::subscriber::set_global_default(
+                tracing_subscriber::registry().with(logs.clone()),
+            )
+            .expect("the standing tests install one shared subscriber");
+            logs
+        })
+        .clone()
+    }
+
     pub(super) fn of(&self, id: &str) -> Vec<String> {
         self.0
             .lock()

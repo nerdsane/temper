@@ -15,7 +15,10 @@
 //! forbid always does, and [`May::Maybe`] otherwise. A caller that knows some
 //! of the record's attributes passes them, and those are unknown no longer.
 
+mod cause;
 mod json;
+mod kinds;
+mod profile;
 mod request;
 
 #[cfg(test)]
@@ -28,7 +31,11 @@ use serde_json::Value as Json;
 
 use super::platform_policy::merge_system_platform_policy;
 use crate::error::AuthzError;
-use request::{Request, TRUE};
+pub use cause::{Cause, Hop};
+pub use kinds::Question;
+pub use profile::Kind;
+use profile::UNKNOWN;
+use request::{Request, Results, TRUE};
 
 /// A kind of sender.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,6 +44,9 @@ pub enum Asker {
     /// module calling the API as whoever invoked it. Never a `System`
     /// principal and never a `service:` id: those only the kernel builds.
     Outside,
+    /// Someone outside of a kind the policies tell apart
+    /// ([`SendAnalysis::outside_kinds`]).
+    OutsideAs(Kind),
     /// A kernel service as `AgentContext::for_service` builds it:
     /// `Agent::"service:<name>"` with `agent_type` the name, `role`
     /// "service" and `agentTypeVerified` false, and these context
@@ -84,6 +94,32 @@ pub enum May {
     Yes,
 }
 
+/// The answer the policies give, from whether each applies.
+fn decide(applies: impl Iterator<Item = (Effect, Results)>) -> May {
+    let (mut permit_can, mut permit_always) = (false, false);
+    let (mut forbid_can, mut forbid_always) = (false, false);
+    for (effect, applies) in applies {
+        let (can, always) = (applies.can(TRUE), applies == TRUE);
+        match effect {
+            Effect::Permit => {
+                permit_can |= can;
+                permit_always |= always;
+            }
+            Effect::Forbid => {
+                forbid_can |= can;
+                forbid_always |= always;
+            }
+        }
+    }
+    if !permit_can || forbid_always {
+        May::No
+    } else if permit_always && !forbid_can {
+        May::Yes
+    } else {
+        May::Maybe
+    }
+}
+
 /// A tenant's policies with the built-in platform policy, read for
 /// [`SendAnalysis::may`].
 #[derive(Debug, Clone)]
@@ -111,43 +147,41 @@ impl SendAnalysis {
     }
 
     /// Whether `asker` may send `action` to a record of `resource_type`, of
-    /// which the caller knows the attributes in `record` (`id` its id).
+    /// which the caller knows the attributes in `record` (`id` its id), for
+    /// a move with `cause` (unknown when None).
     pub fn may(
         &self,
         asker: &Asker,
         action: &str,
         resource_type: &str,
         record: &BTreeMap<String, Attr>,
+        cause: Option<&Cause>,
     ) -> May {
-        let request = Request {
-            asker,
-            action,
-            resource_type,
-            record,
+        let profiles = match asker {
+            Asker::OutsideAs(kind) => &kind.0[..],
+            _ => std::slice::from_ref(&UNKNOWN),
         };
-        let (mut permit_can, mut permit_always) = (false, false);
-        let (mut forbid_can, mut forbid_always) = (false, false);
-        for (effect, policy) in &self.policies {
-            let applies = request.applies(policy);
-            let (can, always) = (applies.can(TRUE), applies == TRUE);
-            match effect {
-                Effect::Permit => {
-                    permit_can |= can;
-                    permit_always |= always;
-                }
-                Effect::Forbid => {
-                    forbid_can |= can;
-                    forbid_always |= always;
-                }
-            }
-        }
-        if !permit_can || forbid_always {
-            May::No
-        } else if permit_always && !forbid_can {
-            May::Yes
-        } else {
-            May::Maybe
-        }
+        // A kind may be any of its profiles.
+        let mut answers = profiles.iter().map(|profile| {
+            let request = Request {
+                asker,
+                profile,
+                action,
+                resource_type,
+                record,
+                cause,
+            };
+            decide(
+                self.policies
+                    .iter()
+                    .map(|(effect, policy)| (*effect, request.applies(policy))),
+            )
+        });
+        let first = answers.next().unwrap_or(May::No);
+        answers.fold(
+            first,
+            |sofar, next| if sofar == next { sofar } else { May::Maybe },
+        )
     }
 
     /// The policies that may apply when `asker` sends `action` to a
@@ -158,9 +192,11 @@ impl SendAnalysis {
         let record = BTreeMap::new();
         let request = Request {
             asker,
+            profile: &UNKNOWN,
             action,
             resource_type,
             record: &record,
+            cause: None,
         };
         let mut applicable: Vec<String> = self
             .policies
@@ -170,5 +206,14 @@ impl SendAnalysis {
             .collect();
         applicable.sort();
         applicable
+    }
+
+    /// Whether some policy can tell a move in a timer's chain from the same
+    /// move in a request's ([`Cause::reaction`]): when none can, a model
+    /// need not keep the two apart.
+    pub fn tells_timer_chains(&self) -> bool {
+        self.policies
+            .iter()
+            .any(|(_, policy)| cause::tells_timer_chains(&policy["conditions"]))
     }
 }

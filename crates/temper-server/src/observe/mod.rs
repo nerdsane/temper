@@ -16,6 +16,10 @@ pub mod subprocess_verify;
 mod verification;
 pub(crate) mod wasm;
 use axum::Router;
+pub use specs::{
+    DEFAULT_BUDGET_MS, DEFAULT_PROP_TEST_CASES, DEFAULT_SIM_SEEDS, MAX_BUDGET_MS, budget_states,
+    check_ioa,
+};
 
 use axum::routing::{get, patch, post};
 use serde::{Deserialize, Serialize};

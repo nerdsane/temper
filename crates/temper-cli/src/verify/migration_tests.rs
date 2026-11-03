@@ -64,6 +64,15 @@ fn verify_specs(app: &TempDir) -> Result<()> {
     run(app.path().join("specs").to_str().unwrap())
 }
 
+/// The policy warnings `temper verify` reports for the app's `specs/`.
+fn policy_warnings(specs: &Path) -> Vec<String> {
+    let files = AppFiles::find(app_dir_of(specs));
+    let sources = input::read_ioa_files(&files.ioa).unwrap();
+    package::validate(&sources, &files.modules, &files.policies)
+        .unwrap()
+        .1
+}
+
 #[test]
 fn complete_application_passes() {
     let app = application();
@@ -154,18 +163,44 @@ fn exhausted_real_composite_verification_fails_the_command() {
     );
 }
 
+/// A permit counts for its entity from any file in policies/, whatever the
+/// file is named.
 #[test]
-fn missing_or_invalid_cedar_fails() {
+fn a_permit_in_any_policy_file_counts() {
     let app = application();
-    let policy = app.path().join("specs/policies/counter.cedar");
-    fs::remove_file(&policy).unwrap();
-    assert!(
-        verify_specs(&app)
-            .unwrap_err()
-            .to_string()
-            .contains("missing Cedar policy")
-    );
-    fs::write(policy, "this is not Cedar").unwrap();
+    let policies = app.path().join("specs/policies");
+    fs::rename(
+        policies.join("counter.cedar"),
+        policies.join("shared.cedar"),
+    )
+    .unwrap();
+    verify_specs(&app).unwrap();
+    let warnings = policy_warnings(&app.path().join("specs"));
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+/// An entity no permit reaches is a warning: verification still passes.
+#[test]
+fn an_entity_no_permit_reaches_is_a_warning() {
+    let app = application();
+    fs::write(
+        app.path().join("specs/policies/counter.cedar"),
+        "forbid(principal, action, resource);",
+    )
+    .unwrap();
+    verify_specs(&app).unwrap();
+    let warnings = policy_warnings(&app.path().join("specs"));
+    assert_eq!(warnings, ["no Cedar permit reaches Counter"]);
+}
+
+#[test]
+fn invalid_cedar_fails() {
+    let app = application();
+    fs::write(
+        app.path().join("specs/policies/counter.cedar"),
+        "this is not Cedar",
+    )
+    .unwrap();
     assert!(
         verify_specs(&app)
             .unwrap_err()
@@ -309,4 +344,159 @@ fn ambiguous_schema_aliases_are_rejected() {
             "{error:#}"
         );
     }
+}
+
+/// Verify reads an app's files as its install does: given the app's specs/,
+/// it reads specs from the app root as well, and policies from the app's
+/// policies/, so an app that passes here is the app that installs.
+#[test]
+fn verify_reads_the_files_an_install_reads() {
+    let app = application();
+    let root = app.path();
+    fs::write(
+        root.join("app.toml"),
+        "name = \"counter-app\"\ndescription = \"Verify layout test\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    // The spec at the app root, the policy in the app's policies/.
+    fs::rename(
+        root.join("specs/counter.ioa.toml"),
+        root.join("counter.ioa.toml"),
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("policies")).unwrap();
+    fs::rename(
+        root.join("specs/policies/counter.cedar"),
+        root.join("policies/counter.cedar"),
+    )
+    .unwrap();
+
+    let specs = root.join("specs");
+    assert_eq!(
+        input::read_ioa_files(&AppFiles::find(app_dir_of(&specs)).ioa)
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        ["Counter"],
+        "the root spec an install reads is verified"
+    );
+    assert!(
+        policy_warnings(&specs).is_empty(),
+        "the app's policies/ is read"
+    );
+    verify_specs(&app).unwrap();
+}
+
+/// A spec file another of the same name shadows is reported, naming both.
+#[test]
+fn a_shadowed_spec_file_is_named_with_the_file_read_instead() {
+    let app = application();
+    let root = app.path();
+    fs::write(
+        root.join("app.toml"),
+        "name = \"counter-app\"\ndescription = \"Verify layout test\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    fs::copy(
+        root.join("specs/counter.ioa.toml"),
+        root.join("counter.ioa.toml"),
+    )
+    .unwrap();
+    fs::copy(
+        root.join("specs/model.csdl.xml"),
+        root.join("model.csdl.xml"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        AppFiles::find(root).unread_warnings(root),
+        [
+            "specs/counter.ioa.toml is not read: counter.ioa.toml is read in its place",
+            "specs/model.csdl.xml is not read: model.csdl.xml is read in its place",
+        ]
+    );
+}
+
+/// A module the app declares in app.toml, with its binary under wasm/, is
+/// found by verify where its install finds it.
+#[test]
+fn verify_finds_a_module_where_its_install_does() {
+    let app = application();
+    let root = app.path();
+    fs::write(
+        root.join("app.toml"),
+        "name = \"counter-app\"\ndescription = \"Verify layout test\"\nversion = \"0.1.0\"\n\n[[wasm_modules]]\nname = \"probe\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("wasm/probe")).unwrap();
+    fs::write(root.join("wasm/probe/probe.wasm"), b"\0asm").unwrap();
+    let source = IOA.replace(
+        "[[invariant]]",
+        "[[action.triggers]]\nname=\"probe\"\nkind=\"wasm\"\nmodule=\"probe\"\n\n[[invariant]]",
+    );
+    fs::write(root.join("specs/counter.ioa.toml"), source).unwrap();
+    verify_specs(&app).unwrap();
+}
+
+/// A spec may call a module of an app its own app depends on: the install
+/// installs that app first, so verify finds the module there, as the
+/// install's closure does, and still refuses one no app in it declares.
+#[test]
+fn verify_finds_a_module_of_an_app_it_depends_on() {
+    let apps = tempfile::tempdir().unwrap();
+    let suffix: String = apps
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect::<String>()
+        .to_lowercase();
+    let dependency = format!("gate-{suffix}");
+    let gate = apps.path().join(&dependency);
+    fs::create_dir_all(gate.join("wasm/probe_gate")).unwrap();
+    fs::write(
+        gate.join("app.toml"),
+        format!(
+            "name = \"{dependency}\"\ndescription = \"Holds the module\"\nversion = \"0.1.0\"\n\n[[wasm_modules]]\nname = \"probe_gate\"\n"
+        ),
+    )
+    .unwrap();
+    fs::write(gate.join("APP.md"), "# Gate\n\nHolds the module.\n").unwrap();
+    fs::write(gate.join("wasm/probe_gate/probe_gate.wasm"), b"\0asm").unwrap();
+
+    let app = apps.path().join(format!("counter-{suffix}"));
+    let specs = app.join("specs");
+    fs::create_dir_all(specs.join("policies")).unwrap();
+    fs::write(specs.join("model.csdl.xml"), CSDL).unwrap();
+    fs::write(
+        specs.join("policies/counter.cedar"),
+        "permit(principal is Agent, action == Action::\"Increment\", resource is Counter);",
+    )
+    .unwrap();
+    let calls = |module: &str| {
+        IOA.replace(
+            "[[invariant]]",
+            &format!(
+                "[[action.triggers]]\nname=\"gate\"\nkind=\"wasm\"\nmodule=\"{module}\"\n\n[[invariant]]"
+            ),
+        )
+    };
+    fs::write(
+        app.join("app.toml"),
+        format!(
+            "name = \"counter-{suffix}\"\ndescription = \"Calls a module of its dependency\"\nversion = \"0.1.0\"\ndependencies = [\"{dependency}\"]\n"
+        ),
+    )
+    .unwrap();
+    fs::write(specs.join("counter.ioa.toml"), calls("probe_gate")).unwrap();
+    run(specs.to_str().unwrap()).unwrap();
+
+    fs::write(specs.join("counter.ioa.toml"), calls("absent_gate")).unwrap();
+    let error = run(specs.to_str().unwrap()).unwrap_err().to_string();
+    assert!(
+        error.contains("missing compiled WASM module absent_gate"),
+        "a module no app in the closure declares is still refused: {error}"
+    );
 }

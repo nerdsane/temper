@@ -7,9 +7,10 @@ use temper_server::platform_store::InstalledAppRecord;
 
 use super::app_catalog::AppCatalog;
 use super::{
-    AppBundle, AppEntry, OsAppBundleDigest, OsAppInstallPlan, OsAppReconcileResult, catalog,
-    get_os_app, install_os_app_with_plan, load_app_bundle, os_app_dependencies,
-    restore_app_specs_from_matching_digest, tenant_has_ready_app_specs_for_bundle, tenant_os_app,
+    AppBundle, AppEntry, AppFileSource, OsAppBundleDigest, OsAppInstallPlan, OsAppReconcileResult,
+    catalog, get_os_app, install_os_app_swapping, load_app_bundle, load_tenant_os_app,
+    os_app_dependencies, restore_app_specs_from_matching_digest,
+    tenant_has_ready_app_specs_for_bundle, tenant_os_app,
 };
 use crate::state::PlatformState;
 
@@ -111,38 +112,23 @@ pub(super) fn digest_app_bundle(
     digest_entry_bundle(app_name, app_entry(tenant, app_name).as_ref(), bundle)
 }
 
-/// The bundle digest of `app_name` as installed in `dir`, read without adding
-/// `dir` to the catalog.
-pub fn os_app_dir_bundle_digest(dir: &Path, app_name: &str) -> Option<OsAppBundleDigest> {
-    if !dir.is_dir() {
-        return None;
-    }
-    let installed = AppCatalog::from_dir(dir.to_path_buf());
-    let bundle = load_app_bundle(installed.app_dir(None, app_name)?).ok()?;
-    Some(digest_entry_bundle(
-        app_name,
-        installed.app_entry(None, app_name),
-        &bundle,
-    ))
-}
-
-/// The bundle digest of every app in `dir` that loads, as
-/// [`os_app_dir_bundle_digest`] reads each one; an app that does not load is
-/// left out. `None` when `dir` is missing.
-pub fn os_app_dir_bundle_digests(dir: &Path) -> Option<Vec<OsAppBundleDigest>> {
-    if !dir.is_dir() {
-        return None;
-    }
-    let installed = AppCatalog::from_dir(dir.to_path_buf());
-    let digests = installed
+/// The bundle digest of each of `apps` of install directory `dir` that
+/// loads, read from the files each names and without adding them to the
+/// catalog. An app that does not load, such as one with a named file that
+/// cannot be read, is left out.
+pub fn written_apps_bundle_digests(
+    dir: &Path,
+    apps: Vec<(String, AppFileSource)>,
+) -> Vec<OsAppBundleDigest> {
+    let installed = AppCatalog::from_apps(dir.to_path_buf(), apps);
+    installed
         .app_entries(None)
         .iter()
         .filter_map(|entry| {
-            let bundle = load_app_bundle(installed.app_dir(None, &entry.name)?).ok()?;
+            let bundle = load_app_bundle(installed.app_files(None, &entry.name)?).ok()?;
             Some(digest_entry_bundle(&entry.name, Some(entry), &bundle))
         })
-        .collect();
-    Some(digests)
+        .collect()
 }
 
 fn digest_entry_bundle(
@@ -401,8 +387,9 @@ pub(crate) async fn tenant_has_durable_wasm_for_bundle(
 /// Whose word an install carries out, which decides the origin it records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InstallOrigin {
-    /// An install request for the app files this server holds: the record's
-    /// origin becomes `local`. A Genesis install writes its own origin after it.
+    /// An install request for the files this server holds: a new bundle's
+    /// origin becomes `local`; repairing the same bundle retains its source.
+    /// A Genesis install writes its own origin after it.
     Request,
     /// A boot replay of a stored install, which restores it as recorded.
     Replay,
@@ -470,51 +457,60 @@ async fn record_app_install_metadata(
         return;
     };
 
-    let stored = match origin {
-        InstallOrigin::Request => None,
-        InstallOrigin::Replay => match ps.get_installed_app(tenant, &digest.app_name).await {
-            Ok(stored) => stored,
-            Err(error) => {
-                tracing::warn!(
-                    tenant,
-                    app = %digest.app_name,
-                    error = %error,
-                    "Failed to read the stored install record; a replay leaves it as it is"
-                );
-                return;
-            }
-        },
+    let stored = match ps.get_installed_app(tenant, &digest.app_name).await {
+        Ok(stored) => stored,
+        Err(error) => {
+            tracing::warn!(
+                tenant,
+                app = %digest.app_name,
+                error = %error,
+                "Failed to read the stored install record; leaving its provenance as it is"
+            );
+            return;
+        }
     };
-    // A replay never changes the origin. A Genesis record names a registry
-    // version, so it stays exactly as recorded. A local record's version is the
-    // local files, so its digests follow what the replay installed.
-    if stored.is_some_and(|stored| stored.source_kind != "local") {
+    // A replay never changes the origin. A request repairing the same bundle
+    // also retains its valid source: a pushed root may reconcile catalog
+    // dependencies whose provenance it does not rewrite at commit. Changed
+    // bundles become local until their source records the new provenance.
+    if origin == InstallOrigin::Replay
+        && stored
+            .as_ref()
+            .is_some_and(|record| record.source_kind != "local")
+    {
         return;
     }
-
-    let record = InstalledAppRecord {
-        tenant: tenant.to_string(),
-        app_name: digest.app_name.clone(),
-        source_kind: "local".to_string(),
-        app_ref: String::new(),
-        version_hash: String::new(),
-        pinned_version_hash: String::new(),
-        current_version_hash: String::new(),
-        follow_policy: "pinned".to_string(),
-        closure_id: String::new(),
-        registry_url: String::new(),
-        registry_tenant: String::new(),
-        app_version: digest.app_version.clone(),
-        bundle_digest: digest.bundle_digest.clone(),
-        spec_digest: digest.spec_digest.clone(),
-        policy_digest: digest.policy_digest.clone(),
-        wasm_digest: digest.wasm_digest.clone(),
-        content_digest: digest.content_digest.clone(),
-        seed_digest: digest.seed_digest.clone(),
-        installed_at: None,
-        last_reconciled_at: None,
-        status: status.to_string(),
-    };
+    let retained = stored.filter(|record| {
+        record.source_kind != "local" && record.bundle_digest == digest.bundle_digest
+    });
+    let record = retained
+        .map(|record| InstalledAppRecord {
+            status: status.to_string(),
+            ..record
+        })
+        .unwrap_or_else(|| InstalledAppRecord {
+            tenant: tenant.to_string(),
+            app_name: digest.app_name.clone(),
+            source_kind: "local".to_string(),
+            app_ref: String::new(),
+            version_hash: String::new(),
+            pinned_version_hash: String::new(),
+            current_version_hash: String::new(),
+            follow_policy: "pinned".to_string(),
+            closure_id: String::new(),
+            registry_url: String::new(),
+            registry_tenant: String::new(),
+            app_version: digest.app_version.clone(),
+            bundle_digest: digest.bundle_digest.clone(),
+            spec_digest: digest.spec_digest.clone(),
+            policy_digest: digest.policy_digest.clone(),
+            wasm_digest: digest.wasm_digest.clone(),
+            content_digest: digest.content_digest.clone(),
+            seed_digest: digest.seed_digest.clone(),
+            installed_at: None,
+            last_reconciled_at: None,
+            status: status.to_string(),
+        });
 
     if let Err(error) = ps.record_installed_app_metadata(&record).await {
         tracing::warn!(
@@ -546,8 +542,23 @@ pub async fn reconcile_os_app(
     tenant: &str,
     app_name: &str,
 ) -> Result<OsAppReconcileResult, String> {
-    let bundle =
-        tenant_os_app(tenant, app_name).ok_or_else(|| format!("OS app '{app_name}' not found"))?;
+    let result =
+        reconcile_os_app_swapping(state, tenant, app_name, super::Swap::ModulesFirst).await?;
+    if let OsAppReconcileResult::Installed { install, .. } = &result {
+        install.publish_reviews();
+    }
+    Ok(result)
+}
+
+/// [`reconcile_os_app`] with the order its modules and specs go in. The closure
+/// caller publishes reviews after its readiness checks and provenance writes.
+pub(crate) async fn reconcile_os_app_swapping(
+    state: &PlatformState,
+    tenant: &str,
+    app_name: &str,
+    swap: super::Swap,
+) -> Result<OsAppReconcileResult, String> {
+    let bundle = load_tenant_os_app(tenant, app_name)?;
     let digest = digest_app_bundle(Some(tenant), app_name, &bundle);
 
     if let Some(ps) = state
@@ -622,9 +633,15 @@ pub async fn reconcile_os_app(
                     seed = plan.seed,
                     "OS app changed; running delta reconcile"
                 );
-                let install =
-                    install_os_app_with_plan(state, tenant, app_name, plan, InstallOrigin::Request)
-                        .await?;
+                let install = install_os_app_swapping(
+                    state,
+                    tenant,
+                    app_name,
+                    plan,
+                    InstallOrigin::Request,
+                    swap,
+                )
+                .await?;
                 return Ok(OsAppReconcileResult::Installed {
                     app_name: app_name.to_string(),
                     bundle_digest: digest.bundle_digest,
@@ -643,12 +660,13 @@ pub async fn reconcile_os_app(
         }
     }
 
-    let install = install_os_app_with_plan(
+    let install = install_os_app_swapping(
         state,
         tenant,
         app_name,
         OsAppInstallPlan::all(),
         InstallOrigin::Request,
+        swap,
     )
     .await?;
     Ok(OsAppReconcileResult::Installed {

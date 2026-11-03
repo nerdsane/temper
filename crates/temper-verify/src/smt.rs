@@ -358,7 +358,9 @@ fn broken_by(model: &TemperModel, t: &ResolvedTransition, candidates: &[usize]) 
                     string_literal(value, model).expect("effect literal is in the model"),
                 );
             }
-            ModelEffect::ListAppend { var, .. } | ModelEffect::ListRemoveAt { var, .. } => {
+            ModelEffect::ListAppend { var, .. }
+            | ModelEffect::ListRemove { var, .. }
+            | ModelEffect::ListRemoveAt { var, .. } => {
                 changed_lists.insert(var.clone());
             }
         }

@@ -65,6 +65,7 @@ fn claimed_admin_request(method: Method, path: &str, tenant: &str, body: Body) -
                     role: None,
                     acting_for: None,
                     agent_type: None,
+                    label: None,
                     attributes: Default::default(),
                 },
                 context_attrs: Default::default(),

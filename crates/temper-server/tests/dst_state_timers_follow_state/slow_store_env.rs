@@ -1,15 +1,13 @@
-//! Simulated slow/failing disk and read-side publications. Only I/O is replaced.
-use std::collections::{BTreeMap, BTreeSet};
+//! Simulated slow/failing disk. Only I/O is replaced.
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use serde_json::Value;
 use temper_runtime::persistence::{
     CommitRows, EventStore, JournalHead, PersistenceAppend, PersistenceAppendResult,
-    PersistenceEnvelope, PersistenceError, ProjectionCheckpoint,
+    PersistenceEnvelope, PersistenceError,
 };
 use temper_runtime::scheduler::DeterministicRng;
-use temper_server::storage::{QueryPlaneStore, QueryProjectionFieldsRow};
 use temper_store_sim::SimEventStore;
 
 #[derive(Default)]
@@ -151,97 +149,5 @@ impl EventStore for SlowStore {
         kind: &str,
     ) -> Result<Vec<String>, PersistenceError> {
         self.journal.list_entity_ids_by_type(tenant, kind).await
-    }
-}
-
-/// Records each sequence published through the real post-dispatch pipeline,
-/// rather than allowing a later projection to hide a missing earlier one.
-type Checkpoints = BTreeMap<(String, String, String), ProjectionCheckpoint>;
-
-#[derive(Default)]
-pub(super) struct Publications(
-    pub Mutex<BTreeMap<String, BTreeSet<u64>>>,
-    Mutex<Checkpoints>,
-);
-
-#[async_trait::async_trait]
-impl QueryPlaneStore for Publications {
-    async fn projection_checkpoints(
-        &self,
-        tenant: &str,
-    ) -> Result<Vec<ProjectionCheckpoint>, PersistenceError> {
-        Ok(self
-            .1
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|((saved_tenant, _, _), _)| saved_tenant == tenant)
-            .map(|(_, checkpoint)| checkpoint.clone())
-            .collect())
-    }
-    async fn upsert_projection(
-        &self,
-        tenant: &str,
-        kind: &str,
-        id: &str,
-        status: &str,
-        _fields: &Value,
-        _state: &Value,
-        seq: u64,
-    ) -> Result<(), PersistenceError> {
-        self.0
-            .lock()
-            .unwrap()
-            .entry(id.into())
-            .or_default()
-            .insert(seq);
-        let mut checkpoints = self.1.lock().unwrap();
-        let key = (tenant.to_string(), kind.to_string(), id.to_string());
-        if checkpoints
-            .get(&key)
-            .is_none_or(|row| row.sequence_nr <= seq)
-        {
-            checkpoints.insert(
-                key,
-                ProjectionCheckpoint {
-                    entity_type: kind.to_string(),
-                    entity_id: id.to_string(),
-                    sequence_nr: seq,
-                    status: status.to_string(),
-                },
-            );
-        }
-        Ok(())
-    }
-    async fn remove_projection(
-        &self,
-        _tenant: &str,
-        _kind: &str,
-        _id: &str,
-    ) -> Result<(), PersistenceError> {
-        panic!("the workload never deletes records")
-    }
-    async fn query_field_index(
-        &self,
-        _tenant: &str,
-        _kind: &str,
-        _where: &str,
-        _params: Vec<String>,
-    ) -> Result<Option<Vec<String>>, PersistenceError> {
-        Ok(None)
-    }
-    async fn load_projection_fields_many(
-        &self,
-        _tenant: &str,
-        _kind: &str,
-        _ids: &[String],
-        _fields: &[&str],
-    ) -> Result<Option<Vec<QueryProjectionFieldsRow>>, PersistenceError> {
-        Ok(None)
-    }
-    async fn projected_entity_counts_by_tenant(
-        &self,
-    ) -> Result<Option<Vec<(String, u64)>>, PersistenceError> {
-        Ok(None)
     }
 }

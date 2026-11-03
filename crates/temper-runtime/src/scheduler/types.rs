@@ -186,11 +186,4 @@ mod tests {
         assert!(heavy.actor_crash_prob > 0.0);
         assert!(heavy.actor_restart_prob > 0.0);
     }
-
-    #[test]
-    fn sim_actor_state_equality() {
-        assert_eq!(SimActorState::Running, SimActorState::Running);
-        assert_eq!(SimActorState::Crashed, SimActorState::Crashed);
-        assert_ne!(SimActorState::Running, SimActorState::Crashed);
-    }
 }

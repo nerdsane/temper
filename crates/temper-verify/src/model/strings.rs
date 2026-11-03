@@ -1,6 +1,7 @@
 //! String choices and canonical equality symbols.
 
 use super::expansion::Expansion;
+use super::heap::{Heap, whole};
 use super::types::{
     ModelString, ParamValue, ResolvedTransition, StringParam, TemperModel, TemperModelState,
 };
@@ -80,15 +81,34 @@ pub(super) fn string_assignments(
     values: &BTreeSet<ModelString>,
     budget: &Expansion,
 ) -> Vec<BTreeMap<String, ModelString>> {
-    let mut assignments = vec![BTreeMap::new()];
+    let mut assignments = Vec::new();
+    if !budget.push(&mut assignments, BTreeMap::new()) {
+        return assignments;
+    }
     for param in &t.string_params {
         let mut more = Vec::new();
+        let before = assignments.heap();
         for assignment in assignments {
             if !budget.take() {
                 return Vec::new();
             }
+            let scope_room = values.heap() + assignment.heap();
+            if !budget.hold(scope_room) {
+                return Vec::new();
+            }
             let mut scope = values.clone();
             scope.extend(assignment.values().cloned());
+            let literals = model.string_literals.get(&param.name);
+            let candidate_room = scope.heap()
+                + literals.map_or(0, Heap::heap)
+                + super::heap::tree_bytes::<ModelString, ()>(
+                    scope.len() + literals.map_or(0, BTreeSet::len) + 3,
+                )
+                + (scope.len() + literals.map_or(0, BTreeSet::len) + 3)
+                    * whole(&ModelString::Symbol(0));
+            if !budget.hold(candidate_room) {
+                return Vec::new();
+            }
             let mut candidates = string_candidates(model, param, state, &scope);
             // A parameter neither effects nor guard reads leads to the same
             // move with any value its constraints allow: one is enough.
@@ -102,11 +122,18 @@ pub(super) fn string_assignments(
                 if !budget.take() {
                     return Vec::new();
                 }
-                let mut next = assignment.clone();
-                next.insert(param.name.clone(), value);
+                let Some(next) = budget.with_entry(&assignment, &param.name, &value) else {
+                    return Vec::new();
+                };
+                if !budget.reserve(&mut more) {
+                    return Vec::new();
+                }
                 more.push(next);
             }
+            drop(scope);
+            budget.give(scope_room + candidate_room);
         }
+        budget.give(before);
         assignments = more;
     }
     assignments

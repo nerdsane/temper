@@ -1,10 +1,6 @@
-//! Regression workload for indexed equality reads with an asynchronous projection.
-use super::dst_projection_lag::{SimQueryPlane, sim_state};
+//! Indexed equality reads over the query plane the journal writes.
 use super::*;
 use crate::storage::QueryPlaneStore;
-use std::collections::BTreeSet;
-use std::sync::Arc;
-use temper_runtime::scheduler::install_deterministic_context;
 
 pub(super) fn notes(value: &str) -> QueryOptions {
     QueryOptions {
@@ -18,118 +14,8 @@ pub(super) fn notes(value: &str) -> QueryOptions {
     }
 }
 
-#[tokio::test]
-async fn dst_equality_delta_matches_authoritative_under_lag() {
-    for seed in 0..64 {
-        let (_guard, _clock, _ids) = install_deterministic_context(seed);
-        let qp = Arc::new(SimQueryPlane::default());
-        let (state, _) = sim_state(seed, qp.clone());
-        let tenant = TenantId::default();
-        let agent = AgentContext::for_service("equality-delta");
-        for i in 0..24 {
-            let id = format!("ord-{i:02}");
-            let created = state.dispatch_tenant_action(&tenant, "Order", &id, "AddItem",
-                serde_json::json!({"ProductId": "p", "Quantity": 1, "Notes": if i == seed % 24 { "old" }
-                    else if seed % 2 == 1 && i == (seed + 1) % 24 { "late" } else { "noise" }}), &agent).await.unwrap();
-            assert!(created.success, "seed {seed}: fixture action must commit");
-        }
-        // Vary which entity advances after its last projected point. The old
-        // index still says noise; the acknowledged state now matches late.
-        let changed = format!("ord-{:02}", seed % 24);
-        let before = qp
-            .catalog
-            .lock()
-            .unwrap()
-            .get(&(tenant.to_string(), "Order".into(), changed.clone()))
-            .unwrap()
-            .clone();
-        let updated = state
-            .dispatch_tenant_action(
-                &tenant,
-                "Order",
-                &changed,
-                "AddItem",
-                serde_json::json!({"ProductId": "p", "Quantity": 1, "Notes": "late"}),
-                &agent,
-            )
-            .await
-            .unwrap();
-        assert!(updated.success);
-        qp.catalog.lock().unwrap().insert(
-            (tenant.to_string(), "Order".into(), changed.clone()),
-            before,
-        );
-        *qp.pending.lock().unwrap() = Some(BTreeSet::from([changed.clone()]));
-        let security = SecurityContext::system();
-        for caught_up in [false, true] {
-            if caught_up {
-                qp.upsert_projection(
-                    tenant.as_str(),
-                    "Order",
-                    &changed,
-                    &updated.state.status,
-                    &serde_json::to_value(&updated.state.fields).unwrap(),
-                    &serde_json::to_value(&updated.state).unwrap(),
-                    updated.state.sequence_nr,
-                )
-                .await
-                .unwrap();
-                *qp.pending.lock().unwrap() = Some(BTreeSet::new());
-            }
-            for value in ["late", "absent", "old"] {
-                let options = notes(value);
-                let result = read_entity_set_page(QueryPlaneReadRequest {
-                    state: &state,
-                    tenant: &tenant,
-                    security_ctx: &security,
-                    entity_type: "Order",
-                    entity_set_name: "Orders",
-                    query_options: &options,
-                    budget: QueryPlaneReadBudget {
-                        default_page_size: 10,
-                        max_entities: 10,
-                    },
-                })
-                .await
-                .unwrap_or_else(|_| panic!("seed {seed}: read must answer"));
-                assert_eq!(
-                    result.entities.len(),
-                    if value == "late" {
-                        1 + (seed % 2) as usize
-                    } else {
-                        0
-                    },
-                    "seed {seed}, caught_up {caught_up}"
-                );
-                assert_eq!(
-                    result.count,
-                    Some(if value == "late" {
-                        1 + (seed % 2) as usize
-                    } else {
-                        0
-                    })
-                );
-                assert!(
-                    result.telemetry.materialized_count <= 2,
-                    "seed {seed}: hydrate matches plus delta, not the type: {:?}",
-                    result.telemetry
-                );
-                if value == "late" {
-                    let row = result
-                        .entities
-                        .iter()
-                        .find(|row| row["entity_id"] == changed)
-                        .expect("changed match is present alongside any projected match");
-                    assert_eq!(row["fields"]["Notes"], "late");
-                    assert_eq!(row["sequence_nr"], updated.state.sequence_nr);
-                }
-            }
-        }
-    }
-}
-
 /// Same input and instrument before and after the planner change. Timing is
-/// deliberately opt-in; the deterministic invariant above runs in ordinary CI.
+/// deliberately opt-in.
 #[tokio::test]
 #[ignore = "local measurement: 3000 durable rows, run with --ignored --nocapture"]
 async fn measure_equality_delta_3000_rows() {
@@ -185,6 +71,8 @@ async fn measure_equality_delta_3000_rows() {
                         actor_id: "measure".into(),
                     },
                 }],
+                state_timer: None,
+                projection: None,
             })
             .collect();
         store.append_batch(&appends).await.unwrap();

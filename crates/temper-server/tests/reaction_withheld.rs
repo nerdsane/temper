@@ -206,6 +206,7 @@ async fn refused_reactions_are_visible_and_allowed_reactions_add_no_withheld_sig
                     if seed % 4 >= 2 {
                         security.cause = Some(MoveCause::timer_fire(TimerArm {
                             armed_by: "hook-1".into(),
+                            state_timer_of: None,
                         }));
                     }
                     let agent = AgentContext {

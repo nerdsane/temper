@@ -31,6 +31,10 @@ pub struct Principal {
     pub acting_for: Option<String>,
     /// Agent type classification (e.g. "claude-code", "openclaw").
     pub agent_type: Option<String>,
+    /// The name its issuer gave this agent instance, for people to know it by.
+    /// It says nothing about what the agent may do, so it is never a Cedar input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     /// Arbitrary attributes for ABAC evaluation.
     pub attributes: HashMap<String, serde_json::Value>,
 }
@@ -169,6 +173,7 @@ impl SecurityContext {
                 role: None,
                 acting_for: None,
                 agent_type: None,
+                label: None,
                 attributes: HashMap::new(),
             },
             context_attrs: HashMap::new(),
@@ -200,6 +205,7 @@ impl SecurityContext {
                 role: None,
                 acting_for: None,
                 agent_type: None,
+                label: None,
                 attributes: HashMap::new(),
             },
             context_attrs: HashMap::new(),
@@ -221,6 +227,7 @@ impl SecurityContext {
                 role: None,
                 acting_for: None,
                 agent_type: None,
+                label: None,
                 attributes: HashMap::new(),
             },
             context_attrs: HashMap::new(),
@@ -274,6 +281,7 @@ impl SecurityContext {
                 role: None,
                 acting_for: None,
                 agent_type: Some(agent_type_name.to_string()),
+                label: None,
                 attributes,
             },
             context_attrs,
@@ -341,6 +349,7 @@ impl SecurityContext {
                 role: role.map(|r| r.to_string()),
                 acting_for: acting_for.map(|a| a.to_string()),
                 agent_type: agent_type.map(|a| a.to_string()),
+                label: None,
                 attributes,
             },
             context_attrs,
@@ -412,21 +421,23 @@ impl SecurityContext {
         self
     }
 
-    /// Put the statuses of the records that describe the caller (types marked
+    /// Put what the records that describe the caller say (types marked
     /// `principal_record`) on the principal, as Cedar's `principal.<name>`.
     /// Only the identity boundary calls this, with names it built from the
-    /// verified token: `<Type>` for the user in person, `actingFor<Type>` for
-    /// the user an agent acts for. A record type's name starts uppercase (the
-    /// spec refuses others), so none of them replaces an attribute set here.
+    /// verified token: `<Type>` for the status of the user's record in person,
+    /// `actingFor<Type>` for the user an agent acts for, and `<name>_<field>`
+    /// for a record's set (an array, which Cedar reads as a set). A record
+    /// type's name starts uppercase (the spec refuses others), so none of them
+    /// replaces an attribute set here.
     #[must_use]
     pub fn with_principal_records(
         mut self,
-        records: &std::collections::BTreeMap<String, String>,
+        records: &std::collections::BTreeMap<String, serde_json::Value>,
     ) -> Self {
-        for (name, status) in records {
+        for (name, value) in records {
             self.principal
                 .attributes
-                .insert(name.clone(), serde_json::Value::String(status.clone()));
+                .insert(name.clone(), value.clone());
         }
         self
     }
@@ -437,6 +448,12 @@ impl SecurityContext {
     #[must_use]
     pub fn with_credential(mut self, credential: Option<IssuedCredential>) -> Self {
         self.credential = credential;
+        self
+    }
+
+    /// The name its issuer gave this agent instance ([`Principal::label`]).
+    pub fn with_label(mut self, label: Option<&str>) -> Self {
+        self.principal.label = label.map(str::to_string);
         self
     }
 

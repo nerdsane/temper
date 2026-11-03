@@ -2,10 +2,81 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use temper_spec::automaton::{Automaton, Initial};
-use temper_spec::predicate::{Arg, CmpOp, Effect, Expr, Literal, Name, Operand, Set, VarKind};
+use temper_spec::automaton::{ActionConstraint, Automaton, Initial};
+use temper_spec::predicate::{
+    Arg, CmpOp, Effect, Expr, Literal, Name, Operand, ParamKind, Set, VarKind,
+};
 
 use super::rule_asserts;
+
+use crate::model::types::StringParam;
+
+/// The parameters of `action` that write a tracked string variable, or that
+/// a constraint ties to one (`failed_commit` must equal `commit`), with the
+/// action's constraints on each. The model needs the value of the second
+/// kind to decide whether the record takes the action, though it writes
+/// nothing it tracks. List effects also need concrete inputs, whether they
+/// check membership or only length: removal can choose a held value, and
+/// every use of one input must retain the same equality.
+pub(super) fn string_params(
+    action: &temper_spec::automaton::Action,
+    tracked_strings: &BTreeSet<String>,
+    effect_params: &BTreeMap<String, ParamKind>,
+) -> Vec<StringParam> {
+    let tied = |name: &str| {
+        action.constraints.iter().any(|c| {
+            c.param() == name
+                && matches!(
+                    c,
+                    ActionConstraint::ParamEqualsField { .. }
+                        | ActionConstraint::ParamNotEqualsField { .. }
+                )
+                && c.field()
+                    .is_some_and(|field| tracked_strings.contains(field))
+        })
+    };
+    let names: BTreeSet<&str> = action
+        .params
+        .iter()
+        .map(|param| param.name())
+        .chain(
+            effect_params
+                .iter()
+                .filter(|(_, kind)| **kind == ParamKind::Str)
+                .map(|(name, _)| name.as_str()),
+        )
+        .collect();
+    names
+        .into_iter()
+        .filter(|name| {
+            tracked_strings.contains(*name)
+                || tied(name)
+                || effect_params.get(*name) == Some(&ParamKind::Str)
+        })
+        .map(|name| {
+            let mut param = StringParam {
+                name: name.to_string(),
+                writes: tracked_strings.contains(name),
+                nonempty: false,
+                equals: Vec::new(),
+                not_equals: Vec::new(),
+            };
+            for constraint in action.constraints.iter().filter(|c| c.param() == name) {
+                match constraint {
+                    ActionConstraint::ParamNonempty { .. } => param.nonempty = true,
+                    ActionConstraint::ParamEqualsField { field, .. } => {
+                        param.equals.push(field.clone());
+                    }
+                    ActionConstraint::ParamNotEqualsField { field, .. } => {
+                        param.not_equals.push(field.clone());
+                    }
+                    _ => {}
+                }
+            }
+            param
+        })
+        .collect()
+}
 
 /// The string variables the verifier tracks:
 /// - those `[[invariant]]`s and `[[entry_rule]]`s read, constraint fields when
@@ -17,6 +88,9 @@ use super::rule_asserts;
 /// - and every string variable a constraint ties the parameter of a tracked
 ///   one to (its value decides what the tracked one may become), or a guard
 ///   or rule compares with a tracked one (`x == y`).
+///
+/// `can_reach` rules also need every guard/effect string and constraint source:
+/// an unmodeled value must not certify an impossible route.
 ///
 /// Other strings stay unmodeled, and a guard that reads one may go either
 /// way. A string no parameter writes holds only its initial value and the
@@ -44,6 +118,7 @@ pub(super) fn tracked_strings(
         .filter(|name| is_string(name))
         .cloned()
         .collect();
+    let checks_routes = automaton.liveness.iter().any(|l| !l.can_reach.is_empty());
     for action in automaton
         .actions
         .iter()
@@ -74,7 +149,7 @@ pub(super) fn tracked_strings(
         action.guard.for_each_name(&mut |name| {
             if let Name::Var(var) = name
                 && is_string(var)
-                && (enters_a_rule || !param_written.contains(var))
+                && (checks_routes || enters_a_rule || !param_written.contains(var))
             {
                 tracked.insert(var.to_string());
             }
@@ -82,7 +157,7 @@ pub(super) fn tracked_strings(
         for effect in &action.effect {
             if let Effect::Assign { var, .. } = effect
                 && is_string(var)
-                && !param_written.contains(var.as_str())
+                && (checks_routes || !param_written.contains(var.as_str()))
             {
                 tracked.insert(var.clone());
             }
@@ -97,7 +172,7 @@ pub(super) fn tracked_strings(
         let before = tracked.len();
         for action in &automaton.actions {
             for constraint in &action.constraints {
-                if !tracked.contains(constraint.param()) {
+                if !checks_routes && !tracked.contains(constraint.param()) {
                     continue;
                 }
                 if let Some(field) = constraint.field()
@@ -230,10 +305,13 @@ pub(super) fn string_literals(
         automaton.automaton.states.iter().cloned().collect(),
     );
     for sv in &automaton.state {
-        if let Initial::String(value) = &sv.initial {
-            held.entry(Term::Var(sv.name.clone()))
-                .or_default()
-                .insert(value.clone());
+        let literals = held.entry(Term::Var(sv.name.clone())).or_default();
+        match &sv.initial {
+            Initial::String(value) => {
+                literals.insert(value.clone());
+            }
+            Initial::List(items) => literals.extend(items.iter().cloned()),
+            _ => {}
         }
     }
     for action in &automaton.actions {
@@ -241,7 +319,7 @@ pub(super) fn string_literals(
         for effect in &action.effect {
             let (target, value) = match effect {
                 Effect::Assign { var, value, .. } => (var, value),
-                Effect::Append { list, value } => (list, value),
+                Effect::Append { list, value } | Effect::Remove { list, value } => (list, value),
                 _ => continue,
             };
             match value {

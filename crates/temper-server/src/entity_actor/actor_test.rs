@@ -609,6 +609,20 @@ async fn duplicate_composite_idempotency_reemits_spec_trigger() {
         serde_json::json!({}),
     );
     let actor_ref = system.spawn(actor, "rp-acme-app");
+    // A person's request, so the move is recorded although its params are
+    // transient and it changes nothing (`entity_actor::unrecorded`).
+    let caller = Some(std::sync::Arc::new(crate::request_context::AgentContext {
+        security_ctx: Some(temper_authz::SecurityContext::from_verified_jwt(
+            "ann",
+            temper_authz::PrincipalKind::Customer,
+            None,
+            None,
+            None,
+            None,
+        )),
+        agent_id: Some("ann".to_string()),
+        ..Default::default()
+    }));
     let params = serde_json::json!({
         "PackBytes": "pack",
         "RefUpdates": [{"Name": "refs/heads/main"}],
@@ -618,7 +632,7 @@ async fn duplicate_composite_idempotency_reemits_spec_trigger() {
     let first: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
-                caller: None,
+                caller: caller.clone(),
                 name: "IngestPack".into(),
                 params: params.clone(),
                 related: std::collections::BTreeMap::new(),
@@ -639,7 +653,7 @@ async fn duplicate_composite_idempotency_reemits_spec_trigger() {
     let duplicate: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
-                caller: None,
+                caller,
                 name: "IngestPack".into(),
                 params,
                 related: std::collections::BTreeMap::new(),

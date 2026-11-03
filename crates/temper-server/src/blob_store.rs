@@ -43,6 +43,9 @@ pub use streaming::{BlobObjectStream, BlobStreamRead, decode_json_base64_stream}
 pub(crate) struct BlobStore {
     backend: BlobStoreBackend,
     staging_root: PathBuf,
+    /// Per-store I/O fault point for paused-clock actor tests.
+    #[cfg(all(test, feature = "sim"))]
+    pub(crate) io_pause: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
 #[derive(Clone, Debug)]
@@ -75,9 +78,18 @@ pub(crate) struct LinkCredentials {
 }
 
 impl BlobStore {
+    #[cfg(all(test, feature = "sim"))]
+    async fn pause_io_if_set(&self) {
+        if let Some(mut held) = self.io_pause.clone() {
+            let _ = held.wait_for(|held| !held).await;
+        }
+    }
+
     pub(crate) fn local_fs(root: impl Into<PathBuf>) -> Self {
         let root = root.into();
         Self {
+            #[cfg(all(test, feature = "sim"))]
+            io_pause: None,
             staging_root: root.join(".ingest-staging"),
             backend: BlobStoreBackend::LocalFs { root },
         }
@@ -92,6 +104,8 @@ impl BlobStore {
         key_prefix: Option<String>,
     ) -> Self {
         Self {
+            #[cfg(all(test, feature = "sim"))]
+            io_pause: None,
             staging_root: staging_root.into(),
             backend: BlobStoreBackend::S3(S3BlobStore {
                 endpoint: endpoint.into().trim_end_matches('/').to_string(),
@@ -134,6 +148,8 @@ impl BlobStore {
         body: &[u8],
         ttl: Option<Duration>,
     ) -> Result<(), String> {
+        #[cfg(all(test, feature = "sim"))]
+        self.pause_io_if_set().await;
         let queued_at = Instant::now(); // determinism-ok: production blob I/O queue metric only
         let _permit =
             tokio::time::timeout(BLOB_IO_QUEUE_TIMEOUT, blob_io_semaphore().acquire_owned())

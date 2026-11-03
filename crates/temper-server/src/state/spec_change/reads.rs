@@ -113,7 +113,8 @@ pub(super) fn read_names(
                 | Effect::AddCounter { var, value }
                 | Effect::SubCounter { var, value }
                 | Effect::SetBool { var, value }
-                | Effect::ListAppend { var, value } => (var, value),
+                | Effect::ListAppend { var, value }
+                | Effect::ListRemove { var, value } => (var, value),
                 Effect::ListRemoveAt { var, index } => (var, index),
                 _ => continue,
             };

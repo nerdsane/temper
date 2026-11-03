@@ -48,6 +48,27 @@ pub struct WasmInvocationContext {
     /// response. `None` for entity-action-triggered invocations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_request: Option<HttpDispatchContext>,
+    /// Who the move that set this integration off was made as: the
+    /// principal Cedar saw for that move. A timer's move is its setter's,
+    /// and a reaction's is the move it reacts to's. `None` when the move was
+    /// made by the kernel itself (a system or service move) or anonymously.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_principal: Option<TriggerPrincipal>,
+}
+
+/// The principal a triggering move was made as.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TriggerPrincipal {
+    /// The principal's id: the person, or the agent instance.
+    pub id: String,
+    /// `Customer` (a person), `Agent` or `Admin`.
+    pub kind: String,
+    /// For an agent, the person it acts for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acting_for: Option<String>,
+    /// For an agent, its type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
 }
 
 /// HTTP-specific invocation context, attached to `WasmInvocationContext`

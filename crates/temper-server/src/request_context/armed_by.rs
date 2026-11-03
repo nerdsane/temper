@@ -33,6 +33,9 @@ struct ArmedBy {
     read_when_set: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     scheduled_follow_on: Option<ScheduledFollowOn>,
+    /// Only call deadlines carry an origin process; old rows have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    call_process_id: Option<uuid::Uuid>,
 }
 
 /// The causal context of a scheduled action, already separated from its parent.
@@ -49,7 +52,31 @@ pub(crate) fn encode_armed_by(agent: &AgentContext) -> Result<String, serde_json
 
 /// A scheduled follow-on's identity, lineage and derived key as its row keeps them.
 pub(crate) fn encode_scheduled_armed_by(agent: &AgentContext) -> Result<String, serde_json::Error> {
+    encode_follow_on(agent, None)
+}
+
+/// A call deadline's identity and the process that owns its live call.
+pub(crate) fn encode_call_armed_by(
+    agent: &AgentContext,
+    process: uuid::Uuid,
+) -> Result<String, serde_json::Error> {
+    encode_follow_on(agent, Some(process))
+}
+
+/// Whether this row belongs to a call started by `process`. Rows from older
+/// binaries have no process marker and remain recoverable.
+pub(crate) fn call_started_in(armed_by: &str, process: uuid::Uuid) -> bool {
+    serde_json::from_str::<ArmedBy>(armed_by)
+        .ok()
+        .is_some_and(|armed| armed.call_process_id == Some(process))
+}
+
+fn encode_follow_on(
+    agent: &AgentContext,
+    process: Option<uuid::Uuid>,
+) -> Result<String, serde_json::Error> {
     let mut armed = armed_by(agent);
+    armed.call_process_id = process;
     armed.scheduled_follow_on = Some(ScheduledFollowOn {
         callback_hops: agent.callback_hops,
         idempotency_key: agent
@@ -75,6 +102,7 @@ fn armed_by(agent: &AgentContext) -> ArmedBy {
         observation_metadata: agent.observation_metadata.clone(),
         read_when_set: agent.read_when_set,
         scheduled_follow_on: None,
+        call_process_id: None,
     }
 }
 

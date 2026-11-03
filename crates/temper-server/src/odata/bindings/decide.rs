@@ -9,7 +9,7 @@ use temper_jit::table::ContractError;
 use temper_runtime::tenant::TenantId;
 
 use super::ActionSpan;
-use crate::authz::{DenialInput, record_authz_denial};
+use crate::authz::{DenialInput, record_answerable_denial};
 use crate::odata::account_verification::enforce_commons_account_verified_for_action;
 use crate::odata::common::authorized_snapshot_failure;
 use crate::odata::file_content::refuse_caller_content;
@@ -104,7 +104,7 @@ pub(super) async fn decide(request: &BoundAction<'_>, first: bool) -> Result<Dec
     );
     if let Err(denial) = authz_result {
         let reason = denial.to_string();
-        let pd = record_authz_denial(
+        let pd = record_answerable_denial(
             state,
             DenialInput {
                 tenant: tenant.as_str(),
@@ -127,6 +127,13 @@ pub(super) async fn decide(request: &BoundAction<'_>, first: bool) -> Result<Dec
         .await;
 
         action_span.set_status(Status::error(reason.clone()));
+        let Some(pd) = pd else {
+            return Err(
+                odata_error(StatusCode::FORBIDDEN, "AuthorizationDenied", &reason)
+                    .into_response()
+                    .into(),
+            );
+        };
         let reason_with_id = format!("{reason} (decision: {})", pd.id);
         return Err(odata_denial(&reason_with_id, &pd.id).into_response().into());
     }

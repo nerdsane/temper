@@ -159,10 +159,7 @@ pub(crate) fn resolve_property(
     entity: &serde_json::Value,
     prop: &str,
 ) -> Option<serde_json::Value> {
-    if matches!(
-        prop,
-        "first_event_at" | "last_event_at" | "last_event_via" | "last_event_by"
-    ) {
+    if temper_spec::automaton::is_event_metadata_field(prop) {
         // Old catalog rows have no provenance. App fields can never supply it.
         return Some(entity.get(prop).cloned().unwrap_or(serde_json::Value::Null));
     }
@@ -369,10 +366,8 @@ fn sort_entities(entities: &mut [serde_json::Value], orderby: &[OrderByClause]) 
                 } else {
                     (a_val, b_val)
                 };
-            let kernel_metadata = matches!(
-                clause.property.as_str(),
-                "first_event_at" | "last_event_at" | "last_event_via" | "last_event_by"
-            );
+            let kernel_metadata =
+                temper_spec::automaton::is_event_metadata_field(clause.property.as_str());
             let ordering = match (&a_val, &b_val) {
                 (Some(serde_json::Value::Null), Some(serde_json::Value::Null))
                     if kernel_metadata =>

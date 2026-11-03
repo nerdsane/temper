@@ -139,6 +139,7 @@ pub async fn bearer_auth_check(
             )
             .with_principal_records(&identity.principal_records)
             .with_credential(identity.credential.clone())
+            .with_label(identity.label.as_deref())
         } else {
             temper_authz::SecurityContext::from_resolved_identity(
                 &identity.agent_instance_id,

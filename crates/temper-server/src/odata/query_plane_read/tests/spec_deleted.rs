@@ -196,8 +196,9 @@ async fn a_spec_deleted_record_keeps_its_catalog_row() {
 }
 
 /// A Temper written before this fix removed ord-05's catalog row when it was
-/// discarded. On restart the boot backfill replays every record from its
-/// journal and puts the row back, writing nothing to the journal.
+/// discarded. On restart boot repair replays that record from its journal
+/// before the server serves and puts the row back, writing nothing to the
+/// journal.
 #[tokio::test]
 async fn a_restart_puts_back_a_spec_deleted_records_catalog_row() {
     let (store, db_path) = new_store("spec-deleted-boot").await;
@@ -221,14 +222,14 @@ async fn a_restart_puts_back_a_spec_deleted_records_catalog_row() {
         "the setup is a Temper written before the fix: ord-05 listed, with no catalog row"
     );
 
-    restarted.populate_field_index_from_snapshots(&tenant).await;
+    restarted.repair_query_projections_at_boot().await;
     let shown = reads(&restarted).await;
     let events_after = store.read_events(&journal, 0).await.expect("read").len();
 
     assert_eq!(
         (shown, events_after),
         (expected(), events_before),
-        "the boot backfill puts ord-05's catalog row back and leaves its journal as it was"
+        "boot repair puts ord-05's catalog row back and leaves its journal as it was"
     );
 
     let _ = std::fs::remove_file(db_path);

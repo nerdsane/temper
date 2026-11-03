@@ -13,12 +13,16 @@
 //! a seed draws the scenario's times within the bounds each one states, and
 //! its ids.
 
+#[path = "state_timer_restart/boot_walk.rs"]
+mod boot_walk;
 #[path = "dst_state_timers_follow_state/process_clock.rs"]
 mod process_clock;
 #[path = "state_timer_restart/recovery.rs"]
 mod recovery;
 #[path = "state_timer_restart/server.rs"]
 mod server;
+#[path = "state_timer_restart/unrecorded.rs"]
+mod unrecorded;
 
 use std::time::Duration;
 
@@ -67,6 +71,11 @@ from = ["Armed"]
 params = []
 
 [[action]]
+name = "Reset"
+from = ["Armed"]
+params = []
+
+[[action]]
 name = "Fire"
 from = ["Armed"]
 params = [{ name = "fired_by", type = "string", source = "authenticated_subject" }]
@@ -76,6 +85,7 @@ effect = ["fires += 1"]
 state = "Armed"
 after_seconds = 4
 on_timeout = "Fire"
+reset_on = ["Reset"]
 "#;
 
 /// A repeating timer: every `Tick` resets the clock for the next one.
@@ -111,6 +121,118 @@ on_timeout = "Tick"
 reset_on = ["Tick"]
 "#;
 
+/// A watcher whose timer polls every 15 s. `Poll` changes nothing: it only
+/// sets off its trigger, a `Pass` on the record's relay.
+const POLLER_IOA: &str = r#"
+[automaton]
+name = "Poller"
+states = ["Idle", "Watching"]
+initial = "Idle"
+allow_indefinite_states = ["Idle", "Watching"]
+strict_action_params = true
+
+[[action]]
+name = "Watch"
+from = ["Idle"]
+to = "Watching"
+params = []
+
+[[action]]
+name = "Poll"
+from = ["Watching"]
+params = []
+
+[[action.triggers]]
+name = "relays"
+kind = "entity"
+target_entity = "Relay"
+target_action = "Pass"
+resolve_target = { kind = "same_id" }
+
+[[state_timeout]]
+state = "Watching"
+after_seconds = 15
+on_timeout = "Poll"
+reset_on = ["Poll"]
+"#;
+
+/// `POLLER_IOA` whose `Poll` counts itself, so each poll changes the record.
+const COUNTING_POLLER_IOA: &str = r#"
+[automaton]
+name = "CountingPoller"
+states = ["Idle", "Watching"]
+initial = "Idle"
+allow_indefinite_states = ["Idle", "Watching"]
+strict_action_params = true
+
+[[state]]
+name = "polls"
+type = "counter"
+initial = 0
+
+[[action]]
+name = "Watch"
+from = ["Idle"]
+to = "Watching"
+params = []
+
+[[action]]
+name = "Poll"
+from = ["Watching"]
+params = []
+effect = ["polls += 1"]
+
+[[state_timeout]]
+state = "Watching"
+after_seconds = 15
+on_timeout = "Poll"
+reset_on = ["Poll"]
+"#;
+
+/// A reaction's hop that changes nothing: `Pass` only sets off its own
+/// trigger, a `Count` on the record's tally.
+const RELAY_IOA: &str = r#"
+[automaton]
+name = "Relay"
+states = ["Open"]
+initial = "Open"
+allow_indefinite_states = ["Open"]
+strict_action_params = true
+
+[[action]]
+name = "Pass"
+from = ["Open"]
+params = []
+
+[[action.triggers]]
+name = "tallies"
+kind = "entity"
+target_entity = "Tally"
+target_action = "Count"
+resolve_target = { kind = "same_id" }
+"#;
+
+/// Counts what reaches it, so each `Count` changes the record.
+const TALLY_IOA: &str = r#"
+[automaton]
+name = "Tally"
+states = ["Open"]
+initial = "Open"
+allow_indefinite_states = ["Open"]
+strict_action_params = true
+
+[[state]]
+name = "count"
+type = "counter"
+initial = 0
+
+[[action]]
+name = "Count"
+from = ["Open"]
+params = []
+effect = ["count += 1"]
+"#;
+
 const CSDL: &str = r#"<?xml version="1.0"?>
 <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
 <edmx:DataServices><Schema Namespace="Probe" xmlns="http://docs.oasis-open.org/odata/ns/edm">
@@ -121,6 +243,18 @@ const CSDL: &str = r#"<?xml version="1.0"?>
 <EntityType Name="Ticker"><Key><PropertyRef Name="Id"/></Key>
 <Property Name="Id" Type="Edm.String" Nullable="false"/>
 </EntityType>
+<EntityType Name="Poller"><Key><PropertyRef Name="Id"/></Key>
+<Property Name="Id" Type="Edm.String" Nullable="false"/>
+</EntityType>
+<EntityType Name="CountingPoller"><Key><PropertyRef Name="Id"/></Key>
+<Property Name="Id" Type="Edm.String" Nullable="false"/>
+</EntityType>
+<EntityType Name="Relay"><Key><PropertyRef Name="Id"/></Key>
+<Property Name="Id" Type="Edm.String" Nullable="false"/>
+</EntityType>
+<EntityType Name="Tally"><Key><PropertyRef Name="Id"/></Key>
+<Property Name="Id" Type="Edm.String" Nullable="false"/>
+</EntityType>
 <Action Name="Arm" IsBound="true"><Parameter Name="bindingParameter" Type="Probe.Probe"/></Action>
 <Action Name="Fire" IsBound="true"><Parameter Name="bindingParameter" Type="Probe.Probe"/></Action>
 <Action Name="Note" IsBound="true"><Parameter Name="bindingParameter" Type="Probe.Probe"/></Action>
@@ -129,6 +263,10 @@ const CSDL: &str = r#"<?xml version="1.0"?>
 <EntityContainer Name="Container">
 <EntitySet Name="Probes" EntityType="Probe.Probe"/>
 <EntitySet Name="Tickers" EntityType="Probe.Ticker"/>
+<EntitySet Name="Pollers" EntityType="Probe.Poller"/>
+<EntitySet Name="CountingPollers" EntityType="Probe.CountingPoller"/>
+<EntitySet Name="Relays" EntityType="Probe.Relay"/>
+<EntitySet Name="Tallies" EntityType="Probe.Tally"/>
 </EntityContainer>
 </Schema></edmx:DataServices></edmx:Edmx>"#;
 
@@ -279,6 +417,26 @@ fn turso_repeating_timer_resumes_without_replaying_missed_ticks() {
 }
 
 #[test]
+fn turso_polls_that_change_nothing_write_nothing_and_still_trigger() {
+    on_turso(unrecorded::polls_that_change_nothing_write_nothing_and_still_trigger);
+}
+
+#[test]
+fn turso_polls_that_change_the_record_are_recorded() {
+    on_turso(unrecorded::polls_that_change_the_record_are_recorded);
+}
+
+#[test]
+fn turso_one_shot_reset_survives_reconciliation_and_restart() {
+    on_turso(unrecorded::one_shot_reset_survives_reconciliation_and_restart);
+}
+
+#[test]
+fn turso_a_restart_arms_the_poll_from_the_newest_unrecorded_one() {
+    on_turso(unrecorded::a_restart_arms_the_poll_from_the_newest_unrecorded_one);
+}
+
+#[test]
 #[ignore = "requires TEMPER_TEST_POSTGRES_URL pointing to disposable PostgreSQL"]
 fn postgres_timers_survive_restart() {
     let url = std::env::var("TEMPER_TEST_POSTGRES_URL").expect("disposable PostgreSQL"); // determinism-ok: integration-test configuration
@@ -301,6 +459,8 @@ fn postgres_timers_survive_restart() {
             let world = World::new(seed, Backend::Postgres(url.clone(), schema.clone()));
             timers_fire_once_as_their_principal_after_restart(&world);
             repeating_timer_resumes_without_replaying_missed_ticks(&world);
+            unrecorded::a_restart_arms_the_poll_from_the_newest_unrecorded_one(&world);
+            unrecorded::one_shot_reset_survives_reconciliation_and_restart(&world);
         }
         runtime.block_on(async {
             let pool = sqlx::PgPool::connect(&url).await.unwrap();

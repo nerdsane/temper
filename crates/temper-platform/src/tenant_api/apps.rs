@@ -92,10 +92,13 @@ struct InstalledAppView {
     status: String,
     installed_at: Option<String>,
     last_reconciled_at: Option<String>,
+    /// The absolute path of the folder the tenant serves the app from (its
+    /// `specs/`, its `COMMIT`), or `""` when only its stored specs serve.
+    dir: String,
 }
 
-impl From<InstalledAppRecord> for InstalledAppView {
-    fn from(record: InstalledAppRecord) -> Self {
+impl InstalledAppView {
+    fn new(record: InstalledAppRecord, dir: String) -> Self {
         Self {
             app_name: record.app_name,
             source_kind: record.source_kind,
@@ -107,8 +110,23 @@ impl From<InstalledAppRecord> for InstalledAppView {
             status: record.status,
             installed_at: record.installed_at,
             last_reconciled_at: record.last_reconciled_at,
+            dir,
         }
     }
+}
+
+/// The folder `tenant` serves `app` from, as an absolute path, or `""`
+/// when no folder holds it. The response serializer escapes JSON characters.
+fn served_dir(tenant: &str, app: &str) -> Result<String, String> {
+    let Some(dir) = crate::os_apps::tenant_os_app_dir(tenant, app) else {
+        return Ok(String::new());
+    };
+    let dir = std::path::absolute(&dir)
+        .map_err(|error| format!("the folder of '{app}' has no absolute path: {error}"))?;
+    let text = dir
+        .to_str()
+        .ok_or_else(|| format!("the folder of '{app}' ({}) is not UTF-8", dir.display()))?;
+    Ok(text.to_string())
 }
 
 /// Authorize a read of the credential tenant's app installs and return that
@@ -182,7 +200,8 @@ async fn installed_apps_in_tenant(
         }
         // None: the row has no metadata, e.g. it was removed between the reads.
         if let Some(record) = platform_store.get_installed_app(tenant, &app_name).await? {
-            apps.push(InstalledAppView::from(record));
+            let dir = served_dir(tenant, &app_name)?;
+            apps.push(InstalledAppView::new(record, dir));
         }
     }
     apps.sort_by(|left, right| left.app_name.cmp(&right.app_name));
@@ -255,6 +274,12 @@ pub(crate) async fn install_genesis_app(
     }
     match crate::genesis_install::install_genesis_app_from_registry(&state, req).await {
         Ok(result) => (StatusCode::OK, Json(serde_json::json!(result))),
+        // A spec of the closure did not parse: nothing changed. Matched
+        // first, since its path or the parser's words may say "not found".
+        Err(error) if error.contains("refused: spec '") && error.contains("does not parse:") => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({ "error": error })),
+        ),
         Err(error) if error.contains("not found") => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": error })),

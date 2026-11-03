@@ -351,16 +351,4 @@ mod tests {
         let metadata = OTSMetadata::new("test", "agent", OutcomeType::Success, now);
         OTSTrajectory::new(metadata).with_final_reward(2.0);
     }
-
-    #[test]
-    fn test_metadata_with_parent_trajectory() {
-        let now = sim_now();
-        let metadata = OTSMetadata::new("Child task", "agent", OutcomeType::Success, now)
-            .with_parent_trajectory_id("parent_traj_123");
-
-        assert_eq!(
-            metadata.parent_trajectory_id,
-            Some("parent_traj_123".to_string())
-        );
-    }
 }

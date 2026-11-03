@@ -69,7 +69,7 @@ resolve_target = { kind = "same_id" }
 | `principal` | string | no | Registered `AgentType` to dispatch as; omit to inherit the invoking principal |
 | `args` | table | no | Parameters for the target action: `target_param = "value"`, each value in the [predicate grammar](predicates.md) |
 
-Each `args` value is a literal — `'text'` in single quotes, an integer, `true`, `false` or `null` — or the name of a source field, read after the source commits (`Id` is the source entity's id). A name must be a declared state variable, `Id`, or a parameter of the source action (parameters are stored as fields); anything else is a load error, so a string written without its single quotes is caught.
+Each `args` value is a literal — `'text'` in single quotes, an integer, `true`, `false` or `null` — or the name of a source field, read after the source commits (`Id` is the source entity's id). A declared variable the source record stores no value for, because the record is older than the declaration, reads as its declared initial value, as it does in a guard. A name must be a declared state variable, `Id`, or a parameter of the source action (parameters are stored as fields); anything else is a load error, so a string written without its single quotes is caught.
 
 If a named field is missing on the source entity at dispatch time, the key is logged (`tracing::warn!`) and skipped; the reaction still fires with the other params.
 
@@ -162,7 +162,7 @@ resolve_target = { kind = "field", id_field = "hold_id" }
 
 These properties are load-bearing and unchanged by any of the four Phase additions:
 
-- **Fire-and-forget.** A failing reaction does NOT roll back the source transition. The source action is already committed by the time the dispatcher runs.
+- **Fire-and-forget.** A failing reaction does NOT roll back the source transition. The source action is already committed by the time the dispatcher runs. A target that refuses the move leaves a `reaction_refused` event on the source record's observe stream and a `reaction refused` warning in the log, each with the rule, the target, its state and why.
 - **Cascade bound.** A chain of reactions runs as long as its steps differ. The first reaction that would repeat a step the chain is already in (the same action on the same entity; for an entity the chain made, the same action on that type) is not run. It comes back as a failed `ReactionResult` naming the loop, and the entity whose action would have fired it gets a `reaction_cycle_stopped` observe event. A child made by `spawn(...)` is an entity the chain made, and its initial action is the chain's next step: a spawn that would repeat a step is refused before the child is made, with an `integration_callback_rejected` event on the parent naming the loop. To repeat work on purpose, use a state timer: a timer starts a new chain.
 - **Tenant isolation.** Reactions only fire for rules registered under the same tenant as the source action.
 - **Cedar on every dispatch.** Target actions run under the invoking principal, or under the service identity named by the trigger's `principal`. There is no system-principal bypass.

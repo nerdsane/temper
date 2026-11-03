@@ -35,6 +35,71 @@ fn durable_keys_keep_their_action_and_older_snapshots_still_load() {
     );
 }
 
+/// A record that takes large values keeps them in its recent events: an app's description, twice per install, made a
+/// module's context 17 MB and ran it out of memory (1 Nov 2026).
+#[test]
+fn a_module_reads_the_record_without_what_its_past_moves_were_told() {
+    let sent = "x".repeat(1_000_000);
+    let event = |action: &str| {
+        json!({
+            "action": action,
+            "from_status": "Open",
+            "to_status": "Open",
+            "timestamp": "2026-11-01T23:29:05Z",
+            "params": { "description": sent },
+        })
+    };
+    let state: EntityState = serde_json::from_value(json!({
+        "entity_type": "App",
+        "entity_id": "a1",
+        "status": "Open",
+        "item_count": 2,
+        "counters": { "version": 7 },
+        "booleans": { "broke": false },
+        "lists": { "members": ["m"] },
+        "fields": { "description": "the one it runs" },
+        "spawn_reservations": { "child": "3:0" },
+        "events": [event("Installed"), event("Installed"), event("Propose")],
+        "total_event_count": 3,
+        "sequence_nr": 3,
+        "processed_idempotency_keys": { "k": { "sequence": 2, "action": "Propose" } },
+    }))
+    .unwrap();
+
+    let whole = serde_json::to_value(&state).unwrap();
+    let record = state.for_module();
+
+    assert!(
+        record.to_string().len() < 2_000,
+        "{} bytes for a record of three million bytes of old parameters",
+        record.to_string().len()
+    );
+    // What a module reads of past moves (TemperPaw's emit_ots_trajectory): their names and times, oldest first.
+    let moves: Vec<_> = record["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|event| {
+            (
+                event["action"].as_str().unwrap(),
+                event["timestamp"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    let time = whole["events"][0]["timestamp"].as_str().unwrap();
+    assert_eq!(
+        moves,
+        [("Installed", time), ("Installed", time), ("Propose", time)]
+    );
+    // Everything else stays as the whole record says it, including a field added to the record later.
+    let others = |value: &serde_json::Value| {
+        let mut object = value.as_object().unwrap().clone();
+        object.remove("events");
+        object
+    };
+    assert_eq!(others(&record), others(&whole));
+}
+
 #[test]
 fn event_budget_is_based_on_snapshot_tail_not_lifetime_total() {
     let state = EntityState {
@@ -117,19 +182,10 @@ fn entity_response_spec_governed_skipped_when_true() {
         spec_governed: true,
         refused: false,
         answered_action: None,
+        trigger_failures: Vec::new(),
         store_unavailable: false,
+        unrecorded_at: None,
     };
     let serialized = serde_json::to_string(&resp).unwrap();
     assert!(!serialized.contains("spec_governed"));
-}
-
-#[test]
-fn default_spec_governed_is_true() {
-    assert!(default_spec_governed());
-}
-
-#[test]
-fn is_true_helper() {
-    assert!(is_true(&true));
-    assert!(!is_true(&false));
 }

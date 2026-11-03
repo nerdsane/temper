@@ -5,8 +5,9 @@ pub(super) use native::{native_candidate_page_plan, try_native_page_read};
 pub(super) use read_source::read_from_source_cursor;
 
 use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
-use temper_authz::ListReadUniformity;
+use temper_authz::{ListRead, RowRule};
 use temper_odata::query::types::QueryOptions;
 
 use super::super::authz::{READ_ACTION, entity_id_from_body, resource_attrs_from_body};
@@ -62,7 +63,7 @@ impl ScanCounters {
 }
 
 /// How row `read` decisions apply to one list.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(super) enum RowAuthz {
     /// One Cedar decision allowed every row of this entity type.
     AllowAll,
@@ -71,34 +72,50 @@ pub(super) enum RowAuthz {
     /// At least one policy can tell rows apart.
     ///
     /// `attribute_keys` is `Some` when those policies only read the listed
-    /// resource attributes (plus the entity id and `has_spec`).
+    /// resource attributes (plus the entity id and `has_spec`). `rule` holds
+    /// the list-wide part of the decision, evaluated once, and the policies
+    /// each row is checked against.
     PerRow {
         attribute_keys: Option<BTreeSet<String>>,
+        rule: Arc<RowRule>,
     },
 }
 
-/// Classify this list once. A uniform policy evaluates Cedar a single time.
+/// Decide this list once: the policies that cannot tell rows apart are
+/// evaluated a single time, and each row is checked only against the rest.
 pub(super) fn decide_row_authz(request: &QueryPlaneReadRequest<'_>) -> RowAuthz {
-    match request.state.authz.list_read_uniformity(
+    let probe = serde_json::json!({
+        "entity_id": "_list",
+        "status": "",
+        "fields": {}
+    });
+    let probe_attrs = row_attrs(request, "_list", &probe);
+    let authz = match request.state.authz.list_read_for_tenant(
         request.tenant.as_str(),
         request.security_ctx,
         READ_ACTION,
         request.entity_type,
+        &probe_attrs,
     ) {
-        ListReadUniformity::Uniform => {
-            let probe = serde_json::json!({
-                "entity_id": "_list",
-                "status": "",
-                "fields": {}
-            });
-            if row_permitted(request, "_list", &probe) {
-                RowAuthz::AllowAll
-            } else {
-                RowAuthz::DenyAll
-            }
+        ListRead::AllowAll => RowAuthz::AllowAll,
+        ListRead::DenyAll => RowAuthz::DenyAll,
+        ListRead::PerRow(rule) => RowAuthz::PerRow {
+            attribute_keys: rule.attribute_keys.clone(),
+            rule: Arc::from(rule),
+        },
+    };
+    // On `odata.entity_set_read`: how this list's rows were decided, and how
+    // many policies each row was checked against (0: the whole set).
+    let span = tracing::Span::current();
+    match &authz {
+        RowAuthz::AllowAll => span.record("row_authz", "allow_all"),
+        RowAuthz::DenyAll => span.record("row_authz", "deny_all"),
+        RowAuthz::PerRow { rule, .. } => {
+            span.record("row_authz", "per_row");
+            span.record("row_policies", rule.row_policy_count as u64)
         }
-        ListReadUniformity::PerEntity { attribute_keys } => RowAuthz::PerRow { attribute_keys },
-    }
+    };
+    authz
 }
 
 pub(super) struct TelemetryInput {
@@ -197,37 +214,42 @@ pub(super) fn budget_rejection(
     }
 }
 
-fn row_permitted(
+fn row_attrs(
     request: &QueryPlaneReadRequest<'_>,
     entity_id: &str,
     entity: &serde_json::Value,
-) -> bool {
-    let attrs = resource_attrs_from_body(
+) -> HashMap<String, serde_json::Value> {
+    resource_attrs_from_body(
         request.state,
         request.tenant,
         request.entity_type,
         entity_id,
         entity,
-    );
-    let attrs: HashMap<String, serde_json::Value> = attrs.into_iter().collect(); // determinism-ok: Cedar API requires HashMap
-    request
-        .state
-        .authz
-        .authorize_row_for_tenant(
-            request.tenant.as_str(),
-            request.security_ctx,
-            READ_ACTION,
-            request.entity_type,
-            &attrs,
-        )
-        .is_allowed()
+    )
+    .into_iter()
+    .collect() // determinism-ok: Cedar API requires HashMap
 }
 
+/// Whether this list may show `entity`.
 pub(super) fn entity_read_allowed(
     request: &QueryPlaneReadRequest<'_>,
+    authz: &RowAuthz,
     entity: &serde_json::Value,
 ) -> bool {
-    entity_id_from_body(entity).is_some_and(|entity_id| row_permitted(request, entity_id, entity))
+    match authz {
+        RowAuthz::AllowAll => true,
+        RowAuthz::DenyAll => false,
+        RowAuthz::PerRow { rule, .. } => entity_id_from_body(entity).is_some_and(|entity_id| {
+            request.state.authz.list_row_allowed(
+                request.tenant.as_str(),
+                request.security_ctx,
+                READ_ACTION,
+                request.entity_type,
+                rule,
+                &row_attrs(request, entity_id, entity),
+            )
+        }),
+    }
 }
 
 fn retain_authorized(
@@ -240,7 +262,7 @@ fn retain_authorized(
         RowAuthz::DenyAll => Vec::new(),
         RowAuthz::PerRow { .. } => entities
             .into_iter()
-            .filter(|entity| entity_read_allowed(request, entity))
+            .filter(|entity| entity_read_allowed(request, authz, entity))
             .collect(),
     }
 }
@@ -254,6 +276,7 @@ fn projection_fields<'a>(
         RowAuthz::AllowAll | RowAuthz::DenyAll => Some(select),
         RowAuthz::PerRow {
             attribute_keys: Some(keys),
+            ..
         } => keys
             .iter()
             .all(|key| {
@@ -263,6 +286,7 @@ fn projection_fields<'a>(
             .then_some(select),
         RowAuthz::PerRow {
             attribute_keys: None,
+            ..
         } => None,
     }
 }

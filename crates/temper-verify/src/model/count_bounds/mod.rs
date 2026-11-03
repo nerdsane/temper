@@ -98,7 +98,8 @@ fn walk<'a>(model: &TemperModel, t: &'a ResolvedTransition) -> Walked<'a> {
             }
             ModelEffect::SetBool { .. }
             | ModelEffect::SetString { .. }
-            | ModelEffect::ListAppend { .. } => {}
+            | ModelEffect::ListAppend { .. }
+            | ModelEffect::ListRemove { .. } => {}
         }
     }
     for (counter, value) in values {
@@ -217,7 +218,7 @@ pub(super) fn count_ranges<'a>(
             (*p, range)
         })
         .collect();
-    if !model.entry_rules.is_empty() {
+    if super::parameters::checks_inputs(model, t) {
         // Freeze effect ranges before widening: a compared input's effects
         // can require values this input must reach too. Updating in place
         // while calculating bounds would make the result depend on order.

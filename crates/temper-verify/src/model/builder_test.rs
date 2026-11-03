@@ -164,17 +164,6 @@ guard = "Child[child_id].status in ['Done']"
     );
 }
 
-#[test]
-fn debug_resolved_transitions() {
-    let model = build_model_from_ioa(ORDER_IOA, 2).unwrap();
-    for t in &model.transitions {
-        eprintln!(
-            "{}: from={:?} to={:?} guard={:?} effects={:?}",
-            t.name, t.from_states, t.to_state, t.guard, t.effects
-        );
-    }
-}
-
 // --- Compound invariant tests ---------------------------------------
 
 const COMPOUND_IOA: &str = r#"

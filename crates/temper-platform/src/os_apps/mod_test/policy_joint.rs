@@ -108,13 +108,12 @@ async fn policy_checks_use_incoming_specs_over_active_versions() {
     )
     .await
     .expect("the incoming spec replaces the old property before checking");
-    // The new property names only Place, so App's reaction into Place is
-    // outside its scope. The walk does not send that reaction, so the
-    // property is not checked: a warning, not a refusal.
-    assert!(
-        unproved.len() == 1 && unproved[0].contains("a reaction from App may take Place.Bring"),
-        "{unproved:?}"
-    );
+    // The incoming property is `eventually true`, which the forbid cannot
+    // break, while the active one is refused under the same Cedar (see
+    // `policy_only_install_checks_existing_apps_in_its_tenant`). App's
+    // reaction into Place is outside the new property's scope, so the walk
+    // sends it as an outside move, and the property holds with it.
+    assert!(unproved.is_empty(), "{unproved:?}");
 }
 
 #[tokio::test]

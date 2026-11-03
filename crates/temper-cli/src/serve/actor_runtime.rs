@@ -267,7 +267,10 @@ fn validate_actor_runtime_compatible(
                         action.name
                     );
                 }
-                Effect::Assign { .. } | Effect::Append { .. } | Effect::RemoveAt { .. } => {}
+                Effect::Assign { .. }
+                | Effect::Append { .. }
+                | Effect::RemoveAt { .. }
+                | Effect::Remove { .. } => {}
             }
         }
     }

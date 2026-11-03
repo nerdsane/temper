@@ -395,6 +395,7 @@ fn internal_http_call_replaces_guest_authority_with_fresh_capability() {
             workflow_root_entity_id: Some("cq-1".to_string()),
             workflow_run_id: Some("CurationQuery:cq-1".to_string()),
             http_request: None,
+            trigger_principal: None,
         });
 
     let headers = vec![
@@ -596,6 +597,7 @@ fn guest_log_span_attrs_include_message_and_invocation_context() {
         workflow_root_entity_id: None,
         workflow_run_id: None,
         http_request: None,
+        trigger_principal: None,
     };
 
     let attrs = guest_log_span_attrs(
@@ -662,6 +664,7 @@ fn guest_log_span_event_is_named_for_trace_export() {
         workflow_root_entity_id: None,
         workflow_run_id: None,
         http_request: None,
+        trigger_principal: None,
     };
 
     {
@@ -683,6 +686,8 @@ fn guest_log_span_event_is_named_for_trace_export() {
 mod host_boundary_observability;
 #[path = "tests/log_correlation.rs"]
 mod log_correlation;
+#[path = "tests/raw_url_tracing.rs"]
+mod raw_url_tracing;
 #[path = "tests/span_hint_tests.rs"]
 mod span_hint_tests;
 

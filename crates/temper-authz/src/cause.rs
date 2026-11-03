@@ -57,6 +57,28 @@ pub struct ReactionHop {
 pub struct TimerArm {
     /// The id of the principal that armed it, which its fire runs as.
     pub armed_by: String,
+    /// The record whose state timer this is; None for a scheduled action.
+    /// A refusal late in the chain, an integration's answer's reaction, say,
+    /// finds the timer that set it off from this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_timer_of: Option<TimerRecord>,
+}
+
+/// The record a state timer belongs to, and which of its declared timers it
+/// is: a refusal late in its chain stops only that timer, not one the record
+/// moved on to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimerRecord {
+    /// The record's entity type.
+    pub entity_type: String,
+    /// The record's entity id.
+    pub entity_id: String,
+    /// The timed state the timer was declared for.
+    #[serde(default)]
+    pub state: String,
+    /// The timer's `on_timeout` action.
+    #[serde(default)]
+    pub action: String,
 }
 
 impl MoveCause {
@@ -138,6 +160,7 @@ mod tests {
     fn arm() -> TimerArm {
         TimerArm {
             armed_by: "hook-1".to_string(),
+            state_timer_of: None,
         }
     }
 

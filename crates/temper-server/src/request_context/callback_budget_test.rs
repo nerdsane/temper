@@ -271,8 +271,10 @@ fn answer_preserves_authority_and_its_own_key_without_the_askers_fire_marks() {
             tenant: "tenant-a".into(),
             entity_type: "Job".into(),
             entity_id: "job".into(),
+            state: "Asking".into(),
             action: "Ask".into(),
             armed_seq: 7,
+            repeats: false,
         }),
         ..AgentContext::default()
     }

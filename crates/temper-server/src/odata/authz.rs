@@ -8,7 +8,7 @@ use axum::response::{IntoResponse, Response};
 use temper_authz::{AuthenticatedRequestContext, SecurityContext};
 use temper_runtime::tenant::TenantId;
 
-use crate::authz::{DenialInput, record_authz_denial};
+use crate::authz::{DenialInput, record_answerable_denial};
 use crate::request_context::AgentContext;
 use crate::response::{odata_denial, odata_error};
 use crate::state::ServerState;
@@ -186,7 +186,7 @@ pub(super) async fn authorize_mutation(
     };
 
     let reason = denial.to_string();
-    let decision = record_authz_denial(
+    let decision = record_answerable_denial(
         state,
         DenialInput {
             tenant: tenant.as_str(),
@@ -210,6 +210,11 @@ pub(super) async fn authorize_mutation(
         },
     )
     .await;
+    let Some(decision) = decision else {
+        return Err(
+            odata_error(StatusCode::FORBIDDEN, "AuthorizationDenied", &reason).into_response(),
+        );
+    };
 
     Err(odata_denial(
         &format!("{reason} (decision: {})", decision.id),

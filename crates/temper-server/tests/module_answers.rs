@@ -4,6 +4,10 @@
 //! `on_success = ["TakeUmbrella", "LeaveUmbrella"]`, and `TakeUmbrella`'s
 //! guard reads the value as `params.rain`. The real WASM engine runs each
 //! module, and the record's status shows which move the kernel made.
+//!
+//! A trigger that lists no `on_success` takes the action its module names,
+//! whatever that action's kind: an `internal` `Recheck` whose module answers
+//! `Revive`, an `input` action, moves the record on to `Restarting`.
 
 use std::time::Duration;
 
@@ -175,4 +179,116 @@ async fn an_answer_that_names_no_action_still_sends_on_success() {
     }))
     .await;
     assert_eq!(status, "Dry");
+}
+
+const INSTALL_IOA: &str = r#"
+[automaton]
+name = "Install"
+states = ["Running", "Broken", "Restarting"]
+initial = "Running"
+
+[[action]]
+name = "Break"
+kind = "input"
+from = ["Running"]
+to = "Broken"
+hint = "The install stops working."
+
+[[action]]
+name = "Recheck"
+kind = "internal"
+from = ["Broken"]
+to = "Broken"
+hint = "Asks the recheck module what to do with a broken install."
+
+[[action.triggers]]
+name = "recheck"
+kind = "wasm"
+module = "recheck"
+
+[[action]]
+name = "Revive"
+kind = "input"
+from = ["Broken"]
+to = "Restarting"
+hint = "Restarts a broken install."
+"#;
+
+const INSTALL_CSDL_XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Temper.Install" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="Install">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+      </EntityType>
+      <EntityContainer Name="Container">
+        <EntitySet Name="Installs" EntityType="Temper.Install.Install"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_module_may_answer_with_an_input_action() {
+    let mut registry = SpecRegistry::new();
+    let csdl = parse_csdl(INSTALL_CSDL_XML).expect("CSDL parses");
+    registry.register_tenant(
+        "default",
+        csdl,
+        INSTALL_CSDL_XML.to_string(),
+        &[("Install", INSTALL_IOA)],
+    );
+    let state = ServerState::from_registry(ActorSystem::new("module-answer-input"), registry);
+    let tenant = TenantId::default();
+    let hash = state
+        .wasm_engine
+        .compile_and_cache(
+            answering(&serde_json::json!({ "action": "Revive", "params": {} })).as_bytes(),
+        )
+        .expect("the module compiles");
+    state.register_wasm_module(&tenant, "recheck", &hash);
+    let runtime = AgentContext::for_service("runtime");
+
+    for action in ["Break", "Recheck"] {
+        let moved = state
+            .dispatch_tenant_action(
+                &tenant,
+                "Install",
+                "app",
+                action,
+                serde_json::json!({}),
+                &runtime,
+            )
+            .await
+            .expect("the action dispatches");
+        assert!(moved.success, "{action} is taken: {:?}", moved.error);
+    }
+
+    // The answer comes in the background. Wait until the record leaves
+    // Broken, or long enough that an answer would have landed.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let install = loop {
+        let install = state
+            .get_tenant_entity_state(&tenant, "Install", "app")
+            .await
+            .expect("the record exists")
+            .state;
+        if install.status != "Broken" || tokio::time::Instant::now() >= deadline {
+            break install;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    assert_eq!(install.status, "Restarting");
+    let revived = install
+        .events
+        .iter()
+        .find(|event| event.action == "Revive")
+        .expect("Revive is journaled");
+    assert_eq!(
+        (revived.from_status.as_str(), revived.to_status.as_str()),
+        ("Broken", "Restarting")
+    );
 }

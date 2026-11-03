@@ -192,6 +192,15 @@ pub(super) async fn dispatch_bound_action(
                     action_span.set_status(Status::Ok);
 
                     let mut state_json = action_answer(&response.state);
+                    // The action committed; triggers that failed are said beside it.
+                    if !response.trigger_failures.is_empty()
+                        && let Some(object) = state_json.as_object_mut()
+                    {
+                        object.insert(
+                            "@temper.triggerFailures".to_string(),
+                            serde_json::json!(response.trigger_failures),
+                        );
+                    }
                     if let Some(hook) = state.bound_action_hook.as_ref() {
                         match hook
                             .after_bound_action(BoundActionHookContext {

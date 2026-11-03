@@ -93,11 +93,37 @@ pub fn model_check_diagnostics(result: &VerificationResult) -> Vec<String> {
         } else {
             format!(" ({} false)", counterexample.violated.join(", "))
         };
-        lines.push(format!(
-            "property '{}' violated{broken}; path ({} step(s)):",
-            counterexample.property,
-            counterexample.trace.len().saturating_sub(1),
-        ));
+        let steps = counterexample.trace.len().saturating_sub(1);
+        if counterexample.property == crate::reaches::REACHES {
+            let rule = counterexample.violated.join(", ");
+            let targets = crate::lost_places::either(&counterexample.never_reaches);
+            let back = counterexample
+                .trace
+                .split_last()
+                .and_then(|((last, _), rest)| rest.iter().rposition(|(state, _)| state == last));
+            lines.push(match back {
+                Some(back) => format!(
+                    "rule '{rule}' broken: this path comes back to step {back} without \
+                     reaching {targets}, so a record can go round it forever ({steps} step(s)):"
+                ),
+                None => format!(
+                    "rule '{rule}' broken: this path stops without reaching {targets} \
+                     after the rule starts ({steps} step(s)):"
+                ),
+            });
+        } else if counterexample.never_reaches.is_empty() {
+            lines.push(format!(
+                "property '{}' violated{broken}; path ({steps} step(s)):",
+                counterexample.property,
+            ));
+        } else {
+            lines.push(format!(
+                "rule '{}' broken: the record at the end of this path can never reach {} \
+                 ({steps} step(s)):",
+                counterexample.violated.join(", "),
+                crate::lost_places::either(&counterexample.never_reaches),
+            ));
+        }
         lines.extend(render_trace(&counterexample.trace));
     }
 

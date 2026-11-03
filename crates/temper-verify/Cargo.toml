@@ -16,3 +16,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 z3 = { version = "0.19" }
+
+[dev-dependencies]
+temper-jit = { workspace = true }

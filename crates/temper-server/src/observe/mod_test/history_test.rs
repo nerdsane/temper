@@ -128,8 +128,6 @@ fn state_with_journal(store: impl EventStore) -> ServerState {
         None,
         None,
         None,
-        None,
-        None,
     ));
     state
 }

@@ -25,9 +25,14 @@ pub(crate) const CALLBACK_LAG: i64 = 30;
 pub(crate) const JOB: &str = r#"
 [automaton]
 name = "Job"
-states = ["Idle", "Waiting", "Active", "Planned", "Done"]
+states = ["Idle", "Waiting", "Active", "Planned", "Running", "Done"]
 initial = "Idle"
-allow_indefinite_states = ["Idle", "Waiting", "Active", "Planned", "Done"]
+allow_indefinite_states = ["Idle", "Waiting", "Active", "Planned", "Running", "Done"]
+
+[[state]]
+name = "reports"
+type = "counter"
+initial = 0
 
 [[action]]
 name = "Start"
@@ -68,6 +73,30 @@ effect = ["schedule_at('Run', next_run_at)"]
 [[action]]
 name = "Run"
 from = ["Planned"]
+
+# A run that reports progress and checks on itself at one deadline, as a
+# KatagamiAppRun does: launching and every report schedule the same Check.
+[[action]]
+name = "Launch"
+from = ["Idle"]
+to = "Running"
+params = ["check_at"]
+effect = ["schedule_at('Check', check_at)"]
+
+[[action]]
+name = "Progress"
+from = ["Running"]
+params = ["check_at"]
+effect = ["reports += 1", "schedule_at('Check', check_at)"]
+
+[[action]]
+name = "Finish"
+from = ["Running"]
+to = "Done"
+
+[[action]]
+name = "Check"
+from = ["Running"]
 "#;
 
 pub(crate) const CSDL: &str = r#"<?xml version="1.0"?>
@@ -77,6 +106,7 @@ pub(crate) const CSDL: &str = r#"<?xml version="1.0"?>
 <Property Name="Id" Type="Edm.String" Nullable="false"/>
 <Property Name="due" Type="Edm.String"/>
 <Property Name="next_run_at" Type="Edm.String"/>
+<Property Name="check_at" Type="Edm.String"/>
 </EntityType>
 <Action Name="Start" IsBound="true"><Parameter Name="bindingParameter" Type="Jobs.Job"/></Action>
 <Action Name="StartAt" IsBound="true"><Parameter Name="bindingParameter" Type="Jobs.Job"/><Parameter Name="due" Type="Edm.String"/></Action>
@@ -85,6 +115,10 @@ pub(crate) const CSDL: &str = r#"<?xml version="1.0"?>
 <Action Name="Fire" IsBound="true"><Parameter Name="bindingParameter" Type="Jobs.Job"/></Action>
 <Action Name="Plan" IsBound="true"><Parameter Name="bindingParameter" Type="Jobs.Job"/><Parameter Name="next_run_at" Type="Edm.String"/></Action>
 <Action Name="Run" IsBound="true"><Parameter Name="bindingParameter" Type="Jobs.Job"/></Action>
+<Action Name="Launch" IsBound="true"><Parameter Name="bindingParameter" Type="Jobs.Job"/><Parameter Name="check_at" Type="Edm.String"/></Action>
+<Action Name="Progress" IsBound="true"><Parameter Name="bindingParameter" Type="Jobs.Job"/><Parameter Name="check_at" Type="Edm.String"/></Action>
+<Action Name="Finish" IsBound="true"><Parameter Name="bindingParameter" Type="Jobs.Job"/></Action>
+<Action Name="Check" IsBound="true"><Parameter Name="bindingParameter" Type="Jobs.Job"/></Action>
 <EntityContainer Name="Container"><EntitySet Name="Jobs" EntityType="Jobs.Job"/></EntityContainer>
 </Schema></edmx:DataServices></edmx:Edmx>"#;
 

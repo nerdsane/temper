@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::ops::ControlFlow;
 
-use temper_authz::{Asker, May, SendAnalysis};
+use temper_authz::{Asker, Cause, May, SendAnalysis};
 use temper_runtime::tenant::TenantId;
 use temper_spec::automaton::Automaton;
 use temper_spec::cross_invariant;
@@ -36,6 +36,21 @@ pub(super) fn refuse_unavailable_tenant(
         "tenant '{tenant}' is unavailable (its stored specs did not load at startup), so \
          os-app '{app_name}' is not installed and the stored rows are kept for repair"
     ))
+}
+
+/// Refuse bad same-type trigger/timer args before an install or upgrade writes.
+/// Boot replay skips this gate; registry loading warns and keeps the stored spec.
+pub(super) fn trigger_target_args(app: &str, specs: &[(String, String)]) -> Result<(), String> {
+    for (entity, source) in specs {
+        let automaton = temper_spec::automaton::parse_automaton(source)
+            .map_err(|e| format!("os-app '{app}' spec {entity} failed to parse: {e}"))?;
+        if let Some(finding) =
+            temper_spec::automaton::lint_trigger_target_args(&automaton, entity).first()
+        {
+            return Err(format!("os-app '{app}' spec {entity}: {}", finding.message));
+        }
+    }
+    Ok(())
 }
 
 /// Parse the bundle's cross-invariants, if it has any, so a bundle whose
@@ -120,7 +135,11 @@ pub(super) async fn prove(
     // scope, so it runs off the async threads too.
     let joint = tokio::task::spawn_blocking(move || {
         let refs: Vec<&Automaton> = automatons.values().map(|(_, a)| a).collect();
-        temper_verify::composite::joint_proofs(&refs, Some(&policies))
+        temper_verify::composite::joint_proofs(
+            &refs,
+            Some(&policies),
+            &temper_server::host_room::HOST_ROOM,
+        )
     })
     .await
     .map_err(|e| {
@@ -340,7 +359,13 @@ pub(super) fn timer_strands(
         return Vec::new();
     };
     let outside_may = |entity_type: &str, action: &str| {
-        cedar.may(&Asker::Outside, action, entity_type, &BTreeMap::new()) != May::No
+        cedar.may(
+            &Asker::Outside,
+            action,
+            entity_type,
+            &BTreeMap::new(),
+            Some(&Cause::request()),
+        ) != May::No
     };
     let mut warnings = Vec::new();
     for (entity_type, source) in specs {
@@ -400,6 +425,12 @@ pub(super) async fn check_spec_changes(
         .iter()
         .map(|(entity_type, source)| (entity_type.as_str(), source.as_str()))
         .collect();
+    state
+        .registry
+        .read()
+        .expect("registry lock poisoned")
+        .check_principal_attributes(tenant, &sources, true)
+        .map_err(|error| format!("os-app '{app_name}' was not installed. {error}"))?;
     let changes = state
         .server
         .spec_changes(tenant, &sources)

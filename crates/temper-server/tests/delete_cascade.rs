@@ -9,8 +9,6 @@
 //! a strict type, which only a declared action deletes.
 
 mod common;
-#[path = "delete_cascade/moved_rows.rs"]
-mod moved_rows;
 #[path = "delete_cascade/recovery.rs"]
 mod recovery;
 

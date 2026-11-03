@@ -21,6 +21,7 @@ use temper_spec::cross_invariant::{
 };
 
 use crate::entity_actor::EntityState;
+use crate::odata::read_defaults::ReadDefaults;
 use crate::registry::RelationEdge;
 use crate::state::ServerState;
 use crate::state::write_record::RecordWrite;
@@ -418,7 +419,9 @@ pub(crate) async fn post_write_invariant_checks(
                 if assertion.field_name == "status" {
                     target.status
                 } else {
-                    let target_fields = serde_json::to_value(&target.fields).unwrap_or_default();
+                    let target_fields =
+                        ReadDefaults::for_entity(state, tenant, &assertion.target_entity)
+                            .fields_as_read(&target.fields);
                     let Some(value) =
                         extract_field_as_string(&target_fields, &assertion.field_name)
                     else {
@@ -638,7 +641,10 @@ pub async fn pre_upsert_field_invariant_checks(
         return Ok(());
     }
 
-    let view = field_invariant_view(fields);
+    // A variable the record stores no value for reads as its declared
+    // initial value, as it does in every guard.
+    let view = ReadDefaults::for_entity(state, tenant, entity_type)
+        .fields_as_read(&field_invariant_view(fields));
 
     for inv in invariants {
         if inv.passes(&view) {

@@ -26,12 +26,12 @@ pub use verify::{
     CompositeOutcome, CompositeVerifyResult, seed_cover, verify_all, verify_composite,
 };
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use temper_spec::automaton::{Automaton, TriggerEdge, TriggerGraph};
 
-use crate::model::{TemperModel, build_model_from_automaton};
+use crate::model::{TemperModel, build_model_tracking};
 
 /// Default per-entity counter ceiling used when building composite
 /// [`TemperModel`]s. Matches the single-entity cascade default.
@@ -161,7 +161,14 @@ impl CompositeVerificationPlan {
             let aut = by_name
                 .get(entity.as_str())
                 .expect("scope member is in input set");
-            let model = build_model_from_automaton(aut, DEFAULT_COMPOSITE_MAX_COUNTER);
+            // Whole models: another entity's rule may read any field.
+            let fields: BTreeSet<String> = aut
+                .state
+                .iter()
+                .filter(|sv| !matches!(sv.initial, temper_spec::automaton::Initial::String(_)))
+                .map(|sv| sv.name.clone())
+                .collect();
+            let model = build_model_tracking(aut, DEFAULT_COMPOSITE_MAX_COUNTER, &fields);
             models.insert(entity.clone(), model);
         }
 
@@ -335,6 +342,37 @@ to = "Published"
             .expect("plan should build for isolated entity");
         assert_eq!(plan.scope_size(), 1);
         assert_eq!(plan.edge_count(), 0);
+    }
+
+    #[test]
+    fn plan_keeps_fields_that_only_another_entity_may_read() {
+        use stateright::Model;
+
+        let source = format!(
+            "{}\n\
+             [[state]]\nname = 'version'\ntype = 'counter'\ninitial = 0\n\
+             [[state]]\nname = 'seen'\ntype = 'bool'\ninitial = false\n\
+             [[state]]\nname = 'items'\ntype = 'list'\ninitial = []\n\
+             [[action]]\nname = 'Note'\nfrom = ['Draft']\n\
+             effect = ['version += 1', 'seen = true', \"append(items, 'note')\"]\n",
+            wiki_ioa(),
+        );
+        let wiki = parse_automaton(&source).unwrap();
+        let local = crate::model::build_model_from_automaton(&wiki, 2);
+        assert!(!local.holds("version"));
+        assert!(!local.holds("seen"));
+        assert!(!local.holds("items"));
+
+        let plan = CompositeVerificationPlan::new(&[&wiki], "Wiki").unwrap();
+        let model = &plan.models["Wiki"];
+        let initial = model.init_states().remove(0);
+        let note = model.transitions.iter().find(|t| t.name == "Note").unwrap();
+        let choices = crate::model::semantics::successors(model, note, &initial);
+        assert_eq!(choices.len(), 1);
+        let after = &choices[0].1;
+        assert_eq!(after.counters["version"], 1);
+        assert!(after.booleans["seen"]);
+        assert_eq!(after.lists["items"].len(), 1);
     }
 
     #[test]

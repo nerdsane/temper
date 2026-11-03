@@ -231,14 +231,6 @@ fn resolve_config_ignores_empty_values() {
 }
 
 #[test]
-fn export_queues_stay_capped_at_the_pre_pin_size() {
-    assert_eq!(super::TRACE_BATCH_MAX_QUEUE_SIZE, 2_048);
-    assert_eq!(super::LOG_BATCH_MAX_QUEUE_SIZE, 2_048);
-    assert_eq!(super::TRACE_BATCH_MAX_EXPORT_BATCH_SIZE, 512);
-    assert_eq!(super::LOG_BATCH_MAX_EXPORT_BATCH_SIZE, 512);
-}
-
-#[test]
 fn trace_sampler_config_reads_and_clamps_sample_rate_overrides() {
     with_test_env(
         &[

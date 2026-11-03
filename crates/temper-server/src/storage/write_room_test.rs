@@ -65,6 +65,8 @@ async fn a_disk_under_the_floor_refuses_every_append_and_writes_go_on_once_it_ha
                 persistence_id: JOURNAL.into(),
                 expected_sequence: 0,
                 events: events.to_vec(),
+                state_timer: None,
+                projection: None,
             }])
             .await
             .unwrap_err(),

@@ -308,8 +308,11 @@ permit(
         );
     }
 
+    /// The path's old contract, installing a catalog app into a tenant the
+    /// body names, is gone: the route now takes the app's files for the
+    /// credential's own tenant, under Cedar `install_app`.
     #[tokio::test]
-    async fn test_local_os_app_install_route_is_removed() {
+    async fn test_install_route_does_not_install_a_catalog_app_into_a_named_tenant() {
         let state = test_state();
         let request = authenticated_request(
             &state,
@@ -317,10 +320,22 @@ permit(
             "/api/os-apps/project-management/install",
             Body::from(r#"{"tenant":"test-install"}"#),
         );
-        let app = build_platform_router(state);
+        let app = build_platform_router(state.clone());
         let response = app.oneshot(request).await.unwrap();
 
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(
+            response.status().is_client_error(),
+            "got {}",
+            response.status()
+        );
+        assert!(
+            state
+                .registry
+                .read()
+                .unwrap()
+                .get_tenant(&TenantId::new("test-install"))
+                .is_none()
+        );
     }
 
     #[tokio::test]

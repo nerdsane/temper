@@ -419,3 +419,51 @@ mod contracts;
 
 #[path = "stored_record_spawn/authenticated.rs"]
 mod authenticated;
+
+/// A child made before its spec declared `grade` stores none. The
+/// cross-invariant that reads it reads the declared initial value, as a
+/// guard does.
+#[tokio::test]
+async fn a_cross_invariant_reads_a_related_records_newly_declared_field_as_its_default() {
+    let state = build_state();
+    let (status, body) = send(&state, Method::POST, "/tdata/Children", json!({"Id": "c1"})).await;
+    assert_eq!(status, StatusCode::CREATED, "seed c1: {body}");
+
+    let child =
+        format!("{CHILD_IOA}\n[[state]]\nname = \"grade\"\ntype = \"string\"\ninitial = \"A\"\n");
+    let graded = r#"
+version = 1
+
+[[invariant]]
+name = "RunsNameAGradeAChild"
+kind = "hard"
+on = "Run.Create"
+assert = 'related(Child, ChildRef).grade in ["A"]'
+"#;
+    {
+        let mut registry = state.registry.write().unwrap();
+        registry.register_tenant_with_constraints(
+            "default",
+            parse_csdl(CSDL).expect("CSDL parse"),
+            CSDL.to_string(),
+            &[("Child", child.as_str()), ("Run", RUN_IOA)],
+            Some(graded.to_string()),
+        );
+        for entity_type in ["Child", "Run"] {
+            registry.set_verification_status(&TenantId::default(), entity_type, verified());
+        }
+    }
+
+    let (status, body) = send(
+        &state,
+        Method::POST,
+        "/tdata/Runs",
+        json!({"Id": "r1", "ChildRef": "c1"}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "c1 stores no grade, which reads as 'A': {body}"
+    );
+}

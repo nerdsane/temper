@@ -329,14 +329,13 @@ async fn sim_pagination_is_deterministic_across_seeds() {
         let (_guard, _clock, _id) = install_deterministic_context(seed);
         let events = BoxedEventStore::new(SimEventStore::no_faults(seed));
         let mut state = build_order_state("paging-sim");
+        // No query plane: reads go through the authoritative source cursor.
         state.set_storage_stack(StorageStack::new(
             BackendLabel::Sim,
             events,
             None,
             None,
             None,
-            None,
-            None, // no query plane: reads go through the authoritative source cursor
             None,
             None,
             None,

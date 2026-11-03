@@ -147,6 +147,8 @@ if let Some(ref post_response) = inline_response
 }
 ```
 
+**Amendment: a silent exit is a trigger that sends no answer (2026-11-02).** The guard above compared the record's status before and after an inline trigger. It counted every answer that keeps the status (Katagami's `KatagamiApp.UseSurface` answers `SurfaceUsed`, which stays `Live`: every use of an app's interface counted), and it never saw a module that answered nothing, because that dispatch returns no response. The count now happens where the kernel reads the module's result (`dispatch/wasm.rs`), inline or in the background: a successful module that names no move, does not answer `"empty": true`, and wrote nothing as a composite. An answer the record refuses is journaled as a rejected answer and is not counted here.
+
 Under healthy operation `temper_integration_silent_exit_total` is permanently zero. The consumer (openpaw) is responsible for enforcing the invariant at the WASM layer (per openpaw ADR-0039 Sub-Decision 3a). This platform-side check is a belt-and-suspenders regression guard — if the WASM-side invariant ever regresses, operators see the counter go nonzero and can act before user-visible impact.
 
 **Why no automatic `on_silent_exit` recovery field on actions:** scope control. The consumer-side invariant + persist retries close the common causes. A declarative recovery primitive is appealing but adds spec grammar and requires usage-pattern data we don't have yet. Revisit once we have production evidence that this regression-guard fires — at that point we'll know what shape of recovery operators actually want.

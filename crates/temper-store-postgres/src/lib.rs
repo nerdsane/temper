@@ -34,7 +34,9 @@
 //! restoring the registry. Bare-pool compatibility APIs still use the default
 //! search path. Schema selection is independent of Temper tenant authorization.
 
-mod data_only_create;
+mod append_commit;
+#[cfg(test)]
+mod append_commit_test;
 pub mod dbm;
 mod first_event;
 mod metrics;

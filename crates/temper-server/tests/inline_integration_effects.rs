@@ -215,9 +215,10 @@ impl Respond for AnswerAfterTheStoreStops {
 }
 
 /// When the store does not take an inline integration's answer, the request's
-/// own action has already committed. The caller is told it failed, as before,
-/// but not that the store is unavailable: that answer (503, Retry-After) asks
-/// the caller to send the action again, and the action would apply twice.
+/// own action has already committed. The caller is answered committed with
+/// the refused answer named (ADR-0184), never that the store is unavailable:
+/// that answer (503, Retry-After) asks the caller to send the action again,
+/// and the action would apply twice.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_answer_the_store_does_not_take_does_not_ask_for_the_action_again() {
     let mock_server = MockServer::start().await;
@@ -261,7 +262,15 @@ async fn an_answer_the_store_does_not_take_does_not_ask_for_the_action_again() {
         actions.contains(&"Trigger") && !actions.contains(&"AdapterSucceeded"),
         "the action committed and its answer did not: {actions:?}"
     );
-    assert!(!response.success, "the answer was not written");
+    assert!(response.success, "the action committed: {response:?}");
+    assert!(
+        response
+            .trigger_failures
+            .iter()
+            .any(|failure| failure.starts_with("answer refused: ")),
+        "the answer the store did not take is named: {:?}",
+        response.trigger_failures
+    );
     assert!(
         !response.store_unavailable,
         "the action committed, so the caller must not be asked to send it again: {:?}",

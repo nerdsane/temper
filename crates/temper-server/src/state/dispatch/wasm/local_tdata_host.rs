@@ -80,12 +80,11 @@ impl LocalTDataWasmHost {
                 HeaderValue::from(body.len()),
             );
         }
-        let path_for_span = request.path.clone();
         let span = tracing::info_span!(
             "wasm.local_tdata_http_call",
             otel.name = "wasm.local_tdata_http_call",
             http.method = %method_upper,
-            url.path = %path_for_span,
+            url.path = %request.telemetry_path(),
             local_tdata = true,
         );
 
@@ -273,6 +272,13 @@ struct LocalTDataRequest {
 }
 
 impl LocalTDataRequest {
+    /// The parser separates the query before decoding this path. A decoded '?'
+    /// belongs to the path and must remain in telemetry. Only a parsed request,
+    /// rather than an arbitrary string labelled `url.path`, can use this accessor.
+    fn telemetry_path(&self) -> &str {
+        &self.path
+    }
+
     fn parse(url: &str, local_tdata_hosts: &BTreeSet<String>) -> Option<Self> {
         let parsed = Url::parse(url).ok()?;
         if !matches!(parsed.scheme(), "http" | "https") {

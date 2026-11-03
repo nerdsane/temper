@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Instant;
 
-use tracing::{Instrument, instrument};
+use tracing::instrument;
 
 use temper_observe::wide_event;
 use temper_runtime::actor::ActorError;
@@ -21,7 +21,8 @@ use crate::events::EntityStateChange;
 use crate::registry::{VerificationDetail, VerificationStatus};
 use crate::request_context::AgentContext;
 use crate::runtime_metrics;
-use crate::storage::DataOnlyCreateRecord;
+
+mod timer_needs_person;
 
 /// Idle actors snapshotted and stopped in one `passivate_idle_actors` tick.
 /// Remainder stay registered for the next tick so snapshot writes cannot
@@ -55,86 +56,6 @@ fn actor_idle_timeout_secs() -> i64 {
             .filter(|v| *v > 0)
             .unwrap_or(300)
     })
-}
-
-fn record_projection_update_started(
-    tenant: &TenantId,
-    entity_type: &str,
-    operation: &str,
-    source: &str,
-) {
-    crate::query_projection_metrics::record_update_started(
-        tenant.as_str(),
-        entity_type,
-        operation,
-        source,
-    );
-}
-
-fn record_projection_update_success(
-    tenant: &TenantId,
-    entity_type: &str,
-    operation: &str,
-    source: &str,
-    sequence_nr: u64,
-    started_at: Instant,
-) {
-    let duration = started_at.elapsed();
-    crate::query_projection_metrics::record_update_duration(
-        tenant.as_str(),
-        entity_type,
-        operation,
-        source,
-        "ok",
-        duration,
-    );
-    crate::query_projection_metrics::record_update_end_to_end_duration(
-        tenant.as_str(),
-        entity_type,
-        operation,
-        source,
-        "ok",
-        duration,
-    );
-    crate::query_projection_metrics::record_update_applied_sequence(
-        tenant.as_str(),
-        entity_type,
-        operation,
-        source,
-        sequence_nr,
-    );
-}
-
-fn record_projection_update_error(
-    tenant: &TenantId,
-    entity_type: &str,
-    operation: &str,
-    source: &str,
-    started_at: Instant,
-) {
-    let duration = started_at.elapsed();
-    crate::query_projection_metrics::record_update_duration(
-        tenant.as_str(),
-        entity_type,
-        operation,
-        source,
-        "error",
-        duration,
-    );
-    crate::query_projection_metrics::record_update_end_to_end_duration(
-        tenant.as_str(),
-        entity_type,
-        operation,
-        source,
-        "error",
-        duration,
-    );
-    crate::query_projection_metrics::record_update_error(
-        tenant.as_str(),
-        entity_type,
-        operation,
-        source,
-    );
 }
 
 /// Error returned when the verification gate blocks an operation.
@@ -364,7 +285,9 @@ impl ServerState {
                 spec_governed: true,
                 refused: false,
                 answered_action: None,
+                trigger_failures: Vec::new(),
                 store_unavailable: false,
+                unrecorded_at: None,
             }
         };
 
@@ -1081,9 +1004,10 @@ impl ServerState {
                 .with_idempotency_cache(self.idempotency_cache.clone())
                 .with_blob_store(tenant_blob_store),
         }
+        .with_action_dispatch_timeout(self.action_dispatch_timeout)
         .with_legacy_blob_store(legacy_blob_store)
         .with_on_rehydrated(self.state_timer_rehydrate_hook(tenant, entity_type, entity_id))
-        .with_entity_rows(self.entity_rows_hook(tenant, entity_type))
+        .with_entity_rows(Some(self.entity_rows_hook(tenant, entity_type)))
         .with_creator(created_by.cloned());
 
         // Slow-path: atomically re-check and spawn under write lock.
@@ -1550,65 +1474,6 @@ impl ServerState {
         );
         let _ = self.event_tx.send(change);
 
-        if let Some(query_plane) = self.query_plane_written_after_commit() {
-            let status = response.state.status.clone();
-            let fields = self.query_projection_fields(tenant, entity_type, &response.state.fields);
-            let projected_state = self.query_projection_state(&response.state);
-            let sequence_nr = response.state.sequence_nr;
-            let operation = "upsert";
-            let source = "create";
-            record_projection_update_started(tenant, entity_type, operation, source);
-            let projection_started_at = Instant::now(); // determinism-ok: production-only projection duration metric
-            if let Err(e) = query_plane
-                .upsert_projection(
-                    tenant.as_str(),
-                    entity_type,
-                    entity_id,
-                    &status,
-                    &fields,
-                    &projected_state,
-                    sequence_nr,
-                )
-                .await
-            {
-                record_projection_update_error(
-                    tenant,
-                    entity_type,
-                    operation,
-                    source,
-                    projection_started_at,
-                );
-                // Surface the projection failure instead of swallowing it.
-                // Previously this was a `warn` followed by `Ok(response)`,
-                // which produced HTTP 201 even when the entity wasn't
-                // discoverable via $filter — silently corrupting any caller
-                // that does write-then-read-back. Returning Err propagates
-                // up through the OData write handler to a 5xx so the client
-                // knows to retry. The event is already durable in the
-                // events table; on retry the actor's idempotent UPSERT into
-                // entity_catalog/entity_field_index will succeed (or fail
-                // again loudly).
-                tracing::error!(
-                    error = %e,
-                    tenant = %tenant,
-                    entity_type = %entity_type,
-                    entity_id = %entity_id,
-                    "failed to update query projection during create"
-                );
-                return Err(CreateError::Failed(format!(
-                    "query projection write failed during create: {e}"
-                )));
-            }
-            record_projection_update_success(
-                tenant,
-                entity_type,
-                operation,
-                source,
-                sequence_nr,
-                projection_started_at,
-            );
-        }
-
         Ok(response)
     }
 
@@ -1675,9 +1540,11 @@ impl ServerState {
         let Some((store, backend)) = self.event_journal() else {
             return Ok(None);
         };
-        let Some(query_plane) = self.query_plane_store() else {
+        // The projection commits with the event only into a stack's query
+        // plane; without one the record is created through its actor.
+        if self.query_plane_store().is_none() {
             return Ok(None);
-        };
+        }
 
         let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
         let initial_fields =
@@ -1716,158 +1583,39 @@ impl ServerState {
         created_projection_state.sequence_nr = 1;
         created_projection_state.push_event_bounded(created.clone());
         let projection_state = self.query_projection_state(&created_projection_state);
-        if let Some(native_store) = self.data_only_create_store() {
-            // The native create writes past the journal handle, so it is held to the
-            // same event size limits here.
-            store
-                .check_event_sizes(&persistence_id, std::slice::from_ref(&envelope))
-                .map_err(|e| e.to_string())?;
-            let operation = "native_create";
-            let source = "data_only_create_fast_path";
-            record_projection_update_started(tenant, entity_type, operation, source);
-            let projection_started_at = Instant::now(); // determinism-ok: production-only projection duration metric
-            let native_span = tracing::info_span!(
-                "entity.data_only_create_native_storage",
-                otel.name = "entity.data_only_create_native_storage",
-                tenant = %tenant,
-                entity_type,
-                entity_id,
-            );
-            match native_store
-                .create_data_only_entity(DataOnlyCreateRecord {
-                    tenant: tenant.as_str(),
-                    entity_type,
-                    entity_id,
-                    status: &state.status,
-                    fields: &projection_fields,
-                    state: &projection_state,
-                    event: &envelope,
-                })
-                .instrument(native_span)
-                .await
-            {
-                Ok(new_seq) => {
-                    state.sequence_nr = new_seq;
-                    record_projection_update_success(
-                        tenant,
-                        entity_type,
-                        operation,
-                        source,
-                        state.sequence_nr,
-                        projection_started_at,
-                    );
-                }
-                Err(PersistenceError::ConcurrencyViolation { .. }) => {
-                    record_projection_update_error(
-                        tenant,
-                        entity_type,
-                        operation,
-                        source,
-                        projection_started_at,
-                    );
-                    return Ok(None);
-                }
-                Err(e) => {
-                    record_projection_update_error(
-                        tenant,
-                        entity_type,
-                        operation,
-                        source,
-                        projection_started_at,
-                    );
-                    tracing::error!(
-                        error = %e,
-                        tenant = %tenant,
-                        entity_type = %entity_type,
-                        entity_id = %entity_id,
-                        "failed to update query projection during native data-only create fast path"
-                    );
-                    return Err(format!(
-                        "native data-only create failed for {entity_type}:{entity_id}: {e}"
-                    ));
-                }
+        let append_started_at = Instant::now(); // determinism-ok: production-only append wait metric
+        let append_result = store
+            .append_with_rows(
+                &persistence_id,
+                state.sequence_nr,
+                &[envelope],
+                CommitRows {
+                    projection: Some(ProjectionRow::Upsert {
+                        status: &state.status,
+                        fields: &projection_fields,
+                        state: &projection_state,
+                    }),
+                    ..CommitRows::default()
+                },
+            )
+            .await;
+        runtime_metrics::record_event_store_append_wait(
+            backend.as_str(),
+            "append",
+            append_started_at.elapsed(),
+        );
+        match append_result {
+            Ok(new_seq) => {
+                state.sequence_nr = new_seq;
             }
-        } else {
-            let append_started_at = Instant::now(); // determinism-ok: production-only append wait metric
-            let rows_follow = self.entity_rows_follow_commits();
-            let projection = rows_follow.then_some(ProjectionRow::Upsert {
-                status: &state.status,
-                fields: &projection_fields,
-                state: &projection_state,
-            });
-            let append_result = store
-                .append_with_rows(
-                    &persistence_id,
-                    state.sequence_nr,
-                    &[envelope],
-                    CommitRows {
-                        projection,
-                        ..CommitRows::default()
-                    },
-                )
-                .await;
-            runtime_metrics::record_event_store_append_wait(
-                backend.as_str(),
-                "append",
-                append_started_at.elapsed(),
-            );
-            match append_result {
-                Ok(new_seq) => {
-                    state.sequence_nr = new_seq;
-                }
-                Err(PersistenceError::ConcurrencyViolation { .. }) => {
-                    return Ok(None);
-                }
-                Err(e) => {
-                    return Err(format!(
-                        "failed to persist data-only Created event for {entity_type}:{entity_id}: {e}"
-                    ));
-                }
+            Err(PersistenceError::ConcurrencyViolation { .. }) => {
+                return Ok(None);
             }
-
-            let operation = "upsert";
-            let source = "data_only_create_fast_path";
-            record_projection_update_started(tenant, entity_type, operation, source);
-            let projection_started_at = Instant::now(); // determinism-ok: production-only projection duration metric
-            if !rows_follow
-                && let Err(e) = query_plane
-                    .upsert_projection(
-                        tenant.as_str(),
-                        entity_type,
-                        entity_id,
-                        &state.status,
-                        &projection_fields,
-                        &projection_state,
-                        state.sequence_nr,
-                    )
-                    .await
-            {
-                record_projection_update_error(
-                    tenant,
-                    entity_type,
-                    operation,
-                    source,
-                    projection_started_at,
-                );
-                tracing::error!(
-                    error = %e,
-                    tenant = %tenant,
-                    entity_type = %entity_type,
-                    entity_id = %entity_id,
-                    "failed to update query projection during data-only create fast path"
-                );
+            Err(e) => {
                 return Err(format!(
-                    "query projection write failed during data-only create: {e}"
+                    "failed to persist data-only Created event for {entity_type}:{entity_id}: {e}"
                 ));
             }
-            record_projection_update_success(
-                tenant,
-                entity_type,
-                operation,
-                source,
-                state.sequence_nr,
-                projection_started_at,
-            );
         }
         state.push_event_bounded(created);
 
@@ -1914,7 +1662,9 @@ impl ServerState {
             spec_governed: true,
             refused: false,
             answered_action: None,
+            trigger_failures: Vec::new(),
             store_unavailable: false,
+            unrecorded_at: None,
         }))
     }
 
@@ -2024,83 +1774,7 @@ impl ServerState {
         .result
         .map_err(|e| format!("Actor update failed: {e}"))?;
 
-        if response.success {
-            self.upsert_kernel_write_projection(
-                tenant,
-                entity_type,
-                entity_id,
-                &response,
-                "field_update",
-            )
-            .await?;
-        }
-
         Ok(response)
-    }
-
-    /// Upsert the query projection after a write the actor made outside a
-    /// spec action. A write the projection does not show is not acknowledged.
-    async fn upsert_kernel_write_projection(
-        &self,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-        response: &EntityResponse,
-        source: &'static str,
-    ) -> Result<(), String> {
-        if let Some(query_plane) = self.query_plane_written_after_commit() {
-            let status = response.state.status.clone();
-            let fields = self.query_projection_fields(tenant, entity_type, &response.state.fields);
-            let projected_state = self.query_projection_state(&response.state);
-            let sequence_nr = response.state.sequence_nr;
-            let operation = "upsert";
-            record_projection_update_started(tenant, entity_type, operation, source);
-            let projection_started_at = Instant::now(); // determinism-ok: production-only projection duration metric
-            if let Err(e) = query_plane
-                .upsert_projection(
-                    tenant.as_str(),
-                    entity_type,
-                    entity_id,
-                    &status,
-                    &fields,
-                    &projected_state,
-                    sequence_nr,
-                )
-                .await
-            {
-                record_projection_update_error(
-                    tenant,
-                    entity_type,
-                    operation,
-                    source,
-                    projection_started_at,
-                );
-                // Same reasoning as create: don't ack a write that won't be
-                // visible via $filter. Propagate so OData returns 5xx and
-                // clients can retry against the idempotent upsert.
-                tracing::error!(
-                    error = %e,
-                    tenant = %tenant,
-                    entity_type = %entity_type,
-                    entity_id = %entity_id,
-                    source,
-                    "failed to update query projection after a kernel write"
-                );
-                return Err(format!(
-                    "query projection write failed during {source}: {e}"
-                ));
-            }
-            record_projection_update_success(
-                tenant,
-                entity_type,
-                operation,
-                source,
-                sequence_nr,
-                projection_started_at,
-            );
-        }
-
-        Ok(())
     }
 
     /// Record on a parent that a spawn could not create its child, and clear
@@ -2131,14 +1805,6 @@ impl ServerState {
                 .error
                 .unwrap_or_else(|| "spawn refusal was not recorded".to_owned()));
         }
-        self.upsert_kernel_write_projection(
-            tenant,
-            parent_type,
-            parent_id,
-            &response,
-            "spawn_refusal",
-        )
-        .await?;
         Ok(response)
     }
 
@@ -2214,18 +1880,7 @@ impl ServerState {
         .map_err(|e| format!("Actor delete failed: {e}"))?;
 
         if response.success {
-            // A store that keeps the query plane in the journal's commit
-            // removed the row with the tombstone.
-            if let Some(query_plane) = self.query_plane_written_after_commit() {
-                self.remove_deleted_entity_projection(
-                    query_plane.as_ref(),
-                    tenant,
-                    entity_type,
-                    entity_id,
-                    response.state.sequence_nr,
-                )
-                .await;
-            }
+            // The tombstone's commit removed the record's query-plane row.
 
             // With a journal the tombstone is the record's last event, so its
             // status replaces the cached one: a guard no longer finds the
@@ -2248,55 +1903,6 @@ impl ServerState {
         }
 
         Ok(response)
-    }
-
-    /// Remove a deleted entity's row from `query_plane` once its tombstone is
-    /// in the journal.
-    pub(super) async fn remove_deleted_entity_projection(
-        &self,
-        query_plane: &dyn crate::storage::QueryPlaneStore,
-        tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-        tombstone_sequence: u64,
-    ) {
-        let operation = "remove";
-        let source = "delete";
-        record_projection_update_started(tenant, entity_type, operation, source);
-        let projection_started_at = Instant::now(); // determinism-ok: production-only projection duration metric
-        if let Err(e) = query_plane
-            .remove_projection(tenant.as_str(), entity_type, entity_id)
-            .await
-        {
-            record_projection_update_error(
-                tenant,
-                entity_type,
-                operation,
-                source,
-                projection_started_at,
-            );
-            // Delete is idempotent against the projection: a stale row
-            // surviving in entity_field_index after the tombstone is a
-            // visibility leak, not data corruption. Log loudly so it's
-            // greppable but don't block the delete from completing —
-            // the actor and event journal already reflect the tombstone.
-            tracing::error!(
-                error = %e,
-                tenant = %tenant,
-                entity_type = %entity_type,
-                entity_id = %entity_id,
-                "failed to remove query projection during delete (stale projection row will linger until next successful upsert/delete)"
-            );
-        } else {
-            record_projection_update_success(
-                tenant,
-                entity_type,
-                operation,
-                source,
-                tombstone_sequence,
-                projection_started_at,
-            );
-        }
     }
 
     /// Check if an entity exists in the index.

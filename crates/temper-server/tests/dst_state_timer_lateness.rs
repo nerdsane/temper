@@ -51,13 +51,20 @@ const SEEDS: u64 = 16;
 /// `JOB`'s `Waiting` budget.
 const BUDGET: Duration = Duration::from_secs(3600);
 
-/// `Poke` keeps the record in `Waiting` without resetting its timer.
+/// `Poke` keeps the record in `Waiting` without resetting its timer. It counts
+/// itself, so it moves the record's journal past the timer's arming: a
+/// machine's move that changes nothing writes no event.
 const JOB: &str = r#"
 [automaton]
 name = "Job"
 states = ["Idle", "Waiting", "Done"]
 initial = "Idle"
 allow_indefinite_states = ["Idle", "Done"]
+
+[[state]]
+name = "pokes"
+type = "counter"
+initial = 0
 
 [[action]]
 name = "Start"
@@ -67,6 +74,7 @@ to = "Waiting"
 [[action]]
 name = "Poke"
 from = ["Waiting"]
+effect = ["pokes += 1"]
 
 [[action]]
 name = "Expire"
@@ -186,9 +194,7 @@ fn server(store: &SimEventStore, tenants: &[&TenantId], name: &str) -> ServerSta
         registry.register_tenant((*tenant).clone(), csdl, CSDL.to_string(), &[("Job", JOB)]);
     }
     let mut state = ServerState::from_registry(ActorSystem::new(name), registry);
-    state.set_storage_stack(
-        StorageStack::from_sim(store.clone(), None).with_entity_rows_in_journal(),
-    );
+    state.set_storage_stack(StorageStack::from_sim(store.clone(), None));
     state.state_timer_rows = Some(Arc::new(TimerRows(store.clone())));
     for tenant in tenants {
         state

@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use temper_verify::{Budget, CascadeLevel, VerificationCascade};
+use temper_verify::{Budget, CascadeLevel, Clock, VerificationCascade};
 
 /// A spec whose model check runs for minutes with no budget.
 const HEAVY_FEED: &str = include_str!("../../../test-fixtures/budget/heavy_feed.toml");
@@ -17,20 +17,20 @@ fn budget(time: Duration) -> Budget {
     }
 }
 
+/// A clock that moves 10 us each time the cascade reads it: a 1 s budget runs
+/// out after 100,000 readings, at the same point of the model check on any
+/// machine, however fast or busy.
+const STEPS: Clock = Clock::Steps(Duration::from_micros(10));
+
 #[test]
 fn a_spec_too_large_to_check_stops_at_its_budget_and_names_itself() {
-    let started = Instant::now();
     let result = VerificationCascade::from_ioa(HEAVY_FEED)
         .with_sim_seeds(5)
         .with_prop_test_cases(100)
         .with_budget(budget(Duration::from_secs(1)))
+        .with_clock(STEPS)
         .run();
-    let took = started.elapsed();
 
-    // The budget is 1 s; what follows it is draining a queue that no longer
-    // grows. 10 s leaves room for a loaded CI machine, against the minutes
-    // this spec takes with no budget.
-    assert!(took < Duration::from_secs(10), "answered in {took:?}");
     assert!(!result.all_passed);
     let stopped = result
         .stopped
@@ -109,6 +109,7 @@ fn a_finding_before_the_cut_is_named_and_a_cut_walk_proves_no_liveness_false() {
     );
     let result = VerificationCascade::from_ioa(&spec)
         .with_budget(budget(Duration::from_secs(1)))
+        .with_clock(STEPS)
         .run();
     let stopped = result
         .stopped
@@ -203,7 +204,8 @@ fn a_move_with_too_many_parameter_choices_fails_its_check_instead_of_panicking()
 #[test]
 fn a_huge_counter_bound_is_counted_not_built() {
     // `x = 1000000000` raises the bound for parameters whose effects use x:
-    // building those choices would allocate a billion values.
+    // building those choices would allocate a billion values. The rule reads
+    // x, so it is not left out of the model as unread.
     let spec = r#"
 [automaton]
 name = "Big"

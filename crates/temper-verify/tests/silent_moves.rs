@@ -192,3 +192,54 @@ fn a_silent_move_out_of_a_place_no_liveness_watches_keeps_the_verdict() {
     assert!(check(&remarked).run().all_passed);
     assert!(keeps(&kept, TICKET, &remarked));
 }
+
+/// A silent move leaves every route open, so a passing `can_reach` verdict
+/// can stand for a spec with that move too.
+#[test]
+fn a_silent_move_keeps_a_can_reach_verdict() {
+    let route = TICKET.to_string()
+        + "\n[[liveness]]\nname = \"can_close\"\nfrom = [\"Open\"]\ncan_reach = [\"Closed\"]\n";
+    let kept = check(&route).run();
+    assert!(kept.all_passed, "{kept:?}");
+    let remarked = route.clone() + &remark("Open");
+    assert!(keeps(&kept, &route, &remarked));
+    assert!(check(&remarked).run().all_passed);
+}
+
+/// The same whole walk must retain both its reached-place evidence and
+/// the refusal path when a non-silent move closes the last route.
+#[test]
+fn a_walk_with_silent_moves_keeps_its_can_reach_refusal() {
+    let route = TICKET.replace(
+        "name = \"Close\"",
+        "name = \"Close\"\nguard = \"notes == 0\"",
+    ) + "\n[[liveness]]\nname = \"can_close\"\nfrom = [\"Open\"]\ncan_reach = [\"Closed\"]\n"
+        + &remark("Open");
+    let result = check(&route).run();
+    assert!(!result.all_passed, "{result:?}");
+    let l1 = result
+        .levels
+        .iter()
+        .find(|level| level.level == CascadeLevel::ModelCheck)
+        .unwrap()
+        .verification
+        .as_ref()
+        .unwrap();
+    assert!(l1.is_complete);
+    let reached = l1.reached.as_ref().expect("the whole walk kept its places");
+    assert_eq!(reached.places, ["Closed", "Open"]);
+    assert_eq!(reached.left_silently, ["Open"]);
+    let refusal = l1
+        .counterexamples
+        .iter()
+        .find(|example| example.property == "CanReach")
+        .expect("a closed route remains a refusal");
+    assert_eq!(refusal.violated, ["can_close"]);
+    assert_eq!(refusal.never_reaches, ["Closed"]);
+    assert_eq!(refusal.trace.len(), 2);
+    assert_eq!(refusal.trace[0].1.as_ref().unwrap().name, "Note");
+    let last = &refusal.trace[1];
+    assert_eq!(last.0.status, "Open");
+    assert_eq!(last.0.counters["notes"], 1);
+    assert!(last.1.is_none());
+}

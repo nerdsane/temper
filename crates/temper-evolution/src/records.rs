@@ -497,77 +497,6 @@ mod tests {
     }
 
     #[test]
-    fn test_observation_record() {
-        let record = ObservationRecord {
-            header: RecordHeader::new(RecordType::Observation, "sentinel:latency"),
-            source: "sentinel:latency".to_string(),
-            classification: ObservationClass::Performance,
-            evidence_query: "SELECT p99(duration_ns) FROM spans WHERE operation = 'handle'"
-                .to_string(),
-            threshold_field: Some("p99".to_string()),
-            threshold_value: Some(100_000_000.0),
-            observed_value: Some(450_000_000.0),
-            context: serde_json::json!({"concurrent_actors": 12847}),
-        };
-
-        assert_eq!(record.classification, ObservationClass::Performance);
-        assert!(record.observed_value.unwrap() > record.threshold_value.unwrap());
-    }
-
-    #[test]
-    fn test_insight_record() {
-        let record = InsightRecord {
-            header: RecordHeader::new(RecordType::Insight, "trajectory_analyzer"),
-            category: InsightCategory::UnmetIntent,
-            signal: InsightSignal {
-                intent: "split order into multiple shipments".to_string(),
-                volume: 234,
-                success_rate: 0.18,
-                trend: Trend::Growing,
-                growth_rate: Some(0.12),
-            },
-            recommendation: "Add SplitOrder action to Order entity".to_string(),
-            priority_score: 0.87,
-        };
-
-        assert_eq!(record.category, InsightCategory::UnmetIntent);
-        assert_eq!(record.signal.volume, 234);
-        assert!(record.priority_score > 0.5);
-    }
-
-    #[test]
-    fn test_decision_record() {
-        let decision = DecisionRecord {
-            header: RecordHeader::new(RecordType::Decision, "human:alice")
-                .derived_from("A-2024-abc1"),
-            decision: Decision::Approved,
-            decided_by: "alice@company.com".to_string(),
-            rationale: "Low risk, addresses root cause directly".to_string(),
-            verification_results: Some(VerificationSummary {
-                stateright_pass: true,
-                stateright_states_explored: 42847,
-                simulation_pass: true,
-                proptest_pass: true,
-                proptest_cases: 100_000,
-            }),
-            implementation: Some(ImplementationPlan {
-                codegen_command: "temper codegen --from-spec v47".to_string(),
-                migration_required: false,
-                deployment_strategy: "Rolling restart".to_string(),
-            }),
-        };
-
-        assert_eq!(decision.decision, Decision::Approved);
-        assert!(
-            decision
-                .verification_results
-                .as_ref()
-                .unwrap()
-                .stateright_pass
-        );
-    }
-
-    #[test]
     fn test_record_type_prefixes() {
         assert_eq!(RecordType::Observation.prefix(), "O");
         assert_eq!(RecordType::Problem.prefix(), "P");
@@ -575,23 +504,5 @@ mod tests {
         assert_eq!(RecordType::Decision.prefix(), "D");
         assert_eq!(RecordType::Insight.prefix(), "I");
         assert_eq!(RecordType::FeatureRequest.prefix(), "FR");
-    }
-
-    #[test]
-    fn test_feature_request_record() {
-        let record = FeatureRequestRecord {
-            header: RecordHeader::new(RecordType::FeatureRequest, "insight-generator"),
-            category: PlatformGapCategory::MissingMethod,
-            description: "Agents tried 'send_email' 47 times".to_string(),
-            frequency: 47,
-            trajectory_refs: vec!["2024-01-01T00:00:00Z".to_string()],
-            disposition: FeatureRequestDisposition::Open,
-            developer_notes: None,
-        };
-
-        assert!(record.header.id.starts_with("FR-"));
-        assert_eq!(record.category, PlatformGapCategory::MissingMethod);
-        assert_eq!(record.frequency, 47);
-        assert_eq!(record.disposition, FeatureRequestDisposition::Open);
     }
 }

@@ -27,6 +27,7 @@ mod validate;
 pub use field_invariant::FieldInvariant;
 pub use lint::{
     BundleLintFinding, LintFinding, LintSeverity, lint_automata_bundle, lint_automaton,
+    lint_automaton_for_type, lint_trigger_target_args,
 };
 pub use metadata::{LivenessViolation, SpecMetadata};
 pub use parser::{

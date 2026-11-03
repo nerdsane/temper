@@ -16,6 +16,7 @@ use crate::metrics::{
 
 mod evolution;
 mod inputs;
+mod module_reviews;
 mod policy_approval;
 mod policy_replace;
 mod rows;
@@ -599,6 +600,43 @@ impl PostgresEventStore {
         state: &serde_json::Value,
         sequence_nr: u64,
     ) -> Result<(), PersistenceError> {
+        let row = [tenant, entity_type, entity_id, status];
+        self.write_query_projection(row, fields, state, sequence_nr, MissingCatalogRow::Insert)
+            .await
+    }
+
+    /// Rewrite an existing catalog row and its field index from `state`, as
+    /// [`Self::upsert_query_projection_with_state`] does, and leave a record
+    /// with no catalog row alone. While the server serves, only the record's
+    /// own commit creates its row (boot repair creates the missing ones before
+    /// serving): a commit locks the catalog row before it reads the field
+    /// index, so a row created by another writer while that commit runs is one
+    /// it cannot lock, and its field-index rows are ones it cannot see. A
+    /// record deleted after `state` was read stays deleted.
+    #[expect(clippy::too_many_arguments, reason = "projection upsert boundary")]
+    pub async fn refresh_query_projection_with_state(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+        fields: &serde_json::Value,
+        state: &serde_json::Value,
+        sequence_nr: u64,
+    ) -> Result<(), PersistenceError> {
+        let row = [tenant, entity_type, entity_id, status];
+        self.write_query_projection(row, fields, state, sequence_nr, MissingCatalogRow::Leave)
+            .await
+    }
+
+    async fn write_query_projection(
+        &self,
+        [tenant, entity_type, entity_id, status]: [&str; 4],
+        fields: &serde_json::Value,
+        state: &serde_json::Value,
+        sequence_nr: u64,
+        missing: MissingCatalogRow,
+    ) -> Result<(), PersistenceError> {
         let status = canonical_projection_status(status, state);
         // The row holds each field once: in `fields`, not again in `state`.
         let stored_state = temper_runtime::persistence::catalog_state_for_storage(fields, state);
@@ -709,6 +747,10 @@ impl PostgresEventStore {
             )
             .await?;
             previous_catalog
+        } else if missing == MissingCatalogRow::Leave {
+            tx.commit().await.map_err(storage_error)?;
+            transaction_timer.set_outcome("missing_left");
+            return Ok(());
         } else {
             let inserted: Option<i32> = crate::dbm::postgres_query_scalar!(&self.schema,
                 "INSERT INTO {schema}entity_catalog \
@@ -2152,6 +2194,32 @@ impl PostgresEventStore {
         .map_err(|e| format!("blob get failed: {e}"))
     }
 
+    /// Read a bounded byte slice of a legacy blob with its actual total length.
+    pub async fn get_blob_chunk(
+        &self,
+        key: &str,
+        offset: u64,
+        max_bytes: usize,
+    ) -> Result<Option<(u64, Vec<u8>)>, String> {
+        let start = i32::try_from(offset)
+            .ok()
+            .and_then(|n| n.checked_add(1))
+            .ok_or_else(|| "blob offset exceeds Postgres bytea range".to_string())?;
+        let count = i32::try_from(max_bytes).map_err(|_| "blob chunk exceeds i32".to_string())?;
+        let row = crate::dbm::postgres_query!(
+            &self.schema,
+            "SELECT octet_length(data) AS length, substring(data FROM $2 FOR $3) AS chunk \
+             FROM {schema}blobs WHERE blob_key = $1"
+        )
+        .bind(key)
+        .bind(start)
+        .bind(count)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|e| format!("blob chunk read failed: {e}"))?;
+        Ok(row.map(|row| (row.get::<i32, _>("length") as u64, row.get("chunk"))))
+    }
+
     /// Retrieve a blob only when its durable size metadata is within the
     /// caller's allocation budget. `None` means missing or over budget.
     pub async fn get_blob_if_size_at_most(
@@ -2455,6 +2523,19 @@ impl PostgresEventStore {
         .execute(self.pool())
         .await
         .map_err(storage_error)?;
+        // Prune the inserting tenant every time: a global id cadence can
+        // indefinitely skip a tenant when writes from tenants interleave.
+        crate::dbm::postgres_query!(
+            &self.schema,
+            "DELETE FROM {schema}wasm_invocation_logs WHERE tenant = $1 AND id <= ( \
+                 SELECT id FROM {schema}wasm_invocation_logs WHERE tenant = $1 \
+                 ORDER BY id DESC OFFSET $2 LIMIT 1)",
+        )
+        .bind(entry.tenant)
+        .bind(temper_runtime::persistence::WASM_INVOCATIONS_KEPT_PER_TENANT)
+        .execute(self.pool())
+        .await
+        .map_err(storage_error)?;
         Ok(())
     }
 
@@ -2568,4 +2649,13 @@ pub(crate) fn postgres_placeholders(sql: &str, max_index: usize) -> String {
         out = out.replace(&format!("?{index}"), &format!("${index}"));
     }
     out
+}
+
+/// What a projection write does for a record with no catalog row.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MissingCatalogRow {
+    /// Create it: boot repair, before the server serves.
+    Insert,
+    /// Leave it missing: a background refresh while the server serves.
+    Leave,
 }

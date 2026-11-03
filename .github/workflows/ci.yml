@@ -1,12 +1,11 @@
 name: CI
 
 on:
+  # Every pull request, whatever its base. A stacked pull request's base is another branch until that branch
+  # merges, and GitHub's move of the base to main is an 'edited' event that starts nothing, so a push made
+  # before the move got no CI at all (temper #330, 2 Nov 2026: fix-up 10bcdce3 at 05:47:00, base moved
+  # 05:48:07, no run). Its checks run against the base it had; the push to main that lands it runs its tests.
   pull_request:
-    branches: [main, staging]
-  # The merge queue tests each group (the queued pull requests on top of main) before it
-  # lands. Every required check comes from this workflow, so without this trigger the
-  # queue would wait for checks that never start.
-  merge_group:
   push:
     branches: [main, staging]
   schedule:
@@ -31,7 +30,7 @@ on:
         required: false
         default: false
 
-# A new push to a pull request cancels its older run. Every merge group, push to main,
+# A new push to a pull request cancels its older run. Every push to main,
 # schedule and dispatch runs to the end in its own group, so each commit on main gets a
 # full verdict.
 concurrency:
@@ -65,18 +64,23 @@ env:
   # which can only restore their own ref's caches or main's, compiled from scratch.
   # Only main (push, schedule, dispatch) saves; everything restores from main.
   SAVE_RUST_CACHE: ${{ (github.ref == 'refs/heads/main' && github.event_name != 'pull_request') || inputs.save_cache == true }}
+  # apt normally finishes in 6 to 18 seconds (66 steps on main, 27 Oct). That day a stalled
+  # Ubuntu mirror held two runners in apt-get update for their jobs' whole 60 minutes and
+  # took a pull request out of the merge queue. A request that stalls for 30 s is retried,
+  # and an install step still running after 5 minutes is failed, so a stalled mirror costs
+  # minutes and a re-run, not an hour of the queue.
+  APT_OPTS: -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30
 
 jobs:
   # ─────────────────────────────────────────────────────
-  # What this run tests. Push, schedule and a plain dispatch: everything (lane "full").
-  # A pull request or a merge group: only the packages its changes can reach (lane "pr"),
-  # see scripts/ci/affected.py. A merge group's changes are those of every pull request in it.
-  # A push whose tree already passed in a merge group: nothing to test, like a docs-only change.
-  # Every test runs once, in the merge group (Rita, 31 Oct 2026: "CI 2 times is insane"): a pull
-  # request only compiles and lints (Compile & Lint, Integrity, Instrumentation Hygiene, the
-  # SDK's type check), so its author sees a broken build in about four minutes, and every job
-  # that runs tests is skipped on it (output tests=false). To run on a branch, before queueing
-  # it, exactly what its merge group will:
+  # What this run tests. Schedule and a plain dispatch: everything (lane "full"). A push or a pull
+  # request: only the packages its changes can reach (lane "pr"), see scripts/ci/affected.py. A
+  # push's changes are what it moved main by. Changes land by pushing to main (trunk-based
+  # development, Rita, 3 Nov 2026; there is no merge queue), and every test runs once, on that push
+  # (Rita, 31 Oct 2026: "CI 2 times is insane"): a pull request only compiles and lints (Compile &
+  # Lint, Integrity, Instrumentation Hygiene, the SDK's type check), so its author sees a broken
+  # build in about four minutes, and every job that runs tests is skipped on it (output
+  # tests=false). To run on a branch, before pushing it to main, exactly what that push will:
   #   gh workflow run ci.yml -R arni-labs/temper --ref <branch> -f changed="$(git diff --name-only origin/main...)"
   # Jobs with nothing to do are skipped here rather than started; a skipped job satisfies
   # a required check. The DST cells always start, because a matrix job skipped before it
@@ -104,25 +108,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      # The queue moves main to the commit its group tested, so the push that follows
-      # would test the same files again. Matched by tree, not commit: same files, same result.
-      - id: verified
-        if: github.event_name == 'push'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          tree=$(git rev-parse 'HEAD^{tree}')
-          run=$(gh api "repos/${{ github.repository }}/actions/workflows/ci.yml/runs?event=merge_group&status=success&per_page=100" \
-            --jq ".workflow_runs[] | select(.head_commit.tree_id == \"$tree\") | .html_url" | head -n 1)
-          echo "tree $tree: ${run:-no merge group run passed it}"
-          echo "run=$run" >> "$GITHUB_OUTPUT"
-
       - id: affected
         env:
           EVENT: ${{ github.event_name }}
-          VERIFIED_RUN: ${{ steps.verified.outputs.run }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           CHANGED_PATHS: ${{ inputs.changed }}
           # cargo metadata --no-deps needs no particular toolchain; skip installing the pinned one.
           RUSTUP_TOOLCHAIN: stable
@@ -161,7 +151,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libz3-dev
+        timeout-minutes: 5  # a stalled mirror, see APT_OPTS
+        run: sudo apt-get $APT_OPTS update && sudo apt-get $APT_OPTS install -y libz3-dev
 
       # About 2 minutes of deletes; check and clippy fit without it on pull requests.
       - name: Free disk space for full workspace tests
@@ -241,7 +232,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libz3-dev
+        timeout-minutes: 5  # a stalled mirror, see APT_OPTS
+        run: sudo apt-get $APT_OPTS update && sudo apt-get $APT_OPTS install -y libz3-dev
 
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
@@ -412,7 +404,8 @@ jobs:
           fetch-depth: 0
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libz3-dev
+        timeout-minutes: 5  # a stalled mirror, see APT_OPTS
+        run: sudo apt-get $APT_OPTS update && sudo apt-get $APT_OPTS install -y libz3-dev
 
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
@@ -468,6 +461,9 @@ jobs:
           tar -xJf /tmp/tursodb.tar.xz -C /tmp
           echo "TEMPER_TEST_TURSODB=/tmp/turso_cli-x86_64-unknown-linux-gnu/tursodb" >> "$GITHUB_ENV"
 
+      - run: echo "::add-matcher::.github/rust-test-failures.json"
+        if: matrix.args != ''
+
       - name: cargo nextest run (affected packages, skip dst_)
         if: matrix.args != ''
         env:
@@ -508,10 +504,10 @@ jobs:
 
   # ─────────────────────────────────────────────────────
   # Gate 3: Full test suite (minutes)
-  # The required "Tests" check. Full lane (push, schedule, plain dispatch): the
-  # whole workspace on one machine, exactly as before. Pull-request lane: passes
+  # The required "Tests" check. Full lane (schedule, plain dispatch): the
+  # whole workspace on one machine, exactly as before. Pull-request lane (also a push): passes
   # when every test shard above passed, or nothing needed testing, or on a pull
-  # request, which runs no tests (its merge group runs them). Either lane also
+  # request, which runs no tests (the push to main runs them). Either lane also
   # needs Other workspaces to have passed, or to have had nothing to test.
   # ─────────────────────────────────────────────────────
   test:
@@ -547,7 +543,7 @@ jobs:
           PACKAGES: ${{ needs.changes.outputs.packages }}
         run: |
           if [ "${{ needs.changes.outputs.tests }}" != true ]; then
-            echo "A pull request only compiles and lints; its merge group runs the tests of: ${PACKAGES:-none}"
+            echo "A pull request only compiles and lints; the push to main runs the tests of: ${PACKAGES:-none}"
           else
             echo "Packages tested: ${PACKAGES:-none}"
           fi
@@ -562,7 +558,8 @@ jobs:
 
       - name: Install system dependencies
         if: needs.changes.outputs.lane == 'full'
-        run: sudo apt-get update && sudo apt-get install -y libz3-dev
+        timeout-minutes: 5  # a stalled mirror, see APT_OPTS
+        run: sudo apt-get $APT_OPTS update && sudo apt-get $APT_OPTS install -y libz3-dev
 
       - name: Install pinned Rust toolchain
         if: needs.changes.outputs.lane == 'full'
@@ -620,6 +617,9 @@ jobs:
           echo "321e401e44f7ee8ea656caff0f85304025f7e905acafe7bedf6a9304f1af1783  /tmp/tursodb.tar.xz" | sha256sum -c -
           tar -xJf /tmp/tursodb.tar.xz -C /tmp
           echo "TEMPER_TEST_TURSODB=/tmp/turso_cli-x86_64-unknown-linux-gnu/tursodb" >> "$GITHUB_ENV"
+
+      - run: echo "::add-matcher::.github/rust-test-failures.json"
+        if: needs.changes.outputs.lane == 'full'
 
       - name: cargo nextest run --workspace (skip dst_)
         if: needs.changes.outputs.lane == 'full'
@@ -696,7 +696,8 @@ jobs:
 
       - name: Install system dependencies
         if: steps.select.outputs.args != ''
-        run: sudo apt-get update && sudo apt-get install -y libz3-dev
+        timeout-minutes: 5  # a stalled mirror, see APT_OPTS
+        run: sudo apt-get $APT_OPTS update && sudo apt-get $APT_OPTS install -y libz3-dev
 
       - name: Install pinned Rust toolchain
         if: steps.select.outputs.args != ''
@@ -708,9 +709,18 @@ jobs:
         if: steps.select.outputs.args != ''
         uses: rui314/setup-mold@v1
 
+      # rust-cache hashes every installed toolchain into its key, so this job shares the
+      # test jobs' cache only with the runner image's own stable Rust gone, as in theirs.
+      - name: Keep only the pinned toolchain
+        if: steps.select.outputs.args != ''
+        run: rustup toolchain list --quiet | grep -v "^${{ env.RUST_TOOLCHAIN }}" | xargs -r -n1 rustup toolchain uninstall
+
       - name: Cache Rust build
         if: steps.select.outputs.args != ''
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+          save-if: false
 
       - name: Install cargo-nextest
         if: steps.select.outputs.args != ''
@@ -752,23 +762,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.dst_matrix) }}
-    # The cells always run so each required check reports; when no change reaches a
-    # package, or the tree already passed in its merge group, their steps are skipped.
-    # A pull request runs none: the merge queue runs every suite on the same change
-    # before it lands, and main takes nothing that has not passed there.
+    # The cells always run so each check reports; when no change reaches a package,
+    # their steps are skipped. A pull request runs none: the push to main that lands
+    # the change runs every suite it can reach.
     env:
       DST_NEEDED: ${{ needs.changes.outputs.test_args != '' && needs.changes.outputs.tests == 'true' }}
     steps:
       - name: Not affected
         if: env.DST_NEEDED != 'true'
-        run: echo "No dst_ tests run here. Nothing new to test, or a pull request, whose merge group runs this suite."
+        run: echo "No dst_ tests run here. Nothing new to test, or a pull request, whose push to main runs this suite."
 
       - uses: actions/checkout@v4
         if: env.DST_NEEDED == 'true'
 
       - name: Install system dependencies
         if: env.DST_NEEDED == 'true'
-        run: sudo apt-get update && sudo apt-get install -y libz3-dev
+        timeout-minutes: 5  # a stalled mirror, see APT_OPTS
+        run: sudo apt-get $APT_OPTS update && sudo apt-get $APT_OPTS install -y libz3-dev
 
       - name: Install pinned Rust toolchain
         if: env.DST_NEEDED == 'true'
@@ -800,6 +810,9 @@ jobs:
         with:
           tool: cargo-nextest
 
+      - run: echo "::add-matcher::.github/rust-test-failures.json"
+        if: env.DST_NEEDED == 'true'
+
       # A package set can hold no test of a cell (a change only to temper-cli), so an
       # empty selection passes with a warning.
       - name: cargo nextest DST/platform suite
@@ -819,17 +832,20 @@ jobs:
     name: Spec Verification (L0-L3)
     needs: changes
     # These are temper-cli's verify:: tests, which read every spec collection in the
-    # repository. The full lane runs them; the pr lane runs them when a spec file
-    # changed (scripts/ci/affected.py, SPEC_FILES). The Tests shards also run them
-    # whenever a change reaches temper-cli.
-    if: needs.changes.outputs.specs == 'true' && needs.changes.outputs.tests == 'true'
+    # repository. The pr lane runs them here when a spec file
+    # changed (scripts/ci/affected.py, SPEC_FILES). A run that tests temper-cli runs them
+    # in Tests already, so this job only runs when it does not.
+    if: >-
+      needs.changes.outputs.specs == 'true' && needs.changes.outputs.tests == 'true'
+      && !contains(format(' {0} ', needs.changes.outputs.packages), ' temper-cli ')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libz3-dev
+        timeout-minutes: 5  # a stalled mirror, see APT_OPTS
+        run: sudo apt-get $APT_OPTS update && sudo apt-get $APT_OPTS install -y libz3-dev
 
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
@@ -848,9 +864,6 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ env.SAVE_RUST_CACHE }}
-
-      - name: Build temper-cli
-        run: cargo build --locked -p temper-cli
 
       # Source collections include partial fixtures and examples whose Rust
       # hosts/build scripts supply policies and modules. Keep checking every
@@ -933,7 +946,8 @@ jobs:
           fetch-depth: 0
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libz3-dev
+        timeout-minutes: 5  # a stalled mirror, see APT_OPTS
+        run: sudo apt-get $APT_OPTS update && sudo apt-get $APT_OPTS install -y libz3-dev
 
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@nightly

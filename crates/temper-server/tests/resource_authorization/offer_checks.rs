@@ -85,6 +85,10 @@ async fn order_only_a_person_may_add_to(state: &ServerState) {
 
 /// `request` as agent-1 inside an interactive session, the case that files decisions.
 fn as_agent_in_session(mut request: Request<Body>) -> Request<Body> {
+    request.headers_mut().insert(
+        "x-session-id",
+        axum::http::HeaderValue::from_static("session-1"),
+    );
     let mut security = customer_security_context("agent-1");
     security.principal.kind = PrincipalKind::Agent;
     request.extensions_mut().insert(
@@ -294,12 +298,16 @@ async fn refused_dispatch_still_files_exactly_one_decision_after_offer_checks() 
     );
     let mut security = customer_security_context("agent-1");
     security.principal.kind = PrincipalKind::Agent;
-    request
-        .extensions_mut()
-        .insert(AuthenticatedRequestContext::new(
-            TenantId::new(TENANT),
-            security,
-        ));
+    // An agent in a session, which waits for the decision: only such a
+    // refusal files one (`authz::denial_can_be_answered`).
+    request.headers_mut().insert(
+        "x-session-id",
+        axum::http::HeaderValue::from_static("session-1"),
+    );
+    request.extensions_mut().insert(
+        AuthenticatedRequestContext::new(TenantId::new(TENANT), security)
+            .with_session_id(Some("session-1".to_string())),
+    );
     let response = app.oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     let body: serde_json::Value = serde_json::from_slice(

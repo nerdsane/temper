@@ -14,7 +14,6 @@ use temper_server::request_context::AgentContext;
 use temper_spec::automaton;
 use temper_spec::csdl::parse_csdl;
 use temper_store_turso::TursoSpecVerificationUpdate;
-use temper_verify::cascade::VerificationCascade;
 
 fn test_admin_security_context(principal_id: &str) -> SecurityContext {
     SecurityContext {
@@ -24,6 +23,7 @@ fn test_admin_security_context(principal_id: &str) -> SecurityContext {
             role: None,
             acting_for: None,
             agent_type: None,
+            label: None,
             attributes: HashMap::new(),
         },
         context_attrs: HashMap::new(),
@@ -31,31 +31,6 @@ fn test_admin_security_context(principal_id: &str) -> SecurityContext {
         cause: None,
         credential: None,
     }
-}
-
-#[test]
-fn test_pm_specs_parse() {
-    let bundle = get_os_app("project-management").expect("PM app not found");
-    for (entity_type, ioa_source) in &bundle.specs {
-        let result = automaton::parse_automaton(ioa_source);
-        assert!(
-            result.is_ok(),
-            "PM spec {} failed to parse: {:?}",
-            entity_type,
-            result.err()
-        );
-    }
-}
-
-#[test]
-fn test_pm_csdl_parses() {
-    let bundle = get_os_app("project-management").expect("PM app not found");
-    let result = parse_csdl(bundle.csdl.as_ref().expect("PM should have CSDL"));
-    assert!(
-        result.is_ok(),
-        "PM CSDL failed to parse: {:?}",
-        result.err()
-    );
 }
 
 #[test]
@@ -67,63 +42,6 @@ fn test_pm_spec_entity_names() {
             &a.automaton.name, entity_type,
             "PM spec name mismatch: expected {entity_type}, got {}",
             a.automaton.name
-        );
-    }
-}
-
-#[test]
-fn test_pm_specs_verify() {
-    let bundle = get_os_app("project-management").expect("PM app not found");
-    for (entity_type, ioa_source) in &bundle.specs {
-        let cascade = VerificationCascade::from_ioa(ioa_source)
-            .with_sim_seeds(3)
-            .with_prop_test_cases(50);
-        let result = cascade.run();
-        assert!(
-            result.all_passed,
-            "PM spec {} failed verification",
-            entity_type
-        );
-    }
-}
-
-#[test]
-fn test_agent_orchestration_specs_parse() {
-    let bundle = get_os_app("agent-orchestration").expect("AO app not found");
-    for (entity_type, ioa_source) in &bundle.specs {
-        let result = automaton::parse_automaton(ioa_source);
-        assert!(
-            result.is_ok(),
-            "Agent Orchestration spec {} failed to parse: {:?}",
-            entity_type,
-            result.err()
-        );
-    }
-}
-
-#[test]
-fn test_agent_orchestration_csdl_parses() {
-    let bundle = get_os_app("agent-orchestration").expect("AO app not found");
-    let result = parse_csdl(bundle.csdl.as_ref().expect("AO should have CSDL"));
-    assert!(
-        result.is_ok(),
-        "Agent Orchestration CSDL failed to parse: {:?}",
-        result.err()
-    );
-}
-
-#[test]
-fn test_agent_orchestration_specs_verify() {
-    let bundle = get_os_app("agent-orchestration").expect("AO app not found");
-    for (entity_type, ioa_source) in &bundle.specs {
-        let cascade = VerificationCascade::from_ioa(ioa_source)
-            .with_sim_seeds(3)
-            .with_prop_test_cases(30);
-        let result = cascade.run();
-        assert!(
-            result.all_passed,
-            "Agent Orchestration spec {} failed verification",
-            entity_type
         );
     }
 }
@@ -843,84 +761,15 @@ async fn test_reconcile_os_app_repairs_entity_set_map_from_matching_digest() {
     let _ = std::fs::remove_file(format!("{db_path}-shm"));
 }
 
-#[test]
-fn test_intent_discovery_specs_parse() {
-    let bundle = get_os_app("intent-discovery").expect("intent-discovery app not found");
-    for (entity_type, ioa_source) in &bundle.specs {
-        let result = automaton::parse_automaton(ioa_source);
-        assert!(
-            result.is_ok(),
-            "IntentDiscovery spec {} failed to parse: {:?}",
-            entity_type,
-            result.err()
-        );
-    }
-}
-
-#[test]
-fn test_intent_discovery_csdl_parses() {
-    let bundle = get_os_app("intent-discovery").expect("intent-discovery app not found");
-    let result = parse_csdl(
-        bundle
-            .csdl
-            .as_ref()
-            .expect("intent-discovery should have CSDL"),
-    );
-    assert!(
-        result.is_ok(),
-        "IntentDiscovery CSDL failed to parse: {:?}",
-        result.err()
-    );
-}
-
-#[test]
-fn test_intent_discovery_specs_verify() {
-    let bundle = get_os_app("intent-discovery").expect("intent-discovery app not found");
-    for (entity_type, ioa_source) in &bundle.specs {
-        let cascade = VerificationCascade::from_ioa(ioa_source)
-            .with_sim_seeds(3)
-            .with_prop_test_cases(40);
-        let result = cascade.run();
-        assert!(
-            result.all_passed,
-            "IntentDiscovery spec {} failed verification",
-            entity_type
-        );
-    }
-}
-
 mod bundle_refusal;
 mod directed_evolution;
+mod entity_owners;
+mod own_schema;
 #[path = "mod_test/policy_joint.rs"]
 mod policy_joint;
 mod policy_reinstall;
 mod spec_change;
 mod timer_strands;
-
-#[test]
-fn test_agent_specs_parse() {
-    let bundle = get_os_app("temper-agent").expect("temper-agent app not found");
-    for (entity_type, ioa_source) in &bundle.specs {
-        let result = automaton::parse_automaton(ioa_source);
-        assert!(
-            result.is_ok(),
-            "Agent spec {} failed to parse: {:?}",
-            entity_type,
-            result.err()
-        );
-    }
-}
-
-#[test]
-fn test_agent_csdl_parses() {
-    let bundle = get_os_app("temper-agent").expect("temper-agent app not found");
-    let result = parse_csdl(bundle.csdl.as_ref().expect("temper-agent should have CSDL"));
-    assert!(
-        result.is_ok(),
-        "Agent CSDL failed to parse: {:?}",
-        result.err()
-    );
-}
 
 #[test]
 fn test_agent_spec_entity_names() {
@@ -931,22 +780,6 @@ fn test_agent_spec_entity_names() {
             &a.automaton.name, entity_type,
             "Agent spec name mismatch: expected {entity_type}, got {}",
             a.automaton.name
-        );
-    }
-}
-
-#[test]
-fn test_agent_specs_verify() {
-    let bundle = get_os_app("temper-agent").expect("temper-agent app not found");
-    for (entity_type, ioa_source) in &bundle.specs {
-        let cascade = VerificationCascade::from_ioa(ioa_source)
-            .with_sim_seeds(3)
-            .with_prop_test_cases(50);
-        let result = cascade.run();
-        assert!(
-            result.all_passed,
-            "Agent spec {} failed verification",
-            entity_type
         );
     }
 }
@@ -1011,7 +844,8 @@ fn test_find_wasm_modules_discovers_packaged_root_wasm() {
         },
     );
 
-    let modules = find_wasm_modules(&root, &configs);
+    let modules = find_wasm_modules(&AppFileSource::Listed(root.clone()), &configs)
+        .expect("wasm modules read");
     fs::remove_dir_all(&root).expect("remove temp app");
 
     assert_eq!(
@@ -1956,7 +1790,8 @@ mode = "commons"
     let manifest = read_app_manifest(&temp_dir).expect("manifest should parse");
     assert_eq!(manifest.mode, AppDeploymentMode::Commons);
 
-    let bundle = load_app_bundle(&temp_dir).expect("bundle should load policies");
+    let bundle = load_app_bundle(&AppFileSource::Listed(temp_dir.clone()))
+        .expect("bundle should load policies");
     assert_eq!(bundle.deployment_mode, AppDeploymentMode::Commons);
     assert_eq!(bundle.cedar_policies.len(), 2);
     let source_paths: Vec<&str> = bundle
@@ -2019,7 +1854,8 @@ startup_loading = "lazy"
     )
     .unwrap();
 
-    let bundle = load_app_bundle(&temp_dir).expect("bundle should load");
+    let bundle =
+        load_app_bundle(&AppFileSource::Listed(temp_dir.clone())).expect("bundle should load");
     assert!(bundle.wasm_modules.contains_key("echo"));
     assert!(bundle.cross_invariants_toml.is_none());
     let config = bundle
@@ -2055,7 +1891,8 @@ version = "1.0.0"
     )
     .unwrap();
 
-    let bundle = load_app_bundle(&temp_dir).expect("bundle should load");
+    let bundle =
+        load_app_bundle(&AppFileSource::Listed(temp_dir.clone())).expect("bundle should load");
     assert_eq!(
         bundle.cross_invariants_toml.as_deref(),
         Some("version = 1\ndefault_delete_policy = \"restrict\"\n")
@@ -2682,7 +2519,7 @@ field = "file_id"
     )
     .unwrap();
 
-    let bundle = load_app_bundle(&temp_dir);
+    let bundle = load_app_bundle(&AppFileSource::Listed(temp_dir.clone()));
     assert!(
         bundle.is_err(),
         "legacy reactions.toml should be rejected after the ADR-0046 hard cut"
@@ -2735,7 +2572,8 @@ fn test_find_wasm_modules_respects_manifest_target() {
         },
     );
 
-    let modules = find_wasm_modules(&temp_dir, &configs);
+    let modules = find_wasm_modules(&AppFileSource::Listed(temp_dir.clone()), &configs)
+        .expect("wasm modules read");
     assert!(modules.contains_key("echo"), "echo module should be found");
     assert_eq!(
         modules["echo"], correct_bytes,
@@ -2780,7 +2618,8 @@ fn test_find_wasm_modules_prefers_packaged_sibling_over_target_output() {
         },
     );
 
-    let modules = find_wasm_modules(&temp_dir, &configs);
+    let modules = find_wasm_modules(&AppFileSource::Listed(temp_dir.clone()), &configs)
+        .expect("wasm modules read");
     assert_eq!(
         modules["echo"], packaged_bytes,
         "packaged sibling artifact should win over target output"
@@ -2817,7 +2656,8 @@ fn test_find_wasm_modules_finds_sibling_artifact() {
         },
     );
 
-    let modules = find_wasm_modules(&temp_dir, &configs);
+    let modules = find_wasm_modules(&AppFileSource::Listed(temp_dir.clone()), &configs)
+        .expect("wasm modules read");
     assert!(
         modules.contains_key("echo"),
         "echo module should be found at sibling path"
@@ -2838,7 +2678,8 @@ fn test_find_wasm_modules_ignores_undeclared_artifact() {
     fs::create_dir_all(&module_dir).unwrap();
     fs::write(module_dir.join("echo.wasm"), b"undeclared").unwrap();
 
-    let modules = find_wasm_modules(&temp_dir, &BTreeMap::new());
+    let modules = find_wasm_modules(&AppFileSource::Listed(temp_dir.clone()), &BTreeMap::new())
+        .expect("wasm modules read");
     assert!(
         modules.is_empty(),
         "WASM artifacts must be declared in app.toml before install"
@@ -2856,7 +2697,7 @@ fn test_find_adrs_discovers_markdown_in_sorted_order() {
     fs::write(adrs_dir.join("001-first.md"), "# first").unwrap();
     fs::write(adrs_dir.join("notes.txt"), "ignore").unwrap();
 
-    let adrs = find_adrs(&temp_dir);
+    let adrs = find_adrs(&AppFileSource::Listed(temp_dir.clone())).expect("adrs read");
     assert_eq!(adrs.len(), 2);
     assert_eq!(adrs[0].file_name, "001-first.md");
     assert_eq!(adrs[1].file_name, "002-second.md");
@@ -3025,6 +2866,31 @@ name = "Publish"
 kind = "input"
 from = ["Created", "Published"]
 to = "Published"
+"#,
+    )
+    .unwrap();
+
+    // The app declares the type its Soul spec runs, as an app that runs one must.
+    fs::write(
+        app_dir.join("specs/model.csdl.xml"),
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Test.SkillDoc" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="Soul">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="name" Type="Edm.String"/>
+        <Property Name="description" Type="Edm.String"/>
+        <Property Name="content_file_id" Type="Edm.String"/>
+      </EntityType>
+      <EntityContainer Name="SkillDoc">
+        <EntitySet Name="Souls" EntityType="Test.SkillDoc.Soul"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>
 "#,
     )
     .unwrap();
@@ -3662,3 +3528,6 @@ async fn test_concurrent_installs_into_one_tenant_keep_both_apps_cedar() {
 
 #[path = "mod_test/timer_install.rs"]
 mod timer_install;
+
+#[path = "mod_test/install_order.rs"]
+mod install_order;

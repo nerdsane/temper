@@ -30,6 +30,7 @@ mod boxed;
 mod invocation_artifacts;
 mod local_tdata_host;
 mod replay_inputs;
+mod trigger_principal;
 
 pub(super) use boxed::{
     dispatch_callback_action_boxed, dispatch_wasm_callback_boxed, dispatch_wasm_integrations_boxed,
@@ -51,6 +52,7 @@ fn wasm_module_security_context(module_name: &str) -> SecurityContext {
             role: Some("wasm_module".to_string()),
             acting_for: None,
             agent_type: None,
+            label: None,
             attributes: std::collections::HashMap::new(), // determinism-ok: Principal uses HashMap
         },
         context_attrs: std::collections::HashMap::new(), // determinism-ok: SecurityContext uses HashMap
@@ -503,6 +505,9 @@ impl crate::state::ServerState {
             mode: req.mode,
         };
         let mut last_response: Option<EntityResponse> = None;
+        // Triggers on one action are independent: one that fails is kept, and
+        // the triggers after it still run.
+        let mut failures: Vec<String> = Vec::new();
 
         for effect_name in req.custom_effects {
             let integration = integrations
@@ -512,22 +517,43 @@ impl crate::state::ServerState {
             let Some(integration) = integration else {
                 continue;
             };
+            // A background call that names an `on_failure` has a deadline
+            // row; its answer is made in a context that removes it.
+            let call = self.call_deadline_row(req.tenant, req.entity_state, &integration, req.mode);
+            let call_agent_ctx = AgentContext {
+                ends_call: call.clone(),
+                ..req.agent_ctx.clone()
+            };
+            let call_ctx = WasmDispatchCtx {
+                agent_ctx: &call_agent_ctx,
+                ..ctx
+            };
 
-            if let Some(resp) = self
+            match self
                 .dispatch_single_integration(
-                    &ctx,
+                    &call_ctx,
                     &integration,
                     req.entity_state,
                     req.action_params,
                     &base_gate,
                 )
-                .await?
+                .await
             {
-                last_response = Some(resp);
+                Ok(Some(resp)) => last_response = Some(resp),
+                Ok(None) => {}
+                Err(error) => failures.push(error),
+            }
+            // The call has ended, answered or not.
+            if let Some(call) = &call {
+                self.end_call(call, &integration.name, req.agent_ctx);
             }
         }
 
-        Ok(last_response)
+        if failures.is_empty() {
+            Ok(last_response)
+        } else {
+            Err(failures.join("; "))
+        }
     }
 
     /// Dispatch a single WASM integration: resolve module, invoke, handle result.
@@ -649,7 +675,7 @@ impl crate::state::ServerState {
                     trigger_action: ctx.action.to_string(),
                     wasm_module: Some(module_name.clone()),
                     trigger_params,
-                    entity_state: serde_json::to_value(entity_state).unwrap_or_default(),
+                    entity_state: entity_state.for_module(),
                     agent_id: ctx.agent_ctx.agent_id.clone(),
                     session_id: ctx.agent_ctx.session_id.clone(),
                     integration_config: match self.secrets_vault.as_ref() {
@@ -667,6 +693,7 @@ impl crate::state::ServerState {
                     workflow_root_entity_id: ctx.agent_ctx.workflow_root_entity_id.clone(),
                     workflow_run_id: ctx.agent_ctx.workflow_run_id.clone(),
                     http_request: None,
+                    trigger_principal: trigger_principal::trigger_principal(ctx.agent_ctx),
                 };
                 (authz_ctx, inv_ctx)
             },
@@ -745,11 +772,7 @@ impl crate::state::ServerState {
                 //
                 // Apps that fire the counter frequently should wire an explicit
                 // `timeout_secs` in their integration config.
-                let explicit_timeout = integration
-                    .config
-                    .get("timeout_secs")
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .map(std::time::Duration::from_secs);
+                let explicit_timeout = super::call_deadlines::configured_timeout(integration);
                 let http_timeout =
                     explicit_timeout.unwrap_or_else(|| WasmResourceLimits::default().max_duration);
                 if explicit_timeout.is_some() {
@@ -1359,6 +1382,30 @@ impl crate::state::ServerState {
                 } else {
                     &named
                 };
+                // A silent exit (ADR-0056 Sub-Decision 3): the module succeeded
+                // but sends no answer, did not say it has none (`"empty":
+                // true`), and wrote nothing as a composite, so the record waits
+                // for a move that will not come. An answer that keeps the
+                // record's status is a move, and one the record refuses is
+                // journaled as a rejected answer; neither is counted here.
+                if answers.is_empty() && !result.empty_answer && !composite_result_consumed {
+                    tracing::warn!(
+                        target: "temper_server::integration",
+                        tenant = %ctx.entity_ref.tenant,
+                        entity_type = ctx.entity_ref.entity_type,
+                        entity_id = ctx.entity_ref.entity_id,
+                        action = ctx.action,
+                        integration = %integration.name,
+                        state = %entity_state.status,
+                        "integration answered no move"
+                    );
+                    crate::runtime_metrics::record_integration_silent_exit(
+                        ctx.entity_ref.tenant.as_str(),
+                        ctx.entity_ref.entity_type,
+                        ctx.action,
+                        &entity_state.status,
+                    );
+                }
                 let callback_action = self
                     .choose_answer(ctx.entity_ref, answers, &callback_params)
                     .await;

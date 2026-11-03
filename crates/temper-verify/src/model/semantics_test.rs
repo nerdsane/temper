@@ -270,6 +270,11 @@ assert = "a == '' || a != ''"
             initial.strings.insert("a".into(), value.into());
             let next = successors(&model, t, &initial);
             assert_eq!(next.len(), usize::from(allowed), "{name} = {value:?}");
+            assert_eq!(
+                crate::model::parameters::locally_enabled(&model, t, &initial),
+                Some(allowed),
+                "input availability: {name} = {value:?}"
+            );
             if allowed {
                 assert_eq!(next[0].0[name], ParamValue::Str(value.into()));
                 assert_eq!(next[0].1.strings, initial.strings);
@@ -301,5 +306,124 @@ fn unconstrained_strings_include_distinct_nonempty_blank_values() {
             !a.is_empty() && a.is_blank() && !b.is_empty() && b.is_blank() && a != b
         }),
         "different whitespace-only inputs must remain possible"
+    );
+}
+
+#[test]
+fn field_and_list_symbols_share_one_canonical_scope() {
+    let mut s = state("Ready");
+    s.strings.insert("goal".into(), ModelString::Symbol(9));
+    s.lists.insert(
+        "tags".into(),
+        vec![ModelString::Symbol(9), ModelString::Symbol(4), "#1".into()],
+    );
+    canonical_state(&mut s);
+    assert_eq!(s.strings["goal"], ModelString::Symbol(1));
+    assert_eq!(
+        s.lists["tags"],
+        vec![ModelString::Symbol(1), ModelString::Symbol(2), "#1".into()]
+    );
+    assert!(evaluate_guard(
+        &g("goal in tags && '#1' in tags && len(tags) == 3 && !empty(tags)"),
+        &kinds(),
+        &s
+    ));
+    s.lists.get_mut("tags").unwrap().remove(0);
+    canonical_state(&mut s);
+    assert!(!evaluate_guard(&g("goal in tags"), &kinds(), &s));
+    assert_eq!(
+        string_values(std::iter::once(&s)),
+        BTreeSet::from([ModelString::Symbol(1), ModelString::Symbol(2), "#1".into()])
+    );
+}
+
+#[test]
+fn string_choices_and_successor_states_count_against_the_room() {
+    let model = two_strings_model();
+    let initial = stateright::Model::init_states(&model).remove(0);
+    let values = (0..16)
+        .map(|i| ModelString::from(format!("{i}{}", "v".repeat(256))))
+        .collect();
+    let budget = Expansion::default();
+    budget.allow(64 << 10);
+    let next = successors_budgeted(&model, &model.transitions[0], &initial, &values, &budget);
+    assert!(
+        budget.short(),
+        "input products must stop while they are built"
+    );
+    drop(next);
+
+    budget.allow(16 << 20);
+    let next = successors_budgeted(&model, &model.transitions[0], &initial, &values, &budget);
+    assert!(
+        !budget.short(),
+        "the complete input product fits in a larger room"
+    );
+    assert_eq!(
+        next,
+        successors_among(&model, &model.transitions[0], &initial, &values)
+    );
+
+    // The input choices fit, but copying this record for each choice does not.
+    let mut large = initial;
+    large.lists.insert(
+        "payload".into(),
+        vec![ModelString::from("x".repeat(32 << 10))],
+    );
+    budget.allow(64 << 10);
+    successors_budgeted(
+        &model,
+        &model.transitions[0],
+        &large,
+        &BTreeSet::new(),
+        &budget,
+    );
+    assert!(
+        budget.short(),
+        "successor records must consume room before cloning"
+    );
+}
+
+#[test]
+fn an_allowed_input_still_enables_a_move_past_an_exploration_bound() {
+    let spec = r#"
+[automaton]
+name = "BoundedInput"
+states = ["Open", "Done"]
+initial = "Open"
+[[state]]
+name = "count"
+type = "counter"
+initial = 2
+[[state]]
+name = "token"
+type = "string"
+initial = "ok"
+[[action]]
+name = "Finish"
+from = ["Open"]
+to = "Done"
+params = [{ name = "proof", type = "string" }]
+effect = ["count += 1"]
+guard = "count >= 0"
+[[action.constraints]]
+kind = "param_nonempty"
+param = "proof"
+[[action.constraints]]
+kind = "param_equals_field"
+param = "proof"
+field = "token"
+[[invariant]]
+name = "TrackToken"
+assert = "token == '' || token != ''"
+"#;
+    let model = crate::model::build_model_from_ioa(spec, 2).unwrap();
+    let initial = stateright::Model::init_states(&model).remove(0);
+    let transition = &model.transitions[0];
+    assert!(successors(&model, transition, &initial).is_empty());
+    assert_eq!(
+        crate::model::parameters::locally_enabled(&model, transition, &initial),
+        Some(true),
+        "effects past the bound do not prevent an allowed runtime input"
     );
 }

@@ -7,14 +7,15 @@ use tracing::Instrument;
 
 use super::DispatchError;
 use super::owed_writes::{OwedKind, OwedWrite};
-use super::state_timeouts::{ArmedTimer, deadline};
+use super::state_timeouts::ArmedTimer;
 use super::timer_standing::{Standing, TimerFire};
 use crate::idempotency::IdempotencyKey;
 use crate::state::ServerState;
 use crate::wake::TimerRef;
 
 impl ServerState {
-    /// Wait until the timer's deadline by the wall clock, fire through the
+    /// Wait until the timer is due by the wall clock (its deadline, or
+    /// sooner when a move brought it forward), fire through the
     /// normal dispatch pipeline, and remove the old row only after its
     /// durable successor is armed. A failed write keeps this arming
     /// (including its identity and journal fence) and retries. A final
@@ -28,7 +29,7 @@ impl ServerState {
         gate: Option<Arc<Semaphore>>,
         armed_seq: u64,
     ) {
-        let mut due_at = deadline(timer.started_at, timer.after_seconds);
+        let mut due_at = timer.due_at();
         let fire_key = timer.new_fire_key();
         self.state_timeout_tracker.inc_pending(&timer.entity_type);
         let workflow_root_entity_type = timer
@@ -171,11 +172,25 @@ impl ServerState {
                 };
             }
         };
+        // Stopped because nothing names its caller (`state_timer_stop`): no
+        // arming of it fires until a move names someone.
+        if current.last_event.timer_needs_person.is_some() && timer.agent_ctx.caller().is_none() {
+            // Cancelled, not only ended: a timer still held as armed would keep
+            // the move that names someone from arming its own.
+            self.cancel_state_timer(
+                &timer.tenant,
+                &timer.entity_type,
+                &timer.entity_id,
+                current.sequence_nr,
+            )
+            .await;
+            return Fired::Ended;
+        }
         let belongs = current.status == timer.state && self.declares_state_timer(timer);
         if !belongs {
             let follow = super::state_timer_reconcile::Follow {
                 armed_by: Some(&timer.agent_ctx),
-                woke_for: Some(deadline(timer.started_at, timer.after_seconds)),
+                woke_for: Some(timer.due_at()),
                 ..Default::default()
             };
             self.follow_owned_state_timer(
@@ -189,7 +204,7 @@ impl ServerState {
         } else if current.sequence_nr > timer.sequence_nr {
             self.follow_moved_record(timer, armed_seq, &current).await;
         } else if !self.state_timer_already_fired(timer, &current) {
-            let agent_ctx = timer.fire_context(fire_key);
+            let agent_ctx = timer.fire_context(fire_key, self.state_timeout_resets_on(timer));
             let fire = TimerFire {
                 tenant: &timer.tenant,
                 entity_type: &timer.entity_type,

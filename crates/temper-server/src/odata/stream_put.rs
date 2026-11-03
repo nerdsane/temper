@@ -274,6 +274,7 @@ pub(super) async fn handle_stream_put(
             workflow_root_entity_id: agent_ctx.workflow_root_entity_id.clone(),
             workflow_run_id: agent_ctx.workflow_run_id.clone(),
             http_request: None,
+            trigger_principal: None,
         };
 
         let wasm_result = match state

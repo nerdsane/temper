@@ -185,6 +185,7 @@ struct SimEventStoreInner {
     /// While set, `delete_scheduled_action` never completes, as when the
     /// process stops before it. See `hold_scheduled_action_deletes`.
     scheduled_deletes_held: bool,
+    pending_scheduled_delete_failures: usize,
     /// Each entry makes `list_scheduled_actions` for that tenant fail with a
     /// storage error on the next N calls. See `fail_next_scheduled_lists`.
     pending_scheduled_list_failures: BTreeMap<String, usize>,
@@ -245,6 +246,7 @@ impl SimEventStore {
                 vector_index: BTreeMap::new(),
                 scheduled_actions: BTreeMap::new(),
                 scheduled_deletes_held: false,
+                pending_scheduled_delete_failures: 0,
                 pending_scheduled_list_failures: BTreeMap::new(),
                 vector_index_watermark: BTreeMap::new(),
                 projections: BTreeMap::new(),
@@ -284,6 +286,22 @@ impl SimEventStore {
     pub fn hold_scheduled_action_deletes(&self, held: bool) {
         let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
         inner.scheduled_deletes_held = held;
+    }
+
+    /// Fail the next `count` scheduled-row deletions without changing any row.
+    pub fn fail_next_scheduled_deletes(&self, count: usize) {
+        self.inner
+            .lock()
+            .expect("SimEventStore lock poisoned") // ci-ok: infallible lock
+            .pending_scheduled_delete_failures = count;
+    }
+
+    /// The number of injected deletion failures not yet observed.
+    pub fn scheduled_delete_failures_pending(&self) -> usize {
+        self.inner
+            .lock()
+            .expect("SimEventStore lock poisoned") // ci-ok: infallible lock
+            .pending_scheduled_delete_failures
     }
 
     /// Make the next `count` `list_scheduled_actions` calls for `tenant` fail
@@ -880,6 +898,50 @@ impl EventStore for SimEventStore {
             .collect())
     }
 
+    /// One record's rows, read under the lock. The simulated listing
+    /// failures are for whole-tenant listings (boot, and the recovery of a
+    /// fire whose answer was lost), so this read does not take one.
+    async fn list_entity_scheduled_actions(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<Vec<ScheduledActionRecord>, PersistenceError> {
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Ok(inner
+            .scheduled_actions
+            .values()
+            .filter(|action| {
+                action.tenant == tenant
+                    && action.entity_type == entity_type
+                    && action.entity_id == entity_id
+            })
+            .cloned()
+            .collect())
+    }
+
+    async fn cancel_scheduled_action(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        arm_id: &str,
+    ) -> Result<(), PersistenceError> {
+        let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        if let Some(row) = inner.scheduled_actions.get_mut(&(
+            tenant.to_string(),
+            entity_type.to_string(),
+            entity_id.to_string(),
+            arm_id.to_string(),
+        )) {
+            row.action.clear();
+        }
+        Ok(())
+    }
+
     async fn delete_scheduled_action(
         &self,
         tenant: &str,
@@ -896,6 +958,12 @@ impl EventStore for SimEventStore {
             std::future::pending::<()>().await;
         }
         let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        if inner.pending_scheduled_delete_failures > 0 {
+            inner.pending_scheduled_delete_failures -= 1;
+            return Err(PersistenceError::Storage(
+                "simulated scheduled-action delete failure".into(),
+            ));
+        }
         inner.scheduled_actions.remove(&(
             tenant.to_string(),
             entity_type.to_string(),
@@ -1204,10 +1272,8 @@ impl EventStore for SimEventStore {
                 stored.sequence_nr = new_seq;
                 journal.push(stored);
             }
-            *inner
-                .commits
-                .entry(append.persistence_id.clone())
-                .or_default() += 1;
+            // The record's rows commit with its events, as in one append.
+            inner.commit_entity_rows(&append.persistence_id, new_seq, &append.commit_rows());
             results.push(PersistenceAppendResult {
                 persistence_id: append.persistence_id.clone(),
                 sequence_nr: new_seq,

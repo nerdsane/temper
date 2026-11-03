@@ -25,11 +25,26 @@ async fn legacy_cache_boot_copies_verified_apps_into_each_tenants_directory() {
     write_app(&old, "notes", "prior notes");
     std::fs::create_dir_all(old.join("notes/resources/nested")).unwrap();
     std::fs::write(old.join("notes/resources/nested/data.bin"), [0, 255, 42]).unwrap();
+    written::keep_app(
+        &old,
+        "notes",
+        &["app.toml", "APP.md", "resources/nested/data.bin"],
+    );
+    let original = recorded(&old, "notes");
+    std::fs::remove_file(old.join(".written.json")).unwrap();
     for suffix in ["one", "two"] {
         let tenant = format!("{TENANT}-legacy-boot-{suffix}");
-        ps.record_installed_app_metadata(&record(&old, &tenant, "notes", &v1))
-            .await
-            .unwrap();
+        ps.record_installed_app_metadata(&InstalledAppRecord {
+            tenant: tenant.clone(),
+            app_ref: format!("acme/notes@{v1}"),
+            version_hash: v1.clone(),
+            registry_tenant: "default".to_string(),
+            registry_url: "http://127.0.0.1:9".to_string(),
+            status: "installed".to_string(),
+            ..original.clone()
+        })
+        .await
+        .unwrap();
     }
     assert_eq!(
         boot(data_dir.path(), &ps).await,
@@ -48,6 +63,14 @@ async fn legacy_cache_boot_copies_verified_apps_into_each_tenants_directory() {
             crate::os_apps::tenant_app_guide(&tenant, "notes")
                 .unwrap()
                 .contains("prior notes")
+        );
+        assert_eq!(
+            written_digest(&destination, "notes"),
+            original.bundle_digest
+        );
+        assert!(
+            !old.join(".written.json").exists(),
+            "shared cache is untouched"
         );
         copies.push(destination);
     }
@@ -69,11 +92,17 @@ async fn legacy_cache_boot_copies_verified_apps_into_each_tenants_directory() {
         [0, 255, 42],
     )
     .unwrap();
+    written::keep_app(
+        &copies[0],
+        "notes",
+        &["app.toml", "APP.md", "resources/nested/data.bin"],
+    );
     std::fs::remove_dir_all(&old).unwrap();
+    crate::os_apps::app_files_seam::list_empty_under(data_dir.path());
     assert_eq!(
         boot(data_dir.path(), &ps).await,
         2,
-        "both tenant copies survive removal of the old cache"
+        "both tenant copies restore from saved lists even when folders list empty"
     );
 }
 
@@ -104,7 +133,10 @@ async fn legacy_cache_rollback_recovers_root_and_dependency_from_another_closure
                 .await
                 .unwrap();
         }
-        register_install_cache(&tenant, broken, DirApps::Every);
+        register_written_apps(&tenant, broken.clone(), written::read(&broken).unwrap());
+        for root in [&old, &other] {
+            std::fs::remove_file(root.join(".written.json")).unwrap();
+        }
         let mut prior = vec![notes.clone(), tags.clone(), labels.clone()];
         if seed & 1 != 0 {
             prior.swap(1, 2);
@@ -118,9 +150,7 @@ async fn legacy_cache_rollback_recovers_root_and_dependency_from_another_closure
             (&labels, cache(&platform, &tenant, "labels", &v2)),
         ] {
             assert_eq!(
-                os_app_dir_bundle_digest(&destination, &installed.app_name)
-                    .unwrap()
-                    .bundle_digest,
+                written_digest(&destination, &installed.app_name),
                 installed.bundle_digest
             );
             assert_eq!(
@@ -163,6 +193,7 @@ async fn legacy_cache_migration_excludes_changed_unrecorded_and_unverifiable_app
     };
     write_app(&old, "changed", "tampered");
     let prior = [notes.clone(), changed, no_digest];
+    std::fs::remove_file(old.join(".written.json")).unwrap();
     // The root can recover, but neither dependency may be served from the shared old cache.
     assert!(
         ensure_prior_bundle_available(&platform, ps.as_ref(), &notes, &prior)
@@ -170,12 +201,7 @@ async fn legacy_cache_migration_excludes_changed_unrecorded_and_unverifiable_app
             .is_err()
     );
     let destination = cache(&platform, &tenant, "notes", &v1);
-    assert_eq!(
-        os_app_dir_bundle_digest(&destination, "notes")
-            .unwrap()
-            .bundle_digest,
-        notes.bundle_digest
-    );
+    assert_eq!(written_digest(&destination, "notes"), notes.bundle_digest);
     for excluded in ["changed", "unknown", "no-digest"] {
         assert!(!destination.join(excluded).exists(), "copied {excluded}");
         assert!(
@@ -205,6 +231,7 @@ async fn legacy_cache_rejects_a_changed_root_or_one_without_a_recorded_digest() 
         } else {
             write_app(&old, "notes", "tampered");
         }
+        std::fs::remove_file(old.join(".written.json")).unwrap();
         assert!(
             ensure_prior_bundle_available(
                 &platform,
@@ -222,5 +249,43 @@ async fn legacy_cache_rejects_a_changed_root_or_one_without_a_recorded_digest() 
         );
         assert!(crate::os_apps::tenant_app_guide(&tenant, "notes").is_none());
         assert!(old.exists());
+    }
+}
+
+/// Shared cache symlinks may hash to valid bytes but must never be copied.
+#[cfg(unix)]
+#[tokio::test]
+async fn legacy_cache_migration_rejects_symlinked_files_and_directories() {
+    use std::os::unix::fs::symlink;
+    for directory in [false, true] {
+        let data_dir = tempfile::tempdir().expect("data dir");
+        let ps = Arc::new(store());
+        let platform = server_on(data_dir.path(), &ps);
+        let tenant = format!("{TENANT}-legacy-symlink-{directory}");
+        let version = "4".repeat(40);
+        let old = old_cache(&platform, "notes", &version);
+        write_app(&old, "notes", "original");
+        let notes = record(&old, &tenant, "notes", &version);
+        let external = tempfile::tempdir().unwrap();
+        if directory {
+            std::fs::rename(old.join("notes"), external.path().join("notes")).unwrap();
+            symlink(external.path().join("notes"), old.join("notes")).unwrap();
+        } else {
+            std::fs::rename(old.join("notes/APP.md"), external.path().join("APP.md")).unwrap();
+            symlink(external.path().join("APP.md"), old.join("notes/APP.md")).unwrap();
+        }
+        std::fs::remove_file(old.join(".written.json")).unwrap();
+        let candidates = install_cache_candidates(&platform, &tenant, "default", &notes.app_ref);
+        assert!(
+            first_matching_install(
+                ps.as_ref(),
+                &candidates,
+                &notes,
+                std::slice::from_ref(&notes)
+            )
+            .await
+            .is_none()
+        );
+        assert!(!cache(&platform, &tenant, "notes", &version).exists());
     }
 }

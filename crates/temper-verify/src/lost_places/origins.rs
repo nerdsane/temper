@@ -3,18 +3,19 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{Bits, Graph};
+use crate::reach::{Graph, Reach};
 
 /// Choose the first comparable records that can name each move's loss.
 pub(super) fn first_comparable(
     graph: &Graph,
-    component: &[u32],
-    first: &[usize],
-    members: &[usize],
-    reach: &[u64],
+    reach: &Reach,
     lost: &BTreeMap<usize, Vec<u64>>,
-    bits: Bits,
 ) -> BTreeSet<usize> {
+    let component = &reach.component;
+    let first = &reach.first;
+    let members = &reach.members;
+    let bits = reach.bits;
+    let reach = &reach.places;
     let mut pending = vec![0u64; reach.len()];
     for (&at, row) in lost {
         if graph.parent[at].is_none() {

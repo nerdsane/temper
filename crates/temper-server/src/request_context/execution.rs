@@ -33,14 +33,20 @@ impl AgentContext {
         let mut next = self.clone();
         next.inline_chain = inline_chain;
         next.callback_hops += 1;
-        next.idempotency_key = self.idempotency_key.as_ref().map(|key| {
+        next.idempotency_key = self.callback_key(source);
+        Ok(next)
+    }
+
+    /// The key of a callback that `source` sends for this context's move:
+    /// derived from this context's key, so every run of the move derives it.
+    pub(crate) fn callback_key(&self, source: &str) -> Option<IdempotencyKey> {
+        self.idempotency_key.as_ref().map(|key| {
             IdempotencyKey::FollowUp(crate::idempotency::derived_idempotency_key(
                 key.as_str(),
                 "callback",
                 source,
             ))
-        });
-        Ok(next)
+        })
     }
 
     /// This context inside `action` on an entity: the step of its inline
@@ -68,9 +74,12 @@ impl AgentContext {
     ///
     /// Call only at a runtime-owned spawn boundary: the parent inline chain
     /// ends there, but its callback lineage continues in the detached task.
+    /// A detached task is not the answer of a call this context answers, so
+    /// it removes no call's deadline.
     pub(crate) fn for_background_task(&self) -> Self {
         let mut next = self.clone();
         next.inline_chain = InlineChain::default();
+        next.ends_call = None;
         next
     }
 }

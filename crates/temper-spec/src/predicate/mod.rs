@@ -11,6 +11,7 @@ mod effect;
 mod eval;
 mod parse;
 mod print;
+mod string;
 
 pub use ast::{CmpOp, Expr, Literal, Name, Operand, Set};
 pub(crate) use check::unverifiable_entry;
@@ -20,6 +21,7 @@ pub use effect::{
 };
 pub use eval::{Env, JsonEnv, Truth, Val, eval, explain};
 pub use parse::{MAX_DEPTH, ParseError, is_keyword, parse};
+pub use string::SymbolicString;
 
 impl std::str::FromStr for Expr {
     type Err = ParseError;

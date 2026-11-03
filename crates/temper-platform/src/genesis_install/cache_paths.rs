@@ -120,6 +120,8 @@ pub(super) enum InstallSource<'a> {
     Registry(&'a str),
     /// This process's own Genesis rows in this tenant (`App.Install`).
     Local(&'a str),
+    /// Files the caller posted to this server (`POST /api/os-apps/{name}/install`).
+    Pushed,
 }
 
 impl CacheOwner<'_> {
@@ -133,6 +135,10 @@ impl CacheOwner<'_> {
                 tenant,
                 source: InstallSource::Local(source_tenant),
             } => format!("install\n{tenant}\nlocal\n{source_tenant}"),
+            Self::Install {
+                tenant,
+                source: InstallSource::Pushed,
+            } => format!("install\n{tenant}\npushed"),
             Self::Export { registry_tenant } => format!("export\n{registry_tenant}"),
             Self::DependencyRead { tenant } => format!("dependency-read\n{tenant}"),
         }
@@ -155,7 +161,8 @@ pub(super) fn genesis_cache_root(
     root.join(format!("{}-{}", sanitize_fragment(app_ref), &digest[..32]))
 }
 
-/// The pre-tenant cache layout, read only to recover digest-verified installs.
+/// The pre-tenant shared layout, used only for digest-verified recovery.
+/// Delete with the pre-tenant cache migration after existing installs move.
 pub(super) fn legacy_genesis_cache_root(state: &ServerState, app_ref: &str) -> PathBuf {
     let digest = format!("{:x}", sha2::Sha256::digest(app_ref.as_bytes()));
     genesis_cache_base(state).join(format!("{}-{}", sanitize_fragment(app_ref), &digest[..16]))

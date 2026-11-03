@@ -4,6 +4,7 @@
 - Date: 2026-06-22
 - Deciders: Temper core maintainers
 - Supersedes: ADR-0140 (generalizes its composite-only propagation)
+- Superseded in part by: ADR-0184 (Sub-Decision 2, for actions that are not composite)
 - Related:
   - ADR-0140: A Composite action fails when its integration fails (the
     composite-only special case this generalizes)
@@ -66,6 +67,8 @@ is just `on_failure.is_none()`, now expressed at the one site that owns the
 decision rather than duplicated at each call site.
 
 ### Sub-Decision 2: inline failure becomes `success: false`
+
+> Superseded by ADR-0184 for actions that are not composite: the caller is answered committed, with the failure in `trigger_failures`, and the failure is compensated as in the background.
 
 When `failure_must_propagate` is true and the dispatcher runs **inline**
 (`await_integration = true`), the `Err` propagates out of

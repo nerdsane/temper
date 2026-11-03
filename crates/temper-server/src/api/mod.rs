@@ -16,7 +16,7 @@ mod spec_pin;
 mod trajectory_analysis;
 
 use axum::Router;
-use axum::extract::{FromRequestParts, Path, State};
+use axum::extract::{DefaultBodyLimit, FromRequestParts, Path, State};
 use axum::http::StatusCode;
 use axum::http::request::Parts;
 use axum::response::IntoResponse;
@@ -59,7 +59,7 @@ pub fn build_api_router() -> Router<ServerState> {
         )
         .route(
             "/specs/validate-ioa",
-            post(crate::observe::specs::handle_validate_ioa),
+            post(crate::observe::specs::handle_validate_ioa).layer(DefaultBodyLimit::disable()),
         )
         .route(
             "/wasm/modules/{module_name}",

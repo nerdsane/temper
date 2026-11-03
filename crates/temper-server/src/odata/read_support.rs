@@ -1,11 +1,12 @@
 //! Shared helpers for OData read handlers.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use futures_util::stream::{self, StreamExt};
 use temper_runtime::tenant::TenantId;
 
 use super::read_defaults::ReadDefaults;
+use super::response::fill_event_metadata;
 use crate::state::ServerState;
 use crate::storage::{
     CatalogRowsLoad, EntityCatalogRow, load_catalog_rows_by_id, load_selected_catalog_rows_by_id,
@@ -55,15 +56,7 @@ fn catalog_row_to_entity_body(
             .or_insert(serde_json::json!({}));
         obj.entry("lists".to_string())
             .or_insert(serde_json::json!({}));
-        for property in [
-            "first_event_at",
-            "last_event_at",
-            "last_event_via",
-            "last_event_by",
-        ] {
-            obj.entry(property.to_string())
-                .or_insert(serde_json::Value::Null);
-        }
+        fill_event_metadata(obj);
         obj.insert("events".to_string(), serde_json::json!([]));
         obj.entry("total_event_count".to_string())
             .or_insert(serde_json::json!(row.sequence_nr));
@@ -94,6 +87,10 @@ fn catalog_row_to_entity_body(
         "last_event_at": null,
         "last_event_via": null,
         "last_event_by": null,
+        "last_event_for": null,
+        "last_event_agent_type": null,
+        "last_event_label": null,
+        "timer_needs_person": null,
         "@odata.id": format!("{entity_set_name}('{id}')"),
     })
 }
@@ -159,78 +156,6 @@ async fn try_load_selected_catalog_rows(
             )
         }
     }
-}
-
-/// The ids in `entity_ids` that have no catalog row, which a read then finds
-/// through their actors (ADR-0113).
-///
-/// A store that writes each record's catalog row in the commit of its event
-/// has none: a create or a move commits its row with it or not at all, and
-/// boot repair keeps the server from serving until every older record's row
-/// matches its journal. Only a row written after its commit can be missing,
-/// so only those stores are asked. Asking every time cost the whole type: on
-/// Turso, with no sparse catalog read, the check loaded every record's row.
-pub(super) async fn missing_catalog_entity_ids(
-    state: &ServerState,
-    tenant: &TenantId,
-    entity_type: &str,
-    entity_ids: &[String],
-) -> Vec<String> {
-    if entity_ids.is_empty() || state.entity_rows_follow_commits() {
-        return Vec::new();
-    }
-    let Some(query_plane) = state.query_plane_store() else {
-        return Vec::new();
-    };
-
-    let coverage_fields = [String::from("entity_id")];
-    let present_ids = match load_selected_catalog_rows_by_id(
-        &query_plane,
-        tenant.as_str(),
-        entity_type,
-        entity_ids,
-        &coverage_fields,
-    )
-    .await
-    {
-        Ok(CatalogRowsLoad::Available(rows)) => Some(rows.into_keys().collect::<Vec<_>>()),
-        Ok(CatalogRowsLoad::Unsupported) => {
-            match load_catalog_rows_by_id(&query_plane, tenant.as_str(), entity_type, entity_ids)
-                .await
-            {
-                Ok(CatalogRowsLoad::Available(rows)) => Some(rows.into_keys().collect()),
-                Ok(CatalogRowsLoad::Unsupported) => None,
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        tenant = %tenant,
-                        entity_type = %entity_type,
-                        "catalog coverage row check failed; trusting SQL filter push-down result"
-                    );
-                    None
-                }
-            }
-        }
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                tenant = %tenant,
-                entity_type = %entity_type,
-                "catalog coverage presence check failed; trusting SQL filter push-down result"
-            );
-            None
-        }
-    };
-
-    let Some(present_ids) = present_ids else {
-        return Vec::new();
-    };
-    let present = present_ids.into_iter().collect::<BTreeSet<_>>();
-    entity_ids
-        .iter()
-        .filter(|id| !present.contains(*id))
-        .cloned()
-        .collect()
 }
 
 /// Try to load a single entity body from the durable `entity_catalog`.
@@ -346,15 +271,20 @@ pub(super) async fn materialize_entity_set_entities(
                 if let Some(row) = catalog_row {
                     let entity = match selected_catalog_fields.as_deref() {
                         Some(select) => {
-                            let fields = defaults.field_values(row.state.as_ref().unwrap_or(&row.fields));
+                            let fields =
+                                defaults.field_values(row.state.as_ref().unwrap_or(&row.fields));
                             let mut entity = catalog_row_to_selected_entity_body(
-                                &entity_type, &entity_set_name, row, select,
+                                &entity_type,
+                                &entity_set_name,
+                                row,
+                                select,
                             );
                             defaults.apply_selected(&mut entity, select, &fields);
                             entity
                         }
                         None => {
-                            let mut entity = catalog_row_to_entity_body(&entity_type, &entity_set_name, row);
+                            let mut entity =
+                                catalog_row_to_entity_body(&entity_type, &entity_set_name, row);
                             defaults.apply(&mut entity);
                             entity
                         }
@@ -366,39 +296,13 @@ pub(super) async fn materialize_entity_set_entities(
                     .await
                 {
                     Ok(response) => {
-                        if !response.state.is_tombstoned()
-                            && let Some(query_plane) = state.query_plane_store()
-                        {
-                            let fields = state.query_projection_fields(
-                                &tenant,
-                                &entity_type,
-                                &response.state.fields,
-                            );
-                            let projected_state = state.query_projection_state(&response.state);
-                            if let Err(error) = query_plane
-                                .upsert_projection(
-                                    tenant.as_str(),
-                                    &entity_type,
-                                    &id,
-                                    &response.state.status,
-                                    &fields,
-                                    &projected_state,
-                                    response.state.sequence_nr,
-                                )
-                                .await
-                            {
-                                tracing::debug!(
-                                    error = %error,
-                                    tenant = %tenant,
-                                    entity_type = %entity_type,
-                                    entity_id = %id,
-                                    "failed to repair query projection after actor materialization fallback"
-                                );
-                            }
-                        }
+                        // Nothing is written back: a record's catalog row
+                        // commits with its events, so a row missing here is
+                        // a commit still in flight or a delete, not a lag.
                         let mut entity = serde_json::to_value(&response.state).unwrap_or_default();
                         defaults.apply(&mut entity);
                         if let Some(obj) = entity.as_object_mut() {
+                            fill_event_metadata(obj);
                             obj.insert(
                                 "@odata.id".into(),
                                 serde_json::json!(format!("{entity_set_name}('{id}')")),

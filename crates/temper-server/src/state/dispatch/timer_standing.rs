@@ -279,7 +279,7 @@ impl ServerState {
         attrs: &std::collections::BTreeMap<String, serde_json::Value>,
     ) -> bool {
         let mut asking = agent.clone();
-        mark_timer_fire(&mut asking);
+        mark_timer_fire(&mut asking, None);
         asking.caller().is_some_and(|setter| {
             self.authorize_offer_with_context(
                 setter,

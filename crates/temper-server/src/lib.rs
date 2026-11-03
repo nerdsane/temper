@@ -25,6 +25,8 @@ pub mod eventual_invariants;
 mod growable_stack;
 #[cfg(feature = "observe")]
 pub mod host_room;
+#[cfg(feature = "observe")]
+pub mod host_turn;
 pub mod http_endpoint;
 pub mod idempotency;
 pub mod identity;

@@ -222,10 +222,7 @@ fn translate_comparison(
         _ => return None, // cross-field or complex expressions
     };
 
-    if matches!(
-        field_name.as_str(),
-        "first_event_at" | "last_event_at" | "last_event_via" | "last_event_by"
-    ) {
+    if temper_spec::automaton::is_event_metadata_field(field_name.as_str()) {
         return None;
     }
     let sql_op = match op {
@@ -318,10 +315,7 @@ fn lossless_eq_comparison(left: &FilterExpr, right: &FilterExpr) -> bool {
     let Some((field_name, value)) = property_literal_pair(left, right) else {
         return false;
     };
-    if matches!(
-        field_name,
-        "first_event_at" | "last_event_at" | "last_event_via" | "last_event_by"
-    ) {
+    if temper_spec::automaton::is_event_metadata_field(field_name) {
         return false;
     }
     if is_status_property(field_name) {
@@ -390,10 +384,7 @@ fn translate_function(name: &str, args: &[FilterExpr], ctx: &mut TranslateCtx) -
                 FilterExpr::Property(name) => name.clone(),
                 _ => return None,
             };
-            if matches!(
-                field_name.as_str(),
-                "first_event_at" | "last_event_at" | "last_event_via" | "last_event_by"
-            ) {
+            if temper_spec::automaton::is_event_metadata_field(field_name.as_str()) {
                 return None;
             }
             let search_value = match &args[1] {

@@ -25,6 +25,10 @@
 //! - an entity reaction is a dispatch of its own, sent after its source
 //!   commits with `args` copied from the source as committed, and taken by
 //!   its target later, in any order with other dispatches;
+//! - a reaction from a type outside the scope is a move from outside: it
+//!   comes whenever its target's guard may let it, with any parameters, as
+//!   a sender Cedar may answer either way for, in a chain that may already
+//!   hold any step that can come before it;
 //! - string variables are tracked as symbols (equality only) when an
 //!   invariant reads them, when a reference uses them as an id, or when
 //!   their value reaches one that is read
@@ -83,7 +87,7 @@ pub use model::DroppedReaction;
 pub(crate) use model::dropped_reactions;
 use model::{JointModel, Move, Sending};
 use state::render;
-pub use state::{Call, Dispatch, JointState, ReactionStep};
+pub use state::{Call, Committed, Dispatch, JointState, ReactionStep};
 
 /// What the joint check found for one invariant.
 #[derive(Debug, Clone)]
@@ -100,6 +104,8 @@ pub struct JointInvariantResult {
     pub states: usize,
     /// When the walk held a move back because it would have put more than
     /// this many dispatches in flight: what it found holds only up to that.
+    /// A commit whose reactions wait for their guards to be read counts as
+    /// one, however many wait.
     pub in_flight_bound: Option<usize>,
     /// Holds, broken (with a shortest path), or not fully checked.
     pub outcome: JointOutcome,
@@ -210,7 +216,7 @@ pub fn verify_joint_invariants(
     policies: Option<&SendAnalysis>,
     bound: Bound<'_>,
 ) -> Vec<JointInvariantResult> {
-    invariant_proofs(automatons, policies)
+    invariant_proofs(automatons, policies, bound.room)
         .iter()
         .flat_map(|proof| proof.check(bound))
         .collect()
@@ -319,7 +325,7 @@ pub fn replay_joint_invariants(
                 })
                 .or_else(|| {
                     moves.iter().find(|mv| match mv {
-                        Move::Take(e, action) | Move::Send(e, action) => {
+                        Move::Take(e, action, _) | Move::Send(e, action, _) => {
                             e == &wanted.entity
                                 && action.name == wanted.action
                                 && fits(&action.params)
@@ -346,7 +352,7 @@ pub fn replay_joint_invariants(
                     }
                 },
             };
-            if let Move::Take(_, action) | Move::Send(_, action) = &mv {
+            if let Move::Take(_, action, _) | Move::Send(_, action, _) = &mv {
                 for (param, name) in &wanted.params {
                     if let Some(ParamValue::Str(value)) = action.params.get(param)
                         && !name.is_empty()
@@ -405,3 +411,31 @@ mod vacuous_tests;
 
 #[cfg(test)]
 mod chain_test;
+
+#[cfg(test)]
+#[path = "literals_test.rs"]
+mod literals_tests;
+
+#[cfg(test)]
+#[path = "sure_test.rs"]
+mod sure_tests;
+
+#[cfg(test)]
+#[path = "outside_test.rs"]
+mod outside_tests;
+
+#[cfg(test)]
+#[path = "outside_count_test.rs"]
+mod outside_count_tests;
+
+#[cfg(test)]
+#[path = "widen_test.rs"]
+mod widen_tests;
+
+#[cfg(test)]
+#[path = "trigger_guard_test.rs"]
+mod trigger_guard_tests;
+
+#[cfg(test)]
+#[path = "trigger_order_test.rs"]
+mod trigger_order_tests;

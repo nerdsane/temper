@@ -10,6 +10,7 @@ use std::sync::Arc;
 use futures_util::FutureExt;
 use futures_util::future::BoxFuture;
 
+use crate::odata::read_defaults::ReadDefaults;
 use crate::request_context::AgentContext;
 use temper_runtime::tenant::TenantId;
 use tracing;
@@ -143,21 +144,28 @@ impl ReactionDispatcher {
         let mut repeat_stopped_count = 0usize;
         let mut success_count = 0usize;
         let mut results = Vec::new();
+        // Guards and args read the source record as every guard does: a
+        // variable it stores no value for reads as its declared initial value.
+        let reads_record = rules
+            .iter()
+            .any(|rule| rule.when.guard.is_some() || !rule.then.args.is_empty());
+        let read = reads_record
+            .then(|| ReadDefaults::for_entity(state, tenant, entity_type).fields_as_read(fields));
 
         for rule in rules {
             // Guard evaluation: skip rules whose guard evaluates to false.
             // Guard-skipped rules do not produce a `ReactionResult` — they
             // never fired.
-            if let Some(guard) = &rule.when.guard {
+            if let (Some(guard), Some(read)) = (&rule.when.guard, &read) {
                 let mut related = temper_jit::table::RelatedMap::new();
-                for (reference, ids) in super::guard::related_ids(guard, fields) {
+                for (reference, ids) in super::guard::related_ids(guard, read) {
                     let mut statuses = Vec::with_capacity(ids.len());
                     for id in &ids {
                         statuses.push(state.resolve_entity_status(tenant, &reference.0, id).await);
                     }
                     related.insert(reference, temper_jit::table::Related::Statuses(statuses));
                 }
-                if !super::guard::guard_holds(guard, fields, to_state, &related) {
+                if !super::guard::guard_holds(guard, read, to_state, &related) {
                     guard_skipped_count += 1;
                     tracing::debug!(
                         rule = rule.name,
@@ -227,8 +235,12 @@ impl ReactionDispatcher {
                 "Dispatching reaction"
             );
 
-            let effective_params =
-                super::params::build_effective_params(&rule.then, entity_id, fields, &rule.name);
+            let effective_params = super::params::build_effective_params(
+                &rule.then,
+                entity_id,
+                read.as_ref().unwrap_or(fields),
+                &rule.name,
+            );
 
             // ADR-0046: resolve the dispatch principal. If the rule declares
             // an explicit `principal`, build a synthetic service identity;

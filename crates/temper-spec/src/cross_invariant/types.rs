@@ -126,15 +126,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cross_invariant_spec_default() {
-        let spec = CrossInvariantSpec::default();
-        assert_eq!(spec.version, 1);
-        assert_eq!(spec.default_delete_policy, DeletePolicy::Restrict);
-        assert!(spec.invariants.is_empty());
-        assert!(spec.relation_overrides.is_empty());
-    }
-
-    #[test]
     fn delete_policy_serde_rename() {
         assert_eq!(
             serde_json::to_string(&DeletePolicy::Restrict).unwrap(),

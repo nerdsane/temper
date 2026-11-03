@@ -5,8 +5,8 @@
 //! steps, holding rules, deciding out of sight, packing several concerns) belongs to the spec's states, guards, timers
 //! and Cedar, where the checker can see it and the person can follow it.
 //!
-//! Advisory (Rita, 26 Oct 2026: warn, then migrate the apps, then enforce): a review never refuses an install, and a
-//! Jev that does not answer is said once in the install result, never retried in a loop.
+//! Advisory (Rita, 26 Oct 2026: warn, then migrate the apps, then enforce): a review never refuses or holds an install,
+//! and a Jev that does not answer is said once in what the review keeps, never retried in a loop.
 
 mod excerpt;
 mod items;
@@ -16,6 +16,7 @@ mod review;
 mod reviewer;
 mod source;
 mod types;
+mod under_way;
 
 pub use excerpt::{Excerpt, SPEC_BYTES, excerpt, said_left_out};
 pub use items::{FOUND_AT, ITEMS, Item, LARGE_LINES, QUESTION_VERSION};
@@ -26,6 +27,8 @@ pub use types::{
     Answer, Answers, Finding, Judge, JudgeUnavailable, ModuleReview, ModuleSource, Question,
     SpecSource,
 };
+pub use under_way::ReviewsUnderWay;
+pub(crate) use under_way::{ReviewSaveFailure, ReviewStatus};
 
 #[cfg(test)]
 mod tests;

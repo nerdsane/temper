@@ -58,8 +58,6 @@ pub enum EntityMsg {
     },
     /// Get the current entity state.
     GetState,
-    /// Get a specific field value.
-    GetField { field: String },
     /// Update entity fields (PATCH: merge, PUT: replace).
     UpdateFields {
         /// Kernel dispatch context; never populated from field values.
@@ -78,6 +76,15 @@ pub enum EntityMsg {
         /// The refused spawn.
         refusal: super::spawn_refusal::SpawnRefusal,
     },
+    /// Record that this entity's state timer stopped because nothing names
+    /// its caller, for the action no one could make.
+    RecordTimerNeedsPerson {
+        /// The refused action.
+        action: String,
+        /// The journal sequence the stop was decided at. A record that moved
+        /// past it is left as it is: the newer move decides its timer.
+        checked: u64,
+    },
     /// Delete this entity.
     Delete {
         /// Kernel dispatch context; never populated from field values.
@@ -86,6 +93,21 @@ pub enum EntityMsg {
         /// decision. Internal dispatches omit it.
         expected_authorization_precondition: Option<String>,
     },
+}
+
+impl EntityMsg {
+    /// The message as its record's logs name it: an action's name, or the kind
+    /// of message.
+    pub(crate) fn name(&self) -> &str {
+        match self {
+            EntityMsg::Action { name, .. } => name,
+            EntityMsg::GetState => "GetState",
+            EntityMsg::UpdateFields { .. } => "UpdateFields",
+            EntityMsg::RecordSpawnRefusal { .. } => "RecordSpawnRefusal",
+            EntityMsg::RecordTimerNeedsPerson { .. } => "RecordTimerNeedsPerson",
+            EntityMsg::Delete { .. } => "Delete",
+        }
+    }
 }
 
 impl Message for EntityMsg {}
@@ -381,10 +403,20 @@ pub struct EntityResponse {
     /// effects and reactions that follow belong to that recorded action.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answered_action: Option<String>,
+    /// The triggers of this committed action that failed, or whose answer
+    /// was refused, each as `trigger: error`. The action stands: they are
+    /// reported beside its success, and the record shows each failure.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trigger_failures: Vec<String>,
     /// Whether the store could not take the action's write: it failed, or its
     /// disk is under the floor. Answered 503, so the caller tries again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub store_unavailable: bool,
+    /// When the move was made, for a move that wrote no event: a machine made
+    /// it and it left its record as it was (`entity_actor::unrecorded`). None
+    /// for every other answer, whose move, if any, is its newest event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unrecorded_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl EntityResponse {
@@ -392,6 +424,21 @@ impl EntityResponse {
     /// recorded another ([`Self::answered_action`]).
     pub fn action<'a>(&'a self, requested: &'a str) -> &'a str {
         self.answered_action.as_deref().unwrap_or(requested)
+    }
+
+    /// The state this successful answer's move started from, and when it was
+    /// made: its event's, or, for a move that wrote none
+    /// ([`Self::unrecorded_at`]), the record's status, which the move left as
+    /// it was, and the move's own time. None when the record has no event.
+    pub(crate) fn move_start(&self) -> Option<(&str, chrono::DateTime<chrono::Utc>)> {
+        match self.unrecorded_at {
+            Some(at) => Some((self.state.status.as_str(), at)),
+            None => self
+                .state
+                .events
+                .back()
+                .map(|event| (event.from_status.as_str(), event.timestamp)),
+        }
     }
 
     /// The answer to an action refused before anything was written.
@@ -439,10 +486,15 @@ impl EntityResponse {
             spec_governed: true,
             refused: false,
             answered_action: None,
+            trigger_failures: Vec::new(),
             store_unavailable: false,
+            unrecorded_at: None,
         }
     }
 }
+
+#[path = "module_record.rs"]
+mod module_record;
 
 #[cfg(test)]
 #[path = "types_test.rs"]

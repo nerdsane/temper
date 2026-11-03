@@ -1,5 +1,5 @@
 use axum::http::StatusCode;
-use temper_spec::automaton::{LintSeverity, lint_automata_bundle, lint_automaton};
+use temper_spec::automaton::{LintSeverity, lint_automata_bundle, lint_automaton_for_type};
 use temper_spec::cross_invariant::{CrossInvariantLintFinding, CrossInvariantLintSeverity};
 
 pub(super) use temper_spec::naming::to_pascal_case;
@@ -42,7 +42,7 @@ pub(super) fn lint_loaded_specs(
             )
         })?;
 
-        for finding in lint_automaton(&automaton) {
+        for finding in lint_automaton_for_type(&automaton, entity_name) {
             findings.push(EntityLintFinding {
                 entity: entity_name.clone(),
                 code: finding.code,
@@ -160,3 +160,7 @@ pub(super) fn build_ndjson_response(
             )
         })
 }
+
+#[cfg(test)]
+#[path = "specs_helpers_test.rs"]
+mod tests;

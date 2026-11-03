@@ -469,6 +469,13 @@ impl SpecDrivenActor {
                     }
                 }
             }
+            Effect::ListRemove { var, value } => {
+                if let Some(element) = effect_args::string(value, params) {
+                    declared
+                        .list_mut(&mut state.lists, var)
+                        .retain(|item| *item != element);
+                }
+            }
             _ => {
                 tracing::debug!(actor = %self.name, "unhandled effect: {:?}", effect);
             }

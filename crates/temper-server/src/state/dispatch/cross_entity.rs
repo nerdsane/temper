@@ -144,7 +144,7 @@ impl crate::state::ServerState {
 
             let parent_params = action_params.clone();
             let mut agent = agent_ctx.clone();
-            agent.event_origin = Some(crate::entity_actor::EventOrigin::internal());
+            agent.event_origin = Some(crate::entity_actor::EventOrigin::reaction_as(agent_ctx));
             let workflow_root_entity_type = agent
                 .workflow_root_entity_type
                 .clone()

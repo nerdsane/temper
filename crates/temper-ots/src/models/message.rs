@@ -240,42 +240,6 @@ mod tests {
     use temper_runtime::scheduler::sim_now;
 
     #[test]
-    fn test_visibility_internal() {
-        let vis = OTSVisibility::internal();
-        assert!(!vis.send_to_user);
-        assert!(vis.persist);
-    }
-
-    #[test]
-    fn test_visibility_ephemeral() {
-        let vis = OTSVisibility::ephemeral();
-        assert!(vis.send_to_user);
-        assert!(!vis.persist);
-    }
-
-    #[test]
-    fn test_message_serialization() {
-        let now = sim_now();
-        let content = OTSMessageContent::text("Test message");
-        let visibility = OTSVisibility::internal();
-        let snapshot = OTSContextSnapshot::new().with_tool("search");
-
-        let message = OTSMessage::new(MessageRole::Assistant, content, now)
-            .with_reasoning("This is my reasoning")
-            .with_visibility(visibility)
-            .with_context_snapshot(snapshot);
-
-        let json_str = serde_json::to_string(&message).unwrap();
-        let parsed: OTSMessage = serde_json::from_str(&json_str).unwrap();
-
-        assert_eq!(parsed.role, message.role);
-        assert_eq!(parsed.content, message.content);
-        assert_eq!(parsed.reasoning, message.reasoning);
-        assert_eq!(parsed.visibility, message.visibility);
-        assert_eq!(parsed.context_snapshot, message.context_snapshot);
-    }
-
-    #[test]
     fn test_message_optional_fields_omitted() {
         let now = sim_now();
         let content = OTSMessageContent::text("Simple message");

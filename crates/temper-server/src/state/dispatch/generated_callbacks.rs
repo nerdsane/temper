@@ -118,7 +118,9 @@ impl ServerState {
         self.record_answer_refusal(entity, action, error, &Value::Null);
     }
 
-    /// A refused answer, journaled and logged with the values it carried.
+    /// A refused answer. The entity's observe stream gets the values it
+    /// carried; the log gets only their names, since an answer's values can
+    /// be anything an integration returned.
     pub(super) fn record_answer_refusal(
         &self,
         entity: WasmEntityRef<'_>,
@@ -141,8 +143,12 @@ impl ServerState {
                 "action":action, "error":error, "params":params,
             }),
         );
+        let param_names: Vec<&str> = params
+            .as_object()
+            .map(|fields| fields.keys().map(String::as_str).collect())
+            .unwrap_or_default();
         tracing::warn!(tenant=%entity.tenant, entity_type=entity.entity_type,
-            entity_id=entity.entity_id, action, error, %params, "integration callback rejected");
+            entity_id=entity.entity_id, action, error, ?param_names, "integration callback rejected");
     }
 
     /// Send an answer of a `source` integration ("WASM" or "adapter"): `sent`
@@ -251,12 +257,16 @@ impl ServerState {
     }
 }
 
-/// Send an owed answer again, journaling it if it fails otherwise this time.
+/// Send an owed answer again, journaling it if it fails otherwise this time:
+/// its call has then ended, and its deadline row goes.
 fn answer_again(state: ServerState, sent: std::sync::Arc<OwedMove>) -> OwedTry {
     Box::pin(async move {
         let attempt = Attempt::of(&sent.send(&state).await);
         if let Attempt::Failed(error) = &attempt {
             state.record_answer_refusal(sent.entity_ref(), &sent.action, error, &sent.params);
+            if let Some(call) = &sent.agent_ctx.ends_call {
+                state.end_call_row(call).await;
+            }
         }
         attempt
     })

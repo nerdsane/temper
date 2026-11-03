@@ -121,7 +121,7 @@ impl VerificationCascade {
                 .iter()
                 .filter_map(|live| match &live.kind {
                     LivenessKind::NoDeadlock { from } => Some(from.clone()),
-                    LivenessKind::ReachesState { .. } => None,
+                    LivenessKind::ReachesState { .. } | LivenessKind::CanReach { .. } => None,
                 })
                 .flatten()
                 .collect(),

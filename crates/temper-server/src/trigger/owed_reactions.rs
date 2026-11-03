@@ -106,6 +106,11 @@ async fn try_reaction(state: &ServerState, reaction: &Reaction) -> ReactionTry {
             None,
         )
         .await;
+    if let Ok(response) = &reply
+        && response.refused
+    {
+        reaction.record_refused(state, response);
+    }
     ReactionTry::Sent(Box::new(reply))
 }
 

@@ -10,6 +10,7 @@
 //! clock moves only when no task can run, so how fast the machine is decides
 //! nothing.
 
+use std::cell::RefCell;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,13 +26,17 @@ use temper_runtime::scheduler::{
 use temper_runtime::{ActorSystem, tenant::TenantId};
 use temper_server::registry::SpecRegistry;
 use temper_server::request_context::AgentContext;
+use temper_server::state::BootTimers;
+use temper_server::storage::BoxedEventStore;
 use temper_server::{ServerState, StorageStack};
 use temper_store_postgres::{PostgresEventStore, PostgresSchema};
 use temper_store_turso::TursoEventStore;
 use tokio::sync::Notify;
 
 use super::process_clock::ProcessClock;
-use super::{CSDL, PERMIT_ALL, PROBE_IOA, TICKER_IOA};
+use super::{
+    COUNTING_POLLER_IOA, CSDL, PERMIT_ALL, POLLER_IOA, PROBE_IOA, RELAY_IOA, TALLY_IOA, TICKER_IOA,
+};
 
 /// Simulation time for work already under way to end, such as a boot's
 /// background walk or a timer that fell due. That work waits on no timer of
@@ -161,6 +166,10 @@ pub(crate) fn millis_between(rng: &mut DeterministicRng, from: u64, to: u64) -> 
 pub(crate) struct Server {
     runtime: tokio::runtime::Runtime,
     state: ServerState,
+    /// The journal the server writes, read back by [`Self::journal`].
+    journal: BoxedEventStore,
+    /// The boot's walk of every timed type, until [`Self::boot_counts`] waits for it.
+    boot: RefCell<Option<tokio::task::JoinHandle<BootTimers>>>,
 }
 
 impl Server {
@@ -172,39 +181,67 @@ impl Server {
             .start_paused(true)
             .build()
             .unwrap();
-        let state = runtime.block_on(async {
+        let (state, journal, boot) = runtime.block_on(async {
             world.clock.begin();
             let mut registry = SpecRegistry::new();
             registry.register_tenant(
                 "default",
                 temper_spec::csdl::parse_csdl(CSDL).unwrap(),
                 CSDL.to_string(),
-                &[("Probe", PROBE_IOA), ("Ticker", TICKER_IOA)],
+                &[
+                    ("Probe", PROBE_IOA),
+                    ("Ticker", TICKER_IOA),
+                    ("Poller", POLLER_IOA),
+                    ("CountingPoller", COUNTING_POLLER_IOA),
+                    ("Relay", RELAY_IOA),
+                    ("Tally", TALLY_IOA),
+                ],
             );
             let mut state = ServerState::from_registry(ActorSystem::new(name), registry);
-            state.set_storage_stack(world.backend.open().await);
+            let storage = world.backend.open().await;
+            let journal = storage.events.clone();
+            state.set_storage_stack(storage);
             state
                 .authz
                 .reload_tenant_policies("default", PERMIT_ALL)
                 .unwrap();
-            state.start_runtime().await;
-            state
+            state.rebuild_reaction_dispatcher();
+            let boot = state.start_runtime().await;
+            (state, journal, boot)
         });
-        Self { runtime, state }
+        Self {
+            runtime,
+            state,
+            journal,
+            boot: RefCell::new(boot),
+        }
     }
 
     /// Kill the server the way a process exit would, every task stopping,
     /// and keep it down until `until` on the simulation clock.
     pub(crate) fn kill(self, world: &World, until: DateTime<Utc>) {
-        let Self { runtime, state } = self;
+        let Self {
+            runtime,
+            state,
+            journal,
+            ..
+        } = self;
         runtime.block_on(async {
             let down = (until - sim_now())
                 .to_std()
                 .expect("the server comes back later, not earlier");
             world.clock.end(down);
         });
+        drop(journal);
         drop(state);
         drop(runtime);
+    }
+
+    /// What the boot did with each tenant's and type's timers, once its walk
+    /// of every timed type has ended.
+    pub(crate) fn boot_counts(&self) -> BootTimers {
+        let walk = self.boot.borrow_mut().take().expect("the boot walk, once");
+        self.runtime.block_on(walk).expect("the boot walk ends")
     }
 
     /// Now, on the simulation clock.
@@ -227,6 +264,29 @@ impl Server {
         // The sleep is made inside the runtime, so it reads the paused clock.
         self.runtime
             .block_on(async move { tokio::time::sleep(by).await });
+    }
+
+    /// Create the record, if it does not exist yet.
+    pub(crate) fn create(&self, entity_type: &str, id: &str) {
+        self.runtime.block_on(async {
+            self.state
+                .get_or_create_tenant_entity(&TenantId::default(), entity_type, id, json!({}))
+                .await
+                .unwrap();
+        });
+    }
+
+    /// The actions the record's journal holds, oldest first.
+    pub(crate) fn journal(&self, entity_type: &str, id: &str) -> Vec<String> {
+        self.runtime.block_on(async {
+            self.journal
+                .read_events(&format!("default:{entity_type}:{id}"), 0)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|event| event.event_type)
+                .collect()
+        })
     }
 
     /// Send `action` to the record as `who`, creating the record first.
@@ -289,6 +349,24 @@ impl Server {
     /// Remove every timer row, as for timers armed before rows were kept.
     pub(crate) fn forget_rows(&self) {
         for row in self.rows() {
+            self.runtime.block_on(async {
+                let store = self
+                    .state
+                    .metadata_store_for_tenant("default")
+                    .await
+                    .unwrap();
+                store
+                    .delete_state_timer("default", &row.entity_type, &row.entity_id, &row.arm_id)
+                    .await
+                    .unwrap();
+            });
+        }
+    }
+
+    /// Remove `id`'s timer rows, as for a record whose process stopped
+    /// between its event and its row.
+    pub(crate) fn forget_row(&self, id: &str) {
+        for row in self.rows().into_iter().filter(|row| row.entity_id == id) {
             self.runtime.block_on(async {
                 let store = self
                     .state

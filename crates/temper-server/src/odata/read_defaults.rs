@@ -1,6 +1,7 @@
 //! Read the current declarations without changing a record's committed state.
 
 use serde_json::Value;
+use temper_jit::table::TransitionTable;
 use temper_runtime::tenant::TenantId;
 
 use crate::state::ServerState;
@@ -17,10 +18,26 @@ impl ReadDefaults {
             .expect("registry lock should not be poisoned")
             .get_table(tenant, entity_type)
             .or_else(|| state.transition_tables.get(entity_type).cloned());
-        Self(table.map_or_else(
-            || serde_json::json!({}),
-            |table| serde_json::json!(table.initial_values),
-        ))
+        table.map_or_else(
+            || Self(serde_json::json!({})),
+            |table| Self::from_table(&table),
+        )
+    }
+
+    /// The declarations of `table`.
+    pub(crate) fn from_table(table: &TransitionTable) -> Self {
+        Self(serde_json::json!(table.initial_values))
+    }
+
+    /// A record's `fields` as guards and rules read them: each declared
+    /// variable it holds no value for reads as its declared initial value.
+    /// A stored value, null included, is kept. `fields` is the record's
+    /// field map after a move, which mirrors its counters, booleans and
+    /// lists.
+    pub(crate) fn fields_as_read(&self, fields: &Value) -> Value {
+        let mut read = fields.clone();
+        fill_missing(&mut read, &self.field_values(&Value::Null));
+        read
     }
 
     pub(crate) fn apply(&self, body: &mut Value) {

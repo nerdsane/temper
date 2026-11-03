@@ -62,9 +62,9 @@ fn run_seed(seed: u64, committed: bool) {
     if committed {
         // Switch the empty server to read the same rows its journal commits.
         process.runtime.block_on(async {
-            process.state.set_storage_stack(
-                StorageStack::from_sim(world.events.clone(), None).with_entity_rows_in_journal(),
-            );
+            process
+                .state
+                .set_storage_stack(StorageStack::from_sim(world.events.clone(), None));
             process.state.state_timer_rows = Some(Arc::new(CommittedRows(world.events.clone())));
         });
     }

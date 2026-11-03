@@ -25,6 +25,12 @@ pub(super) fn record(root: &Path, tenant: &str, app: &str, version: &str) -> Ins
     }
 }
 
+/// Register every app `root`'s list names for `tenant`, as an install does.
+fn register_listed(tenant: &str, root: &Path) {
+    let apps = written::read(root).expect("the list");
+    register_written_apps(tenant, root.to_path_buf(), apps);
+}
+
 #[tokio::test]
 async fn rollback_recovers_a_dependency_from_another_installed_closure() {
     let data_dir = tempfile::tempdir().expect("data dir");
@@ -54,7 +60,7 @@ async fn rollback_recovers_a_dependency_from_another_installed_closure() {
             .await
             .expect("record install");
     }
-    register_install_cache(&tenant, broken_cache, DirApps::Every);
+    register_listed(&tenant, &broken_cache);
     assert!(!cache(&platform, &tenant, "tags", &v2).exists());
     crate::genesis_install::rollback_to_prior(
         &platform,
@@ -101,7 +107,7 @@ async fn rollback_fails_when_the_recorded_dependency_cannot_be_recovered() {
     ps.record_installed_app_metadata(&record(&broken, &tenant, "tags", &v3))
         .await
         .expect("record failed dependency");
-    register_install_cache(&tenant, broken, DirApps::Every);
+    register_listed(&tenant, &broken);
     // The only matching cache belongs to another tenant and must not be used.
     let foreign = cache(&platform, "another-tenant", "other", &v2);
     write_app(&foreign, "other", "other v2");
@@ -234,6 +240,8 @@ startup_loading = "lazy"
     .expect("manifest");
     std::fs::create_dir_all(root.join("tags/wasm/broken")).expect("wasm dir");
     std::fs::write(root.join("tags/wasm/broken/broken.wasm"), b"not wasm").expect("broken wasm");
+    let tags_files = ["app.toml", "APP.md", "wasm/broken/broken.wasm"];
+    written::keep_app(&root, "tags", &tags_files);
     let notes = record(&root, &tenant, "notes", &v1);
     let tags = record(&root, &tenant, "tags", &v1);
     let labels = record(&root, &tenant, "labels", &v1);
@@ -329,7 +337,7 @@ async fn partial_rollback_preserves_each_dependency_for_retry_and_boot_recovery(
                 .await
                 .expect("partial upgrade");
         }
-        register_install_cache(&tenant, broken, DirApps::Every);
+        register_listed(&tenant, &broken);
         let error = crate::genesis_install::rollback_to_prior(
             &platform,
             ps.as_ref(),
@@ -392,9 +400,13 @@ async fn partial_rollback_preserves_each_dependency_for_retry_and_boot_recovery(
             &["missing", "cached", "bundled"],
         );
         let rebooted = server_on(data_dir.path(), &ps);
+        let recovery = start_genesis_registry_cache_recovery(&rebooted).await;
         assert_eq!(
-            restore_genesis_registry_cache_roots(&rebooted).await,
-            2,
+            (
+                recovery.restored,
+                recovery.fetching.finished().await.fetched
+            ),
+            (1, 1),
             "seed {seed}: boot restores the cached dependency and fetches the missing one"
         );
         crate::genesis_install::rollback_to_prior(

@@ -1,4 +1,6 @@
-//! Work accounting inside state expansion.
+//! Work and memory accounting inside state expansion.
+
+use super::heap::{Heap, block};
 
 /// Shared work budget for expansion, including intermediate products. A walk
 /// must report incomplete if this budget stops even when its queue is empty.
@@ -7,6 +9,12 @@ pub(crate) struct Expansion {
     remaining: std::cell::Cell<usize>,
     until: std::cell::Cell<Option<std::time::Instant>>,
     pub(crate) exhausted: std::cell::Cell<bool>,
+    /// Bytes what this expansion builds may still take: a joint walk gives
+    /// each expansion room taken from its own, so what one state's moves
+    /// build counts against the walk's memory.
+    room: std::cell::Cell<usize>,
+    /// The expansion needed more than `room` and stopped short.
+    short: std::cell::Cell<bool>,
 }
 /// Only the name: the allowance is a walk's own accounting, not part of the
 /// model, so a model's digest (`JointProof::digest`) leaves it out.
@@ -22,6 +30,8 @@ impl Default for Expansion {
             remaining: std::cell::Cell::new(usize::MAX),
             until: std::cell::Cell::new(None),
             exhausted: std::cell::Cell::new(false),
+            room: std::cell::Cell::new(usize::MAX),
+            short: std::cell::Cell::new(false),
         }
     }
 }
@@ -38,12 +48,96 @@ impl Expansion {
         self.until
             .set(time.and_then(|t| std::time::Instant::now().checked_add(t)));
         self.exhausted.set(false);
+        self.allow(usize::MAX);
     }
+
+    /// Let what the expansion builds from now on take `bytes`.
+    pub(crate) fn allow(&self, bytes: usize) {
+        self.room.set(bytes);
+        self.short.set(false);
+    }
+
+    /// Count `bytes` more of what the expansion builds, or stop it short.
+    pub(crate) fn hold(&self, bytes: usize) -> bool {
+        match self.room.get().checked_sub(bytes) {
+            Some(left) if !self.short.get() => {
+                self.room.set(left);
+                true
+            }
+            _ => {
+                self.short.set(true);
+                false
+            }
+        }
+    }
+
+    /// Reserve a vector slot before allocating its replacement block. Both
+    /// blocks count until reserve completes; the old block is then released.
+    pub(crate) fn reserve<T>(&self, out: &mut Vec<T>) -> bool {
+        if out.len() < out.capacity() {
+            return !self.short();
+        }
+        let capacity = out.capacity().saturating_mul(2).max(1);
+        let Some(size) = capacity.checked_mul(size_of::<T>()) else {
+            self.short.set(true);
+            return false;
+        };
+        if !self.hold(block(size)) {
+            return false;
+        }
+        let old = out.capacity() * size_of::<T>();
+        out.reserve_exact(capacity - out.len());
+        if old != 0 {
+            self.give(block(old));
+        }
+        true
+    }
+
+    /// Charge a cloned map and its added entry before cloning either.
+    pub(crate) fn with_entry<K: Ord + Clone + Heap, V: Clone + Heap>(
+        &self,
+        map: &std::collections::BTreeMap<K, V>,
+        key: &K,
+        value: &V,
+    ) -> Option<std::collections::BTreeMap<K, V>> {
+        use super::heap::tree_bytes;
+        let nodes = tree_bytes::<K, V>(map.len() + 1);
+        let entries = map.iter().map(|(k, v)| k.heap() + v.heap()).sum::<usize>();
+        if !self.hold(nodes + entries + key.heap() + value.heap()) {
+            return None;
+        }
+        let mut next = map.clone();
+        next.insert(key.clone(), value.clone());
+        Some(next)
+    }
+
+    /// Keep one value, including spare container capacity and growth overlap.
+    pub(crate) fn push<T: Heap>(&self, out: &mut Vec<T>, value: T) -> bool {
+        if !self.hold(value.heap()) || !self.reserve(out) {
+            return false;
+        }
+        out.push(value);
+        true
+    }
+
+    /// Count `bytes` fewer: what it built and dropped.
+    pub(crate) fn give(&self, bytes: usize) {
+        self.room.set(self.room.get().saturating_add(bytes));
+    }
+
+    /// Whether the expansion stopped short of the room it was allowed.
+    pub(crate) fn short(&self) -> bool {
+        self.short.get()
+    }
+
     pub(crate) fn take(&self) -> bool {
         use std::sync::atomic::Ordering;
+        if self.short.get() {
+            return false;
+        }
         if let Some(limit) = &self.limit
             && !limit.lifted.load(Ordering::Relaxed)
-            && (std::time::Instant::now() >= limit.until
+            && (limit.past_time()
                 || limit
                     .work
                     .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))

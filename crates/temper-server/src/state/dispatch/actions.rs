@@ -453,7 +453,15 @@ impl crate::state::ServerState {
         mut expected_authorization_precondition: Option<String>,
     ) -> Result<EntityResponse, DispatchError> {
         let params =
-            self.resolve_authenticated_params(tenant, entity_type, action, params, agent_ctx)?;
+            match self.resolve_authenticated_params(tenant, entity_type, action, params, agent_ctx)
+            {
+                Ok(params) => params,
+                Err(error) => {
+                    self.stop_timer_no_one_can_run(tenant, action, agent_ctx, &error)
+                        .await;
+                    return Err(error);
+                }
+            };
 
         // The dispatch runs in the span it was called in: the request's, or the
         // root span of the runtime work that started it. Ids carried in the agent
@@ -686,8 +694,15 @@ impl crate::state::ServerState {
         let cross_for_retry = related;
         let authorization_precondition_for_retry = expected_authorization_precondition;
         // The actor keeps the caller's identity on any scheduled action the
-        // transition arms, so the action fires as them after a restart too.
-        let actor_caller = Arc::new(agent_ctx.clone());
+        // transition arms, so the action fires as them after a restart too,
+        // and writes the deadline of each background call it starts.
+        let mut actor_caller = agent_ctx.clone();
+        actor_caller.background_calls = if await_integration {
+            Vec::new()
+        } else {
+            self.background_calls(tenant, entity_type)
+        };
+        let actor_caller = Arc::new(actor_caller);
         let idempotency_key = agent_ctx.idempotency_key.clone();
         // W2 phase: ask_reply — round-trip through the retry layer to the
         // actor and back. Aggregates with other phase spans by prefix.

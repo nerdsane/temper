@@ -396,6 +396,18 @@ pub(super) async fn load_specs_from_directory(
         .iter()
         .map(|(entity_type, source)| (entity_type.as_str(), source.as_str()))
         .collect();
+    // Refuse shared principal attributes before writing specs or constraints.
+    state
+        .registry
+        .read()
+        .expect("registry lock poisoned")
+        .check_principal_attributes(&tenant_id, &sources, body.merge)
+        .map_err(|error| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Failed to register specs: {error}"),
+            )
+        })?;
     let changes = state
         .spec_changes(&tenant_id, &sources)
         .map_err(|error| (StatusCode::BAD_REQUEST, error))?;

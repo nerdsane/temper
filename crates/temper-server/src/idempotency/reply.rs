@@ -63,7 +63,9 @@ pub(super) fn replay_copy(response: &EntityResponse) -> EntityResponse {
         spec_governed: response.spec_governed,
         refused: response.refused,
         answered_action: None,
+        trigger_failures: response.trigger_failures.clone(),
         store_unavailable: response.store_unavailable,
+        unrecorded_at: response.unrecorded_at,
     }
 }
 
@@ -88,6 +90,8 @@ pub(super) fn estimated_entry_bytes(
                 + event.origin.by.as_ref().map_or(0, String::len)
                 + event.origin.acting_for.as_ref().map_or(0, String::len)
                 + event.origin.agent_type.as_ref().map_or(0, String::len)
+                + event.origin.role.as_ref().map_or(0, String::len)
+                + event.origin.label.as_ref().map_or(0, String::len)
         })
         .sum();
     let spawns: usize = response
@@ -123,11 +127,15 @@ pub(super) fn estimated_entry_bytes(
         + state.entity_type.len()
         + state.entity_id.len()
         + state.status.len()
-        + state
-            .last_event
-            .last_event_by
-            .as_ref()
-            .map_or(0, String::len)
+        + [
+            &state.last_event.last_event_by,
+            &state.last_event.last_event_for,
+            &state.last_event.last_event_agent_type,
+            &state.last_event.last_event_label,
+        ]
+        .into_iter()
+        .map(|value| value.as_ref().map_or(0, String::len))
+        .sum::<usize>()
         + response.error.as_ref().map_or(0, String::len)
         + json_bytes(&state.fields)
         + state
