@@ -433,3 +433,7 @@ mod widen_tests;
 #[cfg(test)]
 #[path = "trigger_guard_test.rs"]
 mod trigger_guard_tests;
+
+#[cfg(test)]
+#[path = "trigger_order_test.rs"]
+mod trigger_order_tests;
