@@ -211,7 +211,7 @@ pub(super) async fn try_reconciled_equality_read(
                 .is_some_and(|seq| seq >= latest)
         }) {
             counters.materialized_count += 1;
-            if entity_read_allowed(request, &entity) {
+            if entity_read_allowed(request, &authz, &entity) {
                 entities.push(entity);
             }
             continue;
@@ -238,7 +238,7 @@ pub(super) async fn try_reconciled_equality_read(
         let mut entity = serde_json::to_value(&response.state).expect("entity state serializes");
         defaults.apply(&mut entity);
         entity["@odata.id"] = serde_json::json!(format!("{}('{}')", request.entity_set_name, id));
-        if entity_read_allowed(request, &entity) {
+        if entity_read_allowed(request, &authz, &entity) {
             entities.push(entity);
         }
     }

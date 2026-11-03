@@ -210,9 +210,11 @@ async fn try_bounded_unfiltered_page(
         RowAuthz::AllowAll => all_entity_ids.iter().collect(),
         RowAuthz::PerRow {
             attribute_keys: Some(keys),
-        } => sparse_allowed_ids(request, all_entity_ids, keys).await?,
+            ..
+        } => sparse_allowed_ids(request, all_entity_ids, keys, authz).await?,
         RowAuthz::PerRow {
             attribute_keys: None,
+            ..
         } => return None,
     };
 
@@ -257,6 +259,7 @@ async fn sparse_allowed_ids<'a>(
     request: &QueryPlaneReadRequest<'_>,
     all_entity_ids: &'a [String],
     attribute_keys: &BTreeSet<String>,
+    authz: &RowAuthz,
 ) -> Option<Vec<&'a String>> {
     let query_plane = request.state.query_plane_store()?;
     let mut fields = attribute_keys
@@ -307,7 +310,7 @@ async fn sparse_allowed_ids<'a>(
             );
             let values = defaults.field_values(row.state.as_ref().unwrap_or(&row.fields));
             defaults.apply_selected(&mut body, &fields, &values);
-            if super::entity_read_allowed(request, &body) {
+            if super::entity_read_allowed(request, authz, &body) {
                 allowed.push(entity_id);
             }
         }
