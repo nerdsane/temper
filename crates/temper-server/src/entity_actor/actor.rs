@@ -1804,6 +1804,7 @@ impl EntityActor {
                     let scheduled = self
                         .arm_scheduled_actions(
                             &mut result.scheduled_actions,
+                            &result.custom_effects,
                             state,
                             &event,
                             caller.as_deref(),
@@ -2091,6 +2092,7 @@ impl EntityActor {
                                     let retry_scheduled = self
                                         .arm_scheduled_actions(
                                             &mut retry_result.scheduled_actions,
+                                            &retry_result.custom_effects,
                                             state,
                                             &retry_event,
                                             caller.as_deref(),

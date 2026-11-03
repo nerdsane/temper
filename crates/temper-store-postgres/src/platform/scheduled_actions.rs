@@ -10,6 +10,29 @@ use crate::PostgresEventStore;
 type ScheduledActionColumns = (String, String, String, String, String, String);
 
 impl PostgresEventStore {
+    /// Durably cancel one scheduled action before garbage-collecting its row.
+    pub(crate) async fn cancel_scheduled_action_row(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        arm_id: &str,
+    ) -> Result<(), PersistenceError> {
+        crate::dbm::postgres_query!(
+            &self.schema,
+            "UPDATE {schema}scheduled_actions SET action = '' \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 AND arm_id = $4",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .bind(arm_id)
+        .execute(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
     /// Remove one scheduled action's row.
     pub(crate) async fn remove_scheduled_action(
         &self,

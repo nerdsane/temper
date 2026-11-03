@@ -14,6 +14,7 @@ mod adapter;
 mod answers;
 mod authenticated_params;
 pub(crate) use authenticated_params::bind_authenticated_params;
+mod call_deadlines;
 mod compensation;
 mod composite;
 mod cross_entity;

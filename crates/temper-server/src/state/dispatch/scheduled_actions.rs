@@ -32,14 +32,19 @@
 //! It is not a refusal anyone acts on, so it writes no trajectory entry; it
 //! is counted, logged at debug and its row removed. A guard that does not
 //! hold is still a refusal, recorded as one.
+//!
+//! A background module call's deadline is a row of the same kind
+//! (`request_context::calls`), armed only at boot: it answers the lost call
+//! with its `on_failure`, and lapses like any fire on a record moved on.
 
 mod recovery;
+
+use recovery::scheduled_timer;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use temper_runtime::persistence::ScheduledActionRecord;
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 use tokio::sync::Semaphore;
@@ -51,7 +56,6 @@ use super::state_timer_follow::BootTimers;
 use super::timer_standing::{Standing, TimerFire};
 use super::{DispatchError, DispatchExtOptions};
 use crate::entity_actor::EntityResponse;
-use crate::request_context::armed_by::decode_armed_by;
 use crate::request_context::{AgentContext, ScheduledFire};
 use crate::state::ServerState;
 use crate::wake::{Armed, TimerRef};
@@ -191,6 +195,9 @@ impl ServerState {
             .await
             .map_err(|error| error.to_string())?;
         for row in rows {
+            if self.skip_call_recovery(tenant, &row) {
+                continue;
+            }
             let timer = match scheduled_timer(tenant, &row) {
                 Ok(armed) => armed,
                 Err(reason) => {
@@ -349,13 +356,19 @@ impl ServerState {
                             await_integration: false,
                             await_reactions: true,
                         };
+                        let params = self.scheduled_fire_params(
+                            &timer.tenant,
+                            &timer.entity_type,
+                            &timer.action,
+                            &timer.arm_id,
+                        );
                         let outcome = self
                             .dispatch_tenant_action_ext_typed(
                                 &timer.tenant,
                                 &timer.entity_type,
                                 &timer.entity_id,
                                 &timer.action,
-                                serde_json::json!({}),
+                                params,
                                 options,
                             )
                             .await;
@@ -431,7 +444,7 @@ impl ServerState {
 
     /// Remove a refused scheduled action's row, or one that can never fire or
     /// never land. A row left behind fires again at the next boot.
-    async fn forget_scheduled_action(
+    pub(super) async fn forget_scheduled_action(
         &self,
         tenant: &TenantId,
         entity_type: &str,
@@ -466,25 +479,4 @@ pub(crate) fn scheduled_fire_lapsed(
             response.refusal,
             Some(temper_jit::table::Refusal::InvalidState { .. })
         )
-}
-
-/// The timer a row arms.
-fn scheduled_timer(
-    tenant: &TenantId,
-    row: &ScheduledActionRecord,
-) -> Result<ScheduledTimer, String> {
-    let due_at = DateTime::parse_from_rfc3339(&row.due_at)
-        .map_err(|error| format!("due_at: {error}"))?
-        .with_timezone(&Utc);
-    let agent_ctx = decode_armed_by(&row.armed_by).map_err(|error| format!("armed_by: {error}"))?;
-    let timer = ScheduledTimer {
-        tenant: tenant.clone(),
-        entity_type: row.entity_type.clone(),
-        entity_id: row.entity_id.clone(),
-        arm_id: row.arm_id.clone(),
-        action: row.action.clone(),
-        due_at,
-        agent_ctx,
-    };
-    Ok(timer)
 }

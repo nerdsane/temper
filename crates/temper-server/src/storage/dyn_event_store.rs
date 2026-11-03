@@ -92,6 +92,14 @@ pub trait DynEventStore: Send + Sync {
         Result<Vec<temper_runtime::persistence::ScheduledActionRecord>, PersistenceError>,
     >;
 
+    fn cancel_scheduled_action<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+        entity_id: &'a str,
+        arm_id: &'a str,
+    ) -> EventStoreFuture<'a, Result<(), PersistenceError>>;
+
     fn delete_scheduled_action<'a>(
         &'a self,
         tenant: &'a str,

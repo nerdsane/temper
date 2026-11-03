@@ -368,33 +368,6 @@ fn a_late_bring_for_an_older_commit_leaves_the_place_behind() {
 }
 
 #[test]
-fn a_lost_call_after_a_one_shot_timer_leaves_the_record_stuck() {
-    // A reported failure retries the module; a lost call has no callback.
-    let place = counting_place(true).replace(
-        "on_success = \"Placed\"",
-        "on_success = \"Placed\"\non_failure = \"Again\"",
-    );
-    let result = check_specs(COUNTING_APP, &place, SAME_RECORD);
-    let LivenessOutcome::Stuck { cases, .. } = &result.outcome else {
-        panic!("a lost call after the timer must stay stuck: {result}");
-    };
-    assert!(
-        cases.iter().any(|case| {
-            let actions: Vec<&str> = case
-                .path
-                .iter()
-                .filter_map(|step| step.action.as_deref())
-                .collect();
-            actions
-                .iter()
-                .position(|a| a.contains("(timer)"))
-                .is_some_and(|timer| actions[timer + 1..].iter().any(|a| a.contains("is lost")))
-        }),
-        "{result}"
-    );
-}
-
-#[test]
 fn a_second_comparison_on_the_same_sequence_parameter_is_not_certain_progress() {
     let app = COUNTING_APP.replace("from = [\"Unmade\", \"Live\"]", "from = [\"Unmade\"]");
     let place = counting_place(true)
@@ -489,3 +462,4 @@ fn oversized_parameter_expansion_is_incomplete() {
 }
 
 mod cause;
+mod lost_call;

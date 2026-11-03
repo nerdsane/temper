@@ -28,7 +28,9 @@
 //! treated the same: the write may yet land, or was never handled.
 //!
 //! Kept writes live only in this process, so a restart loses them, except a
-//! state timer's fire, whose row arms it again at boot. The gauge
+//! state timer's fire, whose row arms it again at boot, and the answer of a
+//! background module call that names an `on_failure`, whose deadline row
+//! answers the call with it after the restart (`request_context::calls`). The gauge
 //! `temper_owed_writes_held` says how many are held now, and
 //! [`ServerState::report_owed_writes_at_shutdown`] logs and counts each one
 //! still held when the process stops.
@@ -84,7 +86,10 @@ impl OwedKind {
     fn at_restart(self) -> &'static str {
         match self {
             Self::Timer => "its row fires it again at boot",
-            Self::Answer | Self::Reaction | Self::Child => "a restart loses it",
+            Self::Answer => {
+                "a restart loses it; a module call that names an on_failure is answered by it after the restart"
+            }
+            Self::Reaction | Self::Child => "a restart loses it",
         }
     }
 }
@@ -283,6 +288,14 @@ impl ServerState {
         held.insert(key.to_string(), owed);
         metrics::record_held(held.len());
         true
+    }
+
+    /// Whether a write is held under `key`, still to be tried again.
+    pub(super) fn holds_owed_write(&self, key: &str) -> bool {
+        self.owed_writes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains_key(key)
     }
 
     /// Stop tracking a retained write once it lands or ends.

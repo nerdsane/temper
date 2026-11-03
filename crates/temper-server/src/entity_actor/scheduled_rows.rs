@@ -14,6 +14,13 @@
 //! with the same deadline each time otherwise piled up one row per report,
 //! all firing together at the deadline (on 2 Nov 2026 one run fired 20 at
 //! once, every one refused).
+//!
+//! The same event writes the deadline row of each background module call it
+//! starts that names an `on_failure` (`request_context::calls`), with the id
+//! `<seq>.call:<integration>`; the call's answer removes it in its commit.
+//! A call's deadline is its own: it never makes a schedule identical to it,
+//! and is never dropped as identical to one. A schedule kept only because a
+//! deadline looked the same would vanish when the call answered.
 
 use chrono::{DateTime, Utc};
 use temper_runtime::persistence::ScheduledActionRecord;
@@ -22,7 +29,8 @@ use super::actor::EntityActor;
 use super::effects::ScheduledAction;
 use super::types::{EntityEvent, EntityState};
 use crate::request_context::AgentContext;
-use crate::request_context::armed_by::encode_scheduled_armed_by;
+use crate::request_context::armed_by::{encode_call_armed_by, encode_scheduled_armed_by};
+use crate::request_context::calls::{call_arm_id, called_integration};
 
 /// The scheduled-action rows an event changes in its commit.
 #[derive(Debug, Default)]
@@ -35,15 +43,17 @@ pub(super) struct ScheduledRows {
 
 impl EntityActor {
     /// Name each scheduled action `event` arms, and return the rows to write
-    /// with it and the row it fires, if `caller` is firing one of this
-    /// record's. An action identical to one already waiting (same action,
-    /// same due time) is dropped from `scheduled`, so it is neither written
-    /// nor armed again. `state` is the entity before the event is written.
-    /// Without a journal nothing is kept and no row is returned; the ids stay
-    /// unique in this process.
+    /// with it: those actions' and the deadlines of the background calls its
+    /// `custom_effects` start, and the row it removes, if `caller` fires one
+    /// of this record's or answers one of its calls. An action identical to
+    /// a schedule already waiting (same action, same due time) is dropped
+    /// from `scheduled`, so it is neither written nor armed again. `state` is
+    /// the entity before the event is written. Without a journal nothing is
+    /// kept and no row is returned; the ids stay unique in this process.
     pub(super) async fn arm_scheduled_actions(
         &self,
         scheduled: &mut Vec<ScheduledAction>,
+        custom_effects: &[String],
         state: &EntityState,
         event: &EntityEvent,
         caller: Option<&AgentContext>,
@@ -64,8 +74,15 @@ impl EntityActor {
                     .and_then(|delay| event.timestamp.checked_add_signed(delay))
             });
         }
+        // An answer fires no scheduled action (`AgentContext::for_answer`),
+        // so a move removes at most one row.
         let fired = caller
-            .and_then(|caller| caller.fires_scheduled_action.as_ref())
+            .and_then(|caller| {
+                caller
+                    .fires_scheduled_action
+                    .as_ref()
+                    .or(caller.ends_call.as_ref())
+            })
             .filter(|fire| {
                 fire.tenant == self.tenant
                     && fire.entity_type == state.entity_type
@@ -82,13 +99,7 @@ impl EntityActor {
         if !journaled {
             return ScheduledRows::default();
         }
-        if scheduled.is_empty() {
-            return ScheduledRows {
-                armed: Vec::new(),
-                fired,
-            };
-        }
-        let armed = scheduled
+        let mut armed: Vec<ScheduledActionRecord> = scheduled
             .iter()
             .enumerate()
             .map(|(index, action)| {
@@ -114,13 +125,66 @@ impl EntityActor {
                 }
             })
             .collect();
+        if let Some(caller) = caller {
+            armed.extend(self.call_deadlines(sequence, state, event, custom_effects, caller));
+        }
         ScheduledRows { armed, fired }
     }
 
-    /// The (action, due time) of each of the record's rows still waiting,
-    /// besides `fired`, which this event removes. A journal that cannot be
-    /// read gives none, and every action is armed as asked: an arm repeated
-    /// then fires once more, and is refused if its record has moved on.
+    /// The deadline rows of the background calls `custom_effects` start that
+    /// name an `on_failure`, from those `caller` says the move may start:
+    /// each answers its call with that action, as the call's own answer
+    /// would be made, once the call's deadline has passed since `event`.
+    fn call_deadlines(
+        &self,
+        sequence: u64,
+        state: &EntityState,
+        event: &EntityEvent,
+        custom_effects: &[String],
+        caller: &AgentContext,
+    ) -> Vec<ScheduledActionRecord> {
+        let mut rows: Vec<ScheduledActionRecord> = Vec::new();
+        for effect in custom_effects {
+            let Some(call) = caller
+                .background_calls
+                .iter()
+                .find(|call| call.trigger == *effect)
+            else {
+                continue;
+            };
+            let arm_id = call_arm_id(sequence, &call.integration);
+            if rows.iter().any(|row| row.arm_id == arm_id) {
+                continue;
+            }
+            let due_at = chrono::Duration::from_std(call.deadline)
+                .ok()
+                .and_then(|deadline| event.timestamp.checked_add_signed(deadline))
+                .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC);
+            let answer = caller.for_call_answer(&call.integration);
+            let armed_by = encode_call_armed_by(&answer, call.process_id).unwrap_or_else(|error| {
+                tracing::error!(entity_type = %state.entity_type, entity_id = %state.entity_id,
+                    %error, "call deadline caller not encodable; it fires with no identity");
+                "{}".to_string()
+            });
+            rows.push(ScheduledActionRecord {
+                tenant: self.tenant.clone(),
+                entity_type: state.entity_type.clone(),
+                entity_id: state.entity_id.clone(),
+                arm_id,
+                action: call.on_failure.clone(),
+                due_at: due_at.to_rfc3339(),
+                armed_by,
+            });
+        }
+        rows
+    }
+
+    /// The (action, due time) of each of the record's schedules still
+    /// waiting, besides `fired`, which this event removes. A call's deadline
+    /// row is not one: it goes when its call answers, so a schedule matched
+    /// to it would go too. A journal that cannot be read gives none, and
+    /// every action is armed as asked: an arm repeated then fires once more,
+    /// and lapses if its record has moved on.
     async fn waiting_schedules(
         &self,
         state: &EntityState,
@@ -135,7 +199,9 @@ impl EntityActor {
         {
             Ok(rows) => rows
                 .into_iter()
-                .filter(|row| Some(row.arm_id.as_str()) != fired)
+                .filter(|row| {
+                    Some(row.arm_id.as_str()) != fired && called_integration(&row.arm_id).is_none()
+                })
                 .filter_map(|row| {
                     let due = DateTime::parse_from_rfc3339(&row.due_at).ok()?;
                     Some((row.action, due.with_timezone(&Utc)))

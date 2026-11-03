@@ -540,6 +540,8 @@ pub struct ServerState {
     /// When each live timer is due by the wall clock: what its wait runs to,
     /// and what the wake reports name (`wake`).
     pub(crate) due_times: Arc<crate::wake::DueTimes>,
+    /// This process's background calls are live, even during boot retries.
+    pub(crate) call_process_id: uuid::Uuid,
     /// The writes committed moves owe that the store has not taken yet, by
     /// idempotency key, each tried again until it lands or fails otherwise
     /// (`dispatch::owed_writes`). In memory only: a restart loses them.
@@ -850,6 +852,7 @@ impl ServerState {
             state_timer_rows: None,
             scheduled_armed: Arc::default(),
             due_times: Arc::default(),
+            call_process_id: temper_runtime::scheduler::sim_uuid(),
             owed_writes: Arc::default(),
             timer_recovery_complete: Arc::default(),
             runtime_started: Arc::default(),
@@ -1134,6 +1137,7 @@ impl ServerState {
             state_timer_rows: None,
             scheduled_armed: Arc::default(),
             due_times: Arc::default(),
+            call_process_id: temper_runtime::scheduler::sim_uuid(),
             owed_writes: Arc::default(),
             timer_recovery_complete: Arc::default(),
             runtime_started: Arc::default(),

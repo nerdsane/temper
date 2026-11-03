@@ -241,6 +241,19 @@ impl BoxedEventStore {
             .await
     }
 
+    /// Durably cancel a scheduled action before deleting its row.
+    pub async fn cancel_scheduled_action(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        arm_id: &str,
+    ) -> Result<(), PersistenceError> {
+        self.store
+            .cancel_scheduled_action(tenant, entity_type, entity_id, arm_id)
+            .await
+    }
+
     /// Remove one scheduled action's row once it has fired.
     pub async fn delete_scheduled_action(
         &self,

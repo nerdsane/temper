@@ -517,10 +517,21 @@ impl crate::state::ServerState {
             let Some(integration) = integration else {
                 continue;
             };
+            // A background call that names an `on_failure` has a deadline
+            // row; its answer is made in a context that removes it.
+            let call = self.call_deadline_row(req.tenant, req.entity_state, &integration, req.mode);
+            let call_agent_ctx = AgentContext {
+                ends_call: call.clone(),
+                ..req.agent_ctx.clone()
+            };
+            let call_ctx = WasmDispatchCtx {
+                agent_ctx: &call_agent_ctx,
+                ..ctx
+            };
 
             match self
                 .dispatch_single_integration(
-                    &ctx,
+                    &call_ctx,
                     &integration,
                     req.entity_state,
                     req.action_params,
@@ -531,6 +542,10 @@ impl crate::state::ServerState {
                 Ok(Some(resp)) => last_response = Some(resp),
                 Ok(None) => {}
                 Err(error) => failures.push(error),
+            }
+            // The call has ended, answered or not.
+            if let Some(call) = &call {
+                self.end_call(call, &integration.name, req.agent_ctx);
             }
         }
 
@@ -757,11 +772,7 @@ impl crate::state::ServerState {
                 //
                 // Apps that fire the counter frequently should wire an explicit
                 // `timeout_secs` in their integration config.
-                let explicit_timeout = integration
-                    .config
-                    .get("timeout_secs")
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .map(std::time::Duration::from_secs);
+                let explicit_timeout = super::call_deadlines::configured_timeout(integration);
                 let http_timeout =
                     explicit_timeout.unwrap_or_else(|| WasmResourceLimits::default().max_duration);
                 if explicit_timeout.is_some() {

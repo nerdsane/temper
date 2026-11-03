@@ -850,6 +850,20 @@ impl EventStore for TenantStoreRouter {
             .await
     }
 
+    #[instrument(skip_all, fields(tenant, entity_type, otel.name = "router.cancel_scheduled_action"))]
+    async fn cancel_scheduled_action(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        arm_id: &str,
+    ) -> Result<(), PersistenceError> {
+        let store = self.store_for_tenant(tenant).await?;
+        store
+            .cancel_scheduled_action(tenant, entity_type, entity_id, arm_id)
+            .await
+    }
+
     #[instrument(skip_all, fields(tenant, entity_type, otel.name = "router.delete_scheduled_action"))]
     async fn delete_scheduled_action(
         &self,

@@ -195,20 +195,23 @@ pub struct StateTimerRecord {
     pub armed_by: String,
 }
 
-/// One pending `schedule(...)` or `schedule_at(...)` action, kept so that a
+/// One pending `schedule(...)` or `schedule_at(...)` action, or the deadline
+/// of a background module call that names an `on_failure`, kept so that a
 /// restarted server arms it again. An entity can have many; each row is
-/// removed in the commit of the event its action fires, or after a fire that
-/// wrote no event.
+/// removed in the commit of the event its action fires (for a call, the
+/// call's answer), or after a fire that wrote no event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScheduledActionRecord {
     pub tenant: String,
     pub entity_type: String,
     pub entity_id: String,
     /// Names this schedule: the arming event's journal sequence and the
-    /// effect's place among that event's schedules, so a repeated write of
-    /// the same arm lands on the same row.
+    /// effect's place among that event's schedules (`<seq>.<index>`), or the
+    /// called integration for a call's deadline (`<seq>.call:<integration>`),
+    /// so a repeated write of the same arm lands on the same row.
     pub arm_id: String,
-    /// The action to dispatch.
+    /// The action to dispatch. Empty means durably cancelled: recovery only
+    /// removes the row and must never dispatch it.
     pub action: String,
     /// When it is due, RFC 3339.
     pub due_at: String,
@@ -374,6 +377,20 @@ pub trait EventStore: Send + Sync + 'static {
                 .filter(|row| row.entity_type == entity_type && row.entity_id == entity_id)
                 .collect())
         }
+    }
+
+    /// Durably cancel a scheduled action without deleting its row, by clearing
+    /// its action. Idempotent, including when the row is already absent.
+    /// Recovery must only delete cancelled rows, never dispatch them. Stores
+    /// that keep rows override this; stores without rows can simply delete.
+    fn cancel_scheduled_action(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        arm_id: &str,
+    ) -> impl std::future::Future<Output = Result<(), PersistenceError>> + Send {
+        self.delete_scheduled_action(tenant, entity_type, entity_id, arm_id)
     }
 
     /// Remove one scheduled action's row once it has fired. Idempotent.

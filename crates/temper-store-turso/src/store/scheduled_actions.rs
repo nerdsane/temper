@@ -10,6 +10,29 @@ use super::TursoEventStore;
 use super::write_gate::WritePriority;
 
 impl TursoEventStore {
+    /// Durably cancel one scheduled action before garbage-collecting its row.
+    #[instrument(skip_all, fields(tenant, entity_type, otel.name = "turso.cancel_scheduled_action"))]
+    pub(crate) async fn cancel_scheduled_action_row(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        arm_id: &str,
+    ) -> Result<(), PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.cancel_scheduled_action");
+        let conn = self
+            .write_connection("turso.cancel_scheduled_action", WritePriority::Low)
+            .await?;
+        conn.execute(
+            "UPDATE scheduled_actions SET action = '' \
+             WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND arm_id = ?4",
+            params![tenant, entity_type, entity_id, arm_id],
+        )
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
     /// Remove one scheduled action's row.
     #[instrument(skip_all, fields(tenant, entity_type, otel.name = "turso.delete_scheduled_action"))]
     pub(crate) async fn remove_scheduled_action(

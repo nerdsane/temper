@@ -16,11 +16,13 @@ use crate::idempotency::IdempotencyKey;
 
 mod answer;
 pub(crate) mod armed_by;
+pub(crate) mod calls;
 mod execution;
 mod fires;
 mod inline_chain;
 mod observation_metadata;
 
+pub use calls::BackgroundCall;
 pub use fires::{ScheduledFire, StateTimerFire};
 pub use inline_chain::{ChainStep, InlineChain, RepeatedStep, StepEntity};
 
@@ -107,6 +109,16 @@ pub struct AgentContext {
     /// the fire's event, and only for that record, so a child dispatch that
     /// inherits this context removes nothing.
     pub fires_scheduled_action: Option<ScheduledFire>,
+    /// Runtime-owned; never populated from request headers. The background
+    /// module calls with an `on_failure` that this move may start, by trigger:
+    /// the actor writes a deadline row, in the move's commit, for each one
+    /// its effects start (`request_context::calls`). Set only on the caller
+    /// a move is sent to its actor with; empty everywhere else.
+    pub background_calls: Vec<BackgroundCall>,
+    /// Runtime-owned; never populated from request headers. The deadline row
+    /// of the background call this context answers: the answer's commit
+    /// removes it, on that record only.
+    pub ends_call: Option<ScheduledFire>,
     /// Runtime-owned; never populated from request headers. The state timer
     /// this dispatch fires: the actor applies its action only while the
     /// record's journal is at the sequence the timer was armed at.
@@ -245,6 +257,8 @@ impl AgentContext {
             workflow_run_id: None,
             idempotency_key: None,
             fires_scheduled_action: None,
+            background_calls: Vec::new(),
+            ends_call: None,
             fires_state_timer: None,
             read_when_set: None,
             read_when_set_for: None,
@@ -287,6 +301,8 @@ impl AgentContext {
             workflow_run_id: None,
             idempotency_key: None,
             fires_scheduled_action: None,
+            background_calls: Vec::new(),
+            ends_call: None,
             fires_state_timer: None,
             read_when_set: None,
             read_when_set_for: None,
@@ -428,6 +444,8 @@ pub(crate) fn extract_agent_context(headers: &HeaderMap) -> AgentContext {
         workflow_run_id,
         idempotency_key,
         fires_scheduled_action: None,
+        background_calls: Vec::new(),
+        ends_call: None,
         fires_state_timer: None,
         read_when_set: None,
         read_when_set_for: None,

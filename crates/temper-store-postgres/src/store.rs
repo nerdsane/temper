@@ -125,6 +125,17 @@ impl EventStore for PostgresEventStore {
             .await
     }
 
+    async fn cancel_scheduled_action(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        arm_id: &str,
+    ) -> Result<(), PersistenceError> {
+        self.cancel_scheduled_action_row(tenant, entity_type, entity_id, arm_id)
+            .await
+    }
+
     async fn delete_scheduled_action(
         &self,
         tenant: &str,

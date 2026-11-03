@@ -7,7 +7,7 @@ use temper_spec::predicate::{Truth, eval};
 
 use super::super::env::Blind;
 use super::super::state::ReactionStep;
-use super::super::{Dispatch, JointState};
+use super::super::{Call, Dispatch, JointState};
 use super::JointModel;
 use super::step::Certainty;
 use crate::model::semantics::{rule_for, step, successors_budgeted, within_bounds};
@@ -43,6 +43,29 @@ impl JointModel {
             return vec![(next, format!("{text} sent"), Certainty::Sure)];
         }
         self.deliver(state, &dispatch, text)
+    }
+
+    /// The states a call that ended unanswered (`text`) leads to from
+    /// `next`, where it is no longer in flight: its `on_failure` action, if
+    /// it names one, sent as `by`, whoever made the move that called the
+    /// module, in the chain the answer comes in.
+    pub(super) fn end_call(
+        &self,
+        next: JointState,
+        call: &Call,
+        text: String,
+        by: u32,
+    ) -> Vec<(JointState, String, Certainty)> {
+        match &call.on_failure {
+            Some(name) => self.fire(
+                next,
+                &call.to,
+                name,
+                &format!("{text}: {}.{name}", call.to),
+                by,
+            ),
+            None => vec![(next, text, Certainty::Sure)],
+        }
     }
 
     /// `dispatch` reaches its record's actor in `state`, which takes or

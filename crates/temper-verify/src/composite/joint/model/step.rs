@@ -8,7 +8,7 @@ use temper_authz::May;
 use temper_spec::predicate::{Truth, eval};
 
 use super::super::env::Blind;
-use super::super::senders::{OUTSIDE, Rule};
+use super::super::senders::{OUTSIDE, Rule, Senders};
 use super::super::state::canonical;
 use super::super::{Call, Dispatch, JointState};
 use super::commit::add;
@@ -33,8 +33,9 @@ pub(in crate::composite::joint) enum Move {
     Answer(Call, TemperModelAction),
     /// A module's call fails: its `on_failure` action, if any, is sent.
     Fail(Call),
-    /// A module's call is lost: the server restarts while it runs, and
-    /// nothing answers it.
+    /// A module's call is lost: the server restarts while it runs. Its
+    /// deadline answers it with its `on_failure` action, if it names one,
+    /// as a failed call is answered; otherwise nothing answers it.
     Lost(Call),
     /// The dispatch path reads the related records a reaction needs.
     Read(Dispatch),
@@ -215,36 +216,27 @@ impl JointModel {
                 let mut next = state.clone();
                 remove_call(&mut next, call);
                 let text = format!("{call} fails");
-                match &call.on_failure {
-                    Some(name) => {
-                        for outcome in self.fire(
-                            next,
-                            &call.to,
-                            name,
-                            &format!("{text}: {}.{name}", call.to),
-                            call.by,
-                        ) {
-                            if !self.expansion.push(&mut outcomes, outcome) {
-                                return (Vec::new(), false);
-                            }
-                        }
-                    }
-                    None => {
-                        if !self.expansion.push(&mut outcomes, (next, text, Sure)) {
-                            return (Vec::new(), false);
-                        }
+                for outcome in self.end_call(next, call, text, call.by) {
+                    if !self.expansion.push(&mut outcomes, outcome) {
+                        return (Vec::new(), false);
                     }
                 }
             }
             Move::Lost(call) => {
+                // The kernel keeps a call's deadline with the move that
+                // started it, so after the restart its `on_failure` answers
+                // it as a failure's does (`request_context::calls`). The
+                // deadline is a scheduled action: it fires as whoever made
+                // that move, starting a timer's chain.
                 let mut next = state.clone();
                 remove_call(&mut next, call);
-                if !self.expansion.push(
-                    &mut outcomes,
-                    (next, format!("{call} is lost: the server restarts"), Sure),
-                ) {
-                    return (Vec::new(), false);
-                };
+                let text = format!("{call} is lost: the server restarts");
+                let by = self.senders.timer(Senders::armer(call.by));
+                for outcome in self.end_call(next, call, text, by) {
+                    if !self.expansion.push(&mut outcomes, outcome) {
+                        return (Vec::new(), false);
+                    }
+                }
             }
             Move::Read(dispatch) => {
                 let mut next = state.clone();

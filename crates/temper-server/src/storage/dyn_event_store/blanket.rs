@@ -118,6 +118,22 @@ where
         ))
     }
 
+    fn cancel_scheduled_action<'a>(
+        &'a self,
+        tenant: &'a str,
+        entity_type: &'a str,
+        entity_id: &'a str,
+        arm_id: &'a str,
+    ) -> EventStoreFuture<'a, Result<(), PersistenceError>> {
+        Box::pin(EventStore::cancel_scheduled_action(
+            self,
+            tenant,
+            entity_type,
+            entity_id,
+            arm_id,
+        ))
+    }
+
     fn delete_scheduled_action<'a>(
         &'a self,
         tenant: &'a str,

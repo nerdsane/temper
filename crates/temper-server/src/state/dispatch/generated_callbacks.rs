@@ -257,12 +257,16 @@ impl ServerState {
     }
 }
 
-/// Send an owed answer again, journaling it if it fails otherwise this time.
+/// Send an owed answer again, journaling it if it fails otherwise this time:
+/// its call has then ended, and its deadline row goes.
 fn answer_again(state: ServerState, sent: std::sync::Arc<OwedMove>) -> OwedTry {
     Box::pin(async move {
         let attempt = Attempt::of(&sent.send(&state).await);
         if let Attempt::Failed(error) = &attempt {
             state.record_answer_refusal(sent.entity_ref(), &sent.action, error, &sent.params);
+            if let Some(call) = &sent.agent_ctx.ends_call {
+                state.end_call_row(call).await;
+            }
         }
         attempt
     })
