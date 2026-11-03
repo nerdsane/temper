@@ -59,11 +59,7 @@ async fn a_tenants_invocation_log_keeps_its_newest_rows_up_to_the_bound() {
         .load_recent_wasm_invocations("quiet", 2 * busy)
         .await
         .unwrap();
-    assert_eq!(
-        quiet.len(),
-        3,
-        "another tenant's rows are left alone"
-    );
+    assert_eq!(quiet.len(), 3, "another tenant's rows are left alone");
 }
 
 #[tokio::test]
