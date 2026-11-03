@@ -4,8 +4,8 @@
 mod classes;
 mod commit;
 mod drops;
-mod guided;
 mod from_outside;
+mod guided;
 mod held;
 mod initial;
 mod labels;
@@ -35,8 +35,8 @@ use crate::model::{ModelString, ParamValue, ResolvedTransition, TemperModel, Tem
 pub(super) use classes::Classes;
 pub use drops::DroppedReaction;
 pub(crate) use drops::dropped_reactions;
-pub use guided::{Candidate, Guide, GuidedSearch, STEPS as GUIDED_STEPS, guided_search, plain};
 use from_outside::{Outside, outside_reactions};
+pub use guided::{Candidate, Guide, GuidedSearch, STEPS as GUIDED_STEPS, guided_search, plain};
 use order::{Order, Specs};
 pub(super) use read::Timeout;
 use read::{Kernel, Reaction, Unchecked, named_literals, tracked, unchecked_constraints};
