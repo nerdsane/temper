@@ -429,3 +429,7 @@ mod outside_count_tests;
 #[cfg(test)]
 #[path = "widen_test.rs"]
 mod widen_tests;
+
+#[cfg(test)]
+#[path = "trigger_guard_test.rs"]
+mod trigger_guard_tests;
