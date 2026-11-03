@@ -55,6 +55,30 @@ fn pushes(
     counted
 }
 
+/// The changes confirmed pushes sent so far (`temper_turso_sync_changes_pushed`).
+fn changes_pushed(provider: &SdkMeterProvider, exporter: &InMemoryMetricExporter) -> u64 {
+    provider.force_flush().expect("flush metrics");
+    let mut total = 0;
+    // Cumulative sums, oldest export first: the last one read is the latest.
+    for metrics in exporter.get_finished_metrics().expect("metrics") {
+        for scope in &metrics.scope_metrics {
+            for metric in scope
+                .metrics
+                .iter()
+                .filter(|metric| metric.name == "temper_turso_sync_changes_pushed")
+            {
+                let sum = metric
+                    .data
+                    .as_any()
+                    .downcast_ref::<Sum<u64>>()
+                    .expect("a counter");
+                total = sum.data_points.iter().map(|point| point.value).sum();
+            }
+        }
+    }
+    total
+}
+
 fn counted_as(counted: &BTreeMap<(String, String), u64>, outcome: &str, code: &str) -> u64 {
     counted
         .get(&(outcome.to_string(), code.to_string()))
@@ -96,6 +120,11 @@ async fn a_push_the_remote_refuses_counts_refused_with_its_code_and_one_it_takes
     let counted = pushes(&provider, &exporter);
     assert_eq!(counted_as(&counted, "refused", "BLOCKED"), 1, "{counted:?}");
     assert_eq!(counted_as(&counted, "confirmed", ""), 0, "{counted:?}");
+    assert_eq!(
+        changes_pushed(&provider, &exporter),
+        0,
+        "a refused push sent no changes the remote kept"
+    );
 
     // Unblocked: the same change goes, and the remote confirms it.
     refusing.store(false, std::sync::atomic::Ordering::Release);
@@ -106,6 +135,8 @@ async fn a_push_the_remote_refuses_counts_refused_with_its_code_and_one_it_takes
     assert_eq!(counted_as(&counted, "confirmed", ""), 1, "{counted:?}");
     assert_eq!(counted_as(&counted, "refused", "BLOCKED"), 1, "{counted:?}");
     assert_eq!(counted_as(&counted, "failed", ""), 0, "{counted:?}");
+    let sent = changes_pushed(&provider, &exporter);
+    assert!(sent > 0, "the confirmed push's changes were not counted");
     drop(copy);
     drop(store);
 
@@ -120,6 +151,11 @@ async fn a_push_the_remote_refuses_counts_refused_with_its_code_and_one_it_takes
         counted_as(&counted, "confirmed", ""),
         1,
         "a push that sent nothing was counted confirmed: {counted:?}"
+    );
+    assert_eq!(
+        changes_pushed(&provider, &exporter),
+        sent,
+        "a push that sent nothing counted changes"
     );
 
     let (_b_dir, b_path) = machine();

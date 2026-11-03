@@ -8,7 +8,7 @@ use temper_runtime::persistence::{PersistenceError, storage_error};
 use tracing::Instrument;
 use tracing::field::Empty;
 
-use super::outcome::PushOutcome;
+use super::outcome::{PushOutcome, record_changes_pushed};
 use super::{
     CopyState, DriverError, PUSH_ATTEMPT_TIMEOUT, REMOTE_STATEMENT_FAILED, SyncCopy, files,
 };
@@ -143,6 +143,7 @@ impl SyncCopy {
                 self.inner.timeouts.store(0, Ordering::Release);
                 if sends {
                     PushOutcome::Confirmed.record();
+                    record_changes_pushed((covered - remote_had).unsigned_abs());
                 }
             }
             Ok(Err(error)) => {
