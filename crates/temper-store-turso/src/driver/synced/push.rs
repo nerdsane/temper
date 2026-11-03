@@ -128,7 +128,7 @@ impl SyncCopy {
         // A refusal or no answer still is: it says the remote cannot be
         // written. Changes above the record count as sent even if the engine
         // leaves some out; Temper sets none of its filters that would.
-        let sends = covered > remote_had;
+        let sends = self.row_changes_between(remote_had, covered).await? > 0;
         // Until it is known to have succeeded, a push may have committed on
         // the remote past the engine's own record: set before it starts, so
         // a caller that gives up on it (an answer's time limit) leaves it set.
@@ -289,6 +289,28 @@ impl SyncCopy {
                 "SELECT COALESCE(SUM(COALESCE(LENGTH(before), 0) + COALESCE(LENGTH(after), 0) \
                  + COALESCE(LENGTH(updates), 0)), 0) FROM turso_cdc WHERE change_id > ?1",
                 crate::driver::params![after],
+            )
+            .await
+            .map_err(storage_error)?;
+        let Some(row) = rows.next().await.map_err(storage_error)? else {
+            return Ok(0);
+        };
+        row.get::<i64>(0).map_err(storage_error)
+    }
+
+    /// The row changes the change log numbers above `after`, up to `through`.
+    ///
+    /// The numbers can't be subtracted for this. Each commit ends with a row
+    /// of its own, which the engine does not send and the remote's record
+    /// stops short of, so the newest number sits above the record even with
+    /// nothing left to send (a commit row's `change_type` is 2 or null).
+    async fn row_changes_between(&self, after: i64, through: i64) -> Result<i64, PersistenceError> {
+        let conn = self.connect().await.map_err(storage_error)?;
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM turso_cdc \
+                 WHERE change_id > ?1 AND change_id <= ?2 AND change_type IN (-1, 0, 1)",
+                crate::driver::params![after, through],
             )
             .await
             .map_err(storage_error)?;
