@@ -5,6 +5,7 @@
 //! `TEMPER_API_KEY` may bootstrap a normal tenant credential, but it has no
 //! special runtime fallback or deployment-wide Admin authority.
 
+use crate::key_use::{self, KeyUse};
 use crate::state::PlatformState;
 use axum::extract::{Request, State};
 use axum::http::{Method, StatusCode};
@@ -91,13 +92,23 @@ pub async fn bearer_auth_check(
     };
     let request_method = req.method().as_str().to_string();
     let request_path = req.uri().path().to_string();
+    let endpoint_route = matched_endpoint
+        .as_ref()
+        .map(|matched| matched.route.path_prefix.as_str());
 
     let resolved_identity = match request_credential(&req) {
         Some(token) => match temper_server::identity::IdentityResolver::new()
             .resolve(&state.server, &tenant, &token)
             .await
         {
-            Ok(identity) => Some(identity),
+            Ok(identity) => {
+                if key_use::is_operator(&identity) {
+                    KeyUse::accepted(&req, &token, state.api_token.as_deref())
+                        .at_endpoint(endpoint_route)
+                        .log();
+                }
+                Some(identity)
+            }
             // The identity authority could not be read — the credential was
             // never shown to be bad. Fail closed as a dependency failure
             // (503), never as 401/anonymous/protocol-forwarded, and never
@@ -111,7 +122,12 @@ pub async fn bearer_auth_check(
                 );
                 return Err(StatusCode::SERVICE_UNAVAILABLE);
             }
-            Err(temper_server::identity::IdentityError::Invalid) => None,
+            Err(temper_server::identity::IdentityError::Invalid) => {
+                if key_use::looks_like_operator_key(&token) {
+                    KeyUse::refused(&req).at_endpoint(endpoint_route).log();
+                }
+                None
+            }
         },
         None => None,
     };
