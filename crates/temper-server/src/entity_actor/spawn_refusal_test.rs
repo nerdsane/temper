@@ -36,10 +36,18 @@ from = ["Active"]
 params = ["run_id"]
 effect = ["spawn('Run', 'Configure', last_run_id, params.run_id)"]
 
+[[state]]
+name = "pings"
+type = "counter"
+initial = 0
+
+# Counts itself so that it advances the record: a machine's move that changes
+# nothing writes no event (`entity_actor::unrecorded`).
 [[action]]
 name = "Ping"
 kind = "input"
 from = ["Active"]
+effect = ["pings += 1"]
 "#;
 
 async fn action(actor: &ActorRef<EntityMsg>, name: &str) -> EntityResponse {

@@ -118,7 +118,11 @@ impl BoxedEventStore {
             .store
             .append(persistence_id, expected_sequence, events)
             .await;
-        self.record_append(result)
+        let result = self.record_append(result);
+        if result.is_ok() {
+            count_written(persistence_id, events.len());
+        }
+        result
     }
 
     pub async fn append_batch(
@@ -133,7 +137,13 @@ impl BoxedEventStore {
         }))?;
         self.check_room()?;
         let result = self.store.append_batch(appends).await;
-        self.record_append(result)
+        let result = self.record_append(result);
+        if result.is_ok() {
+            for append in appends {
+                count_written(&append.persistence_id, append.events.len());
+            }
+        }
+        result
     }
 
     pub async fn read_events(
@@ -178,7 +188,11 @@ impl BoxedEventStore {
             .store
             .append_with_keys(persistence_id, expected_sequence, events, key_rows)
             .await;
-        self.record_append(result)
+        let result = self.record_append(result);
+        if result.is_ok() {
+            count_written(persistence_id, events.len());
+        }
+        result
     }
 
     pub async fn append_with_rows(
@@ -194,7 +208,11 @@ impl BoxedEventStore {
             .store
             .append_with_rows(persistence_id, expected_sequence, events, rows)
             .await;
-        self.record_append(result)
+        let result = self.record_append(result);
+        if result.is_ok() {
+            count_written(persistence_id, events.len());
+        }
+        result
     }
 
     /// Whether an append writes the entity's query-plane row and timer row
@@ -209,6 +227,18 @@ impl BoxedEventStore {
         tenant: &str,
     ) -> Result<Vec<temper_runtime::persistence::ScheduledActionRecord>, PersistenceError> {
         self.store.list_scheduled_actions(tenant).await
+    }
+
+    /// The pending scheduled actions of one record.
+    pub async fn list_entity_scheduled_actions(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<Vec<temper_runtime::persistence::ScheduledActionRecord>, PersistenceError> {
+        self.store
+            .list_entity_scheduled_actions(tenant, entity_type, entity_id)
+            .await
     }
 
     /// Remove one scheduled action's row once it has fired.
@@ -2232,4 +2262,15 @@ impl TrajectorySink for TenantStoreRouter {
                 )
             })
     }
+}
+
+/// Count the events an append wrote, by the tenant and entity type its
+/// journal belongs to (`temper_events_written_total`).
+fn count_written(persistence_id: &str, events: usize) {
+    let (tenant, entity_type) =
+        match temper_runtime::tenant::parse_persistence_id_parts(persistence_id) {
+            Ok((tenant, entity_type, _)) => (tenant, entity_type),
+            Err(_) => ("unknown", "unknown"),
+        };
+    crate::runtime_metrics::record_events_written(tenant, entity_type, events as u64);
 }

@@ -5,9 +5,9 @@ use std::collections::BTreeMap;
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use temper_authz::{AuthenticatedRequestContext, PrincipalKind};
+use temper_authz::AuthenticatedRequestContext;
 
-use super::{DenialInput, record_authz_denial};
+use super::{DenialInput, denial_can_be_answered, record_authz_denial};
 use crate::state::ServerState;
 
 /// A denied resource check, before deciding whether the request needs approval.
@@ -46,7 +46,7 @@ impl DeniedResource {
                 .get("sessionId")
                 .and_then(|value| value.as_str())
         });
-        if security_ctx.principal.kind == PrincipalKind::Agent && session_id.is_some() {
+        if denial_can_be_answered(security_ctx, session_id) {
             let decision = record_authz_denial(
                 state,
                 DenialInput {

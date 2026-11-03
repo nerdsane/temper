@@ -22,6 +22,7 @@ mod projection_repair;
 mod projection_writes;
 mod read_count;
 mod scheduled_actions;
+mod wasm_invocation_bound;
 mod write_queue;
 
 fn test_envelope(event_type: &str, payload: serde_json::Value) -> PersistenceEnvelope {

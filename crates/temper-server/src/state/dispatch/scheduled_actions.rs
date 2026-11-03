@@ -25,6 +25,13 @@
 //! failed with an error no retry can change ([`DispatchError::is_final`]),
 //! such as a caller who cannot make the move: every try would be answered
 //! the same, so it is logged once and its row removed, not retried.
+//!
+//! A fire whose action has no transition from the record's status when it
+//! comes due has lapsed ([`scheduled_fire_lapsed`]): the record left the
+//! states it was armed for, as a timer whose state was left does not fire.
+//! It is not a refusal anyone acts on, so it writes no trajectory entry; it
+//! is counted, logged at debug and its row removed. A guard that does not
+//! hold is still a refusal, recorded as one.
 
 mod recovery;
 
@@ -359,6 +366,26 @@ impl ServerState {
                 }
             };
             let (error, is_final) = match outcome {
+                Ok(response) if scheduled_fire_lapsed(Some(&timer.row()), &response) => {
+                    crate::runtime_metrics::record_scheduled_fire_lapsed(
+                        timer.tenant.as_str(),
+                        &timer.entity_type,
+                        &timer.action,
+                    );
+                    tracing::debug!(tenant = %timer.tenant, entity_type = %timer.entity_type,
+                        entity_id = %timer.entity_id, action = %timer.action,
+                        arm_id = %timer.arm_id, status = %response.state.status,
+                        "scheduled action came due where its action has no transition; \
+                         nothing fired and its row is removed");
+                    self.forget_scheduled_action(
+                        &timer.tenant,
+                        &timer.entity_type,
+                        &timer.entity_id,
+                        &timer.arm_id,
+                    )
+                    .await;
+                    return;
+                }
                 Ok(response) if response.success => {
                     if retried {
                         self.arm_fired_rows_retrying(timer, key.as_str()).await;
@@ -422,6 +449,23 @@ impl ServerState {
                 "fired scheduled action row not removed; the next boot finds it a duplicate");
         }
     }
+}
+
+/// Whether `response` answers the fire of `fire`, a scheduled action of the
+/// answered record, refused only because no transition for its action starts
+/// from the record's status: the fire lapsed, and nothing is recorded for it.
+/// A refused guard is not a lapse; it is recorded as the refusal it is.
+pub(crate) fn scheduled_fire_lapsed(
+    fire: Option<&ScheduledFire>,
+    response: &EntityResponse,
+) -> bool {
+    fire.is_some_and(|fire| {
+        fire.entity_type == response.state.entity_type && fire.entity_id == response.state.entity_id
+    }) && response.refused
+        && matches!(
+            response.refusal,
+            Some(temper_jit::table::Refusal::InvalidState { .. })
+        )
 }
 
 /// The timer a row arms.

@@ -837,6 +837,19 @@ impl EventStore for TenantStoreRouter {
         store.list_scheduled_actions(tenant).await
     }
 
+    #[instrument(skip_all, fields(tenant, entity_type, otel.name = "router.list_entity_scheduled_actions"))]
+    async fn list_entity_scheduled_actions(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<Vec<temper_runtime::persistence::ScheduledActionRecord>, PersistenceError> {
+        let store = self.store_for_tenant(tenant).await?;
+        store
+            .list_entity_scheduled_actions(tenant, entity_type, entity_id)
+            .await
+    }
+
     #[instrument(skip_all, fields(tenant, entity_type, otel.name = "router.delete_scheduled_action"))]
     async fn delete_scheduled_action(
         &self,

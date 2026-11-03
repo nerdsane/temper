@@ -397,6 +397,11 @@ pub struct EntityResponse {
     /// disk is under the floor. Answered 503, so the caller tries again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub store_unavailable: bool,
+    /// When the move was made, for a move that wrote no event: a machine made
+    /// it and it left its record as it was (`entity_actor::unrecorded`). None
+    /// for every other answer, whose move, if any, is its newest event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unrecorded_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl EntityResponse {
@@ -404,6 +409,21 @@ impl EntityResponse {
     /// recorded another ([`Self::answered_action`]).
     pub fn action<'a>(&'a self, requested: &'a str) -> &'a str {
         self.answered_action.as_deref().unwrap_or(requested)
+    }
+
+    /// The state this successful answer's move started from, and when it was
+    /// made: its event's, or, for a move that wrote none
+    /// ([`Self::unrecorded_at`]), the record's status, which the move left as
+    /// it was, and the move's own time. None when the record has no event.
+    pub(crate) fn move_start(&self) -> Option<(&str, chrono::DateTime<chrono::Utc>)> {
+        match self.unrecorded_at {
+            Some(at) => Some((self.state.status.as_str(), at)),
+            None => self
+                .state
+                .events
+                .back()
+                .map(|event| (event.from_status.as_str(), event.timestamp)),
+        }
     }
 
     /// The answer to an action refused before anything was written.
@@ -453,6 +473,7 @@ impl EntityResponse {
             answered_action: None,
             trigger_failures: Vec::new(),
             store_unavailable: false,
+            unrecorded_at: None,
         }
     }
 }

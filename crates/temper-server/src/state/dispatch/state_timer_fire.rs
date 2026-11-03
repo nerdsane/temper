@@ -203,7 +203,7 @@ impl ServerState {
         } else if current.sequence_nr > timer.sequence_nr {
             self.follow_moved_record(timer, armed_seq, &current).await;
         } else if !self.state_timer_already_fired(timer, &current) {
-            let agent_ctx = timer.fire_context(fire_key);
+            let agent_ctx = timer.fire_context(fire_key, self.state_timeout_resets_on(timer));
             let fire = TimerFire {
                 tenant: &timer.tenant,
                 entity_type: &timer.entity_type,

@@ -21,7 +21,7 @@
 use temper_runtime::persistence::{AppendProjection, StateTimerRecord};
 use temper_runtime::tenant::TenantId;
 
-use super::state_timeouts::{rearm_clock_start, timer_agent};
+use super::state_timeouts::timer_agent;
 use crate::entity_actor::entity_rows::{
     EntityRows, EntityRowsHook, Projection, RowsInput, TimerRow,
 };
@@ -34,6 +34,18 @@ use crate::state::ServerState;
 /// it removes when it ends is this one.
 pub(crate) fn timer_arm_id(state: &str, sequence_nr: u64) -> String {
     format!("{state}-{sequence_nr}")
+}
+
+/// The id of the timer a move that wrote no event reset at `at`, on a record
+/// at `sequence_nr` (`entity_actor::unrecorded`). It differs from the id the
+/// event at `sequence_nr` armed and from every earlier reset's, so the timer
+/// it replaces, whose task ends after it, does not remove its row.
+pub(crate) fn unrecorded_timer_arm_id(
+    state: &str,
+    sequence_nr: u64,
+    at: chrono::DateTime<chrono::Utc>,
+) -> String {
+    format!("{state}-{sequence_nr}@{}", at.timestamp_micros())
 }
 
 impl ServerState {
@@ -117,10 +129,10 @@ impl ServerState {
         let entered = event.from_status != after.status;
         let reset = !entered && st.reset_on.iter().any(|action| action == &event.action);
         if !(entered || reset) {
-            // A timer that fires once and has fired wants no row.
-            return rearm_clock_start(st, after, event.timestamp)
-                .is_none()
-                .then_some(TimerRow::End);
+            // Only this fire ends a one-shot. An old fire in the journal
+            // can predate an unrecorded reset held by the timer row, so an
+            // unrelated event must leave that row for reconciliation to read.
+            return (event.action == st.on_timeout).then_some(TimerRow::End);
         }
         let caller = input.caller?;
         let read =

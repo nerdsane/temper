@@ -79,4 +79,36 @@ impl PostgresEventStore {
             )
             .collect())
     }
+
+    /// The pending scheduled actions of one record, by its key.
+    pub(crate) async fn entity_scheduled_action_rows(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<Vec<ScheduledActionRecord>, PersistenceError> {
+        let rows: Vec<(String, String, String, String)> = crate::dbm::postgres_query_as!(
+            &self.schema,
+            "SELECT arm_id, action, due_at, armed_by FROM {schema}scheduled_actions \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
+        )
+        .bind(tenant)
+        .bind(entity_type)
+        .bind(entity_id)
+        .fetch_all(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(rows
+            .into_iter()
+            .map(|(arm_id, action, due_at, armed_by)| ScheduledActionRecord {
+                tenant: tenant.to_string(),
+                entity_type: entity_type.to_string(),
+                entity_id: entity_id.to_string(),
+                arm_id,
+                action,
+                due_at,
+                armed_by,
+            })
+            .collect())
+    }
 }

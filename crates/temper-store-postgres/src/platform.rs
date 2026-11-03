@@ -2496,6 +2496,19 @@ impl PostgresEventStore {
         .execute(self.pool())
         .await
         .map_err(storage_error)?;
+        // Prune the inserting tenant every time: a global id cadence can
+        // indefinitely skip a tenant when writes from tenants interleave.
+        crate::dbm::postgres_query!(
+            &self.schema,
+            "DELETE FROM {schema}wasm_invocation_logs WHERE tenant = $1 AND id <= ( \
+                 SELECT id FROM {schema}wasm_invocation_logs WHERE tenant = $1 \
+                 ORDER BY id DESC OFFSET $2 LIMIT 1)",
+        )
+        .bind(entry.tenant)
+        .bind(temper_runtime::persistence::WASM_INVOCATIONS_KEPT_PER_TENANT)
+        .execute(self.pool())
+        .await
+        .map_err(storage_error)?;
         Ok(())
     }
 

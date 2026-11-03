@@ -51,13 +51,20 @@ const SEEDS: u64 = 16;
 /// `JOB`'s `Waiting` budget.
 const BUDGET: Duration = Duration::from_secs(3600);
 
-/// `Poke` keeps the record in `Waiting` without resetting its timer.
+/// `Poke` keeps the record in `Waiting` without resetting its timer. It counts
+/// itself, so it moves the record's journal past the timer's arming: a
+/// machine's move that changes nothing writes no event.
 const JOB: &str = r#"
 [automaton]
 name = "Job"
 states = ["Idle", "Waiting", "Done"]
 initial = "Idle"
 allow_indefinite_states = ["Idle", "Done"]
+
+[[state]]
+name = "pokes"
+type = "counter"
+initial = 0
 
 [[action]]
 name = "Start"
@@ -67,6 +74,7 @@ to = "Waiting"
 [[action]]
 name = "Poke"
 from = ["Waiting"]
+effect = ["pokes += 1"]
 
 [[action]]
 name = "Expire"

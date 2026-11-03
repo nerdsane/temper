@@ -880,6 +880,31 @@ impl EventStore for SimEventStore {
             .collect())
     }
 
+    /// One record's rows, read under the lock. The simulated listing
+    /// failures are for whole-tenant listings (boot, and the recovery of a
+    /// fire whose answer was lost), so this read does not take one.
+    async fn list_entity_scheduled_actions(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<Vec<ScheduledActionRecord>, PersistenceError> {
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Ok(inner
+            .scheduled_actions
+            .values()
+            .filter(|action| {
+                action.tenant == tenant
+                    && action.entity_type == entity_type
+                    && action.entity_id == entity_id
+            })
+            .cloned()
+            .collect())
+    }
+
     async fn delete_scheduled_action(
         &self,
         tenant: &str,

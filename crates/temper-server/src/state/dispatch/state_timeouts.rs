@@ -350,10 +350,8 @@ impl crate::state::ServerState {
             return;
         };
         let pre_state = response
-            .state
-            .events
-            .back()
-            .map(|event| event.from_status.as_str())
+            .move_start()
+            .map(|(from, _)| from)
             .unwrap_or_default();
         let post_state = response.state.status.as_str();
         let state_changed = pre_state != post_state;
@@ -415,12 +413,8 @@ impl crate::state::ServerState {
                 .find(|timeout| timeout.state == response.state.status)
                 .cloned()
         };
-        let pre_state = response
-            .state
-            .events
-            .back()
-            .map(|e| e.from_status.as_str())
-            .unwrap_or_default();
+        let move_start = response.move_start();
+        let pre_state = move_start.map(|(from, _)| from).unwrap_or_default();
         let state_changed = pre_state != response.state.status;
         let fresh = declared
             .filter(|st| state_changed || st.reset_on.iter().any(|action| action == ctx.action));
@@ -443,16 +437,14 @@ impl crate::state::ServerState {
                 ctx.action,
             );
         }
-        // The clock starts at the event that entered or reset the state, as
+        // The clock starts at the move that entered or reset the state, as
         // its committed row says (`committed_timer_row`), not when the commit
         // returned: a slow commit must not move the deadline, and a restart
-        // arms from the row.
+        // arms from the row. A move that wrote no event resets it at its own
+        // time, never at the previous event's, which would make the timer due
+        // at once.
         let now = sim_now();
-        let started_at = response
-            .state
-            .events
-            .back()
-            .map_or(now, |event| event.timestamp);
+        let started_at = move_start.map_or(now, |(_, at)| at);
         let mut timer = declared_timer(
             ctx.tenant,
             ctx.entity_type,
@@ -463,8 +455,19 @@ impl crate::state::ServerState {
             started_at,
         );
         // The event that entered or reset the state committed this timer's
-        // row under this id (`committed_timer_row`).
-        timer.arm_id = super::entity_rows::timer_arm_id(&st.state, response.state.sequence_nr);
+        // row under this id (`committed_timer_row`). A move that wrote no
+        // event reset the clock at the same sequence as the last arm, so its
+        // arm has an id of its own, and `start_armed_timer` writes its row:
+        // one row per record, replaced on each reset, so a restart arms the
+        // timer from this move's time.
+        timer.arm_id = match response.unrecorded_at {
+            None => super::entity_rows::timer_arm_id(&st.state, response.state.sequence_nr),
+            Some(at) => super::entity_rows::unrecorded_timer_arm_id(
+                &st.state,
+                response.state.sequence_nr,
+                at,
+            ),
+        };
         self.start_armed_timer(timer, Reservation::Fresh).await;
     }
 
@@ -610,7 +613,7 @@ impl crate::state::ServerState {
 
     /// Whether `timer`'s action is in its state's `reset_on`: a repeating
     /// timer, whose fire starts the clock again.
-    fn state_timeout_resets_on(&self, timer: &ArmedTimer) -> bool {
+    pub(super) fn state_timeout_resets_on(&self, timer: &ArmedTimer) -> bool {
         let Ok(registry) = self.registry.read() else {
             return false;
         };
@@ -771,8 +774,8 @@ impl ArmedTimer {
     /// What its fire is dispatched as: its identity under `fire_key`,
     /// marked as the fire of the arming at its journal sequence, which the
     /// record's actor applies only while the record is still at that
-    /// sequence, and with its cause.
-    pub(super) fn fire_context(&self, fire_key: &IdempotencyKey) -> AgentContext {
+    /// sequence, and with its cause. `repeats`: its action resets its clock.
+    pub(super) fn fire_context(&self, fire_key: &IdempotencyKey, repeats: bool) -> AgentContext {
         let mut agent = self.agent_ctx.clone();
         agent.idempotency_key = Some(fire_key.clone());
         super::timer_cause::mark_timer_fire(
@@ -792,6 +795,7 @@ impl ArmedTimer {
             state: self.state.clone(),
             action: self.action.clone(),
             armed_seq: self.sequence_nr,
+            repeats,
         });
         agent
     }
@@ -810,16 +814,21 @@ pub(super) fn timer_agent(armed_by: &AgentContext) -> AgentContext {
 }
 
 /// When the clock of a timer re-armed without a transition started: the
-/// entity's entry into its state or its latest `reset_on`, else `now` (a safe
-/// default whose worst case is one extra budget of wait). None when the timer
-/// keeps the entity in its state without resetting the clock and already fired
+/// entity's entry into its state, its latest recorded `reset_on`, or its
+/// durable arm (an unrecorded reset), whichever is newest; else `now`.
+/// None when the timer keeps the entity in its state without resetting the clock and already fired
 /// since the clock started: it fires once, so there is nothing to arm.
 pub(super) fn rearm_clock_start(
     st: &temper_spec::automaton::StateTimeout,
     state: &EntityState,
     now: DateTime<Utc>,
+    armed_at: Option<DateTime<Utc>>,
 ) -> Option<DateTime<Utc>> {
-    let started_at = state_clock_started_at(state, &st.state, &st.reset_on).unwrap_or(now);
+    let started_at = state_clock_started_at(state, &st.state, &st.reset_on)
+        .into_iter()
+        .chain(armed_at)
+        .max()
+        .unwrap_or(now);
     let fired_since = state
         .status_clock
         .actions

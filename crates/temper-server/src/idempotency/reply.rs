@@ -65,6 +65,7 @@ pub(super) fn replay_copy(response: &EntityResponse) -> EntityResponse {
         answered_action: None,
         trigger_failures: response.trigger_failures.clone(),
         store_unavailable: response.store_unavailable,
+        unrecorded_at: response.unrecorded_at,
     }
 }
 

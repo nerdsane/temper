@@ -184,15 +184,12 @@ impl ServerState {
             })
         };
         let now = sim_now();
-        // A timer that keeps the record in its state without resetting the
-        // clock fires once: once it ran, the state wants no timer.
-        let wanted = declared
-            .and_then(|st| rearm_clock_start(&st, current, now).map(|started| (st, started)));
-        let Some((st, started_at)) = wanted else {
+        let Some(st) = declared else {
             self.cancel_state_timer(tenant, entity_type, entity_id, current.sequence_nr)
                 .await;
             return TimerFollow::Settled;
         };
+        let turn = self.state_timer_turn(tenant, entity_type, entity_id);
         let armed = self.armed_state_timer(tenant, entity_type, entity_id);
         // Rows that follow commits are the timers the journal armed: one the
         // record's events left for this state is the timer it has, even when
@@ -210,6 +207,11 @@ impl ServerState {
             // caller. Leave the record's timer as it is.
             return TimerFollow::RetryRead;
         };
+        // A reset can replace this arm at the same journal sequence while
+        // the read is in flight. Its newer clock wins over this row snapshot.
+        if self.state_timer_turn(tenant, entity_type, entity_id) != turn {
+            return TimerFollow::Settled;
+        }
         // The row committed with the record's events, so it is the current
         // state's clock when it names the state.
         let row = row.filter(|row| row.state == st.state && row.sequence_nr <= current.sequence_nr);
@@ -228,6 +230,19 @@ impl ServerState {
                 }
             }
         });
+        // An unrecorded reset advances only the durable arm's clock, not
+        // the journal's status clock. Read it before deciding a one-shot
+        // already fired: the old fire may predate this replacement arm.
+        let Some(started_at) = rearm_clock_start(
+            &st,
+            current,
+            now,
+            committed.as_ref().map(|timer| timer.started_at),
+        ) else {
+            self.cancel_state_timer(tenant, entity_type, entity_id, current.sequence_nr)
+                .await;
+            return TimerFollow::Settled;
+        };
         if arming == Arming::FromRow && armed.is_none() && armed_by.is_none() && row.is_none() {
             return TimerFollow::WaitsForRow;
         }
@@ -262,6 +277,10 @@ impl ServerState {
         } else {
             known
         };
+        // Resolving the journal's setter above can also await storage.
+        if self.state_timer_turn(tenant, entity_type, entity_id) != turn {
+            return TimerFollow::Settled;
+        }
         let identity = match known {
             Some(identity) => identity,
             None if self.action_binds_caller(tenant, entity_type, &st.on_timeout) => {

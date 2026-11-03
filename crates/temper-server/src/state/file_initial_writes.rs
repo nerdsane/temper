@@ -240,6 +240,7 @@ impl ServerState {
             answered_action: None,
             trigger_failures: Vec::new(),
             store_unavailable: false,
+            unrecorded_at: None,
         };
         self.broadcast_synthetic_file_stream_update(tenant, file_id, &response, agent_ctx);
         Ok(response)

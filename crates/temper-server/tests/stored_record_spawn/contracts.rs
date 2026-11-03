@@ -34,10 +34,18 @@ kind = "param_equals_field"
 param = "expected"
 field = "counter"
 
+[[state]]
+name = "touches"
+type = "counter"
+initial = 0
+
+# Counts itself, so its event is written: a spawn's initializer is a machine's
+# move, and one that changes nothing writes none.
 [[action]]
 name = "Touch"
 kind = "input"
 from = ["Initialized"]
+effect = ["touches += 1"]
 "#;
 
 const RUN: &str = r#"

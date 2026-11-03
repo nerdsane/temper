@@ -48,17 +48,25 @@ const CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 </edmx:Edmx>"#;
 
 /// `Touch` commits an event and keeps the Member Active, so its status write
-/// says Active while a later `Suspend` may already have committed.
+/// says Active while a later `Suspend` may already have committed. It counts
+/// itself so that it changes the record: a machine's move that changes
+/// nothing writes no event (`entity_actor::unrecorded`).
 const MEMBER_IOA: &str = r#"
 [automaton]
 name = "Member"
 states = ["Active", "Suspended"]
 initial = "Active"
 
+[[state]]
+name = "touches"
+type = "counter"
+initial = 0
+
 [[action]]
 name = "Touch"
 from = ["Active"]
 to = "Active"
+effect = ["touches += 1"]
 
 [[action]]
 name = "Suspend"

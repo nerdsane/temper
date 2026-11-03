@@ -115,6 +115,16 @@ impl EventStore for PostgresEventStore {
         self.scheduled_action_rows(tenant).await
     }
 
+    async fn list_entity_scheduled_actions(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<Vec<ScheduledActionRecord>, PersistenceError> {
+        self.entity_scheduled_action_rows(tenant, entity_type, entity_id)
+            .await
+    }
+
     async fn delete_scheduled_action(
         &self,
         tenant: &str,

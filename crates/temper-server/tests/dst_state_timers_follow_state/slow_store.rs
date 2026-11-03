@@ -21,12 +21,17 @@ use super::specs::CSDL;
 use super::world::SimTimerRows;
 
 const GATE: usize = 8; // BOOT_FIRES_AT_ONCE
+/// `Expire` counts itself, so each fire is written and the journal shows it.
 const TICKER: &str = r#"
 [automaton]
 name = "Job"
 states = ["Idle", "Waiting"]
 initial = "Idle"
 allow_indefinite_states = ["Idle"]
+[[state]]
+name = "fires"
+type = "counter"
+initial = 0
 [[action]]
 name = "Start"
 from = ["Idle"]
@@ -34,6 +39,7 @@ to = "Waiting"
 [[action]]
 name = "Expire"
 from = ["Waiting"]
+effect = ["fires += 1"]
 [[state_timeout]]
 state = "Waiting"
 after_seconds = 10

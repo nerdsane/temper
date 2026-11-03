@@ -43,7 +43,8 @@ fn dispatch_trajectory_persistence_mode() -> DispatchTrajectoryPersistenceMode {
 /// The state the action was attempted from.
 ///
 /// A successful dispatch appends an event whose `from_status` is exactly that
-/// state, so the newest event answers the question. A rejected one appends no
+/// state, so the newest event answers the question; a successful move that
+/// wrote none says it itself (`EntityResponse::move_start`). A rejected one appends no
 /// event (`entity_actor::effects::process_action` returns `event: None` on a
 /// guard or state mismatch), so the newest event belongs to the *previous*
 /// successful transition and names a state the entity has already left.
@@ -56,7 +57,7 @@ fn dispatch_trajectory_persistence_mode() -> DispatchTrajectoryPersistenceMode {
 /// where the attempt was made.
 fn source_status(response: &EntityResponse) -> Option<String> {
     if response.success {
-        response.state.events.back().map(|e| e.from_status.clone())
+        response.move_start().map(|(from, _)| from.to_string())
     } else {
         Some(response.state.status.clone())
     }
@@ -363,6 +364,14 @@ impl crate::state::ServerState {
         if response.is_record_changed() {
             return response;
         }
+        // A scheduled action that came due where its action has no
+        // transition did not fire, and nothing is recorded for it.
+        if super::scheduled_actions::scheduled_fire_lapsed(
+            ctx.agent_ctx.fires_scheduled_action.as_ref(),
+            &response,
+        ) {
+            return response;
+        }
 
         // 1. Record metrics
         self.metrics
@@ -370,8 +379,12 @@ impl crate::state::ServerState {
 
         // 2. Record trajectory outside the action critical path. The entity
         // transition is already durable; trajectory persistence is an
-        // observability/audit side effect.
-        self.record_dispatch_trajectory(ctx, &response);
+        // observability/audit side effect. A move that wrote nothing (a
+        // machine's, leaving its record as it was) has no history to add.
+        let recorded = response.unrecorded_at.is_none();
+        if recorded {
+            self.record_dispatch_trajectory(ctx, &response);
+        }
 
         if !response.success {
             return response;
@@ -406,8 +419,10 @@ impl crate::state::ServerState {
         // 3. Broadcast SSE
         self.broadcast_state_change(ctx, &response);
 
-        // 4. Fire webhooks
-        self.fire_webhooks(ctx, &response);
+        // 4. Fire webhooks: each sends the trajectory entry of a recorded move.
+        if recorded {
+            self.fire_webhooks(ctx, &response);
+        }
 
         // 5. Integrations (WASM + native adapters)
         if !response.custom_effects.is_empty() {

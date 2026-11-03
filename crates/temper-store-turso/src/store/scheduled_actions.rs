@@ -63,4 +63,37 @@ impl TursoEventStore {
         }
         Ok(actions)
     }
+
+    /// The pending scheduled actions of one record, by its key.
+    #[instrument(skip_all, fields(tenant, entity_type, otel.name = "turso.list_entity_scheduled_actions"))]
+    pub(crate) async fn entity_scheduled_action_rows(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<Vec<ScheduledActionRecord>, PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.list_entity_scheduled_actions");
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT arm_id, action, due_at, armed_by FROM scheduled_actions \
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+                params![tenant, entity_type, entity_id],
+            )
+            .await
+            .map_err(storage_error)?;
+        let mut actions = Vec::new();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            actions.push(ScheduledActionRecord {
+                tenant: tenant.to_string(),
+                entity_type: entity_type.to_string(),
+                entity_id: entity_id.to_string(),
+                arm_id: row.get(0).map_err(storage_error)?,
+                action: row.get(1).map_err(storage_error)?,
+                due_at: row.get(2).map_err(storage_error)?,
+                armed_by: row.get(3).map_err(storage_error)?,
+            });
+        }
+        Ok(actions)
+    }
 }

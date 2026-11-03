@@ -26,6 +26,21 @@ pub(super) fn armed_seq(
     caller?.state_timer_armed_seq(tenant, &state.entity_type, &state.entity_id, action)
 }
 
+/// Whether `caller` fires a state timer of this record's whose `action` does
+/// not reset its clock: a timer that fires once, which its fire's event ends.
+pub(super) fn fires_once(
+    caller: Option<&AgentContext>,
+    tenant: &str,
+    state: &EntityState,
+    action: &str,
+) -> bool {
+    caller
+        .and_then(|caller| {
+            caller.state_timer_fire(tenant, &state.entity_type, &state.entity_id, action)
+        })
+        .is_some_and(|fire| !fire.repeats)
+}
+
 /// Why a timer fire armed at `armed` is dropped on `state`: the record's
 /// journal has moved past the arming. None for a dispatch that is not a
 /// timer's fire, and for a record at its timer's arming or behind it (an actor

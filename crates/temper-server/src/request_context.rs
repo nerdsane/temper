@@ -164,15 +164,25 @@ impl AgentContext {
         entity_id: &str,
         action: &str,
     ) -> Option<u64> {
-        self.fires_state_timer
-            .as_ref()
-            .filter(|fire| {
-                fire.tenant == tenant
-                    && fire.entity_type == entity_type
-                    && fire.entity_id == entity_id
-                    && fire.action == action
-            })
+        self.state_timer_fire(tenant, entity_type, entity_id, action)
             .map(|fire| fire.armed_seq)
+    }
+
+    /// The state timer fire this dispatch is, when it fires `action` on this
+    /// record (see [`Self::state_timer_armed_seq`]).
+    pub(crate) fn state_timer_fire(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        action: &str,
+    ) -> Option<&StateTimerFire> {
+        self.fires_state_timer.as_ref().filter(|fire| {
+            fire.tenant == tenant
+                && fire.entity_type == entity_type
+                && fire.entity_id == entity_id
+                && fire.action == action
+        })
     }
 
     /// Begin a `schedule` / `schedule_at` follow-on of this context.

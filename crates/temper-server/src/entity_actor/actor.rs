@@ -1654,6 +1654,7 @@ impl EntityActor {
                         answered_action,
                         trigger_failures: Vec::new(),
                         store_unavailable: false,
+                        unrecorded_at: None,
                     });
                     return Ok(());
                 }
@@ -1800,12 +1801,49 @@ impl EntityActor {
                     // error variants fail immediately (same as before).
                     // The rows of the scheduled actions it arms are written
                     // with the event, so a restart arms them again.
-                    let scheduled = self.arm_scheduled_actions(
-                        &mut result.scheduled_actions,
-                        state,
-                        &event,
+                    let scheduled = self
+                        .arm_scheduled_actions(
+                            &mut result.scheduled_actions,
+                            state,
+                            &event,
+                            caller.as_deref(),
+                        )
+                        .await;
+                    // A machine's move that leaves its record as it was writes
+                    // nothing (`unrecorded`); its triggers still run.
+                    let fires_timer_once = super::timer_fire::fires_once(
                         caller.as_deref(),
+                        &self.tenant,
+                        state,
+                        &name,
                     );
+                    if super::unrecorded::made_by_machine(&event.origin)
+                        && super::unrecorded::leaves_record_unchanged(
+                            &state_before,
+                            state,
+                            &result,
+                            &event,
+                            &scheduled,
+                            fires_timer_once,
+                        )
+                    {
+                        *state = state_before;
+                        let response = self.answer_unrecorded(state, result, &event);
+                        if let (Some(key), Some(request), Some(cache)) = (
+                            idempotency_key.as_ref(),
+                            request.as_ref(),
+                            self.idempotency_cache.as_ref(),
+                        ) {
+                            cache.put(&actor_key, key, request, &response);
+                        }
+                        ctx.reply(response);
+                        crate::runtime_metrics::record_actor_ask_reply_latency(
+                            &state.entity_type,
+                            &name,
+                            ask_reply_start.elapsed(),
+                        );
+                        return Ok(());
+                    }
                     if let (Some(store), Some(backend)) =
                         (self.event_journal.as_ref(), self.event_backend)
                     {
@@ -2040,12 +2078,14 @@ impl EntityActor {
                                     ))
                                     .await;
 
-                                    let retry_scheduled = self.arm_scheduled_actions(
-                                        &mut retry_result.scheduled_actions,
-                                        state,
-                                        &retry_event,
-                                        caller.as_deref(),
-                                    );
+                                    let retry_scheduled = self
+                                        .arm_scheduled_actions(
+                                            &mut retry_result.scheduled_actions,
+                                            state,
+                                            &retry_event,
+                                            caller.as_deref(),
+                                        )
+                                        .await;
                                     match self
                                         .persist_event(
                                             store,
@@ -2250,6 +2290,7 @@ impl EntityActor {
                         answered_action: None,
                         trigger_failures: Vec::new(),
                         store_unavailable: false,
+                        unrecorded_at: None,
                     };
                     // ADR-0048 sub-decision 5: cache the successful response
                     // so a racing retry that lands after this reply returns
@@ -2319,6 +2360,7 @@ impl EntityActor {
                     answered_action: None,
                     trigger_failures: Vec::new(),
                     store_unavailable: false,
+                    unrecorded_at: None,
                 });
             }
             EntityMsg::UpdateFields {
@@ -2364,6 +2406,7 @@ impl EntityActor {
                         answered_action: None,
                         trigger_failures: Vec::new(),
                         store_unavailable: false,
+                        unrecorded_at: None,
                     },
                     Err(NotUpdated::RecordChanged) => EntityResponse::record_changed(
                         state.clone(),
@@ -2393,6 +2436,7 @@ impl EntityActor {
                     answered_action: None,
                     trigger_failures: Vec::new(),
                     store_unavailable: false,
+                    unrecorded_at: None,
                 });
             }
 
@@ -2414,6 +2458,7 @@ impl EntityActor {
                     answered_action: None,
                     trigger_failures: Vec::new(),
                     store_unavailable: false,
+                    unrecorded_at: None,
                 });
             }
 
@@ -2464,6 +2509,7 @@ impl EntityActor {
                         answered_action: None,
                         trigger_failures: Vec::new(),
                         store_unavailable: false,
+                        unrecorded_at: None,
                     });
                     return Ok(());
                 }
@@ -2521,6 +2567,7 @@ impl EntityActor {
                     answered_action: None,
                     trigger_failures: Vec::new(),
                     store_unavailable: false,
+                    unrecorded_at: None,
                 });
             }
         }

@@ -97,6 +97,20 @@ async fn dispatch_gives_the_module_event_summaries_and_the_current_calls_params(
     let state = test_state();
     let tenant = TenantId::default();
     let agent = AgentContext::system();
+    // A person's moves: only the first changes the record, and each is
+    // recorded. The same move a machine made would write no event after the
+    // first, so history would hold one.
+    let person = AgentContext {
+        security_ctx: Some(temper_authz::SecurityContext::from_verified_jwt(
+            "ann",
+            temper_authz::PrincipalKind::Customer,
+            None,
+            None,
+            None,
+            None,
+        )),
+        ..AgentContext::default()
+    };
     let sent = "x".repeat(1_000_000);
     for _ in 0..3 {
         let response = state
@@ -106,7 +120,7 @@ async fn dispatch_gives_the_module_event_summaries_and_the_current_calls_params(
                 "one",
                 "Note",
                 json!({"description": sent}),
-                &agent,
+                &person,
             )
             .await
             .expect("Note dispatches");

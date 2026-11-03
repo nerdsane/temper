@@ -19,6 +19,13 @@ pub use tombstone::{EVENT_KIND_KEY, EventKind, TOMBSTONE_EVENT_TYPE, journal_is_
 /// journals/idempotency keys that were committed atomically with it.
 pub const COMPOSITE_EVENT_TYPE: &str = "CompositeEvent";
 
+/// How many WASM invocation log rows a tenant keeps, newest first. Its only
+/// reader, `/observe/wasm` (module stats and invocation history), reads at
+/// most the newest this many, so an older row is never read again; without a
+/// bound the log grew by one row per integration call for as long as the
+/// tenant ran.
+pub const WASM_INVOCATIONS_KEPT_PER_TENANT: i64 = 10_000;
+
 /// Replay/audit record for one Composite action application.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompositeEvent {
@@ -347,6 +354,26 @@ pub trait EventStore: Send + Sync + 'static {
     {
         let _ = tenant;
         async { Ok(Vec::new()) }
+    }
+
+    /// The pending scheduled actions of one record: what an arm compares
+    /// with, so an action armed twice for the same time keeps one row. The
+    /// default reads the tenant's rows and keeps the record's.
+    fn list_entity_scheduled_actions(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<ScheduledActionRecord>, PersistenceError>> + Send
+    {
+        let rows = self.list_scheduled_actions(tenant);
+        async move {
+            Ok(rows
+                .await?
+                .into_iter()
+                .filter(|row| row.entity_type == entity_type && row.entity_id == entity_id)
+                .collect())
+        }
     }
 
     /// Remove one scheduled action's row once it has fired. Idempotent.

@@ -141,15 +141,22 @@ startup_loading = "lazy"
     )
     .expect("read echo fixture");
     fs::write(dir.join("wasm/echo/echo.wasm"), &wasm).expect("write echo module");
+    // `Poke` counts itself, so it changes the record and its event is
+    // written: a machine's move that changes nothing writes none.
     let spec = r#"
 [automaton]
 name = "Job"
 states = ["Waiting", "Done"]
 initial = "Waiting"
 allow_indefinite_states = ["Waiting", "Done"]
+[[state]]
+name = "pokes"
+type = "counter"
+initial = 0
 [[action]]
 name = "Poke"
 from = ["Waiting"]
+effect = ["pokes += 1"]
 [[action]]
 name = "Expire"
 from = ["Waiting"]

@@ -26,6 +26,7 @@ pub(crate) mod timer_needs_person;
 mod tombstone;
 pub mod types;
 pub(crate) mod undeclared_params;
+mod unrecorded;
 
 pub use actor::EntityActor;
 pub(crate) use actor::RehydrateHook;

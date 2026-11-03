@@ -287,6 +287,7 @@ impl ServerState {
                 answered_action: None,
                 trigger_failures: Vec::new(),
                 store_unavailable: false,
+                unrecorded_at: None,
             }
         };
 
@@ -1662,6 +1663,7 @@ impl ServerState {
             answered_action: None,
             trigger_failures: Vec::new(),
             store_unavailable: false,
+            unrecorded_at: None,
         }))
     }
 
