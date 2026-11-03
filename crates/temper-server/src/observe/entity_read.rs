@@ -2,7 +2,9 @@
 
 use axum::http::StatusCode;
 use temper_authz::AuthenticatedRequestContext;
+use temper_runtime::persistence::journal_is_deleted;
 
+use crate::authz::require_observe_auth;
 use crate::entity_actor::EntityResponse;
 use crate::state::ServerState;
 
@@ -23,6 +25,35 @@ pub(super) async fn require_existing_entity_read(
     .await
     .map_err(|_| StatusCode::NOT_FOUND)?;
     authorize_entity_read(state, authenticated, entity_type, entity_id, &body)
+}
+
+/// Authorize reading an entity's history. A record that exists takes the same
+/// decision as any read of it. A deleted record keeps its journal, and with no
+/// fields left to decide on, its trail is for whoever may observe the type; to
+/// anyone else, as for an id the journal does not hold as deleted, it is `404`.
+pub(super) async fn require_history_read(
+    state: &ServerState,
+    authenticated: &AuthenticatedRequestContext,
+    entity_type: &str,
+    entity_id: &str,
+) -> Result<(), StatusCode> {
+    match require_existing_entity_read(state, authenticated, entity_type, entity_id).await {
+        Err(StatusCode::NOT_FOUND) => {}
+        decided => return decided,
+    }
+    let Some((store, _backend)) = state.event_journal() else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    let persistence_id = format!("{}:{entity_type}:{entity_id}", authenticated.tenant());
+    let events = store.read_events(&persistence_id, 0).await.map_err(|error| {
+        tracing::warn!(persistence_id = %persistence_id, error = %error, "entity history journal read failed");
+        StatusCode::SERVICE_UNAVAILABLE
+    })?;
+    if !journal_is_deleted(&events) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    require_observe_auth(state, authenticated, "read", entity_type)
+        .map_err(|_| StatusCode::NOT_FOUND)
 }
 
 /// Read an existing entity's current state and authorize returning it.
