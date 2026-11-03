@@ -19,7 +19,6 @@ pub const DEFAULT_SIM_SEEDS: u64 = 5;
 pub const DEFAULT_PROP_TEST_CASES: u32 = 100;
 const MAX_SIM_SEEDS: u64 = 100;
 const MAX_PROP_TEST_CASES: u32 = 10_000;
-const MAX_IOA_SOURCE_BYTES: usize = 1_048_576;
 /// Time one check may take when the caller names no budget. A WASM
 /// integration waits at most 50 s on one call, so a check that runs out of
 /// this still answers its caller, with why.
@@ -76,12 +75,8 @@ pub(crate) async fn handle_validate_ioa(
             "ioa_source must not be empty".to_string(),
         ));
     }
-    if ioa_source.len() > MAX_IOA_SOURCE_BYTES {
-        return Err((
-            StatusCode::PAYLOAD_TOO_LARGE,
-            format!("ioa_source exceeds {MAX_IOA_SOURCE_BYTES} bytes"),
-        ));
-    }
+    // No limit on the source's size: what a check costs is its time and the states it walks, which the budget below
+    // bounds (`MAX_BUDGET_MS`, `MAX_BUDGET_STATES`), not how long its text is.
 
     let sim_seeds = body.sim_seeds.unwrap_or(DEFAULT_SIM_SEEDS);
     if sim_seeds > MAX_SIM_SEEDS {

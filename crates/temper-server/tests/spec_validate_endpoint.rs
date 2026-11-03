@@ -63,6 +63,30 @@ async fn validate_ioa_runs_server_cascade_without_loading_spec() {
 }
 
 #[tokio::test]
+async fn validate_ioa_accepts_valid_source_over_default_body_limit() {
+    // Grow only the text, keeping the model and its verification cost unchanged.
+    let ioa_source = format!("{ORDER_IOA}\n# {}\n", "x".repeat(3 * 1024 * 1024));
+    assert!(ioa_source.len() > 2 * 1024 * 1024);
+    let request_body = serde_json::json!({
+        "ioa_source": ioa_source,
+        "sim_seeds": 1,
+        "prop_test_cases": 10
+    })
+    .to_string();
+    let response = build_router(test_state_with_registry())
+        .oneshot(authenticated_post("/api/specs/validate-ioa", &request_body))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["all_passed"], true, "{json}");
+}
+
+#[tokio::test]
 async fn validate_ioa_rejects_empty_source() {
     let app = build_router(test_state_with_registry());
     let response = app
