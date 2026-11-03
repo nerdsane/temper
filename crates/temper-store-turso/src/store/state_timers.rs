@@ -2,7 +2,9 @@
 
 use crate::driver::params;
 use crate::metrics::TursoQueryTimer;
-use temper_runtime::persistence::{PersistenceError, StateTimerRecord, storage_error};
+use temper_runtime::persistence::{
+    OverdueTimerRows, OverdueTimers, PersistenceError, StateTimerRecord, storage_error,
+};
 use tracing::instrument;
 
 use super::TursoEventStore;
@@ -22,13 +24,14 @@ impl TursoEventStore {
             .await?;
         conn.execute(
             "INSERT INTO state_timers \
-                 (tenant, entity_type, entity_id, state, arm_id, sequence_nr, started_at, params, armed_by) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+                 (tenant, entity_type, entity_id, state, arm_id, sequence_nr, started_at, params, armed_by, due_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
              ON CONFLICT (tenant, entity_type, entity_id) DO UPDATE SET \
                  state = excluded.state, \
                  arm_id = excluded.arm_id, \
                  sequence_nr = excluded.sequence_nr, \
                  started_at = excluded.started_at, \
+                 due_at = excluded.due_at, \
                  params = excluded.params, \
                  armed_by = excluded.armed_by \
              WHERE excluded.sequence_nr >= state_timers.sequence_nr",
@@ -42,6 +45,7 @@ impl TursoEventStore {
                 timer.started_at.as_str(),
                 timer.params.as_str(),
                 timer.armed_by.as_str(),
+                timer.due_at.as_deref(),
             ],
         )
         .await
@@ -72,6 +76,31 @@ impl TursoEventStore {
         Ok(())
     }
 
+    /// Write the due time on an entity's timer row if it still holds the
+    /// arming `arm_id`. Only an update: a row its timer removed stays removed.
+    #[instrument(skip_all, fields(tenant, entity_type, otel.name = "turso.date_state_timer"))]
+    pub async fn date_state_timer(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        arm_id: &str,
+        due_at: &str,
+    ) -> Result<(), PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.date_state_timer");
+        let conn = self
+            .write_connection("turso.date_state_timer", WritePriority::Low)
+            .await?;
+        conn.execute(
+            "UPDATE state_timers SET due_at = ?5 \
+             WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND arm_id = ?4",
+            params![tenant, entity_type, entity_id, arm_id, due_at],
+        )
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
     /// Every armed timer row for `tenant`.
     #[instrument(skip_all, fields(tenant, otel.name = "turso.list_state_timers"))]
     pub async fn list_state_timers(
@@ -82,7 +111,7 @@ impl TursoEventStore {
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(
-                "SELECT entity_type, entity_id, state, arm_id, sequence_nr, started_at, params, armed_by \
+                "SELECT entity_type, entity_id, state, arm_id, sequence_nr, started_at, params, armed_by, due_at \
                  FROM state_timers WHERE tenant = ?1",
                 params![tenant],
             )
@@ -99,6 +128,7 @@ impl TursoEventStore {
                 sequence_nr: u64::try_from(row.get::<i64>(4).map_err(storage_error)?)
                     .unwrap_or_default(),
                 started_at: row.get(5).map_err(storage_error)?,
+                due_at: row.get::<Option<String>>(8).map_err(storage_error)?,
                 params: row.get(6).map_err(storage_error)?,
                 armed_by: row.get(7).map_err(storage_error)?,
             });
@@ -118,7 +148,7 @@ impl TursoEventStore {
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(
-                "SELECT state, arm_id, sequence_nr, started_at, params, armed_by \
+                "SELECT state, arm_id, sequence_nr, started_at, params, armed_by, due_at \
                  FROM state_timers WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
                 params![tenant, entity_type, entity_id],
             )
@@ -136,8 +166,46 @@ impl TursoEventStore {
             sequence_nr: u64::try_from(row.get::<i64>(2).map_err(storage_error)?)
                 .unwrap_or_default(),
             started_at: row.get(3).map_err(storage_error)?,
+            due_at: row.get::<Option<String>>(6).map_err(storage_error)?,
             params: row.get(4).map_err(storage_error)?,
             armed_by: row.get(5).map_err(storage_error)?,
         }))
+    }
+
+    /// `tenant`'s state timers and scheduled actions due at or before `now`
+    /// (RFC 3339 in UTC, the form their rows keep): how many, and the
+    /// earliest due time. One statement, each half a range read of its
+    /// table's `(tenant, due_at)` index, so it reads only the rows past due.
+    #[instrument(skip_all, fields(tenant, otel.name = "turso.overdue_timer_rows"))]
+    pub async fn overdue_timer_rows(
+        &self,
+        tenant: &str,
+        now: &str,
+    ) -> Result<OverdueTimerRows, PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.overdue_timer_rows");
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT 0, COUNT(*), MIN(due_at) FROM state_timers \
+                 WHERE tenant = ?1 AND due_at <= ?2 \
+                 UNION ALL \
+                 SELECT 1, COUNT(*), MIN(due_at) FROM scheduled_actions \
+                 WHERE tenant = ?1 AND due_at <= ?2",
+                params![tenant, now],
+            )
+            .await
+            .map_err(storage_error)?;
+        let mut overdue = OverdueTimerRows::default();
+        while let Some(row) = rows.next().await.map_err(storage_error)? {
+            let rows = OverdueTimers {
+                count: u64::try_from(row.get::<i64>(1).map_err(storage_error)?).unwrap_or_default(),
+                oldest_due_at: row.get::<Option<String>>(2).map_err(storage_error)?,
+            };
+            match row.get::<i64>(0).map_err(storage_error)? {
+                0 => overdue.state_timers = rows,
+                _ => overdue.scheduled_actions = rows,
+            }
+        }
+        Ok(overdue)
     }
 }

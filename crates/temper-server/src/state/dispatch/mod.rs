@@ -25,6 +25,7 @@ pub use error::DispatchError;
 pub(crate) mod entity_rows;
 mod generated_callbacks;
 mod outside_write;
+mod overdue_timer_rows;
 pub(crate) mod owed_writes;
 pub(crate) mod spawn_plan;
 pub use outside_write::StaleWrite;

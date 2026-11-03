@@ -104,8 +104,8 @@ fn a_batch_commits_timer_resets_and_ends_or_none_of_its_rows() {
         let b = arm("p2", 1);
         store
             .append_batch(&[
-                append("p1", 0, Some(AppendStateTimer::Arm(a.clone()))),
-                append("p2", 0, Some(AppendStateTimer::Arm(b.clone()))),
+                append("p1", 0, Some(AppendStateTimer::Arm(Box::new(a.clone())))),
+                append("p2", 0, Some(AppendStateTimer::Arm(Box::new(b.clone())))),
             ])
             .await
             .unwrap();
@@ -121,7 +121,11 @@ fn a_batch_commits_timer_resets_and_ends_or_none_of_its_rows() {
         let before = snapshot(&pool, &schema).await;
         let refused = store
             .append_batch(&[
-                append("p1", 1, Some(AppendStateTimer::Arm(reset.clone()))),
+                append(
+                    "p1",
+                    1,
+                    Some(AppendStateTimer::Arm(Box::new(reset.clone()))),
+                ),
                 append("p2", 0, Some(AppendStateTimer::End)),
             ])
             .await;
@@ -132,7 +136,11 @@ fn a_batch_commits_timer_resets_and_ends_or_none_of_its_rows() {
         assert_eq!(snapshot(&pool, &schema).await, before);
         store
             .append_batch(&[
-                append("p1", 1, Some(AppendStateTimer::Arm(reset.clone()))),
+                append(
+                    "p1",
+                    1,
+                    Some(AppendStateTimer::Arm(Box::new(reset.clone()))),
+                ),
                 append("p2", 1, Some(AppendStateTimer::End)),
             ])
             .await

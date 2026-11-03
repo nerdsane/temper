@@ -189,10 +189,37 @@ pub struct StateTimerRecord {
     pub sequence_nr: u64,
     /// When the state's clock started (entry or latest `reset_on`), RFC 3339.
     pub started_at: String,
+    /// When the timer falls due: `started_at` plus its state's budget, RFC
+    /// 3339 in UTC, so text order is time order and a store can index it.
+    /// None on a row a release without this column wrote, until a boot
+    /// writes it.
+    pub due_at: Option<String>,
     /// The `on_timeout` parameters, read when the timer was armed (JSON).
     pub params: String,
     /// The identity the timer fires as: the dispatch that armed it (JSON).
     pub armed_by: String,
+}
+
+/// A tenant's timer rows of one kind that are past their due time: a timer
+/// that should have fired and has not, for whatever reason no process armed
+/// or fired it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OverdueTimers {
+    /// How many rows are past due.
+    pub count: u64,
+    /// The earliest due time among them, RFC 3339. None when none is.
+    pub oldest_due_at: Option<String>,
+}
+
+/// A tenant's timer rows past their due time: state timers and scheduled
+/// actions.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OverdueTimerRows {
+    /// Armed `[[state_timeout]]`s ([`StateTimerRecord`]).
+    pub state_timers: OverdueTimers,
+    /// Pending `schedule(...)` and `schedule_at(...)` actions
+    /// ([`ScheduledActionRecord`]).
+    pub scheduled_actions: OverdueTimers,
 }
 
 /// One pending `schedule(...)` or `schedule_at(...)` action, or the deadline
@@ -792,7 +819,7 @@ impl AppendProjection {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AppendStateTimer {
     /// Entering or resetting a timed state replaces its durable arm.
-    Arm(StateTimerRecord),
+    Arm(Box<StateTimerRecord>),
     /// Leaving a timed state or consuming a one-shot timer removes its arm.
     End,
 }

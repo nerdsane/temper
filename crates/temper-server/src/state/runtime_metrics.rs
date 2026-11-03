@@ -137,6 +137,12 @@ impl RuntimeMetricInstruments {
             );
         }
 
+        // Timer rows past due, from the store: a timer no process armed
+        // shows here, where the pending gauge below counts only armed ones.
+        state
+            .record_overdue_timer_rows(self.durable_store_timeout)
+            .await;
+
         // ADR-0049: pending timer gauge — emitted per entity type.
         for (entity_type, count) in state.state_timeout_tracker.pending_snapshot() {
             crate::runtime_metrics::record_scheduler_pending_timers(&entity_type, count);

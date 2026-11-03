@@ -31,7 +31,7 @@ enum Projection {
 
 #[derive(Debug, Clone)]
 enum TimerRow {
-    Arm(StateTimerRecord),
+    Arm(Box<StateTimerRecord>),
     End,
 }
 
@@ -51,7 +51,7 @@ impl EntityRows {
                 ProjectionRow::Remove => Projection::Remove,
             }),
             state_timer: rows.state_timer.map(|timer| match timer {
-                StateTimerRow::Arm(row) => TimerRow::Arm(row.clone()),
+                StateTimerRow::Arm(row) => TimerRow::Arm(Box::new(row.clone())),
                 StateTimerRow::End => TimerRow::End,
             }),
             vectors: rows.reconcile_vectors.then(|| rows.vector_rows.to_vec()),
@@ -143,13 +143,14 @@ impl EntityRows {
 async fn arm_timer(tx: &Transaction<'_>, timer: &StateTimerRecord) -> Result<(), PersistenceError> {
     tx.execute(
         "INSERT INTO state_timers \
-             (tenant, entity_type, entity_id, state, arm_id, sequence_nr, started_at, params, armed_by) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+             (tenant, entity_type, entity_id, state, arm_id, sequence_nr, started_at, params, armed_by, due_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
          ON CONFLICT (tenant, entity_type, entity_id) DO UPDATE SET \
              state = excluded.state, \
              arm_id = excluded.arm_id, \
              sequence_nr = excluded.sequence_nr, \
              started_at = excluded.started_at, \
+             due_at = excluded.due_at, \
              params = excluded.params, \
              armed_by = excluded.armed_by",
         params![
@@ -162,6 +163,7 @@ async fn arm_timer(tx: &Transaction<'_>, timer: &StateTimerRecord) -> Result<(),
             timer.started_at.as_str(),
             timer.params.as_str(),
             timer.armed_by.as_str(),
+            timer.due_at.as_deref(),
         ],
     )
     .await

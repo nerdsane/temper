@@ -194,14 +194,15 @@ retire AS (
               WHERE f.tenant = $1 AND f.entity_type = $2 AND f.entity_id = $3) END),
 timer_arm AS (
     INSERT INTO {schema}state_timers AS t
-        (tenant, entity_type, entity_id, state, arm_id, sequence_nr, started_at, params, armed_by)
-    SELECT $1, $2, $3, $29::text, $30::text, $31::bigint, $32::text, $33::text, $34::text
+        (tenant, entity_type, entity_id, state, arm_id, sequence_nr, started_at, params, armed_by, due_at)
+    SELECT $1, $2, $3, $29::text, $30::text, $31::bigint, $32::text, $33::text, $34::text, $35::text
     FROM w WHERE $28::text = 'arm'
     ON CONFLICT (tenant, entity_type, entity_id) DO UPDATE SET
         state = EXCLUDED.state,
         arm_id = EXCLUDED.arm_id,
         sequence_nr = EXCLUDED.sequence_nr,
         started_at = EXCLUDED.started_at,
+        due_at = EXCLUDED.due_at,
         params = EXCLUDED.params,
         armed_by = EXCLUDED.armed_by
     WHERE EXCLUDED.sequence_nr >= t.sequence_nr),

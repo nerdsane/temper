@@ -318,6 +318,7 @@ async fn a_batch_commits_timer_resets_and_ends_or_none_of_its_rows() {
         started_at: format!("2026-11-02T00:00:{seq:02}Z"),
         params: format!("{{\"version\":{seq}}}"),
         armed_by: format!("{{\"agent_id\":\"caller-{seq}\"}}"),
+        due_at: None,
     };
     let append = |id: &str, expected, timer| PersistenceAppend {
         persistence_id: format!("t:Payment:{id}"),
@@ -334,8 +335,8 @@ async fn a_batch_commits_timer_resets_and_ends_or_none_of_its_rows() {
     let b = arm("two", 1);
     store
         .append_batch(&[
-            append("one", 0, Some(AppendStateTimer::Arm(a.clone()))),
-            append("two", 0, Some(AppendStateTimer::Arm(b.clone()))),
+            append("one", 0, Some(AppendStateTimer::Arm(Box::new(a.clone())))),
+            append("two", 0, Some(AppendStateTimer::Arm(Box::new(b.clone())))),
         ])
         .await
         .unwrap();
@@ -350,7 +351,11 @@ async fn a_batch_commits_timer_resets_and_ends_or_none_of_its_rows() {
     let reset = arm("one", 2);
     let refused = store
         .append_batch(&[
-            append("one", 1, Some(AppendStateTimer::Arm(reset.clone()))),
+            append(
+                "one",
+                1,
+                Some(AppendStateTimer::Arm(Box::new(reset.clone()))),
+            ),
             append("two", 0, Some(AppendStateTimer::End)),
         ])
         .await;
@@ -372,7 +377,11 @@ async fn a_batch_commits_timer_resets_and_ends_or_none_of_its_rows() {
     );
     store
         .append_batch(&[
-            append("one", 1, Some(AppendStateTimer::Arm(reset.clone()))),
+            append(
+                "one",
+                1,
+                Some(AppendStateTimer::Arm(Box::new(reset.clone()))),
+            ),
             append("two", 1, Some(AppendStateTimer::End)),
         ])
         .await

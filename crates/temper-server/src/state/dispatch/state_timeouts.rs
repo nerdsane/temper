@@ -939,6 +939,17 @@ pub(super) fn declared_timer(
     }
 }
 
+/// When a timer whose clock started at `started_at` falls due, as its row
+/// keeps it: RFC 3339 in UTC, so text order is time order. None for a budget
+/// that ends past the calendar's end, which never falls due.
+pub(super) fn timer_due_at(started_at: DateTime<Utc>, after_seconds: u64) -> Option<String> {
+    i64::try_from(after_seconds)
+        .ok()
+        .and_then(chrono::Duration::try_seconds)
+        .and_then(|budget| started_at.checked_add_signed(budget))
+        .map(|due_at| due_at.to_rfc3339())
+}
+
 /// When a move in `st`'s `fire_now_on` made the timer whose clock started at
 /// `started_at` due: the latest such move the record made in `st`'s state
 /// since then, from its status clock. None when no such move came. Timers are

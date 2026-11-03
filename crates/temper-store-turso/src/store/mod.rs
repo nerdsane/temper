@@ -449,6 +449,17 @@ impl TursoEventStore {
         conn.execute(schema::CREATE_SCHEDULED_ACTIONS_TABLE, ())
             .await
             .map_err(storage_error)?;
+        // SQLite refuses a column that is already there, so a failure here is
+        // a store that has it.
+        let _ = conn
+            .execute(schema::ALTER_STATE_TIMERS_ADD_DUE_AT, ())
+            .await;
+        conn.execute(schema::CREATE_STATE_TIMERS_DUE_INDEX, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_SCHEDULED_ACTIONS_DUE_INDEX, ())
+            .await
+            .map_err(storage_error)?;
 
         // Specs table extensions — add content_hash column for verification caching.
         let _ = conn.execute(schema::ALTER_SPECS_ADD_CONTENT_HASH, ()).await;

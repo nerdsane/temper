@@ -55,6 +55,7 @@ struct TimerParams<'a> {
     started_at: &'a str,
     params: &'a str,
     armed_by: &'a str,
+    due_at: Option<&'a str>,
 }
 
 impl<'a> AppendParams<'a> {
@@ -195,6 +196,7 @@ impl<'a> TimerParams<'a> {
                     started_at: &row.started_at,
                     params: &row.params,
                     armed_by: &row.armed_by,
+                    due_at: row.due_at.as_deref(),
                 }
             }
         })
@@ -245,5 +247,6 @@ impl AppendParams<'_> {
             .bind(timer.started_at)
             .bind(timer.params)
             .bind(timer.armed_by)
+            .bind(timer.due_at)
     }
 }

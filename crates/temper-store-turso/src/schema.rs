@@ -527,6 +527,15 @@ CREATE TABLE IF NOT EXISTS state_timers (
     PRIMARY KEY(tenant, entity_type, entity_id)
 );";
 
+/// When each armed state timer falls due. NULL on a row an older release
+/// wrote, until a boot writes it.
+pub const ALTER_STATE_TIMERS_ADD_DUE_AT: &str = "ALTER TABLE state_timers ADD COLUMN due_at TEXT";
+
+/// A tenant's state timers by due time, so the rows past due are one range
+/// read however many timers wait.
+pub const CREATE_STATE_TIMERS_DUE_INDEX: &str =
+    "CREATE INDEX IF NOT EXISTS idx_state_timers_due ON state_timers(tenant, due_at)";
+
 /// Pending `schedule(...)` and `schedule_at(...)` actions: one row per
 /// scheduled action until it fires, read once at boot to arm each again.
 pub const CREATE_SCHEDULED_ACTIONS_TABLE: &str = "\
@@ -540,6 +549,11 @@ CREATE TABLE IF NOT EXISTS scheduled_actions (
     armed_by TEXT NOT NULL,
     PRIMARY KEY(tenant, entity_type, entity_id, arm_id)
 );";
+
+/// A tenant's scheduled actions by due time, so the rows past due are one
+/// range read however many actions wait.
+pub const CREATE_SCHEDULED_ACTIONS_DUE_INDEX: &str =
+    "CREATE INDEX IF NOT EXISTS idx_scheduled_actions_due ON scheduled_actions(tenant, due_at)";
 
 // ---------------------------------------------------------------------------
 // Blob storage (content-addressed binary objects for TemperFS)

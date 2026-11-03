@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use temper_runtime::persistence::{PersistenceError, StateTimerRecord};
+use temper_runtime::persistence::{
+    OverdueTimerRows, OverdueTimers, PersistenceError, StateTimerRecord,
+};
 use temper_store_postgres::PostgresEventStore;
 use temper_store_turso::TursoEventStore;
 
@@ -21,6 +23,22 @@ pub trait StateTimerStore: Send + Sync {
         arm_id: &str,
     ) -> Result<(), PersistenceError>;
 
+    /// Write the due time on an entity's timer row if it still holds the
+    /// arming `arm_id`, for a row an older release wrote without one. Only
+    /// an update: a row its timer removed stays removed. The default keeps
+    /// no rows across releases, so it has none to date.
+    async fn date_state_timer(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        arm_id: &str,
+        due_at: &str,
+    ) -> Result<(), PersistenceError> {
+        let _ = (tenant, entity_type, entity_id, arm_id, due_at);
+        Ok(())
+    }
+
     /// Every armed timer row for `tenant`.
     async fn list_state_timers(
         &self,
@@ -40,6 +58,35 @@ pub trait StateTimerStore: Send + Sync {
             .await?
             .into_iter()
             .find(|row| row.entity_type == entity_type && row.entity_id == entity_id))
+    }
+
+    /// `tenant`'s timer rows due at or before `now` (RFC 3339 in UTC): how
+    /// many, and the earliest due time. The default reads the tenant's state
+    /// timer rows and keeps no scheduled actions; a store with a due-time
+    /// index overrides it.
+    async fn overdue_timer_rows(
+        &self,
+        tenant: &str,
+        now: &str,
+    ) -> Result<OverdueTimerRows, PersistenceError> {
+        let mut state_timers = OverdueTimers::default();
+        for row in self.list_state_timers(tenant).await? {
+            let Some(due_at) = row.due_at.filter(|due_at| due_at.as_str() <= now) else {
+                continue;
+            };
+            state_timers.count += 1;
+            if state_timers
+                .oldest_due_at
+                .as_ref()
+                .is_none_or(|oldest| due_at < *oldest)
+            {
+                state_timers.oldest_due_at = Some(due_at);
+            }
+        }
+        Ok(OverdueTimerRows {
+            state_timers,
+            scheduled_actions: OverdueTimers::default(),
+        })
     }
 }
 
@@ -87,6 +134,26 @@ macro_rules! forward_state_timer_store {
             ) -> Result<Vec<StateTimerRecord>, PersistenceError> {
                 <$store>::list_state_timers(self, tenant).await
             }
+
+            async fn overdue_timer_rows(
+                &self,
+                tenant: &str,
+                now: &str,
+            ) -> Result<OverdueTimerRows, PersistenceError> {
+                <$store>::overdue_timer_rows(self, tenant, now).await
+            }
+
+            async fn date_state_timer(
+                &self,
+                tenant: &str,
+                entity_type: &str,
+                entity_id: &str,
+                arm_id: &str,
+                due_at: &str,
+            ) -> Result<(), PersistenceError> {
+                <$store>::date_state_timer(self, tenant, entity_type, entity_id, arm_id, due_at)
+                    .await
+            }
         }
     };
 }
@@ -126,6 +193,27 @@ impl StateTimerStore for MetadataTimerRows {
         entity_id: &str,
     ) -> Result<Option<StateTimerRecord>, PersistenceError> {
         self.0.state_timer_row(tenant, entity_type, entity_id).await
+    }
+
+    async fn overdue_timer_rows(
+        &self,
+        tenant: &str,
+        now: &str,
+    ) -> Result<OverdueTimerRows, PersistenceError> {
+        self.0.overdue_timer_rows(tenant, now).await
+    }
+
+    async fn date_state_timer(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        arm_id: &str,
+        due_at: &str,
+    ) -> Result<(), PersistenceError> {
+        self.0
+            .date_state_timer(tenant, entity_type, entity_id, arm_id, due_at)
+            .await
     }
 }
 

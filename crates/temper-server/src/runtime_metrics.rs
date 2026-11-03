@@ -13,9 +13,11 @@ use opentelemetry::{KeyValue, global};
 
 pub(crate) mod blob_transport;
 mod handler_deadlines;
+mod overdue_timers;
 pub(crate) mod owed_writes;
 mod snapshot_writes;
 pub use handler_deadlines::*;
+pub use overdue_timers::*;
 pub use snapshot_writes::*;
 
 struct RuntimeMetrics {

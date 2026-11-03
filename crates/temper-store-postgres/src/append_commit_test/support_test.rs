@@ -160,6 +160,7 @@ impl Rows {
                 started_at: "2026-11-02T00:00:00Z".into(),
                 params: "{}".into(),
                 armed_by: "{}".into(),
+                due_at: None,
             },
             state: serde_json::json!({"status": "Open", "sequence_nr": sequence_nr}),
             fields,

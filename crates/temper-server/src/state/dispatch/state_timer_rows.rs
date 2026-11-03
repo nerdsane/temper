@@ -22,7 +22,7 @@ use temper_runtime::tenant::TenantId;
 use tokio::sync::Semaphore;
 use tracing::instrument;
 
-use super::state_timeouts::{ArmedTimer, remaining_budget};
+use super::state_timeouts::{ArmedTimer, remaining_budget, timer_due_at};
 use super::state_timer_follow::{BootCallers, BootTimers};
 use super::state_timer_setter::is_state_timer_service;
 use super::state_timer_settled::BootRows;
@@ -57,7 +57,10 @@ enum Listing {
 impl ServerState {
     /// Where `tenant`'s timer rows are kept: [`Self::state_timer_rows`] when
     /// set, else the tenant's metadata store. None: rows are not kept.
-    async fn timer_rows_for_tenant(&self, tenant: &str) -> Option<Arc<dyn StateTimerStore>> {
+    pub(super) async fn timer_rows_for_tenant(
+        &self,
+        tenant: &str,
+    ) -> Option<Arc<dyn StateTimerStore>> {
         if let Some(rows) = self.state_timer_rows.clone() {
             return Some(rows);
         }
@@ -265,6 +268,7 @@ impl ServerState {
     ) -> Result<(usize, usize), String> {
         let mut armed = 0usize;
         let mut overdue = 0usize;
+        let mut undated = Vec::new();
         for (tenant, timeouts) in self.declared_state_timeouts(tenants) {
             let Some(store) = self.timer_rows_for_tenant(tenant.as_str()).await else {
                 continue;
@@ -328,6 +332,12 @@ impl ServerState {
                         continue;
                     }
                 };
+                let due_at = timer_due_at(timer.started_at, timer.after_seconds);
+                if row.due_at != due_at
+                    && let Some(due_at) = due_at
+                {
+                    undated.push((store.clone(), row.clone(), due_at));
+                }
                 if is_state_timer_service(&timer.agent_ctx) {
                     // Armed for no one. The walk after this arms it, as the
                     // principal the record's journal names when it names one
@@ -364,6 +374,11 @@ impl ServerState {
                 self.spawn_state_timer(timer, Some(gate.clone()), armed_seq);
                 armed += 1;
             }
+        }
+        if !undated.is_empty() {
+            // determinism-ok: the due times of rows an older release wrote go
+            // in behind the boot, one low-priority write each.
+            tokio::spawn(super::overdue_timer_rows::date_timer_rows(undated));
         }
         Ok((armed, overdue))
     }
@@ -442,6 +457,7 @@ fn timer_record(timer: &ArmedTimer) -> Result<StateTimerRecord, serde_json::Erro
         arm_id: timer.arm_id.clone(),
         sequence_nr: timer.sequence_nr,
         started_at: timer.started_at.to_rfc3339(),
+        due_at: timer_due_at(timer.started_at, timer.after_seconds),
         params: serde_json::to_string(&timer.params)?,
         armed_by: encode_armed_by(&timer.agent_ctx)?,
     })

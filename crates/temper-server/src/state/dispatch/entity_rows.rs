@@ -21,7 +21,7 @@
 use temper_runtime::persistence::{AppendProjection, StateTimerRecord};
 use temper_runtime::tenant::TenantId;
 
-use super::state_timeouts::timer_agent;
+use super::state_timeouts::{timer_agent, timer_due_at};
 use crate::entity_actor::entity_rows::{
     EntityRows, EntityRowsHook, Projection, RowsInput, TimerRow,
 };
@@ -148,7 +148,7 @@ impl ServerState {
             }
         };
         let params = serde_json::to_string(&serde_json::Value::Object(params)).ok()?;
-        Some(TimerRow::Arm(StateTimerRecord {
+        Some(TimerRow::Arm(Box::new(StateTimerRecord {
             tenant: tenant.to_string(),
             entity_type: entity_type.to_string(),
             entity_id: after.entity_id.clone(),
@@ -156,8 +156,9 @@ impl ServerState {
             arm_id: timer_arm_id(&st.state, after.sequence_nr),
             sequence_nr: after.sequence_nr,
             started_at: event.timestamp.to_rfc3339(),
+            due_at: timer_due_at(event.timestamp, st.after_seconds),
             params,
             armed_by,
-        }))
+        })))
     }
 }
