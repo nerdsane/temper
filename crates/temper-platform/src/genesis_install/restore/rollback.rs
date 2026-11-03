@@ -39,6 +39,7 @@ pub(in crate::genesis_install) async fn rollback_to_prior(
         let matches = tenant_os_app_bundle_digest(tenant, &record.app_name).is_some_and(|digest| {
             record.bundle_digest.is_empty() || digest.bundle_digest == record.bundle_digest
         });
+        let mut recovered = None;
         let ready = if matches {
             // Pending records describe the desired version, so replay its phases rather
             // than treating its saved digest as proof that the runtime is unchanged.
@@ -51,7 +52,8 @@ pub(in crate::genesis_install) async fn rollback_to_prior(
             )
             .await
             {
-                Ok(_) => {
+                Ok(result) => {
+                    recovered = Some(result);
                     verify_install_runtime_ready(platform, ps, tenant, &record.app_name).await
                         && tenant_os_app_bundle_digest(tenant, &record.app_name).is_some_and(
                             |digest| {
@@ -80,6 +82,8 @@ pub(in crate::genesis_install) async fn rollback_to_prior(
         // Keep the recovery record failed unless this dependency independently verified.
         if let Err(error) = record_dependency_recovery(ps, record, ready).await {
             errors.push(error);
+        } else if ready && let Some(result) = recovered {
+            result.publish_reviews();
         }
     }
     let app_names = prior_records

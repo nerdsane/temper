@@ -174,14 +174,15 @@ pub async fn restore_prior_install(
     tenant: &str,
     prior: &InstalledAppRecord,
 ) -> Result<(), String> {
-    reconcile_materialized_app_closure(platform, tenant, &prior.app_name, Swap::SpecsFirst)
-        .await
-        .map_err(|error| {
-            format!(
-                "rollback re-reconcile of {} failed: {error}",
-                prior.app_name
-            )
-        })?;
+    let result =
+        reconcile_materialized_app_closure(platform, tenant, &prior.app_name, Swap::SpecsFirst)
+            .await
+            .map_err(|error| {
+                format!(
+                    "rollback re-reconcile of {} failed: {error}",
+                    prior.app_name
+                )
+            })?;
     if !verify_install_runtime_ready(platform, ps, tenant, &prior.app_name).await {
         return Err(format!(
             "rollback target {} for app {} is also not runtime-ready (both new and previous versions are broken)",
@@ -212,6 +213,7 @@ pub async fn restore_prior_install(
                 prior.app_name
             )
         })?;
+    result.publish_reviews();
     Ok(())
 }
 

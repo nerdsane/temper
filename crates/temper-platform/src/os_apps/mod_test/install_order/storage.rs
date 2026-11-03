@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use temper_runtime::persistence::PersistenceError;
 use temper_server::platform_store::{
-    InstalledAppRecord, PlatformStore, PolicyEntryRow, SpecRow, SpecVerificationUpdate,
-    WasmModuleRow,
+    InstalledAppRecord, ModuleReviewRow, PlatformStore, PolicyEntryRow, SpecRow,
+    SpecVerificationUpdate, WasmModuleRow,
 };
 use temper_server::storage::TursoStoreProvider;
 use temper_store_turso::{TenantUserRow, TursoEventStore};
@@ -98,6 +98,26 @@ impl PauseInstallStorage {
 
 #[async_trait::async_trait]
 impl PlatformStore for PauseInstallStorage {
+    async fn save_module_review(
+        &self,
+        tenant: &str,
+        app_name: &str,
+        version: &str,
+        result: &str,
+    ) -> Result<(), String> {
+        self.platform
+            .save_module_review(tenant, app_name, version, result)
+            .await
+    }
+
+    async fn load_module_review(
+        &self,
+        tenant: &str,
+        app_name: &str,
+    ) -> Result<Option<ModuleReviewRow>, String> {
+        self.platform.load_module_review(tenant, app_name).await
+    }
+
     async fn upsert_spec(
         &self,
         tenant: &str,

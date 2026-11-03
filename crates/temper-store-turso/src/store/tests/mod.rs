@@ -1780,6 +1780,73 @@ async fn upsert_specs_and_commit_preserves_identical_spec_version() {
     assert_eq!(committed, 1);
 }
 
+/// `(hash, verified)` of each spec the next install would find it need not write again.
+async fn verified_specs(store: &TursoEventStore, tenant: &str) -> Vec<(String, String, bool)> {
+    store
+        .load_verification_cache(tenant)
+        .await
+        .expect("load verification cache")
+        .into_iter()
+        .map(|(entity_type, (hash, verified))| (entity_type, hash, verified))
+        .collect()
+}
+
+#[tokio::test]
+async fn upsert_specs_and_commit_leaves_nothing_for_a_second_write() {
+    let store = make_store("spec-written-once").await;
+    let tenant = format!("tenant-{}", uuid::Uuid::new_v4());
+    let ioa_source = "[automaton]\nname = \"Issue\"\n";
+    let other_source = "[automaton]\nname = \"Task\"\n";
+    let specs = |csdl_xml| {
+        [
+            ("Issue", ioa_source, csdl_xml, "sha256:issue-v1"),
+            ("Task", other_source, csdl_xml, "sha256:task-v1"),
+        ]
+    };
+    let written = vec![
+        ("Issue".to_string(), "sha256:issue-v1".to_string(), true),
+        ("Task".to_string(), "sha256:task-v1".to_string(), true),
+    ];
+
+    store
+        .upsert_specs_and_commit(&tenant, &specs("<Schema v1 />"), None, "test-app")
+        .await
+        .expect("first install");
+    assert_eq!(verified_specs(&store, &tenant).await, written);
+
+    // The tenant's schema is in every spec's row, so one new property rewrites them all.
+    store
+        .upsert_specs_and_commit(&tenant, &specs("<Schema v2 />"), None, "test-app")
+        .await
+        .expect("an install that changes the schema");
+    assert_eq!(verified_specs(&store, &tenant).await, written);
+}
+
+#[tokio::test]
+async fn the_newest_module_review_of_an_app_is_kept_for_its_tenant() {
+    let store = make_store("module-review").await;
+
+    assert_eq!(store.load_module_review("t", "app").await.unwrap(), None);
+    store
+        .save_module_review("t", "app", "c1", r#"{"warnings":[]}"#)
+        .await
+        .unwrap();
+    store
+        .save_module_review("t", "app", "c2", r#"{"warnings":[1]}"#)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store.load_module_review("t", "app").await.unwrap(),
+        Some(("c2".to_string(), r#"{"warnings":[1]}"#.to_string()))
+    );
+    assert_eq!(
+        store.load_module_review("other", "app").await.unwrap(),
+        None
+    );
+    assert_eq!(store.load_module_review("t", "other").await.unwrap(), None);
+}
+
 #[tokio::test]
 async fn upsert_specs_and_commit_bypasses_write_gate_for_identical_app_specs() {
     let store = make_store("spec-idempotent-bypasses-gate").await;

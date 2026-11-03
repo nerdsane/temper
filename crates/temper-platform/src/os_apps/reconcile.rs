@@ -542,10 +542,16 @@ pub async fn reconcile_os_app(
     tenant: &str,
     app_name: &str,
 ) -> Result<OsAppReconcileResult, String> {
-    reconcile_os_app_swapping(state, tenant, app_name, super::Swap::ModulesFirst).await
+    let result =
+        reconcile_os_app_swapping(state, tenant, app_name, super::Swap::ModulesFirst).await?;
+    if let OsAppReconcileResult::Installed { install, .. } = &result {
+        install.publish_reviews();
+    }
+    Ok(result)
 }
 
-/// [`reconcile_os_app`] with the order its modules and specs go in.
+/// [`reconcile_os_app`] with the order its modules and specs go in. The closure
+/// caller publishes reviews after its readiness checks and provenance writes.
 pub(crate) async fn reconcile_os_app_swapping(
     state: &PlatformState,
     tenant: &str,

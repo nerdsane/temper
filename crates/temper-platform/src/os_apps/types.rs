@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
+use super::module_review_step::{ReviewAnswer, ReviewAsked};
 use super::{AdrEntry, AgentDefinition, AppSkillDefinition, SeedInstance, SystemFileEntry};
 
 /// Result of an app installation, categorising each spec by what happened.
@@ -43,6 +44,44 @@ pub struct InstallResult {
     /// found nothing.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub modules_reviewed: Vec<String>,
+    /// The reviews this install left running. What they say is not in
+    /// `warnings` or `modules_reviewed` until [`Self::with_reviews_read`], and
+    /// `GET /api/os-apps/{app}/review/{version}` answers with it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reviewing: Vec<ReviewAsked>,
+    #[serde(skip)]
+    pub(crate) review_answers: Vec<ReviewAnswer>,
+}
+
+impl InstallResult {
+    /// Allow completed reviews to replace saved findings only after the whole
+    /// install succeeds, including closure readiness and provenance writes.
+    pub(crate) fn publish_reviews(&self) {
+        for answer in &self.review_answers {
+            answer.publish();
+        }
+    }
+
+    /// Wait for the reviews this install left running and add what they said, for a caller that answers with all of
+    /// it. A review that stopped says so; none of them fails the install.
+    pub async fn with_reviews_read(mut self) -> Self {
+        for answer in std::mem::take(&mut self.review_answers) {
+            let said = answer.read().await;
+            self.warnings.extend(said.warnings);
+            self.modules_reviewed.extend(said.reviewed);
+        }
+        self.reviewing.clear();
+        self
+    }
+
+    /// Take on what a dependency's install said and left running, ahead of this install's own.
+    pub(crate) fn put_first(&mut self, dependency: InstallResult) {
+        self.warnings.splice(0..0, dependency.warnings);
+        self.modules_reviewed
+            .splice(0..0, dependency.modules_reviewed);
+        self.reviewing.splice(0..0, dependency.reviewing);
+        self.review_answers.splice(0..0, dependency.review_answers);
+    }
 }
 
 /// Something an install's checks found and did not refuse.

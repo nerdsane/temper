@@ -401,7 +401,8 @@ pub async fn install_genesis_app_from_registry(
         installed.materialized.len(),
         0,
     );
-    let install = installed.install;
+    // This answer says what Jev found in every app it installed, so it waits for him.
+    let install = installed.install.with_reviews_read().await;
     Ok(GenesisRegistryInstallResult {
         app_ref: request.app_ref,
         tenant: request.tenant,
@@ -443,7 +444,7 @@ async fn reconcile_app_install_order(
     swap: Swap,
 ) -> Result<InstallResult, String> {
     let mut root_result = InstallResult::default();
-    let (mut warnings, mut reviewed) = (Vec::new(), Vec::new());
+    let mut dependencies = Vec::new();
 
     for app_name in order {
         let started = Instant::now();
@@ -470,14 +471,14 @@ async fn reconcile_app_install_order(
                 if app_name == root_app_name {
                     root_result = *install;
                 } else {
-                    warnings.extend(install.warnings);
-                    reviewed.extend(install.modules_reviewed);
+                    dependencies.push(*install);
                 }
             }
         }
     }
-    root_result.warnings.splice(0..0, warnings);
-    root_result.modules_reviewed.splice(0..0, reviewed);
+    for dependency in dependencies.into_iter().rev() {
+        root_result.put_first(dependency);
+    }
 
     Ok(root_result)
 }
@@ -917,6 +918,7 @@ impl BoundActionHook for GenesisInstallHook {
                     }),
                 )
                 .await;
+                result.publish_reviews();
                 Ok(Some(serde_json::json!({
                     "kind": "genesis_app_install",
                     "appRef": app_ref,

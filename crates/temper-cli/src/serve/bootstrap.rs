@@ -781,6 +781,8 @@ pub(super) async fn bootstrap_installed_apps(
                     );
                 }
                 AppBootstrapSource::Cli => {
+                    // A start's supervisor reads the notes from these lines, so they wait for Jev.
+                    let result = result.with_reviews_read().await;
                     if !result.warnings.is_empty() || !result.modules_reviewed.is_empty() {
                         print_install_notes(
                             &app_name,

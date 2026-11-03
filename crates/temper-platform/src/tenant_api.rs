@@ -116,7 +116,7 @@ pub fn tenant_api_router() -> Router<PlatformState> {
         )
         .route("/os-apps", routing::get(list_os_apps))
         .route("/os-apps/{name}", routing::get(get_os_app_guide))
-        .route("/os-apps/{name}/install", pushed::route())
+        .merge(pushed::routes())
         .route("/genesis/apps/install", routing::post(install_genesis_app))
         .route("/genesis/apps/installs", routing::get(list_app_installs))
         .route(

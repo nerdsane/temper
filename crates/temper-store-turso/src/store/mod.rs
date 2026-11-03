@@ -46,6 +46,7 @@ mod field_index_rows;
 mod first_event;
 mod instrumentation;
 mod migration_support;
+mod module_reviews;
 pub mod ots;
 mod policy;
 mod policy_approval;
@@ -442,6 +443,9 @@ impl TursoEventStore {
         let _ = conn.execute(schema::ALTER_SPECS_ADD_CONTENT_HASH, ()).await;
         let _ = conn.execute(schema::ALTER_SPECS_ADD_COMMITTED, ()).await;
         conn.execute(schema::CREATE_SPEC_COMMITTED_VERSIONS_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_MODULE_REVIEWS_TABLE, ())
             .await
             .map_err(storage_error)?;
 

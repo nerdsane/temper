@@ -2,6 +2,7 @@
 
 use std::time::Instant;
 
+use futures::future::join_all;
 use temper_runtime::tenant::TenantId;
 
 use super::wasm_replacement::UploadedWasmReplacementContext;
@@ -36,8 +37,8 @@ pub(super) async fn register_bundle_modules(
         }
     };
 
+    let mut to_store = Vec::with_capacity(bundle.wasm_modules.len());
     for (module_name, wasm_bytes) in &bundle.wasm_modules {
-        let module_started = Instant::now();
         let module_config = bundle.wasm_module_configs.get(module_name);
         let hash = temper_wasm::WasmEngine::hash_module(wasm_bytes);
         let required = module_config.is_some_and(WasmModuleManifest::is_required);
@@ -69,18 +70,40 @@ pub(super) async fn register_bundle_modules(
                 continue;
             }
         }
+        to_store.push((module_name, wasm_bytes, hash, replace_uploaded_module));
+    }
 
-        let upsert_result = if replace_uploaded_module {
-            state
-                .server
-                .upsert_bundled_wasm_module_replacing_upload(tenant, module_name, wasm_bytes, &hash)
-                .await
-        } else {
-            state
-                .server
-                .upsert_wasm_module(tenant, module_name, wasm_bytes, &hash, "bundled")
-                .await
-        };
+    // All at once: each one asks the object store whether it holds these bytes,
+    // about 100 ms a module on an app's Temper and most of them unchanged, so
+    // asked in turn Arni Labs' 12 take 1.2 s. Asking is what repairs a lost object.
+    let stored = join_all(to_store.iter().map(
+        |(module_name, wasm_bytes, hash, replace_uploaded_module)| async move {
+            let started = Instant::now();
+            let result = if *replace_uploaded_module {
+                state
+                    .server
+                    .upsert_bundled_wasm_module_replacing_upload(
+                        tenant,
+                        module_name,
+                        wasm_bytes,
+                        hash,
+                    )
+                    .await
+            } else {
+                state
+                    .server
+                    .upsert_wasm_module(tenant, module_name, wasm_bytes, hash, "bundled")
+                    .await
+            };
+            (result, started.elapsed())
+        },
+    ))
+    .await;
+
+    for ((module_name, wasm_bytes, hash, _), (upsert_result, stored_in)) in
+        to_store.iter().zip(stored)
+    {
+        let module_config = bundle.wasm_module_configs.get(*module_name);
         if let Err(e) = upsert_result {
             tracing::warn!(
                 tenant,
@@ -91,14 +114,14 @@ pub(super) async fn register_bundle_modules(
         }
         state
             .server
-            .register_wasm_module(tenant_id, module_name, &hash);
+            .register_wasm_module(tenant_id, module_name, hash);
 
         if matches!(
             module_config.map(|config| config.startup_loading),
             Some(WasmStartupLoading::Eager)
         ) && let Err(e) = state.server.wasm_engine.compile_and_cache(wasm_bytes)
         {
-            wasm_failures.push(module_name.clone());
+            wasm_failures.push((*module_name).clone());
             tracing::warn!(
                 tenant,
                 module = %module_name,
@@ -112,13 +135,13 @@ pub(super) async fn register_bundle_modules(
             module = %module_name,
             hash = %hash,
             size = wasm_bytes.len(),
-            duration_ms = module_started.elapsed().as_millis() as u64,
+            duration_ms = stored_in.as_millis() as u64,
             startup_loading = ?module_config
                 .map(|config| config.startup_loading)
                 .unwrap_or_default(),
             "WASM module registered from OS app"
         );
-        wasm_registered.push(module_name.clone());
+        wasm_registered.push((*module_name).clone());
     }
 
     for (module_name, module_config) in &bundle.wasm_module_configs {

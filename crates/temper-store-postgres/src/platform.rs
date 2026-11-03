@@ -16,6 +16,7 @@ use crate::metrics::{
 
 mod evolution;
 mod inputs;
+mod module_reviews;
 mod policy_approval;
 mod policy_replace;
 mod rows;

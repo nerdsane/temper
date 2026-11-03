@@ -156,6 +156,7 @@ pub(super) async fn install_materialized_closure(
             let root_closure_id = record_closure(platform, tenant, &closure)
                 .await
                 .map_err(ClosureRefused::Failed)?;
+            install.publish_reviews();
             // Whoever reads this server's output reads every install the same way.
             println!("{}", installed_line(&closure.root.name, tenant, &install));
             Ok(ClosureInstalled {
