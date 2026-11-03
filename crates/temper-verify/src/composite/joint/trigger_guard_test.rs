@@ -314,3 +314,83 @@ permit(principal, action, resource) when { context has via && context.via != "re
     assert!(result.holds(), "{result}");
     assert_eq!(result.in_flight_bound, Some(3), "{result}");
 }
+
+/// `Go` notes `A` when the other `A` it points at is still idle. The walk
+/// holds one record of `A`, so the other one is a record it does not hold.
+/// `Peek` reads it too, which makes the walk track the pointer.
+const POINT: &str = r#"
+[automaton]
+name = "A"
+states = ["Idle", "Went", "Noted"]
+initial = "Idle"
+
+[[state]]
+name = "other"
+type = "string"
+initial = ""
+
+[[action]]
+name = "Point"
+kind = "input"
+from = ["Idle"]
+to = "Idle"
+params = ["other"]
+
+[[action]]
+name = "Peek"
+kind = "input"
+from = ["Idle"]
+to = "Idle"
+guard = "A[other].status == 'Went'"
+
+[[action]]
+name = "Go"
+kind = "input"
+from = ["Idle"]
+to = "Went"
+
+[[action.triggers]]
+name = "note"
+kind = "entity"
+target_entity = "A"
+target_action = "Note"
+guard = "A[other].status == 'Idle'"
+
+[action.triggers.resolve_target]
+kind = "same_id"
+
+[[action]]
+name = "Note"
+kind = "internal"
+from = ["Went"]
+to = "Noted"
+
+[[invariant]]
+name = "rule"
+assert = "status != 'Noted' || B[Id].status == 'Gone'"
+"#;
+
+const STAY: &str = r#"
+[automaton]
+name = "B"
+states = ["Here", "Gone"]
+initial = "Here"
+
+[[action]]
+name = "Leave"
+kind = "input"
+from = ["Here"]
+to = "Gone"
+"#;
+
+#[test]
+fn a_trigger_guard_on_a_record_the_walk_does_not_hold_may_hold() {
+    // In the runtime one A points at another that is idle, goes, and is
+    // noted while its B is here. The walk's one A is the one that goes: the
+    // other it points at is no record the walk holds, so it cannot tell
+    // whether the guard holds, and it must not read it as no record.
+    let policies = r#"permit(principal, action in [Action::"Point", Action::"Go"], resource is A);
+permit(principal, action == Action::"Note", resource is A) when { context has via && context.via == "reaction" };"#;
+    let result = invariant(&[POINT, STAY], Some(policies));
+    assert!(!result.holds(), "{result}");
+}
