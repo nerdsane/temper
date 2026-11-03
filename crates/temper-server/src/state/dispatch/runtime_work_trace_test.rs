@@ -122,11 +122,11 @@ to = "Ready"
 "#;
 
 /// The root span names of the runtime-started work this scenario makes, one
-/// per round each.
-const RUNTIME_WORK: &[&str] = &[
-    "dispatch.state_timeout.fire",
-    "dispatch.scheduled_actions",
-    "dispatch.background_spawn_entity",
+/// per round each, with the `runtime_work` kind each root carries.
+const RUNTIME_WORK: &[(&str, &str)] = &[
+    ("dispatch.state_timeout.fire", "state_timeout"),
+    ("dispatch.scheduled_actions", "scheduled_action"),
+    ("dispatch.background_spawn_entity", "background_spawn"),
 ];
 const ROUNDS: usize = 2;
 
@@ -222,7 +222,7 @@ async fn runtime_started_work_is_its_own_exported_trace_linked_to_its_cause() {
     for _ in 0..100 {
         if RUNTIME_WORK
             .iter()
-            .all(|name| named(&finished, name).len() >= ROUNDS)
+            .all(|(name, _)| named(&finished, name).len() >= ROUNDS)
         {
             break;
         }
@@ -251,7 +251,7 @@ async fn runtime_started_work_is_its_own_exported_trace_linked_to_its_cause() {
 
     // 2. Each piece of runtime work is a root of its own trace, linked to the
     // request whose move started it: one per round, in that round's request.
-    for name in RUNTIME_WORK {
+    for (name, kind) in RUNTIME_WORK {
         let roots = named(&finished, name);
         assert_eq!(roots.len(), ROUNDS, "{name}: one per round");
         let mut linked_requests = BTreeSet::new();
@@ -260,6 +260,11 @@ async fn runtime_started_work_is_its_own_exported_trace_linked_to_its_cause() {
                 root.parent_span_id,
                 SpanId::INVALID,
                 "{name} starts its own trace"
+            );
+            assert_eq!(
+                attribute(root, "runtime_work").as_deref(),
+                Some(*kind),
+                "{name} is marked as runtime work of its kind"
             );
             assert!(
                 !requests.contains(&root.span_context.trace_id().to_string()),

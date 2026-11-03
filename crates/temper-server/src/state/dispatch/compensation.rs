@@ -66,6 +66,7 @@ impl crate::state::ServerState {
         let parent_ctx = parent_ctx.for_background_task();
         let span = crate::trace_context::runtime_work_span!(
             crate::trace_context::cause(),
+            kind = "integration_compensation",
             "dispatch.integration_failure_compensation",
             tenant = %tenant,
             entity_type = %entity_type,

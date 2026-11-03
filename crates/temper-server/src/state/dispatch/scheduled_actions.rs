@@ -243,6 +243,7 @@ impl ServerState {
             let agent = &timer.agent_ctx;
             let span = crate::trace_context::runtime_work_span!(
                 armed_by,
+                kind = "scheduled_action",
                 "dispatch.scheduled_actions",
                 workflow.root_entity_type = %agent.workflow_root_entity_type.as_deref().unwrap_or(&timer.entity_type),
                 workflow.root_entity_id = %agent.workflow_root_entity_id.as_deref().unwrap_or(&timer.entity_id),

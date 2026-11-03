@@ -159,6 +159,7 @@ impl crate::state::ServerState {
                 .unwrap_or_else(|| format!("{parent_t}:{parent_i}"));
             let span = crate::trace_context::runtime_work_span!(
                 crate::trace_context::cause(),
+                kind = "background_spawn",
                 "dispatch.background_spawn_entity",
                 workflow.root_entity_type = %workflow_root_entity_type,
                 workflow.root_entity_id = %workflow_root_entity_id,

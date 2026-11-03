@@ -44,7 +44,12 @@ fn runtime_work_is_its_own_trace_linked_to_the_move_that_started_it() {
     let request = tracing::info_span!(parent: None, "request");
     let (started_by, work) = request.in_scope(|| {
         let started_by = cause();
-        let work = runtime_work_span!(started_by.clone(), "work.item", work.kind = "timer");
+        let work = runtime_work_span!(
+            started_by.clone(),
+            kind = "timer",
+            "work.item",
+            work.id = "w1"
+        );
         (started_by, work)
     });
     drop(request);
@@ -55,6 +60,16 @@ fn runtime_work_is_its_own_trace_linked_to_the_move_that_started_it() {
     let item = finished.iter().find(|s| s.name == "work.item").unwrap();
     let step = finished.iter().find(|s| s.name == "work.step").unwrap();
     assert_eq!(item.parent_span_id, SpanId::INVALID, "the work is a root");
+    assert_eq!(
+        test_spans::attribute(item, "runtime_work").as_deref(),
+        Some("timer"),
+        "the root names its kind of runtime work"
+    );
+    assert_eq!(
+        test_spans::attribute(item, "work.id").as_deref(),
+        Some("w1"),
+        "the caller's fields follow the kind"
+    );
     assert_ne!(item.span_context.trace_id(), started_by.trace_id());
     let links: Vec<_> = item.links.iter().map(|l| l.span_context.clone()).collect();
     assert_eq!(
@@ -69,11 +84,15 @@ fn runtime_work_is_its_own_trace_linked_to_the_move_that_started_it() {
 #[test]
 fn runtime_work_with_no_cause_is_an_unlinked_root() {
     let spans = test_spans::capture();
-    let work = runtime_work_span!(cause(), "work.item");
+    let work = runtime_work_span!(cause(), kind = "timer", "work.item");
     drop(work);
     let finished = spans.finished();
     assert_eq!(finished[0].parent_span_id, SpanId::INVALID);
     assert!(finished[0].links.is_empty());
+    assert_eq!(
+        test_spans::attribute(&finished[0], "runtime_work").as_deref(),
+        Some("timer")
+    );
 }
 
 #[test]
