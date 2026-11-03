@@ -370,11 +370,15 @@ impl JointModel {
                 }
             }
         }
+        let early = match mv {
+            Move::Read(dispatch) | Move::Arrive(dispatch) => self.overtakes(state, dispatch),
+            _ => false,
+        };
         let mut held_back = false;
         let mut nexts = Vec::new();
         for (mut outcome, text, certainty) in outcomes {
-            let fits = self.delivery == Delivery::BeforeNextRequest
-                || outcome.inflight.len() + outcome.calls.len() <= MAX_IN_FLIGHT;
+            let certainty = if early { Unsure } else { certainty };
+            let fits = self.delivery == Delivery::BeforeNextRequest || self.fits(&outcome);
             held_back |= !fits;
             if !fits {
                 continue;

@@ -14,7 +14,7 @@ use super::super::{Call, Committed, Dispatch, JointState};
 use super::commit::add;
 use super::read::Reaction;
 use super::step::Certainty;
-use super::{Delivery, JointModel, MAX_IN_FLIGHT};
+use super::{Delivery, JointModel};
 use crate::model::ParamValue;
 
 impl JointModel {
@@ -248,10 +248,10 @@ impl JointModel {
         outcomes
     }
 
-    /// `ways` without those holding more dispatches and calls in flight than
-    /// the walk keeps, but one: a later reaction or call only adds to them,
-    /// so the walk would hold each back ([`MAX_IN_FLIGHT`]), and the one
-    /// kept says that it did. Without it, `k` reactions whose guards the
+    /// `ways` without those holding more in flight than the walk keeps
+    /// ([`Self::fits`]), but one: a later reaction or call only adds to
+    /// them, so the walk would hold each back, and the one kept says that it
+    /// did. Without it, `k` reactions whose guards the
     /// model cannot decide make `2^k` ways, nearly all held back.
     fn within_flight(
         &self,
@@ -263,7 +263,7 @@ impl JointModel {
         let before = ways.heap();
         let mut over = false;
         ways.retain(|(state, _)| {
-            if state.inflight.len() + state.calls.len() <= MAX_IN_FLIGHT {
+            if self.fits(state) {
                 return true;
             }
             !std::mem::replace(&mut over, true)
