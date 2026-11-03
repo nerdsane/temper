@@ -41,6 +41,21 @@ async fn whoami(
     )
 }
 
+/// Reports the request's session as a Cedar input and as telemetry, and its
+/// telemetry intent.
+async fn observation_probe(Extension(context): Extension<AuthenticatedRequestContext>) -> String {
+    format!(
+        "cedar={:?} telemetry={:?} intent={:?}",
+        context
+            .security_context()
+            .context_attrs
+            .get("sessionId")
+            .and_then(|v| v.as_str()),
+        context.session_id(),
+        context.intent(),
+    )
+}
+
 /// Reports whether the middleware handed the handler an authenticated context.
 /// The bundle route has to serve both: anonymous callers with no context, and
 /// authenticated ones whose authority the handler needs in order to apply Cedar.
@@ -94,6 +109,7 @@ fn app(state: PlatformState) -> Router {
         .route("/healthz", get(ok_handler))
         .route("/api/identity/resolve", post(ok_handler))
         .route("/session-probe", get(session_probe))
+        .route("/observation-probe", get(observation_probe))
         .route("/api/specs", get(ok_handler))
         .route("/whoami", get(whoami))
         .route("/repo.git/{*path}", get(whoami).post(whoami))
@@ -412,6 +428,116 @@ async fn internal_capability_restores_exact_context_without_identity_resolution(
     assert_eq!(
         String::from_utf8(body.to_vec()).unwrap(),
         "tenant-a:Agent:invoking-agent:false"
+    );
+}
+
+/// Host middleware outside the platform router, inserting a principal it
+/// verified itself.
+async fn insert_host_identity(mut req: Request, next: Next) -> Response {
+    req.extensions_mut().insert(HostVerifiedIdentity(
+        temper_authz::SecurityContext::from_verified_jwt(
+            "ada@example.com",
+            temper_authz::PrincipalKind::Customer,
+            None,
+            None,
+            None,
+            None,
+        ),
+    ));
+    next.run(req).await
+}
+
+/// A protected request whose bearer token no tenant credential resolves.
+fn host_identity_request() -> HttpRequest<Body> {
+    HttpRequest::get("/whoami")
+        .header("authorization", "Bearer host-verified-token")
+        .header("x-tenant-id", "tenant-a")
+        .body(Body::empty())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn host_verified_identity_authenticates_in_the_requested_tenant() {
+    let response = app(PlatformState::new(None))
+        .layer(middleware::from_fn(insert_host_identity))
+        .oneshot(host_identity_request())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(body.to_vec()).unwrap(),
+        "tenant-a:Customer:ada@example.com:false"
+    );
+}
+
+#[tokio::test]
+async fn without_a_host_verified_identity_the_same_request_is_rejected() {
+    let response = app(PlatformState::new(None))
+        .oneshot(host_identity_request())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn host_verified_identity_keeps_session_and_intent_as_telemetry_only() {
+    let response = app(PlatformState::new(None))
+        .layer(middleware::from_fn(insert_host_identity))
+        .oneshot(
+            HttpRequest::get("/observation-probe")
+                .header("x-tenant-id", "tenant-a")
+                .header("x-session-id", "sess-host")
+                .header("x-intent", "list agent types")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(body.to_vec()).unwrap(),
+        r#"cedar=None telemetry=Some("sess-host") intent=Some("list agent types")"#
+    );
+}
+
+#[tokio::test]
+async fn tenant_policy_authorizes_a_host_verified_identity() {
+    let state = PlatformState::new(None);
+    crate::bootstrap::bootstrap_operator_credential_specs(&state, "default")
+        .await
+        .expect("operator credential specs should register");
+    let router = crate::router::build_platform_router(state.clone())
+        .layer(middleware::from_fn(insert_host_identity));
+    let request = || {
+        HttpRequest::get("/tdata/AgentTypes")
+            .header("x-tenant-id", "default")
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    // A tenant without a policy denies the identity.
+    assert_eq!(
+        router.clone().oneshot(request()).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+
+    state
+        .server
+        .authz
+        .reload_tenant_policies(
+            "default",
+            "permit(principal is Customer, action, resource);",
+        )
+        .expect("policy should parse");
+    assert_eq!(
+        router.oneshot(request()).await.unwrap().status(),
+        StatusCode::OK
     );
 }
 
