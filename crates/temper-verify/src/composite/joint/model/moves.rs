@@ -24,6 +24,12 @@ impl JointModel {
                 if !self.expansion.take() {
                     return out;
                 }
+                if self.outside_from(entity, &t.name).is_some()
+                    && self.enabled(entity, t, state, Blind::Nothing)
+                    && !self.outside_moves(entity, t, state, &values, &mut out)
+                {
+                    return out;
+                }
                 let senders = self.outside_senders(entity, &t.name);
                 if senders.is_empty() || !self.enabled(entity, t, state, Blind::Nothing) {
                     continue;

@@ -67,6 +67,7 @@ impl JointModel {
             return Walk {
                 states: 0,
                 held_back: false,
+                outside: vec![BTreeSet::new(); invariants.len()],
                 outcomes: invariants
                     .iter()
                     .map(|_| JointOutcome::Incomplete {
@@ -99,6 +100,25 @@ impl JointModel {
             broken.iter().all(Option::is_some)
         });
         let unwalked = explored.unwalked();
+        // The first move each invariant's first maybe-break rests on, and
+        // the types outside the scope it comes from when it is a reaction
+        // from them.
+        let first: Vec<Option<u32>> = maybe
+            .iter()
+            .map(|found| found.and_then(|index| explored.first_unsure(index)))
+            .collect();
+        let outside = broken
+            .iter()
+            .zip(&first)
+            .map(|(broken, first)| match (broken, first) {
+                (None, Some(label)) => explored
+                    .outside_at(*label)
+                    .and_then(|(entity, action)| self.outside_from(entity, action))
+                    .cloned()
+                    .unwrap_or_default(),
+                _ => BTreeSet::new(),
+            })
+            .collect();
         let outcomes = broken
             .iter()
             .zip(&maybe)
@@ -107,8 +127,8 @@ impl JointModel {
                 (Some(index), _) => JointOutcome::Broken {
                     path: explored.path(*index),
                 },
-                (None, Some(index)) => JointOutcome::Incomplete {
-                    reason: maybe_broken(explored.first_unsure(*index)),
+                (None, Some(_)) => JointOutcome::Incomplete {
+                    reason: maybe_broken(first[i].map(|label| explored.label(label))),
                 },
                 (None, None) if unknown[i] => JointOutcome::Incomplete {
                     reason: "an invariant read is unknown".into(),
@@ -133,16 +153,16 @@ impl JointModel {
             states: explored.len(),
             outcomes,
             held_back: explored.held_back,
+            outside,
         }
     }
 }
 
 /// Why an invariant false only where the walk went by `step`, a move it
 /// cannot be sure the runtime makes, is not checked.
-fn maybe_broken(step: Option<String>) -> String {
+fn maybe_broken(step: Option<&str>) -> String {
     format!(
         "it may break, but only on a way through \"{}\", which the runtime may never take: the model cannot decide the Cedar answer, guard or reference behind it",
-        step.as_deref()
-            .unwrap_or("a move the walk cannot be sure of")
+        step.unwrap_or("a move the walk cannot be sure of")
     )
 }

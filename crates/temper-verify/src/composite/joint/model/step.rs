@@ -27,6 +27,10 @@ pub(in crate::composite::joint) enum Move {
     /// sender: the dispatch path read them and they allowed it; its actor
     /// takes it later.
     Send(String, TemperModelAction, u32),
+    /// A reaction from a type outside the scope, as the sender it runs as:
+    /// a move from outside the model, whenever its target's guard may let
+    /// it ([`from_outside::Outside`]).
+    Reaction(String, TemperModelAction, u32),
     /// A record's state timer fires its action, with no parameters, as
     /// whoever armed it.
     Timer(String, String),
@@ -48,7 +52,15 @@ impl Move {
     /// Whether the system makes this move (a timer, a module, or the
     /// kernel's dispatches) rather than someone outside or a restart.
     pub(in crate::composite::joint) fn by_system(&self) -> bool {
-        !matches!(self, Move::Take(..) | Move::Send(..) | Move::Lost(..))
+        !matches!(
+            self,
+            Move::Take(..) | Move::Send(..) | Move::Reaction(..) | Move::Lost(..)
+        )
+    }
+
+    /// Whether this is a reaction from a type outside the scope.
+    pub(in crate::composite::joint) fn is_outside_reaction(&self) -> bool {
+        matches!(self, Move::Reaction(..))
     }
 
     /// The entity and action an outside move sends.
@@ -154,6 +166,13 @@ impl JointModel {
                 ) {
                     return (Vec::new(), false);
                 };
+            }
+            Move::Reaction(entity, action, by) => {
+                for outcome in self.outside_reaction(state, entity, action, *by) {
+                    if !self.expansion.push(&mut outcomes, outcome) {
+                        return (Vec::new(), false);
+                    }
+                }
             }
             Move::Timer(entity, name) => {
                 let armed = state.armed.get(entity).copied().unwrap_or(OUTSIDE);
@@ -429,7 +448,7 @@ impl JointModel {
 
 /// The dispatch an outside sender, or a module's answer, makes after the
 /// dispatch path read the related records and they allowed it.
-fn sent(entity: &str, action: &TemperModelAction, by: u32) -> Dispatch {
+pub(super) fn sent(entity: &str, action: &TemperModelAction, by: u32) -> Dispatch {
     Dispatch {
         to: entity.to_string(),
         action: action.name.clone(),
