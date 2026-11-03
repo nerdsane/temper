@@ -247,3 +247,70 @@ fn a_trigger_guard_on_a_type_outside_the_scope_may_hold() {
         "{result}"
     );
 }
+
+/// `Go` with `k` triggers that each tick `A` again when `C`, a type no rule
+/// here names, is on: the model cannot decide any of them.
+fn ticks(k: usize) -> String {
+    let triggers: String = (0..k)
+        .map(|i| {
+            format!(
+                r#"
+[[action.triggers]]
+name = "tick{i}"
+kind = "entity"
+target_entity = "A"
+target_action = "Tick"
+guard = "C[Id].status == 'On'"
+
+[action.triggers.resolve_target]
+kind = "same_id"
+"#
+            )
+        })
+        .collect();
+    format!(
+        r#"
+[automaton]
+name = "A"
+states = ["Idle", "Went"]
+initial = "Idle"
+
+[[action]]
+name = "Go"
+kind = "input"
+from = ["Idle"]
+to = "Went"
+{triggers}
+[[action]]
+name = "Tick"
+kind = "internal"
+from = ["Went"]
+
+[[invariant]]
+name = "rule"
+assert = "status == 'Went' => B[Id].status != 'Full'"
+"#
+    )
+}
+
+#[test]
+fn undecided_trigger_guards_build_only_the_ways_the_walk_keeps() {
+    // Sixteen undecided guards go 2^16 ways, and all but those with at most
+    // three ticks in flight are held back: building only those fits a small
+    // room.
+    let automatons = parsed(&[&ticks(16), BOX, SWITCH]);
+    let refs: Vec<&Automaton> = automatons.iter().collect();
+    let policies = r#"permit(principal, action in [Action::"Go", Action::"Turn"], resource);
+permit(principal, action, resource) when { context has via && context.via != "request" };"#;
+    let analysis = SendAnalysis::new(policies).expect("fixture policies parse");
+    let (room, progress) = (Bytes::new(32 << 20), Progress::default());
+    let bound = Bound {
+        room: &room,
+        progress: &progress,
+    };
+    let mut results = verify_joint_invariants(&refs, Some(&analysis), bound);
+    assert_eq!(results.len(), 1);
+    let result = results.remove(0);
+    assert!(result.holds(), "{result}");
+    assert_eq!(result.in_flight_bound, Some(3), "{result}");
+}
