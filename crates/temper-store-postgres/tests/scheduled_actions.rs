@@ -1,5 +1,6 @@
 //! Real PostgreSQL: scheduled-action rows commit with the event that arms them
-//! and with the event that fires them, and nowhere else.
+//! and with the event that fires them. Cancellation durably clears the action
+//! before cleanup.
 
 use sqlx::postgres::PgPoolOptions;
 use temper_runtime::persistence::{
@@ -130,6 +131,29 @@ async fn scheduled_action_rows_commit_with_their_events() {
     assert_eq!(arm_ids(&store, "tenant-a").await, ["1.1"]);
     assert_eq!(arm_ids(&store, "tenant-b").await, ["1.0"]);
 
+    // A refused call is durably cancelled before deletion. Repeating the
+    // cancellation, including after deletion, is harmless and tenant-scoped.
+    for _ in 0..2 {
+        store
+            .cancel_scheduled_action("tenant-a", "Job", "job-1", "1.1")
+            .await
+            .expect("cancellation");
+    }
+    let cancelled = store.list_scheduled_actions("tenant-a").await.unwrap();
+    assert_eq!(cancelled.len(), 1);
+    assert!(
+        cancelled[0].action.is_empty(),
+        "a restart sees terminal disposition"
+    );
+    assert_eq!(
+        store.list_scheduled_actions("tenant-b").await.unwrap()[0].action,
+        "Fire"
+    );
+
+    store
+        .cancel_scheduled_action("tenant-a", "Job", "missing", "1.1")
+        .await
+        .expect("absent cancellation");
     // A removal outside a commit takes one row, and repeating it is a no-op.
     for _ in 0..2 {
         store
@@ -137,6 +161,10 @@ async fn scheduled_action_rows_commit_with_their_events() {
             .await
             .expect("removal");
     }
+    store
+        .cancel_scheduled_action("tenant-a", "Job", "job-1", "1.1")
+        .await
+        .expect("cancellation after deletion");
     let left = arm_ids(&store, "tenant-a").await;
     let other = arm_ids(&store, "tenant-b").await;
 

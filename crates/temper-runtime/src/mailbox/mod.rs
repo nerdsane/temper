@@ -7,6 +7,8 @@
 //! The capacity is set at actor creation time and cannot grow.
 //! When full, sends return MailboxFull immediately — no blocking, no OOM.
 
+use std::sync::{Arc, OnceLock};
+
 use tokio::sync::mpsc;
 
 use crate::actor::actor_ref::Envelope;
@@ -21,11 +23,14 @@ pub const DEFAULT_MAILBOX_CAPACITY: usize = 1_000;
 pub struct MailboxSender<M: Message> {
     inner: mpsc::Sender<Envelope<M>>,
     capacity: usize,
+    /// Why the actor did not start, once its cell closed the mailbox for it.
+    not_started: Arc<OnceLock<String>>,
 }
 
 /// The receiver half of a mailbox. Held by ActorCell, not cloneable.
 pub struct MailboxReceiver<M: Message> {
     inner: mpsc::Receiver<Envelope<M>>,
+    not_started: Arc<OnceLock<String>>,
 }
 
 /// Create a new bounded mailbox with the given capacity.
@@ -39,12 +44,17 @@ pub fn mailbox<M: Message>(capacity: usize) -> (MailboxSender<M>, MailboxReceive
     );
 
     let (tx, rx) = mpsc::channel(capacity);
+    let not_started = Arc::new(OnceLock::new());
     (
         MailboxSender {
             inner: tx,
             capacity,
+            not_started: Arc::clone(&not_started),
         },
-        MailboxReceiver { inner: rx },
+        MailboxReceiver {
+            inner: rx,
+            not_started,
+        },
     )
 }
 
@@ -56,10 +66,15 @@ impl<M: Message> MailboxSender<M> {
 
     /// Send a message to the mailbox. Returns MailboxFull if at capacity.
     /// TigerStyle: This never blocks. Full is an error, not a wait condition.
+    /// A mailbox closed because its actor did not start answers why, however
+    /// late the send.
     pub fn send(&self, msg: Envelope<M>) -> Result<(), ActorError> {
         self.inner.try_send(msg).map_err(|e| match e {
             mpsc::error::TrySendError::Full(_) => ActorError::MailboxFull,
-            mpsc::error::TrySendError::Closed(_) => ActorError::SendFailed,
+            mpsc::error::TrySendError::Closed(_) => match self.not_started.get() {
+                Some(reason) => ActorError::InitFailed(reason.clone()),
+                None => ActorError::SendFailed,
+            },
         })
     }
 
@@ -90,6 +105,14 @@ impl<M: Message> MailboxReceiver<M> {
     pub async fn recv(&mut self) -> Option<Envelope<M>> {
         self.inner.recv().await
     }
+
+    /// Take no more messages because the actor did not start: a later send
+    /// answers `InitFailed(reason)`, and `recv` yields the messages already
+    /// queued, then None.
+    pub fn close_not_started(&mut self, reason: &str) {
+        let _ = self.not_started.set(reason.to_owned());
+        self.inner.close();
+    }
 }
 
 impl<M: Message> Clone for MailboxSender<M> {
@@ -97,6 +120,7 @@ impl<M: Message> Clone for MailboxSender<M> {
         Self {
             inner: self.inner.clone(),
             capacity: self.capacity,
+            not_started: Arc::clone(&self.not_started),
         }
     }
 }

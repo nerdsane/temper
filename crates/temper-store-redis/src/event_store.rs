@@ -8,7 +8,8 @@
 //!
 //! The `append()` operation uses a Lua script (`EVALSHA`) to atomically
 //! check-and-set the sequence number, preventing lost-update races between
-//! concurrent writers on the same entity.
+//! concurrent writers on the same entity. `append_batch` does the same for
+//! several journals at once (`batch_append`).
 
 use std::sync::Arc;
 
@@ -20,6 +21,8 @@ use temper_runtime::persistence::{
     storage_error,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
+
+mod batch_append;
 
 /// Lua script for atomic append: check expected sequence, RPUSH events, SET new seq, SADD entity ref.
 ///
@@ -57,6 +60,7 @@ return {1, new_seq}
 pub struct RedisEventStore {
     client: Arc<fred::clients::Client>,
     append_script: Script,
+    batch_append_script: Script,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -93,6 +97,7 @@ impl RedisEventStore {
         Ok(Self {
             client: Arc::new(client),
             append_script: Script::from_lua(APPEND_LUA),
+            batch_append_script: Script::from_lua(batch_append::BATCH_APPEND_LUA),
         })
     }
 
@@ -182,6 +187,65 @@ impl RedisEventStore {
             .map_err(storage_error)?;
         Ok(entries)
     }
+
+    /// Record that `entity_type('entity_id')`'s journal moved from
+    /// `expected_sequence` to `new_seq` in its current segment.
+    async fn record_segment(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        expected_sequence: u64,
+        new_seq: u64,
+    ) -> Result<(), PersistenceError> {
+        let current_segment_key = Self::current_segment_key(tenant, entity_type, entity_id);
+        let current_segment_raw: Option<String> = self
+            .client
+            .get(&current_segment_key)
+            .await
+            .map_err(storage_error)?;
+        let segment_index = current_segment_raw
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .unwrap_or(0);
+        let segment_key = Self::segment_key(tenant, entity_type, entity_id, segment_index);
+        let existing: Option<String> =
+            self.client.get(&segment_key).await.map_err(storage_error)?;
+        let mut record = existing
+            .as_deref()
+            .map(serde_json::from_str::<SegmentRecord>)
+            .transpose()
+            .map_err(|e| PersistenceError::Serialization(e.to_string()))?
+            .unwrap_or_else(|| SegmentRecord {
+                segment_index,
+                start_sequence_nr: (expected_sequence + 1).max(1),
+                end_sequence_nr: None,
+                snapshot_sequence: None,
+                event_count: 0,
+                sealed_at: None,
+                created_at: chrono::Utc::now(),
+            });
+        record.end_sequence_nr = Some(new_seq);
+        record.event_count = new_seq.saturating_sub(record.start_sequence_nr) + 1;
+        let encoded = serde_json::to_string(&record)
+            .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
+        let _: () = self
+            .client
+            .set(&segment_key, encoded, None, None, false)
+            .await
+            .map_err(storage_error)?;
+        let _: () = self
+            .client
+            .set(
+                &current_segment_key,
+                segment_index.to_string(),
+                None,
+                None,
+                false,
+            )
+            .await
+            .map_err(storage_error)?;
+        Ok(())
+    }
 }
 
 impl EventStore for RedisEventStore {
@@ -229,52 +293,8 @@ impl EventStore for RedisEventStore {
         match result.as_slice() {
             [1, new_seq] => {
                 let new_seq = *new_seq as u64;
-                let current_segment_key = Self::current_segment_key(tenant, entity_type, entity_id);
-                let current_segment_raw: Option<String> = self
-                    .client
-                    .get(&current_segment_key)
-                    .await
-                    .map_err(storage_error)?;
-                let segment_index = current_segment_raw
-                    .and_then(|raw| raw.parse::<u64>().ok())
-                    .unwrap_or(0);
-                let segment_key = Self::segment_key(tenant, entity_type, entity_id, segment_index);
-                let existing: Option<String> =
-                    self.client.get(&segment_key).await.map_err(storage_error)?;
-                let mut record = existing
-                    .as_deref()
-                    .map(serde_json::from_str::<SegmentRecord>)
-                    .transpose()
-                    .map_err(|e| PersistenceError::Serialization(e.to_string()))?
-                    .unwrap_or_else(|| SegmentRecord {
-                        segment_index,
-                        start_sequence_nr: (expected_sequence + 1).max(1),
-                        end_sequence_nr: None,
-                        snapshot_sequence: None,
-                        event_count: 0,
-                        sealed_at: None,
-                        created_at: chrono::Utc::now(),
-                    });
-                record.end_sequence_nr = Some(new_seq);
-                record.event_count = new_seq.saturating_sub(record.start_sequence_nr) + 1;
-                let encoded = serde_json::to_string(&record)
-                    .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
-                let _: () = self
-                    .client
-                    .set(&segment_key, encoded, None, None, false)
-                    .await
-                    .map_err(storage_error)?;
-                let _: () = self
-                    .client
-                    .set(
-                        &current_segment_key,
-                        segment_index.to_string(),
-                        None,
-                        None,
-                        false,
-                    )
-                    .await
-                    .map_err(storage_error)?;
+                self.record_segment(tenant, entity_type, entity_id, expected_sequence, new_seq)
+                    .await?;
                 Ok(new_seq)
             }
             [0, actual] => Err(PersistenceError::ConcurrencyViolation {
@@ -306,9 +326,7 @@ impl EventStore for RedisEventStore {
                     sequence_nr,
                 }])
             }
-            _ => Err(PersistenceError::Storage(
-                "RedisEventStore does not support atomic multi-journal append_batch".to_string(),
-            )),
+            _ => self.append_journals(appends).await,
         }
     }
 
@@ -331,14 +349,46 @@ impl EventStore for RedisEventStore {
             .await
             .map_err(storage_error)?;
 
-        let mut out = Vec::with_capacity(encoded_events.len());
-        for encoded in encoded_events {
-            let env: PersistenceEnvelope = serde_json::from_str(&encoded)
-                .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
-            out.push(env);
-        }
-        out.sort_by_key(|e| e.sequence_nr);
-        Ok(out)
+        decode_envelopes(encoded_events)
+    }
+
+    async fn read_events_page(
+        &self,
+        persistence_id: &str,
+        before_sequence: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let events_key = Self::events_key(tenant, entity_type, entity_id);
+
+        // The event at list index i has sequence_nr = i + 1, so a page is one
+        // index range ending just below `before_sequence`. Clamp the upper
+        // index to the journal length before calculating the page's start.
+        let span = i64::try_from(limit).unwrap_or(i64::MAX);
+        let (start, stop) = match before_sequence {
+            _ if span == 0 => return Ok(Vec::new()),
+            None => (-span, -1),
+            Some(before) if before <= 1 => return Ok(Vec::new()),
+            Some(before) => {
+                let journal_len: i64 =
+                    self.client.llen(&events_key).await.map_err(storage_error)?;
+                if journal_len == 0 {
+                    return Ok(Vec::new());
+                }
+                let stop = i64::try_from(before - 2)
+                    .unwrap_or(i64::MAX)
+                    .min(journal_len - 1);
+                (stop.saturating_sub(span - 1).max(0), stop)
+            }
+        };
+        let encoded_events: Vec<String> = self
+            .client
+            .lrange(&events_key, start, stop)
+            .await
+            .map_err(storage_error)?;
+
+        decode_envelopes(encoded_events)
     }
 
     async fn save_snapshot(
@@ -490,6 +540,20 @@ impl EventStore for RedisEventStore {
     }
 }
 
+/// Decode journal list entries into envelopes in ascending sequence order.
+fn decode_envelopes(
+    encoded_events: Vec<String>,
+) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+    let mut out = Vec::with_capacity(encoded_events.len());
+    for encoded in encoded_events {
+        let env: PersistenceEnvelope = serde_json::from_str(&encoded)
+            .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
+        out.push(env);
+    }
+    out.sort_by_key(|e| e.sequence_nr);
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -558,6 +622,53 @@ mod tests {
         assert_eq!(partial.len(), 1);
         assert_eq!(partial[0].sequence_nr, 2);
         assert_eq!(partial[0].event_type, "OrderApproved");
+    }
+
+    #[tokio::test]
+    async fn read_events_page_reads_newest_first_windows() {
+        // Runs only where REDIS_URL names a Redis server.
+        let Some(store) = make_store().await else {
+            return;
+        };
+        let pid = unique_persistence_id();
+        assert!(
+            store
+                .read_events_page(&pid, None, 3)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .read_events_page(&pid, Some(100), 3)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let events: Vec<_> = (0..7)
+            .map(|i| test_envelope("Moved", serde_json::json!({ "i": i })))
+            .collect();
+        store.append(&pid, 0, &events).await.unwrap();
+
+        let page = async |before: Option<u64>, limit: usize| -> Vec<u64> {
+            let page = store.read_events_page(&pid, before, limit).await.unwrap();
+            page.iter().map(|e| e.sequence_nr).collect()
+        };
+        assert_eq!(page(None, 3).await, [5, 6, 7]);
+        assert_eq!(page(Some(5), 3).await, [2, 3, 4]);
+        assert_eq!(page(Some(2), 3).await, [1]);
+        assert!(page(Some(1), 3).await.is_empty());
+        assert_eq!(page(None, 100).await, [1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(page(Some(100), 2).await, [6, 7]);
+        // The history handler reads limit + 1 rows to detect older events.
+        assert_eq!(page(Some(100), 3).await, [5, 6, 7]);
+        assert_eq!(page(Some(8), 2).await, [6, 7]);
+        assert_eq!(page(Some(9), 2).await, [6, 7]);
+        assert_eq!(page(Some(u64::MAX), 2).await, [6, 7]);
+        assert_eq!(page(Some(100), usize::MAX).await, [1, 2, 3, 4, 5, 6, 7]);
+        assert!(page(None, 0).await.is_empty());
+        assert!(page(Some(100), 0).await.is_empty());
+        assert!(page(Some(0), 3).await.is_empty());
     }
 
     #[tokio::test]

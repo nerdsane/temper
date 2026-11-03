@@ -710,6 +710,34 @@ impl EventStore for TenantStoreRouter {
         store.read_events(persistence_id, from_sequence).await
     }
 
+    #[instrument(skip_all, fields(persistence_id, otel.name = "router.read_events_page"))]
+    async fn read_events_page(
+        &self,
+        persistence_id: &str,
+        before_sequence: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        let (tenant, _, _) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let store = self.store_for_tenant(tenant).await?;
+        store
+            .read_events_page(persistence_id, before_sequence, limit)
+            .await
+    }
+
+    #[instrument(skip_all, fields(persistence_id, otel.name = "router.first_event_at"))]
+    async fn first_event_at(
+        &self,
+        persistence_id: &str,
+    ) -> Result<Option<chrono::DateTime<chrono::Utc>>, PersistenceError> {
+        let (tenant, _, _) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        self.store_for_tenant(tenant)
+            .await?
+            .first_event_at(persistence_id)
+            .await
+    }
+
     #[instrument(skip_all, fields(persistence_id, otel.name = "router.save_snapshot"))]
     async fn save_snapshot(
         &self,
@@ -734,6 +762,26 @@ impl EventStore for TenantStoreRouter {
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
         let store = self.store_for_tenant(tenant).await?;
         store.load_snapshot(persistence_id).await
+    }
+
+    async fn latest_sequence_nr(&self, persistence_id: &str) -> Result<u64, PersistenceError> {
+        let (tenant, _, _) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        self.store_for_tenant(tenant)
+            .await?
+            .latest_sequence_nr(persistence_id)
+            .await
+    }
+
+    #[instrument(skip_all, fields(tenant, otel.name = "router.journal_heads"))]
+    async fn journal_heads(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<temper_runtime::persistence::JournalHead>, PersistenceError> {
+        self.store_for_tenant(tenant)
+            .await?
+            .journal_heads(tenant)
+            .await
     }
 
     #[instrument(skip_all, fields(tenant, otel.name = "router.list_entity_ids"))]
@@ -787,6 +835,33 @@ impl EventStore for TenantStoreRouter {
     ) -> Result<Vec<temper_runtime::persistence::ScheduledActionRecord>, PersistenceError> {
         let store = self.store_for_tenant(tenant).await?;
         store.list_scheduled_actions(tenant).await
+    }
+
+    #[instrument(skip_all, fields(tenant, entity_type, otel.name = "router.list_entity_scheduled_actions"))]
+    async fn list_entity_scheduled_actions(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<Vec<temper_runtime::persistence::ScheduledActionRecord>, PersistenceError> {
+        let store = self.store_for_tenant(tenant).await?;
+        store
+            .list_entity_scheduled_actions(tenant, entity_type, entity_id)
+            .await
+    }
+
+    #[instrument(skip_all, fields(tenant, entity_type, otel.name = "router.cancel_scheduled_action"))]
+    async fn cancel_scheduled_action(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        arm_id: &str,
+    ) -> Result<(), PersistenceError> {
+        let store = self.store_for_tenant(tenant).await?;
+        store
+            .cancel_scheduled_action(tenant, entity_type, entity_id, arm_id)
+            .await
     }
 
     #[instrument(skip_all, fields(tenant, entity_type, otel.name = "router.delete_scheduled_action"))]
@@ -932,6 +1007,69 @@ mod tests {
             .await
             .expect("list");
         assert!(entity_ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn routed_creation_time_survives_compaction_and_keeps_tenants_isolated() {
+        let dir = tempfile::tempdir().unwrap();
+        let router = TenantStoreRouter::new(
+            &format!("file:{}", dir.path().join("platform.db").display()),
+            None,
+            Some(dir.path().join("tenants").to_string_lossy().into_owned()),
+        )
+        .await
+        .unwrap();
+        // The same entity key in separate tenant stores must retain each
+        // catalog's known creation time even with only a later event left.
+        for (tenant, first) in [
+            ("alpha", "2026-01-01T00:00:00.100Z"),
+            ("beta", "2026-02-01T00:00:00.200Z"),
+        ] {
+            let store = router.register_tenant(tenant).await.unwrap();
+            store
+                .upsert_query_projection_with_state(
+                    tenant,
+                    "Order",
+                    "one",
+                    "Draft",
+                    &serde_json::json!({}),
+                    &serde_json::json!({"first_event_at": first}),
+                    2,
+                )
+                .await
+                .unwrap();
+            let conn = store
+                .write_connection("test", WritePriority::High)
+                .await
+                .unwrap();
+            conn.execute(
+                "INSERT INTO events (tenant, entity_type, entity_id, sequence_nr, event_type, payload) VALUES (?1, 'Order', 'one', 2, 'Moved', ?2)",
+                params![tenant, r#"{"timestamp":"2026-03-01T00:00:00.000Z"}"#],
+            ).await.unwrap();
+        }
+        for (tenant, first) in [
+            ("alpha", "2026-01-01T00:00:00.100Z"),
+            ("beta", "2026-02-01T00:00:00.200Z"),
+        ] {
+            assert_eq!(
+                router
+                    .first_event_at(&format!("{tenant}:Order:one"))
+                    .await
+                    .unwrap(),
+                Some(
+                    chrono::DateTime::parse_from_rfc3339(first)
+                        .unwrap()
+                        .with_timezone(&chrono::Utc)
+                ),
+            );
+            assert_eq!(
+                router
+                    .first_event_at(&format!("{tenant}:Order:missing"))
+                    .await
+                    .unwrap(),
+                None
+            );
+        }
     }
 
     #[tokio::test]

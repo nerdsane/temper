@@ -10,10 +10,14 @@ use super::bundle_transport::decode_bundle_response;
 use super::cache_paths::{
     app_cache_dir, replace_directory, validate_git_object_id, validate_identity_component,
 };
+use super::closure_install::MaterializedApp;
+use super::registry::{RegistryUrl, registry_client};
+use super::written::{self, Written};
 use super::{
     GenesisRegistryBundleApp, GenesisRegistryBundleFile, GenesisRegistryBundleResponse,
     RegistryAppRef, parse_registry_app_ref,
 };
+use crate::os_apps::AppFileSource;
 
 pub(super) const MAX_GENESIS_BUNDLE_FILES: usize = 4096;
 pub(super) const MAX_GENESIS_BUNDLE_APPS: usize = 256;
@@ -31,24 +35,26 @@ const MAX_GENESIS_TREE_ENTRIES: usize = 16_384;
 const MAX_GENESIS_TREE_DEPTH: usize = 128;
 const MAX_GENESIS_TREE_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Fetch the pinned closure's bundle and write it whole to `cache_root`:
+/// each app at `<cache_root>/<name>`, with the files it was written with.
 pub(super) async fn materialize_registry_app_closure_via_bundle(
-    registry_url: &str,
+    registry: &RegistryUrl,
     registry_tenant: &str,
     root_ref: RegistryAppRef,
     cache_root: &Path,
-) -> Result<Vec<RegistryAppRef>, String> {
+) -> Result<Vec<MaterializedApp>, String> {
     let Some(version_hash) = root_ref.version_hash.as_deref() else {
         return Err("bundle fetch requires a pinned root app ref".to_string());
     };
     let version_hash = validate_git_object_id(version_hash)?;
     let bundle_url = format!(
         "{}/api/genesis/apps/{}/{}/versions/{}/bundle",
-        registry_url.trim_end_matches('/'),
+        registry.as_str(),
         root_ref.owner,
         root_ref.name,
         version_hash
     );
-    let response = reqwest::Client::new()
+    let response = registry_client()?
         .get(&bundle_url)
         .header("X-Tenant-Id", registry_tenant)
         .send()
@@ -74,19 +80,24 @@ pub(super) async fn materialize_registry_app_closure_via_bundle(
         .tempdir_in(cache_parent)
         .map_err(|error| format!("create staged Genesis bundle cache: {error}"))?;
 
-    let mut refs = Vec::new();
+    let mut apps = Vec::new();
+    let mut written = Written::new();
     for app in bundle.apps {
         validate_identity_component("owner", &app.owner)?;
-        let app_dir = app_cache_dir(staged_cache.path(), &app.name)?;
-        write_bundle_app(&app_dir, &app)?;
-        refs.push(RegistryAppRef {
+        let paths = write_bundle_app(&app_cache_dir(staged_cache.path(), &app.name)?, &app)?;
+        written.insert(app.name.clone(), paths.iter().cloned().collect());
+        // Where the app is once the staged closure is renamed into place.
+        let files = AppFileSource::written(app_cache_dir(cache_root, &app.name)?, paths);
+        let version = RegistryAppRef {
             owner: app.owner,
             name: app.name,
             version_hash: Some(app.version_hash),
-        });
+        };
+        apps.push(MaterializedApp { version, files });
     }
+    written::keep(staged_cache.path(), &written)?;
     replace_directory(staged_cache.keep(), cache_root)?;
-    Ok(refs)
+    Ok(apps)
 }
 
 fn validate_registry_bundle(
@@ -189,10 +200,12 @@ fn validate_registry_bundle(
     Ok(())
 }
 
+/// Write `app`'s files into `app_dir`, and return the path of each inside
+/// it, `/`-separated.
 pub(super) fn write_bundle_app(
     app_dir: &Path,
     app: &GenesisRegistryBundleApp,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     if app_dir.exists() {
         std::fs::remove_dir_all(app_dir).map_err(|error| {
             format!("clear Genesis bundle app '{}': {error}", app_dir.display())
@@ -201,9 +214,11 @@ pub(super) fn write_bundle_app(
     std::fs::create_dir_all(app_dir)
         .map_err(|error| format!("create Genesis bundle app '{}': {error}", app_dir.display()))?;
 
+    let mut written = Vec::new();
     for file in &app.files {
         let rel = safe_bundle_relative_path(&file.path)?;
         let path = app_dir.join(&rel);
+        written.push(rel.to_string_lossy().replace('\\', "/"));
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|error| {
                 format!("create bundle file parent '{}': {error}", parent.display())
@@ -221,7 +236,7 @@ pub(super) fn write_bundle_app(
         std::fs::write(&path, bytes)
             .map_err(|error| format!("write bundle file '{}': {error}", path.display()))?;
     }
-    Ok(())
+    Ok(written)
 }
 
 pub(super) fn safe_bundle_relative_path(path: &str) -> Result<PathBuf, String> {
@@ -342,23 +357,35 @@ impl GenesisBundleBudget {
     }
 }
 
+/// Read `paths` of `app_dir`, the files its Genesis tree named, as bundle
+/// files. Files under a generated folder (`target`, `.git`) are left out.
 pub(super) fn collect_bundle_files(
     app_dir: &Path,
+    paths: &BTreeSet<String>,
     budget: &mut GenesisBundleBudget,
 ) -> Result<Vec<GenesisRegistryBundleFile>, String> {
-    let mut paths = Vec::new();
-    collect_bundle_file_paths(app_dir, app_dir, &mut paths, budget.files_remaining)?;
-    paths.sort();
+    let file_budget = budget.files_remaining;
     let mut files = Vec::new();
-    for path in paths {
-        let rel = path
-            .strip_prefix(app_dir)
-            .map_err(|error| format!("strip bundle path '{}': {error}", path.display()))?
-            .to_string_lossy()
-            .replace('\\', "/");
+    let generated = |rel: &&String| {
+        rel.split('/')
+            .any(|part| part == "target" || part == ".git")
+    };
+    for rel in paths.iter().filter(|rel| !generated(rel)) {
+        if files.len() >= file_budget {
+            return Err(format!(
+                "Genesis bundle file count exceeded budget {MAX_GENESIS_BUNDLE_FILES}"
+            ));
+        }
+        let path = app_dir.join(rel);
         let metadata = std::fs::symlink_metadata(&path)
             .map_err(|error| format!("stat bundle file '{}': {error}", path.display()))?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
+        if metadata.file_type().is_symlink() {
+            return Err(format!(
+                "Genesis bundle entry '{}' must not be a symbolic link",
+                path.display()
+            ));
+        }
+        if !metadata.is_file() {
             return Err(format!(
                 "Genesis bundle path '{}' must be a regular file",
                 path.display()
@@ -378,66 +405,11 @@ pub(super) fn collect_bundle_files(
             ));
         }
         files.push(GenesisRegistryBundleFile {
-            path: rel,
+            path: rel.clone(),
             content_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
         });
     }
     Ok(files)
-}
-
-fn collect_bundle_file_paths(
-    root: &Path,
-    dir: &Path,
-    paths: &mut Vec<PathBuf>,
-    file_budget: usize,
-) -> Result<(), String> {
-    let mut entries: Vec<_> = std::fs::read_dir(dir)
-        .map_err(|error| format!("read bundle directory '{}': {error}", dir.display()))?
-        .filter_map(|entry| entry.ok())
-        .collect();
-    entries.sort_by_key(|entry| entry.file_name());
-    for entry in entries {
-        let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|error| format!("stat Genesis bundle entry '{}': {error}", path.display()))?;
-        if file_type.is_symlink() {
-            return Err(format!(
-                "Genesis bundle entry '{}' must not be a symbolic link",
-                path.display()
-            ));
-        }
-        let rel = path
-            .strip_prefix(root)
-            .map_err(|error| format!("strip bundle path '{}': {error}", path.display()))?;
-        if rel.components().any(|component| {
-            matches!(component, Component::Normal(part) if part == "target" || part == ".git")
-        }) {
-            if file_type.is_dir() {
-                tracing::warn!(
-                    path = %path.display(),
-                    "Skipping forbidden generated directory in Genesis bundle export"
-                );
-            }
-            continue;
-        }
-        if file_type.is_dir() {
-            collect_bundle_file_paths(root, &path, paths, file_budget)?;
-        } else if file_type.is_file() {
-            if paths.len() >= file_budget {
-                return Err(format!(
-                    "Genesis bundle file count exceeded budget {MAX_GENESIS_BUNDLE_FILES}"
-                ));
-            }
-            paths.push(path);
-        } else {
-            return Err(format!(
-                "Genesis bundle entry '{}' must be a regular file or directory",
-                path.display()
-            ));
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

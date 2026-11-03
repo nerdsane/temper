@@ -226,7 +226,8 @@ fn collect_blob_ref_pointers(value: &Value, pointer: &str, out: &mut Vec<String>
     }
 }
 
-fn blob_bytes_match_key(key: &str, bytes: &[u8]) -> bool {
+/// Verify stored bytes against their content address.
+pub(super) fn blob_bytes_match_key(key: &str, bytes: &[u8]) -> bool {
     let Some(expected) = field_overflow_sha256(key) else {
         return false;
     };

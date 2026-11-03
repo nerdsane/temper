@@ -63,21 +63,28 @@ fn authenticate(mut request: Request<Body>) -> Request<Body> {
 }
 
 fn build_state_with_field_invariant() -> ServerState {
-    let csdl = parse_csdl(CSDL_XML).expect("CSDL parse");
+    build_state(ORDER_WITH_FIELD_INVARIANT_IOA)
+}
+
+fn build_state(order: &str) -> ServerState {
     let mut registry = SpecRegistry::new();
-    registry.register_tenant(
-        "default",
-        csdl,
-        CSDL_XML.to_string(),
-        &[("Order", ORDER_WITH_FIELD_INVARIANT_IOA)],
-    );
+    install(&mut registry, order);
     let system = ActorSystem::new("field-invariant-test");
     let state = ServerState::from_registry(system, registry);
-    // Mark Order verified so write requests aren't rejected by the
-    // verification gate — these tests exercise the constraint pipeline, not
-    // the verification cascade.
+    state
+        .authz
+        .reload_tenant_policies("default", "permit(principal, action, resource);")
+        .expect("field-invariant fixture policy should parse");
+    state
+}
+
+/// Install `order` as the tenant's Order spec, marked verified so write
+/// requests aren't rejected by the verification gate — these tests exercise
+/// the constraint pipeline, not the verification cascade.
+fn install(registry: &mut SpecRegistry, order: &str) {
+    let csdl = parse_csdl(CSDL_XML).expect("CSDL parse");
+    registry.register_tenant("default", csdl, CSDL_XML.to_string(), &[("Order", order)]);
     {
-        let mut registry = state.registry.write().unwrap();
         registry.set_verification_status(
             &TenantId::default(),
             "Order",
@@ -93,11 +100,6 @@ fn build_state_with_field_invariant() -> ServerState {
             }),
         );
     }
-    state
-        .authz
-        .reload_tenant_policies("default", "permit(principal, action, resource);")
-        .expect("field-invariant fixture policy should parse");
-    state
 }
 
 /// Send a POST `/tdata/Orders` with the given JSON body and return the
@@ -263,5 +265,35 @@ async fn field_invariant_bypass_respects_feature_flag() {
         status,
         StatusCode::CREATED,
         "with enforcement disabled, invariant should be bypassed: {body:?}"
+    );
+}
+
+/// A record made before its spec declared `tier` stores none. A field
+/// invariant reads it as its declared initial value, as a guard does.
+#[tokio::test]
+async fn a_field_invariant_reads_a_newly_declared_field_as_its_default() {
+    let v1 = ORDER_WITH_FIELD_INVARIANT_IOA
+        .split("[[field_invariant]]")
+        .next()
+        .unwrap()
+        .to_string();
+    let state = build_state(&v1);
+    let (status, body) = post_order(
+        &state,
+        r#"{"id": "ord-old", "Currency": "EUR", "Notes": "keep me"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "seed create failed: {body:?}");
+
+    let v2 = format!(
+        "{v1}\n[[state]]\nname = \"tier\"\ntype = \"string\"\ninitial = \"standard\"\n\n\
+         [[field_invariant]]\nname = \"OnlyStandardOrdersCarryNotes\"\n\
+         assert = \"tier != 'standard' => Notes == null\"\n"
+    );
+    install(&mut state.registry.write().unwrap(), &v2);
+    let (status, body) = patch_order(&state, "ord-old", r#"{"Currency": "GBP"}"#).await;
+    assert!(
+        status == StatusCode::OK || status == StatusCode::NO_CONTENT,
+        "ord-old stores no tier, which reads as 'standard'; got {status} body={body:?}"
     );
 }

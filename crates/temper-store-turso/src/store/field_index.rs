@@ -7,15 +7,18 @@
 
 use crate::driver::{Value, params, params_from_iter};
 use std::collections::{BTreeMap, BTreeSet};
-use temper_runtime::persistence::{PersistenceError, storage_error};
+use temper_runtime::persistence::{
+    PersistenceError, catalog_state_for_storage, catalog_state_from_storage, storage_error,
+};
 use temper_runtime::scheduler::sim_now;
 use tracing::instrument;
 
 use super::field_index_rows::sync_field_index;
-use super::projection_rows::{ProjectionWrite, remove_projection, write_projection};
+use super::projection_rows::{
+    ProjectionWrite, existing_projection, remove_projection, write_projection,
+};
 use super::unchanged_projections::{
-    ExistingProjection, apply_event_counters, drop_event_counters, projection_hash,
-    store_event_counters,
+    apply_event_counters, drop_event_counters, projection_hash, store_event_counters,
 };
 use super::write_gate::WritePriority;
 use super::{TursoEventStore, TursoQueryProjectionRow};
@@ -143,6 +146,49 @@ impl TursoEventStore {
         Ok(())
     }
 
+    /// Rewrite an existing catalog row and its field index from `state`, as
+    /// [`Self::upsert_query_projection_with_state`] does, and leave a record
+    /// with no catalog row alone: while the server serves, only the record's
+    /// own commit creates its row (boot repair creates the missing ones before
+    /// serving). A record deleted after `state` was read stays deleted.
+    #[expect(clippy::too_many_arguments, reason = "projection upsert boundary")]
+    pub async fn refresh_query_projection_with_state(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+        fields: &serde_json::Value,
+        state: &serde_json::Value,
+        sequence_nr: u64,
+    ) -> Result<(), PersistenceError> {
+        let status = canonical_projection_status(status, state);
+        let conn = self
+            .write_connection("turso.refresh_query_projection", WritePriority::Low)
+            .await?;
+        let tx = conn.begin_immediate().await.map_err(storage_error)?;
+        if existing_projection(&tx, [tenant, entity_type, entity_id])
+            .await?
+            .is_some()
+        {
+            write_projection(
+                &tx,
+                &ProjectionWrite {
+                    tenant,
+                    entity_type,
+                    entity_id,
+                    status,
+                    fields,
+                    state,
+                    sequence_nr,
+                },
+            )
+            .await?;
+        }
+        tx.commit().await.map_err(storage_error)?;
+        Ok(())
+    }
+
     /// Upsert several durable query-plane projections in one transaction.
     #[instrument(skip_all, fields(
         otel.name = "turso.upsert_query_projections",
@@ -176,44 +222,24 @@ impl TursoEventStore {
             .await?;
         let tx = conn.begin_immediate().await.map_err(storage_error)?;
         let updated_at = sim_now().to_rfc3339();
+        // One lookup by key per entity: a statement that ORs the keys
+        // together can only search by tenant, reading its whole catalog.
         let mut existing = BTreeMap::new();
-        let existing_candidates = projections
+        for projection in projections
             .iter()
             .filter(|projection| !projection.known_new)
-            .collect::<Vec<_>>();
-        if !existing_candidates.is_empty() {
-            let mut existing_sql = String::from(
-                "SELECT c.entity_type, c.entity_id, c.sequence_nr, c.projection_hash, k.sequence_nr \
-                 FROM entity_catalog c LEFT JOIN entity_catalog_counters k \
-                   ON k.tenant = c.tenant AND k.entity_type = c.entity_type \
-                  AND k.entity_id = c.entity_id \
-                 WHERE c.tenant = ? AND (",
-            );
-            let mut existing_values = Vec::with_capacity(1 + existing_candidates.len() * 2);
-            existing_values.push(Value::from(tenant.to_string()));
-            for (index, projection) in existing_candidates.iter().enumerate() {
-                if index > 0 {
-                    existing_sql.push_str(" OR ");
-                }
-                existing_sql.push_str("(c.entity_type = ? AND c.entity_id = ?)");
-                existing_values.push(Value::from(projection.entity_type.clone()));
-                existing_values.push(Value::from(projection.entity_id.clone()));
-            }
-            existing_sql.push(')');
-
-            let mut existing_rows = tx
-                .query(&existing_sql, params_from_iter(existing_values))
-                .await
-                .map_err(storage_error)?;
-            while let Some(row) = existing_rows.next().await.map_err(storage_error)? {
-                let entity_type: String = row.get(0).map_err(storage_error)?;
-                let entity_id: String = row.get(1).map_err(storage_error)?;
+        {
+            let key = [
+                tenant,
+                projection.entity_type.as_str(),
+                projection.entity_id.as_str(),
+            ];
+            if let Some(found) = existing_projection(&tx, key).await? {
                 existing.insert(
-                    (entity_type, entity_id),
-                    ExistingProjection::from_row(&row, 2)?,
+                    (projection.entity_type.clone(), projection.entity_id.clone()),
+                    found,
                 );
             }
-            drop(existing_rows);
         }
 
         struct PreparedProjection {
@@ -222,25 +248,29 @@ impl TursoEventStore {
             status: String,
             fields_json: String,
             state_json: String,
+            first_event_at: Option<String>,
             sequence_nr: i64,
             projection_hash: String,
         }
 
         let mut catalog_upserts = Vec::new();
         let mut changed_indexes = Vec::new();
+        let mut applied_projections = Vec::new();
         for projection in &projections {
             let fields_json = serde_json::to_string(&projection.fields)
                 .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
-            let state_json = serde_json::to_string(&projection.state)
+            let stored_state = catalog_state_for_storage(&projection.fields, &projection.state);
+            let state_json = serde_json::to_string(&stored_state)
                 .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
             let new_projection_hash =
-                projection_hash(&projection.status, &fields_json, &projection.state);
+                projection_hash(&projection.status, &fields_json, &stored_state);
             let sequence_nr = i64::try_from(projection.sequence_nr).unwrap_or(i64::MAX);
             let existing_row =
                 existing.get(&(projection.entity_type.clone(), projection.entity_id.clone()));
             if existing_row.is_some_and(|existing| existing.sequence_nr() > sequence_nr) {
                 continue;
             }
+            applied_projections.push(*projection);
             let entity = [
                 tenant,
                 projection.entity_type.as_str(),
@@ -269,6 +299,11 @@ impl TursoEventStore {
                 status: projection.status.clone(),
                 fields_json,
                 state_json,
+                first_event_at: projection
+                    .state
+                    .get("first_event_at")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
                 sequence_nr,
                 projection_hash: new_projection_hash,
             });
@@ -277,15 +312,15 @@ impl TursoEventStore {
         if !catalog_upserts.is_empty() {
             let mut upsert_sql = String::from(
                 "INSERT INTO entity_catalog \
-                 (tenant, entity_type, entity_id, status, fields, state, updated_at, sequence_nr, projection_version, projection_hash) \
+                 (tenant, entity_type, entity_id, status, fields, state, updated_at, sequence_nr, projection_version, projection_hash, first_event_at) \
                  VALUES ",
             );
-            let mut upsert_values = Vec::with_capacity(catalog_upserts.len() * 9);
+            let mut upsert_values = Vec::with_capacity(catalog_upserts.len() * 10);
             for (index, projection) in catalog_upserts.iter().enumerate() {
                 if index > 0 {
                     upsert_sql.push_str(", ");
                 }
-                upsert_sql.push_str("(?, ?, ?, ?, ?, ?, ?, ?, 2, ?)");
+                upsert_sql.push_str("(?, ?, ?, ?, ?, ?, ?, ?, 2, ?, ?)");
                 upsert_values.push(Value::from(tenant.to_string()));
                 upsert_values.push(Value::from(projection.entity_type.clone()));
                 upsert_values.push(Value::from(projection.entity_id.clone()));
@@ -295,12 +330,20 @@ impl TursoEventStore {
                 upsert_values.push(Value::from(updated_at.clone()));
                 upsert_values.push(Value::from(projection.sequence_nr));
                 upsert_values.push(Value::from(projection.projection_hash.clone()));
+                upsert_values.push(
+                    projection
+                        .first_event_at
+                        .clone()
+                        .map(Value::Text)
+                        .unwrap_or(Value::Null),
+                );
             }
             upsert_sql.push_str(
                 " ON CONFLICT(tenant, entity_type, entity_id) DO UPDATE SET \
                  status = excluded.status, \
                  fields = excluded.fields, \
                  state = excluded.state, \
+                 first_event_at = COALESCE(entity_catalog.first_event_at, excluded.first_event_at), \
                  updated_at = excluded.updated_at, \
                  sequence_nr = excluded.sequence_nr, \
                  projection_version = excluded.projection_version, \
@@ -364,6 +407,15 @@ impl TursoEventStore {
             }
         }
 
+        for projection in applied_projections {
+            super::projection_delta::applied(
+                &tx,
+                [tenant, &projection.entity_type, &projection.entity_id],
+                projection.sequence_nr,
+                &projection.fields,
+            )
+            .await?;
+        }
         tx.commit().await.map_err(storage_error)?;
         Ok(())
     }
@@ -464,8 +516,9 @@ impl TursoEventStore {
         params: Vec<String>,
     ) -> Result<Vec<String>, PersistenceError> {
         let conn = self.configured_connection().await?;
+        let index = catalog_filter_index(where_clause);
         let sql = format!(
-            "SELECT entity_id FROM entity_catalog \
+            "SELECT entity_id FROM entity_catalog {index}\
              WHERE tenant = ?1 AND entity_type = ?2 AND ({where_clause})"
         );
 
@@ -521,10 +574,13 @@ impl TursoEventStore {
         let field_placeholders = std::iter::repeat_n("?", requested_fields.len())
             .collect::<Vec<_>>()
             .join(", ");
+        // Each record's field rows are found by its key: the engine otherwise
+        // searches `idx_efi_status` by tenant and type, reading every field
+        // row of the type for each record (`driver/plan_check.rs`).
         let sql = format!(
             "SELECT c.entity_id, c.status, f.field_name, f.field_value \
              FROM entity_catalog c \
-             LEFT JOIN entity_field_index f \
+             LEFT JOIN entity_field_index f INDEXED BY sqlite_autoindex_entity_field_index_1 \
                ON c.tenant = f.tenant \
               AND c.entity_type = f.entity_type \
               AND c.entity_id = f.entity_id \
@@ -663,7 +719,8 @@ impl TursoEventStore {
     ///
     /// Returns only rows that exist in the catalog; missing IDs are silently
     /// omitted. Mirrors the Postgres impl so the OData read path can stay
-    /// backend-agnostic.
+    /// backend-agnostic. Each row's `state` comes back whole, its fields put
+    /// back from the `fields` column ([`catalog_state_from_storage`]).
     #[instrument(skip_all, fields(
         otel.name = "turso.load_entity_catalog_rows",
         tenant, entity_type,
@@ -684,7 +741,7 @@ impl TursoEventStore {
             .join(", ");
         let sql = format!(
             "SELECT c.entity_id, c.status, c.fields, c.state, \
-                    COALESCE(k.sequence_nr, c.sequence_nr), k.counters \
+                    COALESCE(k.sequence_nr, c.sequence_nr), k.counters, c.first_event_at \
              FROM entity_catalog c LEFT JOIN entity_catalog_counters k \
                ON k.tenant = c.tenant AND k.entity_type = c.entity_type \
               AND k.entity_id = c.entity_id \
@@ -711,7 +768,17 @@ impl TursoEventStore {
             let mut state = state_text
                 .map(|state_text| serde_json::from_str(&state_text))
                 .transpose()
-                .map_err(|error| PersistenceError::Serialization(error.to_string()))?;
+                .map_err(|error| PersistenceError::Serialization(error.to_string()))?
+                .map(|stored| catalog_state_from_storage(&fields, stored));
+            let first_event_at: Option<String> = row.get(6).map_err(storage_error)?;
+            if state.is_none() && first_event_at.is_some() {
+                state = Some(serde_json::json!({}));
+            }
+            if let Some(stored) = state.as_mut().and_then(serde_json::Value::as_object_mut)
+                && (first_event_at.is_some() || stored.contains_key("first_event_at"))
+            {
+                stored.insert("first_event_at".into(), serde_json::json!(first_event_at));
+            }
             // A newer unchanged projection stored only its counters; serve
             // the row as that projection would have written it.
             if let Some(counters) = counters {
@@ -774,6 +841,19 @@ pub(super) fn indexed_projection_fields(
     // Also index the status as a pseudo-field so `$filter=Status eq 'Active'` works.
     indexed_fields.push(("Status".to_string(), Some(status.to_string())));
     indexed_fields
+}
+
+/// What a `$filter` over the catalog reads it by. Every one fixes the tenant
+/// and type; one that also fixes the status (`status = ?`) reads
+/// `idx_entity_catalog_status` by all three, which turso_core's planner does
+/// not choose by itself (see `driver/plan_check.rs`). Without one, the
+/// planner's walk of the primary key also keeps a page in `entity_id` order.
+pub(super) fn catalog_filter_index(where_clause: &str) -> &'static str {
+    if crate::sql_terms::gives(where_clause, "entity_catalog", true, "status") {
+        "INDEXED BY idx_entity_catalog_status "
+    } else {
+        ""
+    }
 }
 
 #[cfg(test)]

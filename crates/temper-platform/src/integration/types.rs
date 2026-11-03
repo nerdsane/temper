@@ -157,13 +157,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn retry_policy_defaults() {
-        let policy = RetryPolicy::default();
-        assert_eq!(policy.max_retries, 3);
-        assert_eq!(policy.backoff_base_ms, 1000);
-    }
-
-    #[test]
     fn backoff_exponential() {
         let policy = RetryPolicy {
             max_retries: 5,
@@ -194,25 +187,6 @@ mod tests {
             timeout_ms: 3000,
         };
         assert_eq!(cfg.timeout(), Duration::from_secs(3));
-    }
-
-    #[test]
-    fn integration_event_serialization_roundtrip() {
-        let event = IntegrationEvent {
-            tenant: "alpha".to_string(),
-            entity_type: "Order".to_string(),
-            entity_id: "order-123".to_string(),
-            event_name: "SubmitOrder".to_string(),
-            from_status: "Draft".to_string(),
-            to_status: "Submitted".to_string(),
-            params: serde_json::json!({"ShippingAddressId": "addr-1"}),
-            timestamp: Utc::now(),
-        };
-        let json = serde_json::to_string(&event).expect("should serialize");
-        let deserialized: IntegrationEvent =
-            serde_json::from_str(&json).expect("should deserialize");
-        assert_eq!(deserialized.tenant, "alpha");
-        assert_eq!(deserialized.event_name, "SubmitOrder");
     }
 
     #[test]

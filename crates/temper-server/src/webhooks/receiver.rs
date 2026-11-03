@@ -21,6 +21,7 @@ use super::signature::{SignedRequest, verify_signature};
 use crate::request_context::AgentContext;
 use crate::secrets::template::resolve_secret_templates;
 use crate::state::ServerState;
+use crate::state::redecide::Redecide;
 use temper_authz::SecurityContext;
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
@@ -128,20 +129,37 @@ pub async fn handle_webhook(
         ..AgentContext::default()
     };
 
-    match state
-        .dispatch_tenant_action(
-            &tenant,
-            &entity_type,
-            &entity_id,
-            action,
-            Value::Object(params),
-            &agent_ctx,
-        )
-        .await
-    {
+    // The policy above reads only the record's id; the record's own checks run
+    // in the dispatch, on the record as it is. A dispatch decided on a record
+    // that changed first is decided again on it (`state::redecide`).
+    let params = Value::Object(params);
+    let mut redecide = Redecide::start(&state);
+    let dispatched = loop {
+        let dispatched = state
+            .dispatch_outside_action(crate::state::DispatchCommand {
+                tenant: &tenant,
+                entity_type: &entity_type,
+                entity_id: &entity_id,
+                action,
+                params: params.clone(),
+                agent_ctx: &agent_ctx,
+                await_integration: false,
+                await_reactions: true,
+            })
+            .await;
+        let stale = matches!(dispatched, Err(crate::state::DispatchError::StaleWrite(_)));
+        if !redecide.again(stale, "webhook") {
+            break dispatched;
+        }
+    };
+    match dispatched {
         Ok(response) => {
             let body = serde_json::to_string(&response).unwrap_or_default();
             (StatusCode::OK, body)
+        }
+        Err(crate::state::DispatchError::StaleWrite(stale)) => {
+            tracing::warn!(error = %stale, webhook = %webhook.name, "webhook action refused as stale");
+            (StatusCode::CONFLICT, stale.body().to_string())
         }
         Err(e) => {
             tracing::error!(error = %e, "webhook action dispatch failed");

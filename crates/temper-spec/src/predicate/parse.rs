@@ -103,12 +103,22 @@ fn lex(source: &str, kind: &'static str) -> Result<Vec<(Tok, usize)>, ParseError
             b'>' => (Tok::Cmp(CmpOp::Gt), 1),
             b'!' => (Tok::Not, 1),
             b'\'' => {
-                let body = start + 1;
-                let end = source[body..]
-                    .find('\'')
-                    .map(|offset| body + offset)
-                    .ok_or_else(|| err(start, "unterminated string"))?;
-                (Tok::Str(source[body..end].to_string()), end + 1 - start)
+                let mut body = start + 1;
+                let mut value = String::new();
+                let end = loop {
+                    let end = source[body..]
+                        .find('\'')
+                        .map(|offset| body + offset)
+                        .ok_or_else(|| err(start, "unterminated string"))?;
+                    value.push_str(&source[body..end]);
+                    if bytes.get(end + 1) != Some(&b'\'') {
+                        break end;
+                    }
+                    // A doubled quote is a literal apostrophe.
+                    value.push('\'');
+                    body = end + 2;
+                };
+                (Tok::Str(value), end + 1 - start)
             }
             b'-' | b'0'..=b'9' => {
                 let end = scan(bytes, start + 1, |b| b.is_ascii_digit());

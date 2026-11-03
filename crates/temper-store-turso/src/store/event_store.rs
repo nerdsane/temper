@@ -100,6 +100,27 @@ impl EventStore for TursoEventStore {
         self.scheduled_action_rows(tenant).await
     }
 
+    async fn list_entity_scheduled_actions(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<Vec<ScheduledActionRecord>, PersistenceError> {
+        self.entity_scheduled_action_rows(tenant, entity_type, entity_id)
+            .await
+    }
+
+    async fn cancel_scheduled_action(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        arm_id: &str,
+    ) -> Result<(), PersistenceError> {
+        self.cancel_scheduled_action_row(tenant, entity_type, entity_id, arm_id)
+            .await
+    }
+
     async fn delete_scheduled_action(
         &self,
         tenant: &str,
@@ -121,11 +142,13 @@ impl EventStore for TursoEventStore {
         // ADR-0153: a single keyed probe of entity_key_index — present/absent in
         // O(log n), no candidate scan (the negative-existence access path). Bounded
         // regardless of how many entities the tenant/type holds, so it cannot trip
-        // the scan budget that produces the 413.
+        // the scan budget that produces the 413. It names the key's index: without
+        // it the planner may read every row of the type (driver/plan_check.rs).
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(
-                "SELECT entity_id FROM entity_key_index \
+                "SELECT entity_id \
+                 FROM entity_key_index INDEXED BY sqlite_autoindex_entity_key_index_1 \
                  WHERE tenant = ?1 AND entity_type = ?2 AND key_name = ?3 AND key_hash = ?4",
                 params![tenant, entity_type, key_name, key_hash],
             )
@@ -187,7 +210,8 @@ impl EventStore for TursoEventStore {
             .await?;
         let tx = conn.begin_immediate().await.map_err(storage_error)?;
         tx.execute(
-            "DELETE FROM entity_vector_index \
+            // The entity's index (driver/plan_check.rs).
+            "DELETE FROM entity_vector_index INDEXED BY idx_evi_entity \
              WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
             params![tenant, entity_type, entity_id],
         )
@@ -225,7 +249,8 @@ impl EventStore for TursoEventStore {
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(
-                "SELECT entity_id, vector FROM entity_vector_index \
+                // The partition's index (driver/plan_check.rs).
+                "SELECT entity_id, vector FROM entity_vector_index INDEXED BY idx_evi_partition \
                  WHERE tenant = ?1 AND entity_type = ?2 AND decl_name = ?3 AND model_tag = ?4 \
                  ORDER BY entity_id LIMIT ?5",
                 params![tenant, entity_type, decl_name, model_tag, limit as i64],
@@ -318,10 +343,11 @@ impl EventStore for TursoEventStore {
         }
         if let [append] = appends {
             let sequence_nr = self
-                .append(
+                .append_with_rows(
                     &append.persistence_id,
                     append.expected_sequence,
                     &append.events,
+                    append.commit_rows(),
                 )
                 .await?;
             return Ok(vec![PersistenceAppendResult {
@@ -354,35 +380,73 @@ impl EventStore for TursoEventStore {
             .await
             .map_err(storage_error)?;
 
-        let mut out = Vec::new();
-        while let Some(row) = rows.next().await.map_err(storage_error)? {
-            let seq = row.get::<i64>(0).map_err(storage_error)? as u64;
-            let event_type = row.get::<String>(1).map_err(storage_error)?;
-            let payload_json = row.get::<String>(2).map_err(storage_error)?;
-            let metadata_json = row.get::<Option<String>>(3).map_err(storage_error)?;
+        collect_envelopes(&mut rows).await
+    }
 
-            let payload = serde_json::from_str(&payload_json).map_err(|e| {
-                tracing::error!(error = %e, "failed to deserialize event payload");
-                PersistenceError::Serialization(e.to_string())
-            })?;
-            let metadata_raw = metadata_json.ok_or_else(|| {
-                tracing::error!("missing event metadata");
-                PersistenceError::Serialization("missing event metadata".to_string())
-            })?;
-            let metadata: EventMetadata = serde_json::from_str(&metadata_raw).map_err(|e| {
-                tracing::error!(error = %e, "failed to deserialize event metadata");
-                PersistenceError::Serialization(e.to_string())
-            })?;
+    #[instrument(skip_all, fields(persistence_id, otel.name = "turso.read_events_page"))]
+    async fn read_events_page(
+        &self,
+        persistence_id: &str,
+        before_sequence: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let conn = self.configured_connection().await?;
+        // Both bounds saturate: a sequence or a row count above i64::MAX is
+        // past every stored row, so it means "no bound".
+        let before = before_sequence.map_or(i64::MAX, |s| i64::try_from(s).unwrap_or(i64::MAX));
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
 
-            out.push(PersistenceEnvelope {
-                sequence_nr: seq,
-                event_type,
-                payload,
-                metadata,
-            });
-        }
+        // Newest first along the (tenant, entity_type, entity_id, sequence_nr)
+        // unique index, so only the page's rows are read.
+        let mut rows = conn
+            .query(
+                "SELECT sequence_nr, event_type, payload, metadata
+                 FROM events
+                 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND sequence_nr < ?4
+                 ORDER BY sequence_nr DESC
+                 LIMIT ?5",
+                params![tenant, entity_type, entity_id, before, limit],
+            )
+            .await
+            .map_err(storage_error)?;
 
-        Ok(out)
+        let mut page = collect_envelopes(&mut rows).await?;
+        page.reverse();
+        Ok(page)
+    }
+
+    async fn first_event_at(
+        &self,
+        persistence_id: &str,
+    ) -> Result<Option<chrono::DateTime<chrono::Utc>>, PersistenceError> {
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let conn = self.configured_connection().await?;
+        // One read keeps the saved fact and the journal fallback consistent
+        // with compaction. Both probes use the full record key.
+        let mut rows = conn.query(
+            "SELECT COALESCE(
+                (SELECT first_event_at FROM entity_catalog INDEXED BY sqlite_autoindex_entity_catalog_1
+                 WHERE tenant=?1 AND entity_type=?2 AND entity_id=?3),
+                (SELECT COALESCE(json_extract(payload, '$.timestamp'), json_extract(metadata, '$.timestamp'))
+                 FROM events INDEXED BY idx_events_entity
+                 WHERE tenant=?1 AND entity_type=?2 AND entity_id=?3 AND sequence_nr=1))",
+            params![tenant, entity_type, entity_id]).await.map_err(storage_error)?;
+        let row = rows
+            .next()
+            .await
+            .map_err(storage_error)?
+            .ok_or_else(|| PersistenceError::Storage("missing creation lookup row".into()))?;
+        let saved: Option<String> = row.get(0).map_err(storage_error)?;
+        saved
+            .map(|saved| {
+                chrono::DateTime::parse_from_rfc3339(&saved)
+                    .map(|t| t.with_timezone(&chrono::Utc))
+                    .map_err(|error| PersistenceError::Serialization(error.to_string()))
+            })
+            .transpose()
     }
 
     #[instrument(skip_all, fields(persistence_id, otel.name = "turso.save_snapshot"))]
@@ -417,6 +481,15 @@ impl EventStore for TursoEventStore {
         )
         .await
         .map_err(storage_error)?;
+
+        tx.execute("INSERT INTO entity_projection_delta (tenant, entity_type, entity_id, sequence_nr)
+            SELECT ?1, ?2, ?3, ?4 WHERE NOT EXISTS (
+                SELECT 1 FROM entity_catalog c INDEXED BY idx_entity_catalog_checkpoint LEFT JOIN entity_catalog_counters k
+                    ON k.tenant = c.tenant AND k.entity_type = c.entity_type AND k.entity_id = c.entity_id
+                WHERE c.tenant = ?1 AND c.entity_type = ?2 AND c.entity_id = ?3
+                    AND COALESCE(k.sequence_nr, c.sequence_nr) >= ?4)
+            ON CONFLICT (tenant, entity_type, entity_id) DO UPDATE SET sequence_nr = MAX(sequence_nr, excluded.sequence_nr)",
+            params![tenant, entity_type, entity_id, sequence_nr as i64]).await.map_err(storage_error)?;
 
         let mut segment_rows = tx
             .query(
@@ -515,6 +588,19 @@ impl EventStore for TursoEventStore {
         let sequence_nr = row.get::<i64>(0).map_err(storage_error)? as u64;
         let snapshot = row.get::<Vec<u8>>(1).map_err(storage_error)?;
         Ok(Some((sequence_nr, snapshot)))
+    }
+
+    async fn latest_sequence_nr(&self, persistence_id: &str) -> Result<u64, PersistenceError> {
+        let (tenant, ty, id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        self.journal_sequence_nr(tenant, ty, id).await
+    }
+
+    async fn journal_heads(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<temper_runtime::persistence::JournalHead>, PersistenceError> {
+        self.load_journal_heads(tenant).await
     }
 
     #[instrument(skip_all, fields(tenant, otel.name = "turso.list_entity_ids"))]
@@ -647,4 +733,39 @@ impl TursoEventStore {
         }
         Ok(out)
     }
+}
+
+/// Decode `SELECT sequence_nr, event_type, payload, metadata` rows into
+/// envelopes, in the order the query returned them.
+async fn collect_envelopes(
+    rows: &mut crate::driver::Rows,
+) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().await.map_err(storage_error)? {
+        let seq = row.get::<i64>(0).map_err(storage_error)? as u64;
+        let event_type = row.get::<String>(1).map_err(storage_error)?;
+        let payload_json = row.get::<String>(2).map_err(storage_error)?;
+        let metadata_json = row.get::<Option<String>>(3).map_err(storage_error)?;
+
+        let payload = serde_json::from_str(&payload_json).map_err(|e| {
+            tracing::error!(error = %e, "failed to deserialize event payload");
+            PersistenceError::Serialization(e.to_string())
+        })?;
+        let metadata_raw = metadata_json.ok_or_else(|| {
+            tracing::error!("missing event metadata");
+            PersistenceError::Serialization("missing event metadata".to_string())
+        })?;
+        let metadata: EventMetadata = serde_json::from_str(&metadata_raw).map_err(|e| {
+            tracing::error!(error = %e, "failed to deserialize event metadata");
+            PersistenceError::Serialization(e.to_string())
+        })?;
+
+        out.push(PersistenceEnvelope {
+            sequence_nr: seq,
+            event_type,
+            payload,
+            metadata,
+        });
+    }
+    Ok(out)
 }

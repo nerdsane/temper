@@ -44,10 +44,9 @@ impl ReactionRegistry {
     /// safeguard.
     ///
     /// [`MAX_REACTIONS_PER_TENANT`] survives as the threshold for a warning, so
-    /// a tenant accumulating triggers without bound is still visible. The limit
-    /// worth keeping is [`MAX_REACTION_DEPTH`](super::MAX_REACTION_DEPTH),
-    /// which bounds recursive cascades — an unbounded reaction loop is a real
-    /// failure mode, and depth is the thing that has no natural stopping point.
+    /// a tenant accumulating triggers without bound is still visible. What a
+    /// reaction loop needs is a stop at its first repeat, which the
+    /// dispatcher gives it ([`InlineChain`](crate::request_context::InlineChain)).
     pub fn register_tenant_rules(&mut self, tenant: impl Into<TenantId>, rules: Vec<ReactionRule>) {
         let tenant = tenant.into();
         if rules.len() > MAX_REACTIONS_PER_TENANT {

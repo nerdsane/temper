@@ -417,7 +417,7 @@ fn native_plan_pushes_file_lookup_equalities_with_status_ne_recheck() {
         plan.params,
         vec!["Path", "/proofs/live.txt", "WorkspaceId", "ws-1"]
     );
-    assert!(should_try_native_before_catalog_coverage(&request, &plan));
+    assert!(should_try_native_page_first(&request, &plan));
 }
 
 #[tokio::test]
@@ -815,6 +815,9 @@ async fn file_point_lookup_with_status_ne_uses_lossless_equality_candidates() {
         ),
         Err(QueryPlaneReadError::AuthorizationDenied(_)) => {
             panic!("file point lookup should not be denied by read authorization")
+        }
+        Err(QueryPlaneReadError::ReadUnavailable) => {
+            panic!("authoritative read should be available")
         }
         Err(QueryPlaneReadError::InvalidContinuation) => {
             panic!("no $skiptoken was supplied")

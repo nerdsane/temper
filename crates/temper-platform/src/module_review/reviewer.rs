@@ -13,9 +13,9 @@ use super::review::review_module;
 use super::types::{Judge, JudgeUnavailable, ModuleReview, ModuleSource, SpecSource};
 
 /// How long one module's review may take, all its questions included: three rounds (rate, part, line) at Jev's usual
-/// answer of under three seconds. An install waits for its review, and a supervisor may give a new version little time
-/// to serve (Katagami gives 20 seconds, of which an install takes about 3), so past this the install says Jev did not
-/// answer instead of waiting on.
+/// answer of under three seconds. A start and a Genesis install wait for their review, and a supervisor may give a new
+/// version little time to serve (Katagami gives 20 seconds), so past this the review says Jev did not answer instead of
+/// waiting on.
 const MODULE_DEADLINE: Duration = Duration::from_secs(10);
 
 /// Reviews kept. An install reviews only modules whose code changed, so the cache serves the same bundle again (a

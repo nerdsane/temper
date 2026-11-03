@@ -154,11 +154,15 @@ async fn each_refusal_is_logged_once_for_a_create_an_action_and_a_batch() {
             persistence_id: "default:Order:b-warn".into(),
             expected_sequence: 0,
             events: vec![envelope("default:Order:b-warn", "w".repeat(2_000))],
+            state_timer: None,
+            projection: None,
         },
         PersistenceAppend {
             persistence_id: "default:Order:b-big".into(),
             expected_sequence: 0,
             events: vec![envelope("default:Order:b-big", "x".repeat(5_000))],
+            state_timer: None,
+            projection: None,
         },
     ];
     assert!(journal.append_batch(&batch).await.is_err());

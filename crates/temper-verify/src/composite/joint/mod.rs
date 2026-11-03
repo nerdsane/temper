@@ -25,6 +25,10 @@
 //! - an entity reaction is a dispatch of its own, sent after its source
 //!   commits with `args` copied from the source as committed, and taken by
 //!   its target later, in any order with other dispatches;
+//! - a reaction from a type outside the scope is a move from outside: it
+//!   comes whenever its target's guard may let it, with any parameters, as
+//!   a sender Cedar may answer either way for, in a chain that may already
+//!   hold any step that can come before it;
 //! - string variables are tracked as symbols (equality only) when an
 //!   invariant reads them, when a reference uses them as an id, or when
 //!   their value reaches one that is read
@@ -38,7 +42,16 @@
 //! Records disagree while a dispatch is on its way, so invariants are
 //! checked in settled states: those with nothing in flight. The walk is
 //! breadth first, so each broken invariant's path is a shortest one. A walk
-//! that runs out of its [`Budget`] says so and is never a pass.
+//! that does not fit in the memory its [`Room`] gives it says so and is
+//! never a pass.
+//!
+//! Nor is a walk that checked nothing. A module whose trigger names no
+//! `on_success` may answer with any action its result names, and the model
+//! answers only with internal ones: when such a call is open and its record
+//! could take an action nothing in the model sends, the walk never goes
+//! where that answer leads, and says so instead of passing. A rule written
+//! `premise => conclusion` whose premise no walked state meets (no settled
+//! one, for an invariant) holds without being tested, and proves nothing.
 //!
 //! The drop check (ADR-0150, [`dropped_reactions`]) walks the same model over
 //! a whole trigger-graph component, unsliced, one record of each type that
@@ -49,11 +62,17 @@ mod env;
 mod liveness;
 mod model;
 mod pack;
+mod proof;
+mod room;
 mod senders;
 mod slice;
 mod state;
 
 pub use liveness::{JointLivenessResult, LivenessOutcome, StuckCase, verify_joint_liveness};
+pub use proof::{
+    InvariantProof, JointProof, LivenessProof, invariant_proofs, joint_proofs, liveness_proofs,
+};
+pub use room::{Bound, Bytes, Progress, Room};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -62,14 +81,13 @@ use temper_authz::SendAnalysis;
 use temper_spec::automaton::Automaton;
 use temper_spec::predicate::{Expr, Truth, eval};
 
-use crate::Budget;
 use crate::model::{ModelString, ParamValue};
 
 pub use model::DroppedReaction;
 pub(crate) use model::dropped_reactions;
 use model::{JointModel, Move, Sending};
 use state::render;
-pub use state::{Call, Dispatch, JointState};
+pub use state::{Call, Committed, Dispatch, JointState, ReactionStep};
 
 /// What the joint check found for one invariant.
 #[derive(Debug, Clone)]
@@ -86,6 +104,8 @@ pub struct JointInvariantResult {
     pub states: usize,
     /// When the walk held a move back because it would have put more than
     /// this many dispatches in flight: what it found holds only up to that.
+    /// A commit whose reactions wait for their guards to be read counts as
+    /// one, however many wait.
     pub in_flight_bound: Option<usize>,
     /// Holds, broken (with a shortest path), or not fully checked.
     pub outcome: JointOutcome,
@@ -110,11 +130,26 @@ pub enum JointOutcome {
         /// The moves and the joint states they reach.
         path: Vec<JointStep>,
     },
-    /// The walk stopped before every state was seen, or could not start.
+    /// No settled state the walk met breaks it, but none meets its premise
+    /// either, so that proves nothing.
+    Vacuous {
+        /// The premise, as written.
+        premise: String,
+    },
+    /// The walk stopped before every state was seen, never took an answer
+    /// a module may give, or could not start.
     Incomplete {
         /// Why.
         reason: String,
     },
+}
+
+/// The premise of a rule written `premise => conclusion`.
+fn premise(rule: &Expr) -> Option<&Expr> {
+    match rule {
+        Expr::Implies(premise, _) => Some(premise),
+        _ => None,
+    }
 }
 
 /// One step of a counterexample path.
@@ -159,6 +194,11 @@ impl fmt::Display for JointInvariantResult {
                 }
                 Ok(())
             }
+            JointOutcome::Vacuous { premise } => write!(
+                f,
+                "{}.{} CHECKS NOTHING AS WRITTEN: its premise `{premise}` holds in no settled state of the {} joint states walked ({scope})",
+                self.entity, self.invariant, self.states
+            ),
             JointOutcome::Incomplete { reason } => write!(
                 f,
                 "{}.{} NOT CHECKED ({scope}, {} joint states walked): {reason}",
@@ -169,92 +209,17 @@ impl fmt::Display for JointInvariantResult {
 }
 
 /// Check every `[[invariant]]` in `automatons` that reads a related entity,
-/// on the joint model of its entity and the types it names. `policies`
-/// decide each move as its sender, as for liveness; without them every
-/// sender may send everything.
+/// on the joint model of its entity and the types it names
+/// ([`invariant_proofs`]).
 pub fn verify_joint_invariants(
     automatons: &[&Automaton],
     policies: Option<&SendAnalysis>,
-    budget: Budget,
+    bound: Bound<'_>,
 ) -> Vec<JointInvariantResult> {
-    let by_name: BTreeMap<&str, &Automaton> = automatons
+    invariant_proofs(automatons, policies, bound.room)
         .iter()
-        .map(|a| (a.automaton.name.as_str(), *a))
-        .collect();
-    let mut results = Vec::new();
-    for (name, automaton) in &by_name {
-        let joint: Vec<&temper_spec::automaton::Invariant> = automaton
-            .invariants
-            .iter()
-            .filter(|inv| !inv.assert.related_types().is_empty())
-            .collect();
-        if joint.is_empty() {
-            continue;
-        }
-        let mut scope: BTreeSet<String> = BTreeSet::from([name.to_string()]);
-        let mut missing = Vec::new();
-        for inv in &joint {
-            for (entity_type, _) in inv.assert.related_types() {
-                if by_name.contains_key(entity_type.as_str()) {
-                    scope.insert(entity_type);
-                } else {
-                    missing.push(entity_type);
-                }
-            }
-        }
-        let result =
-            |inv: &temper_spec::automaton::Invariant, scope: &BTreeSet<String>, states, outcome| {
-                JointInvariantResult {
-                    entity: name.to_string(),
-                    invariant: inv.name.clone(),
-                    assert: inv.assert.to_string(),
-                    scope: scope.iter().cloned().collect(),
-                    states,
-                    in_flight_bound: None,
-                    outcome,
-                }
-            };
-        if !missing.is_empty() {
-            for inv in &joint {
-                let reason = format!(
-                    "it reads {}, which this app does not declare",
-                    missing.join(", ")
-                );
-                results.push(result(inv, &scope, 0, JointOutcome::Incomplete { reason }));
-            }
-            continue;
-        }
-        let exprs: Vec<&Expr> = joint.iter().map(|inv| &inv.assert).collect();
-        // Code outside the specs sends what a liveness property relies on,
-        // whoever Cedar lets send it; a rule that must always hold has to
-        // hold through those moves too.
-        let relies_on = scope
-            .iter()
-            .flat_map(|entity| {
-                by_name[entity.as_str()]
-                    .liveness
-                    .iter()
-                    .flat_map(move |live| {
-                        live.relies_on
-                            .iter()
-                            .map(move |action| (entity.clone(), action.clone()))
-                    })
-            })
-            .collect();
-        let sending = Sending {
-            policies,
-            kernel_moves: true,
-            relies_on,
-        };
-        let model = JointModel::new(&by_name, scope, name, &exprs, sending, true);
-        let walk = model.walk(name, &exprs, budget);
-        for (inv, outcome) in joint.iter().zip(walk.outcomes) {
-            let mut found = result(inv, &model.scope, walk.states, outcome);
-            found.in_flight_bound = walk.held_back.then_some(model::MAX_IN_FLIGHT);
-            results.push(found);
-        }
-    }
-    results
+        .flat_map(|proof| proof.check(bound))
+        .collect()
 }
 
 /// One move of a trace: an entity's action with the string parameters it
@@ -320,7 +285,7 @@ pub fn replay_joint_invariants(
         }
     }
     let exprs: Vec<&Expr> = joint.iter().map(|inv| &inv.assert).collect();
-    let model = JointModel::new(&by_name, scope, entity, &exprs, Sending::anyone(), true);
+    let model = JointModel::new(&by_name, &scope, entity, &exprs, Sending::anyone(), true);
     let (mut state, mut names) = model.init_with_ids(ids);
     let mut steps = vec![JointStep {
         action: None,
@@ -339,9 +304,7 @@ pub fn replay_joint_invariants(
                     match bindings.get(name) {
                         Some(bound) => value == bound,
                         None if name.is_empty() => value.is_empty(),
-                        None if matches!(value, ModelString::Symbol(_))
-                            && !used.contains(value) =>
-                        {
+                        None if value.symbol_id().is_some() && !used.contains(value) => {
                             bindings.insert(name.clone(), value.clone());
                             used.insert(value.clone());
                             true
@@ -362,7 +325,7 @@ pub fn replay_joint_invariants(
                 })
                 .or_else(|| {
                     moves.iter().find(|mv| match mv {
-                        Move::Take(e, action) | Move::Send(e, action) => {
+                        Move::Take(e, action, _) | Move::Send(e, action, _) => {
                             e == &wanted.entity
                                 && action.name == wanted.action
                                 && fits(&action.params)
@@ -389,7 +352,7 @@ pub fn replay_joint_invariants(
                     }
                 },
             };
-            if let Move::Take(_, action) | Move::Send(_, action) = &mv {
+            if let Move::Take(_, action, _) | Move::Send(_, action, _) = &mv {
                 for (param, name) in &wanted.params {
                     if let Some(ParamValue::Str(value)) = action.params.get(param)
                         && !name.is_empty()
@@ -443,4 +406,36 @@ pub fn replay_joint_invariants(
 mod tests;
 
 #[cfg(test)]
+#[path = "vacuous_test.rs"]
+mod vacuous_tests;
+
+#[cfg(test)]
 mod chain_test;
+
+#[cfg(test)]
+#[path = "literals_test.rs"]
+mod literals_tests;
+
+#[cfg(test)]
+#[path = "sure_test.rs"]
+mod sure_tests;
+
+#[cfg(test)]
+#[path = "outside_test.rs"]
+mod outside_tests;
+
+#[cfg(test)]
+#[path = "outside_count_test.rs"]
+mod outside_count_tests;
+
+#[cfg(test)]
+#[path = "widen_test.rs"]
+mod widen_tests;
+
+#[cfg(test)]
+#[path = "trigger_guard_test.rs"]
+mod trigger_guard_tests;
+
+#[cfg(test)]
+#[path = "trigger_order_test.rs"]
+mod trigger_order_tests;

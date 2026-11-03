@@ -12,6 +12,7 @@ use temper_store_turso::TursoEventStore;
 
 mod acts_for;
 mod carrying;
+mod replays;
 mod then;
 
 /// A place an app's Temper is brought to, after `KatagamiAppPlace` before

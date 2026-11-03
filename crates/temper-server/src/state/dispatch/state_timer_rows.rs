@@ -2,24 +2,31 @@
 //!
 //! A timer writes its row when it is armed and removes it when it ends, so the
 //! rows are the timers still waiting. At boot [`ServerState::rearm_state_timers`]
-//! reads each tenant's rows once, without loading any entity, and arms every
-//! timer again from when its state's clock started: for the rest of its budget,
+//! reads each tenant's rows, retrying failed listings, without loading any
+//! entity, and arms every timer again from when its state's clock started:
+//! for the rest of its budget,
 //! or at once if it fell due while the server was down. It fires once, as the
 //! identity that armed it; ticks missed while the server was down are not
-//! replayed.
+//! replayed. A row armed for no one (the state-timer service) is left to the
+//! walk that follows, which arms it as the principal the record's journal
+//! names, when it names one (`state_timer_setter`).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use temper_runtime::persistence::{PersistenceError, StateTimerRecord};
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 use tokio::sync::Semaphore;
+use tracing::instrument;
 
 use super::state_timeouts::{ArmedTimer, remaining_budget};
 use super::state_timer_follow::{BootCallers, BootTimers};
+use super::state_timer_setter::is_state_timer_service;
+use super::state_timer_settled::BootRows;
+use crate::entity_actor::EntityState;
 use crate::request_context::AgentContext;
 use crate::request_context::armed_by::{decode_armed_by, encode_armed_by};
 use crate::state::ServerState;
@@ -47,20 +54,16 @@ impl ServerState {
         Some(Arc::new(MetadataTimerRows(store)))
     }
 
-    /// The record's timer row, when the event store commits timer rows with
-    /// the events that change them ([`Self::entity_rows_follow_commits`]).
-    /// None: no row, or rows that do not follow commits. An error is a row
-    /// that could not be read (logged): it may hold the committed arm, so it
-    /// is not "no row".
-    pub(super) async fn committed_state_timer_row(
+    /// The record's timer row, which the event store commits with the events
+    /// that change it. None: no row. An error is a row that could not be read
+    /// (logged): it may hold the committed arm, so it is not "no row". An
+    /// ended, withheld task leaves this row as the record of its setter.
+    pub(super) async fn stored_state_timer_row(
         &self,
         tenant: &TenantId,
         entity_type: &str,
         entity_id: &str,
     ) -> Result<Option<StateTimerRecord>, PersistenceError> {
-        if !self.entity_rows_follow_commits() {
-            return Ok(None);
-        }
         let Some(store) = self.timer_rows_for_tenant(tenant.as_str()).await else {
             return Ok(None);
         };
@@ -74,15 +77,15 @@ impl ServerState {
     }
 
     /// Write a newly armed timer's row. A failed write leaves the timer armed
-    /// in this process; only a restart before it fires would lose it. When
-    /// rows follow commits the event that armed the timer usually wrote its
-    /// row, and this writes only a row that is missing.
+    /// in this process; only a restart before it fires would lose it. The
+    /// event that armed the timer usually wrote its row, and this writes only
+    /// a row that is missing.
     pub(super) async fn persist_state_timer(&self, timer: &ArmedTimer) {
         let Some(store) = self.timer_rows_for_tenant(timer.tenant.as_str()).await else {
             return;
         };
         let committed = self
-            .committed_state_timer_row(&timer.tenant, &timer.entity_type, &timer.entity_id)
+            .stored_state_timer_row(&timer.tenant, &timer.entity_type, &timer.entity_id)
             .await;
         if committed.is_ok_and(|row| row.is_some_and(|row| row.arm_id == timer.arm_id)) {
             return;
@@ -102,20 +105,18 @@ impl ServerState {
         }
     }
 
-    /// Remove an ended timer's row, unless a newer arm has replaced it. When
-    /// rows follow commits the event that ended the timer usually removed or
-    /// replaced its row, and this removes only a row the timer still holds.
+    /// Remove an ended timer's row, unless a newer arm has replaced it. The
+    /// event that ended the timer usually removed or replaced its row, and
+    /// this removes only a row the timer still holds.
     pub(super) async fn forget_state_timer(&self, timer: &ArmedTimer) {
         let Some(store) = self.timer_rows_for_tenant(timer.tenant.as_str()).await else {
             return;
         };
-        if self.entity_rows_follow_commits() {
-            let held = self
-                .committed_state_timer_row(&timer.tenant, &timer.entity_type, &timer.entity_id)
-                .await;
-            if !held.is_ok_and(|row| row.is_some_and(|row| row.arm_id == timer.arm_id)) {
-                return;
-            }
+        let held = self
+            .stored_state_timer_row(&timer.tenant, &timer.entity_type, &timer.entity_id)
+            .await;
+        if !held.is_ok_and(|row| row.is_some_and(|row| row.arm_id == timer.arm_id)) {
+            return;
         }
         if let Err(error) = store
             .delete_state_timer(
@@ -140,27 +141,77 @@ impl ServerState {
     /// declares no timeout now is removed. Then, in the background, each
     /// record that had a row follows the state it is in now (as whoever armed
     /// its row), through the same gate. A record in a timed state with no row
-    /// is not armed: it waits for its next action. The scheduled actions left
+    /// is armed from its recorded state clock (unless it needs a caller). The scheduled actions left
     /// waiting are armed again from their rows through the same gate
     /// (`rearm_scheduled_actions`). Returns that background walk, which ends
     /// with the boot's counts per tenant and type, and logs them as
     /// `state timers after boot`.
     pub(crate) async fn rearm_state_timers(&self) -> tokio::task::JoinHandle<BootTimers> {
+        let repaired = self.repair_query_projections_at_boot().await;
         let started = Instant::now();
         let gate = Arc::new(Semaphore::new(BOOT_FIRES_AT_ONCE));
         let mut callers = BootCallers::new();
         let mut counts = BootTimers::new();
+        let mut rows = BootRows::new();
+        let (armed, overdue) = self
+            .rearm_state_timer_rows(&gate, &mut callers, &mut counts, &mut rows)
+            .await;
+        self.follow_repaired_records(repaired, &callers, &gate)
+            .await;
+        tracing::info!(
+            armed,
+            overdue,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "re-armed state timers from the store"
+        );
+        self.rearm_scheduled_actions(&gate, &mut counts).await;
+        {
+            // Serialize with install walks so none can consume startup changes
+            // before saved identities and gates have been restored. The boot
+            // walk covers all timed types, including missing rows at startup.
+            let mut registry = self.registry.write().expect("registry lock poisoned");
+            registry.take_changed_types();
+            self.timer_recovery_complete
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        let server = self.clone();
+        // determinism-ok: boot follow-up runs in the background, as boot timers do.
+        tokio::spawn(async move { server.follow_timed_types(callers, gate, counts, rows).await })
+    }
+
+    /// Arm again each state timer row the last process left, as
+    /// [`Self::rearm_state_timers`] describes, keeping the callers of rows it
+    /// drops in `callers`, the state each row it arms was armed for in
+    /// `rows`, and counting into `counts`. Returns how many it armed and how
+    /// many of those were overdue.
+    #[instrument(skip_all, fields(otel.name = "boot.state_timer_rows"))]
+    async fn rearm_state_timer_rows(
+        &self,
+        gate: &Arc<Semaphore>,
+        callers: &mut BootCallers,
+        counts: &mut BootTimers,
+        rows_armed: &mut BootRows,
+    ) -> (usize, usize) {
         let mut armed = 0usize;
         let mut overdue = 0usize;
         for (tenant, timeouts) in self.declared_state_timeouts() {
             let Some(store) = self.timer_rows_for_tenant(tenant.as_str()).await else {
                 continue;
             };
-            let rows = match store.list_state_timers(tenant.as_str()).await {
-                Ok(rows) => rows,
-                Err(error) => {
-                    tracing::error!(tenant = %tenant, %error, "state timer rows not readable; timers not re-armed");
-                    continue;
+            // A failed listing does not mean there are no saved rows. Restore
+            // their callers before either repaired records or the rowless walk
+            // can reconcile timers and overwrite a saved identity.
+            let mut wait = Duration::from_secs(1);
+            let rows = loop {
+                match store.list_state_timers(tenant.as_str()).await {
+                    Ok(rows) => break rows,
+                    Err(error) => {
+                        tracing::error!(tenant = %tenant, %error,
+                            retry_in_secs = wait.as_secs(),
+                            "state timer rows not readable; boot recovery waits for saved callers");
+                        tokio::time::sleep(wait).await; // determinism-ok: boot retry on runtime clock
+                        wait = (wait * 2).min(Duration::from_secs(60));
+                    }
                 }
             };
             let now = sim_now();
@@ -203,6 +254,13 @@ impl ServerState {
                         continue;
                     }
                 };
+                if is_state_timer_service(&timer.agent_ctx) {
+                    // Armed for no one. The walk after this arms it, as the
+                    // principal the record's journal names when it names one
+                    // (`state_timer_setter`): reading a journal, page by page,
+                    // stays off the path the server serves after.
+                    continue;
+                }
                 timer.boot_gate = Some(gate.clone());
                 let delay = remaining_budget(timer.started_at, timer.after_seconds, now);
                 let label = if delay.is_zero() {
@@ -221,29 +279,53 @@ impl ServerState {
                     continue;
                 };
                 counted.rearmed += 1;
-                self.spawn_state_timer(timer, delay, Some(gate.clone()), armed_seq);
+                rows_armed.insert(
+                    (
+                        tenant.clone(),
+                        row.entity_type.clone(),
+                        row.entity_id.clone(),
+                    ),
+                    row.state.clone(),
+                );
+                self.spawn_state_timer(timer, Some(gate.clone()), armed_seq);
                 armed += 1;
             }
         }
-        tracing::info!(
-            armed,
-            overdue,
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            "re-armed state timers from the store"
-        );
-        self.rearm_scheduled_actions(&gate, &mut counts).await;
-        {
-            // Serialize with install walks so none can consume startup changes
-            // before saved identities and gates have been restored. The boot
-            // walk covers all timed types, with rows-only arming at startup.
-            let mut registry = self.registry.write().expect("registry lock poisoned");
-            registry.take_changed_types();
-            self.timer_recovery_complete
-                .store(true, std::sync::atomic::Ordering::Release);
+        (armed, overdue)
+    }
+
+    /// Make each record the boot repair rewrote follow its replayed state,
+    /// as the caller its row was armed by, through the boot gate.
+    #[instrument(skip_all, fields(otel.name = "boot.repaired_follow", records = repaired.len()))]
+    async fn follow_repaired_records(
+        &self,
+        repaired: Vec<(TenantId, EntityState)>,
+        callers: &BootCallers,
+        gate: &Arc<Semaphore>,
+    ) {
+        // Restore saved identities first, then reconcile repaired records with
+        // their replayed state through the same eight-fire boot gate. A restart
+        // during repair is safe: the rowless boot walk also recovers any timer
+        // whose projection landed before its timer row.
+        for (tenant, current) in repaired {
+            let key = (
+                tenant.clone(),
+                current.entity_type.clone(),
+                current.entity_id.clone(),
+            );
+            self.follow_state_timer(
+                &tenant,
+                &current.entity_type,
+                &current.entity_id,
+                &current,
+                super::state_timer_reconcile::Follow {
+                    armed_by: callers.get(&key),
+                    gate: Some(gate.clone()),
+                    ..Default::default()
+                },
+            )
+            .await;
         }
-        let server = self.clone();
-        // determinism-ok: boot follow-up runs in the background, as boot timers do.
-        tokio::spawn(async move { server.follow_timed_types(callers, gate, counts).await })
     }
 
     /// Every tenant's declared timeouts. Tenants without any are left out.
@@ -315,5 +397,7 @@ pub(super) fn armed_timer(
         arm_id: row.arm_id.clone(),
         sequence_nr: row.sequence_nr,
         started_at,
+        // The row does not keep it: whoever follows the record reads it there.
+        brought_forward_at: None,
     })
 }

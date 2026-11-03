@@ -197,10 +197,13 @@ fn authenticate(mut request: Request<Body>) -> Request<Body> {
             role: None,
             acting_for: None,
             agent_type: None,
+            label: None,
             attributes: Default::default(),
         },
         context_attrs: Default::default(),
         correlation_id: "crucible-session-validation".to_string(),
+        cause: None,
+        credential: None,
     };
     request
         .extensions_mut()
@@ -444,6 +447,17 @@ async fn create_session_on_archived_managed_agent_is_rejected() {
     make_environment(&state, "env-dead").await;
     make_managed_agent(&state, "agent-dead").await;
 
+    // Field invariants hold on bound actions too: set ArchivedAt first.
+    let (status, body) = patch(
+        &state,
+        "/tdata/ManagedAgents('agent-dead')",
+        r#"{"ArchivedAt":"2026-04-11T00:10:00Z"}"#,
+    )
+    .await;
+    assert!(
+        status == StatusCode::OK || status == StatusCode::NO_CONTENT,
+        "PATCH ArchivedAt: {status} {body:?}"
+    );
     let (status, _) = post(
         &state,
         "/tdata/ManagedAgents('agent-dead')/Temper.Crucible.ArchiveManagedAgent",
@@ -774,6 +788,21 @@ async fn start_from_running_is_rejected() {
     );
 }
 
+/// Field invariants hold on bound actions too: `TerminatedRequiresTerminatedAt`
+/// refuses TerminateSession unless `TerminatedAt` is set first.
+async fn set_terminated_at(state: &ServerState, id: &str) {
+    let (status, body) = patch(
+        state,
+        &format!("/tdata/Sessions('{id}')"),
+        r#"{"TerminatedAt":"2026-04-11T00:05:00Z"}"#,
+    )
+    .await;
+    assert!(
+        status == StatusCode::OK || status == StatusCode::NO_CONTENT,
+        "PATCH TerminatedAt: {status} {body:?}"
+    );
+}
+
 #[tokio::test]
 async fn terminate_from_multiple_states_is_accepted() {
     // Verifies the multi-state `from = ["Rescheduling", "Running", "Idle"]`
@@ -782,6 +811,7 @@ async fn terminate_from_multiple_states_is_accepted() {
 
     // From Rescheduling (initial)
     make_session(&state, "sess-t-rs", "agent-t1", "env-t1").await;
+    set_terminated_at(&state, "sess-t-rs").await;
     let (status, _) = post(
         &state,
         "/tdata/Sessions('sess-t-rs')/Temper.Crucible.TerminateSession",
@@ -798,6 +828,7 @@ async fn terminate_from_multiple_states_is_accepted() {
         "{}",
     )
     .await;
+    set_terminated_at(&state, "sess-t-run").await;
     let (status, _) = post(
         &state,
         "/tdata/Sessions('sess-t-run')/Temper.Crucible.TerminateSession",
@@ -820,6 +851,7 @@ async fn terminate_from_multiple_states_is_accepted() {
         "{}",
     )
     .await;
+    set_terminated_at(&state, "sess-t-idle").await;
     let (status, _) = post(
         &state,
         "/tdata/Sessions('sess-t-idle')/Temper.Crucible.TerminateSession",

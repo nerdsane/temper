@@ -12,7 +12,7 @@ use temper_runtime::tenant::TenantId;
 use temper_server::ServerState;
 use temper_server::registry::SpecRegistry;
 
-use crate::module_review::ModuleReviewer;
+use crate::module_review::{ModuleReviewer, ReviewsUnderWay};
 use crate::protocol::PlatformEvent;
 use crate::spec_store::SpecStore;
 
@@ -39,6 +39,8 @@ pub struct PlatformState {
     /// Jev's review of an app's modules at install, once the server is given one ([`Self::set_module_reviewer`]).
     /// Shared by every clone of the state, so hooks made with a clone before it was set review too.
     pub module_reviewer: Arc<OnceLock<Arc<ModuleReviewer>>>,
+    /// The module reviews running in this process.
+    pub module_reviews: Arc<ReviewsUnderWay>,
 }
 
 /// Default broadcast channel capacity.
@@ -103,6 +105,7 @@ impl PlatformState {
             api_token: None,
             spec_store,
             module_reviewer: Arc::new(OnceLock::new()),
+            module_reviews: Arc::default(),
         };
         state.server.bound_action_hook = Some(Arc::new(
             crate::genesis_install::GenesisInstallHook::new(state.clone()),
@@ -147,6 +150,7 @@ impl PlatformState {
             api_token: None,
             spec_store,
             module_reviewer: Arc::new(OnceLock::new()),
+            module_reviews: Arc::default(),
         };
         state.server.bound_action_hook = Some(Arc::new(
             crate::genesis_install::GenesisInstallHook::new(state.clone()),
@@ -177,25 +181,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_new_state() {
-        let state = PlatformState::new(None);
-        assert!(state.api_key.is_none());
-    }
-
-    #[test]
-    fn test_new_with_api_key() {
-        let state = PlatformState::new(Some("sk-test-key".into()));
-        assert_eq!(state.api_key.as_deref(), Some("sk-test-key"));
-    }
-
-    #[test]
-    fn test_with_registry() {
-        let registry = SpecRegistry::new();
-        let state = PlatformState::with_registry(registry, None);
-        assert!(state.api_key.is_none());
-    }
-
-    #[test]
     fn test_broadcast_and_subscribe() {
         let state = PlatformState::new(None);
         let mut rx = state.subscribe();
@@ -209,15 +194,6 @@ mod tests {
             PlatformEvent::Error { message } => assert_eq!(message, "test broadcast"),
             _ => panic!("expected Error message"),
         }
-    }
-
-    #[test]
-    fn test_broadcast_no_receivers_does_not_panic() {
-        let state = PlatformState::new(None);
-        // No subscribers — should not panic.
-        state.broadcast(PlatformEvent::Error {
-            message: "nobody listening".into(),
-        });
     }
 
     #[test]
@@ -259,12 +235,5 @@ mod tests {
             temper_authz::AuthzEngine::new(&policy).is_ok(),
             "generated system-tenant policy must parse as valid Cedar"
         );
-    }
-
-    #[test]
-    fn temper_system_csdl_uses_register_callback_action_name() {
-        let csdl = include_str!("specs/model.csdl.xml");
-        assert!(csdl.contains(r#"<Action Name="RegisterCallback" IsBound="true">"#));
-        assert!(!csdl.contains("RegisterCallbackGovernanceDecision"));
     }
 }

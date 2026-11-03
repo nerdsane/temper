@@ -5,6 +5,7 @@
 //! assign  = ident ( "=" | "+=" | "-=" ) arg ;
 //! call    = "append" "(" ident "," arg ")"
 //!         | "remove_at" "(" ident "," arg ")"
+//!         | "remove" "(" ident "," arg ")"
 //!         | "schedule" "(" 'action' "," int ")"
 //!         | "schedule_at" "(" 'action' "," ident ")"
 //!         | "spawn" "(" 'type' "," 'action' [ "," ident [ "," arg ] ] [ "," copy ] ")" ;
@@ -62,7 +63,7 @@ impl AssignOp {
 pub enum Effect {
     /// `var = v`, `var += v` or `var -= v`.
     Assign {
-        /// The counter or bool written.
+        /// The counter, bool or string written.
         var: String,
         /// The operator.
         op: AssignOp,
@@ -82,6 +83,13 @@ pub enum Effect {
         list: String,
         /// The index removed.
         index: Arg,
+    },
+    /// `remove(list, v)`: remove every element equal to `v`; none is a no-op.
+    Remove {
+        /// The list written.
+        list: String,
+        /// The string removed.
+        value: Arg,
     },
     /// `schedule('Action', seconds)`: dispatch an action on this entity later.
     Schedule {
@@ -156,6 +164,14 @@ impl Parser<'_> {
                 Effect::RemoveAt {
                     list,
                     index: self.arg()?,
+                }
+            }
+            "remove" => {
+                let list = self.ident()?;
+                self.expect(&Tok::Comma, "','")?;
+                Effect::Remove {
+                    list,
+                    value: self.arg()?,
                 }
             }
             "schedule" => {
@@ -287,6 +303,7 @@ impl fmt::Display for Effect {
             Effect::Assign { var, op, value } => write!(f, "{var} {} {value}", op.as_str()),
             Effect::Append { list, value } => write!(f, "append({list}, {value})"),
             Effect::RemoveAt { list, index } => write!(f, "remove_at({list}, {index})"),
+            Effect::Remove { list, value } => write!(f, "remove({list}, {value})"),
             Effect::Schedule {
                 action,
                 delay_seconds,
@@ -407,11 +424,15 @@ pub fn check_effect(
             VarKind::List => Err(format!(
                 "'{effect}': '{var}' is a list; use append() or remove_at()"
             )),
-            VarKind::Str | VarKind::Num => Err(format!(
-                "'{effect}': only counters and bools can be assigned, '{var}' is neither"
-            )),
+            VarKind::Str => match (op, value) {
+                (AssignOp::Set, Arg::Lit(Literal::Str(_))) => Ok(None),
+                _ => Err(format!(
+                    "'{effect}': a string takes only '=' with a string literal"
+                )),
+            },
+            VarKind::Num => Err(format!("'{effect}': '{var}' is not assignable")),
         },
-        Effect::Append { list, value } => {
+        Effect::Append { list, value } | Effect::Remove { list, value } => {
             if declared(list)? != VarKind::List {
                 return Err(format!("'{effect}': '{list}' is not a list"));
             }
@@ -419,7 +440,7 @@ pub fn check_effect(
                 Arg::Lit(Literal::Str(_)) => Ok(None),
                 Arg::Param(p) => Ok(Some((p.clone(), ParamKind::Str))),
                 _ => Err(format!(
-                    "'{effect}': lists hold strings; append a 'string' or params.<name>"
+                    "'{effect}': lists hold strings; use a 'string' or params.<name>"
                 )),
             }
         }

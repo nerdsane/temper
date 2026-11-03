@@ -21,15 +21,20 @@ use crate::error::{AuthzDenial, AuthzError};
 use crate::metrics::{CedarCheck, CedarDecisionMetric, CedarPhaseOutcome};
 
 mod candidates;
+mod list_read;
 mod list_uniformity;
 mod may;
+mod permit_reach;
 mod platform_policy;
 
+pub use list_read::{ListRead, RowRule};
 pub use list_uniformity::ListReadUniformity;
-pub use may::{Asker, Attr, May, SendAnalysis};
+pub use may::{Asker, Attr, Cause, Hop, Kind, May, Question, SendAnalysis};
+pub use permit_reach::permitted_resource_types;
 pub use platform_policy::VERIFIED_OPERATOR_WHEN;
 use platform_policy::{
     compiled_system_platform_policies, count_user_policies, merge_system_platform_policy,
+    platform_authority_policy,
 };
 
 #[cfg(test)]
@@ -40,6 +45,9 @@ mod stack_tests;
 
 #[cfg(test)]
 mod identity_records_tests;
+
+#[cfg(test)]
+mod principal_record_tests;
 
 /// The result of an authorization check.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +118,8 @@ pub struct AuthzEngine {
     /// Only System principals are evaluated against this set; all externally
     /// resolvable principal kinds still fail closed for an unloaded tenant.
     platform_policy_set: CompiledPolicies,
+    /// Permits exactly the principals with platform authority.
+    platform_authority_policy: CompiledPolicies,
     authorizer: Authorizer,
 }
 
@@ -129,6 +139,7 @@ impl AuthzEngine {
             tenant_policies: RwLock::new(BTreeMap::new()),
             fallback_policy_set: RwLock::new(CompiledPolicies::new(policy_set)),
             platform_policy_set: compiled_system_platform_policies(),
+            platform_authority_policy: platform_authority_policy(),
             authorizer: Authorizer::new(),
         })
     }
@@ -147,6 +158,7 @@ impl AuthzEngine {
             tenant_policies: RwLock::new(BTreeMap::new()),
             fallback_policy_set: RwLock::new(CompiledPolicies::new(policy_set)),
             platform_policy_set: compiled_system_platform_policies(),
+            platform_authority_policy: platform_authority_policy(),
             authorizer: Authorizer::new(),
         }
     }
@@ -168,6 +180,7 @@ impl AuthzEngine {
             tenant_policies: RwLock::new(BTreeMap::new()),
             fallback_policy_set: RwLock::new(CompiledPolicies::new(policy_set)),
             platform_policy_set: compiled_system_platform_policies(),
+            platform_authority_policy: platform_authority_policy(),
             authorizer: Authorizer::new(),
         }
     }
@@ -401,6 +414,27 @@ impl AuthzEngine {
         )
     }
 
+    /// The same decision as [`Self::authorize_for_tenant`], for a page asking which moves to show before any is
+    /// sent. Only its metric differs: it is counted as `check:offer`, never as a refusal; the move, if sent, is
+    /// checked again at the gate.
+    pub fn authorize_offer_for_tenant(
+        &self,
+        tenant: &str,
+        security_ctx: &SecurityContext,
+        action: &str,
+        resource_type: &str,
+        resource_attrs: &HashMap<String, serde_json::Value>,
+    ) -> AuthzDecision {
+        self.authorize_for_tenant_checked(
+            tenant,
+            security_ctx,
+            action,
+            resource_type,
+            resource_attrs,
+            CedarCheck::Offer,
+        )
+    }
+
     fn authorize_for_tenant_checked(
         &self,
         tenant: &str,
@@ -518,9 +552,19 @@ impl AuthzEngine {
             );
         }
 
-        // Add context attributes
+        // Add context attributes. The cause keys come from the cause alone,
+        // below, so no attribute speaks under them, even where it has none.
         for (key, value) in &security_ctx.context_attrs {
+            if platform_keys::CAUSE.contains(&key.as_str()) {
+                continue;
+            }
             insert_json_as_cedar(&mut ctx_map, key.clone(), value);
+        }
+
+        // How the move came about: `via` and `depth` on every check, the
+        // reaction's hop and the timer's arm where the move has them.
+        for (key, value) in crate::cause::cause_context(security_ctx.cause.as_ref()) {
+            insert_json_as_cedar(&mut ctx_map, key.to_string(), &value);
         }
 
         // Resource fields may appear as context.key for domain policies.
@@ -601,8 +645,10 @@ impl AuthzEngine {
             }
         };
         let resource_entity = if resource_uid == principal_uid {
-            let mut merged_attrs = principal_attrs;
-            merged_attrs.extend(resource_entity_attrs);
+            // The principal's attributes come from its token and the identity
+            // boundary; a field of the record it is reading never replaces one.
+            let mut merged_attrs = resource_entity_attrs;
+            merged_attrs.extend(principal_attrs);
             match Entity::new(resource_uid.clone(), merged_attrs, HashSet::new()) {
                 Ok(entity) => entity,
                 Err(e) => {

@@ -12,10 +12,13 @@ fn customer() -> SecurityContext {
             role: None,
             acting_for: None,
             agent_type: None,
+            label: None,
             attributes: HashMap::new(),
         },
         context_attrs: HashMap::new(),
         correlation_id: "list-uniformity".to_string(),
+        cause: None,
+        credential: None,
     }
 }
 

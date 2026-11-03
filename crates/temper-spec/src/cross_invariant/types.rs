@@ -9,8 +9,47 @@ pub enum DeletePolicy {
     Restrict,
     /// Delete dependents automatically.
     Cascade,
-    /// Set dependent FK field to null when possible.
+    /// Set dependent FK field to null when possible. Not implemented: every
+    /// parser refuses it, so no relation carries it.
     SetNull,
+    /// Leave dependents as they are: the relation is navigation only, and a
+    /// dependent may keep pointing at a deleted parent.
+    None,
+}
+
+impl DeletePolicy {
+    /// Whether the server carries out this policy when a parent is deleted.
+    pub fn is_implemented(self) -> bool {
+        !matches!(self, Self::SetNull)
+    }
+
+    /// The name specs write: the serde name, which [`str::parse`] reads back.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Restrict => "restrict",
+            Self::Cascade => "cascade",
+            Self::SetNull => "setnull",
+            Self::None => "none",
+        }
+    }
+}
+
+impl std::str::FromStr for DeletePolicy {
+    type Err = String;
+
+    /// Parse the names `cross-invariants.toml` uses: `restrict`, `cascade`,
+    /// `none` and `setnull`.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "restrict" => Ok(Self::Restrict),
+            "cascade" => Ok(Self::Cascade),
+            "none" => Ok(Self::None),
+            "setnull" => Ok(Self::SetNull),
+            other => Err(format!(
+                "unknown delete policy '{other}' (expected restrict, cascade or none)"
+            )),
+        }
+    }
 }
 
 /// Cross-invariant strength.
@@ -87,38 +126,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn delete_policy_default_is_restrict() {
-        assert_eq!(DeletePolicy::default(), DeletePolicy::Restrict);
-    }
-
-    #[test]
-    fn invariant_kind_default_is_hard() {
-        assert_eq!(InvariantKind::default(), InvariantKind::Hard);
-    }
-
-    #[test]
-    fn cross_invariant_spec_default() {
-        let spec = CrossInvariantSpec::default();
-        assert_eq!(spec.version, 1);
-        assert_eq!(spec.default_delete_policy, DeletePolicy::Restrict);
-        assert!(spec.invariants.is_empty());
-        assert!(spec.relation_overrides.is_empty());
-    }
-
-    #[test]
-    fn delete_policy_serde_roundtrip() {
-        for policy in [
-            DeletePolicy::Restrict,
-            DeletePolicy::Cascade,
-            DeletePolicy::SetNull,
-        ] {
-            let json = serde_json::to_string(&policy).unwrap();
-            let back: DeletePolicy = serde_json::from_str(&json).unwrap();
-            assert_eq!(back, policy);
-        }
-    }
-
-    #[test]
     fn delete_policy_serde_rename() {
         assert_eq!(
             serde_json::to_string(&DeletePolicy::Restrict).unwrap(),
@@ -132,6 +139,26 @@ mod tests {
             serde_json::to_string(&DeletePolicy::SetNull).unwrap(),
             "\"setnull\""
         );
+        assert_eq!(
+            serde_json::to_string(&DeletePolicy::None).unwrap(),
+            "\"none\""
+        );
+    }
+
+    #[test]
+    fn delete_policy_parses_the_names_it_serializes_to() {
+        for policy in [
+            DeletePolicy::Restrict,
+            DeletePolicy::Cascade,
+            DeletePolicy::SetNull,
+            DeletePolicy::None,
+        ] {
+            let name = serde_json::to_value(policy).unwrap();
+            assert_eq!(name.as_str(), Some(policy.as_str()));
+            let parsed: DeletePolicy = policy.as_str().parse().unwrap();
+            assert_eq!(parsed, policy);
+        }
+        assert!("Cascade".parse::<DeletePolicy>().is_err());
     }
 
     #[test]

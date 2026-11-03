@@ -94,7 +94,8 @@ idempotent retry can establish visibility and resume dispatch without appending
 another source transition. Delayed older projection writes remain subject to
 the store's sequence guard. Superseded state timers are invalidated before
 waiting, so a committed reset cannot leave its old deadline active during a
-slow write. Successor timers start only after visibility is established.
+slow write. Successor timers start only after visibility is established
+(superseded on 2026-10-25, below: they start before the wait).
 
 **Amendment: projection before response (2026-10-01).** Every committed
 single-action transition now awaits its query projection before the response
@@ -110,6 +111,66 @@ that. The cost is one awaited projection write per transition, which is what
 deployments paid before ADR-0181. A projection failure is reported in the
 response as before. The queued path remains for composite dispatch, deletes
 and backfill.
+
+**Amendment: a failed projection is retried, not reported (2026-10-25).** The
+idempotent retry this section relied on does not come for most moves: a timer,
+a scheduled action or a reaction has no caller to retry it, and an agent that
+reads "failed" usually moves on. On a user's Temper, 19 moves between
+24 Oct 20:54 and 25 Oct committed, then hit "query projection timed out after
+30 seconds" under Turso write contention, and stayed in their new state with
+no state timer and no follow-on work. A Factory release sat in Making with its
+4500-second Lost timer never armed and its make run never started.
+
+Now the dispatch keeps the work. The state timer the transition entered or
+reset is armed right after the commit, before the projection wait: it fires
+through the record's actor and reads nothing from the query plane, so it is
+bookkeeping for the commit like the cancellation of the old one. An atomic
+composite batch keeps its order (cancel, project, reload, arm): wherever a
+query plane exists the server runs the projection queue, and the batch only
+enqueues its rows, so it neither waits for nor fails on the write. If the
+projection write fails, its
+scheduled actions are armed at once and taken out of the response, so the
+later arms on the ordinary path do not arm them a second time (a row that has
+already fired would fire again). The write is tried again with a doubling
+wait (100 ms up to the 30-second budget of one try) until it lands. Then
+dispatch continues down the ordinary path: SSE, webhooks, integrations,
+spawns, and the caller's reactions, each once. The response waits for that and
+reports success. The 30-second budget now bounds one try, since a write stuck
+on a dead connection or a held lock does not finish by waiting longer; it no
+longer bounds the response.
+
+A delete of the record committed while the write is being tried ends the
+tries, and the dependents start without it. The delete removes the record's
+row rather than replacing it, so the sequence guard has nothing to compare
+with, and the older write landing after the removal would bring the deleted
+record back. Each try first reads the record's journal after the
+transition's sequence: an event there that moved the record to `Deleted`
+(the kernel's tombstone or a spec action) means a delete was committed since.
+The journal answers, not the status cache, because the cache can evict the
+delete's status during a long outage. A try that cannot read the journal writes
+nothing and waits for the next. A try already in flight when the removal
+lands can still bring the row back, as a slow first write could before this
+change.
+
+The tries do not give up. Nothing else starts this transition's dependents,
+so a limit would drop committed work again, which is the defect. A store
+that refuses one row forever (no such error is known) keeps that request
+waiting and logs every try, and the request keeps what it holds: its
+admission permit, a reaction permit if it is a reaction, and for the commons
+tenant the commons write lock. On Turso this path no longer runs once
+arni-labs/temper #122 writes query rows in the commit, so it is reached only
+on the other stores.
+
+A caller can wait longer than 30 seconds while the store is stalled. A caller
+that hangs up meanwhile loses nothing once dispatch runs in its own task
+(arni-labs/temper #122). A caller that retries with the same idempotency key
+while the first dispatch is still catching up can start the dependents a
+second time, and arm its scheduled actions again from the actor's cached
+reply, as it can today while any post-dispatch work (an inline integration,
+awaited reactions) outlasts the caller's timeout. The wait now lasts as long
+as the outage, so the window is wider. arni-labs/temper #79 closes that race
+by giving a key's post-dispatch effects one owner: a retry that arrives while
+they run waits for them.
 
 ### Sub-Decision 3: Session Collection Reads Must Push Down Bounds
 

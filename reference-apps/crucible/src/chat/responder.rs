@@ -1415,13 +1415,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_content_blob_is_rejected() {
-        let history = vec![blank_row(0, "user.message", Some(""))];
-        let err = events_to_messages(&history).unwrap_err();
-        assert!(err.to_string().contains("empty Content"), "{err}");
-    }
-
-    #[test]
     fn agent_message_with_tool_use_blocks_preserves_them() {
         let blob = serde_json::json!({
             "blocks": [

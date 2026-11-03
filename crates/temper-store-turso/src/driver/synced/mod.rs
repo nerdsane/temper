@@ -25,6 +25,7 @@ use temper_runtime::persistence::{PersistenceError, storage_error};
 
 use super::{Connection, DriverError, DriverHandle, Lease};
 
+mod checkpoint;
 mod files;
 mod pool;
 mod push;
@@ -79,11 +80,11 @@ struct Inner {
     /// change capture on it, which also fails while another connection
     /// writes; reuse makes that rare and `connect` retries it.
     pool: ConnectionPool,
-    /// Every connection in use holds this shared. While the engine
-    /// checkpoints, every statement on any connection fails at once with
-    /// "database is locked", so a checkpoint takes it exclusively, and only
-    /// when it is free right away: waiting for it could deadlock a store call
-    /// that holds one connection while opening another.
+    /// Every connection in use holds this shared. While the log is reset,
+    /// every statement on any connection fails at once with "database is
+    /// locked", so a checkpoint takes it exclusively, waiting at most
+    /// [`CHECKPOINT_TURN_BUDGET`]: longer could deadlock a store call that
+    /// holds one connection while opening another.
     in_use: Arc<tokio::sync::RwLock<()>>,
     /// The newest change a successful push carried (from `last_change`).
     pushed: AtomicI64,
@@ -333,6 +334,15 @@ impl SyncCopy {
             match opened {
                 Ok(conn) => {
                     conn.busy_timeout(Duration::from_secs(5))?;
+                    // A commit does not wait for the disk: NORMAL flushes the
+                    // file at each checkpoint instead of each commit. Every
+                    // confirmed write is already on the remote, so a machine
+                    // crash that rolls the file back to its last checkpoint
+                    // loses only writes answered "not confirmed", and the next
+                    // start restores a file behind its remote. Unsynced stores
+                    // keep Turso's FULL. Rita's choice on 27 Oct 2026: on a
+                    // Tensorlake drive FULL fell behind at 20 moves a second.
+                    conn.execute("PRAGMA synchronous = NORMAL", ()).await?;
                     let conn = Lease::new(Arc::new(DriverHandle::new(conn)), in_use);
                     return Ok(Connection::Local { conn, pool });
                 }
@@ -343,25 +353,6 @@ impl SyncCopy {
                 Err(error) => return Err(error.into()),
             }
         }
-    }
-
-    /// Move the local write-ahead log into the database file once it is larger
-    /// than `max_wal_bytes`. Turso Sync turns automatic checkpoints off, so
-    /// without this the log grows with every write.
-    pub async fn checkpoint_if_wal_over(
-        &self,
-        max_wal_bytes: u64,
-    ) -> Result<bool, PersistenceError> {
-        let _engine = self.inner.engine.lock().await;
-        let Ok(_idle) = self.inner.in_use.try_write() else {
-            return Ok(false);
-        };
-        let stats = self.inner.db.stats().await.map_err(storage_error)?;
-        if stats.main_wal_size < max_wal_bytes {
-            return Ok(false);
-        }
-        self.inner.db.checkpoint().await.map_err(storage_error)?;
-        Ok(true)
     }
 
     /// With the app stopped: clear a [`CopyState::Stopped`] copy once its
@@ -417,6 +408,13 @@ impl SyncCopy {
         conn.execute(sql, ()).await.map_err(storage_error)
     }
 }
+
+/// How long a checkpoint waits for the calls in flight before it gives way.
+/// Every new call waits behind it meanwhile, so it stays well inside the
+/// 10 s a request may wait for its answer; and a write holds its connection
+/// for one commit, about 1 s at worst on a Tensorlake drive (fsync p99 on the
+/// staging canary, 26 Oct 2026).
+const CHECKPOINT_TURN_BUDGET: Duration = Duration::from_secs(1);
 
 /// How long opening a connection retries while other connections write; as
 /// long as the store's statements wait for a busy database.

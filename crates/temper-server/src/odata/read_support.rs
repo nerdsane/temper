@@ -1,10 +1,12 @@
 //! Shared helpers for OData read handlers.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use futures_util::stream::{self, StreamExt};
 use temper_runtime::tenant::TenantId;
 
+use super::read_defaults::ReadDefaults;
+use super::response::fill_event_metadata;
 use crate::state::ServerState;
 use crate::storage::{
     CatalogRowsLoad, EntityCatalogRow, load_catalog_rows_by_id, load_selected_catalog_rows_by_id,
@@ -54,6 +56,7 @@ fn catalog_row_to_entity_body(
             .or_insert(serde_json::json!({}));
         obj.entry("lists".to_string())
             .or_insert(serde_json::json!({}));
+        fill_event_metadata(obj);
         obj.insert("events".to_string(), serde_json::json!([]));
         obj.entry("total_event_count".to_string())
             .or_insert(serde_json::json!(row.sequence_nr));
@@ -80,6 +83,14 @@ fn catalog_row_to_entity_body(
         "events": [],
         "total_event_count": row.sequence_nr,
         "sequence_nr": row.sequence_nr,
+        "first_event_at": null,
+        "last_event_at": null,
+        "last_event_via": null,
+        "last_event_by": null,
+        "last_event_for": null,
+        "last_event_agent_type": null,
+        "last_event_label": null,
+        "timer_needs_person": null,
         "@odata.id": format!("{entity_set_name}('{id}')"),
     })
 }
@@ -147,77 +158,14 @@ async fn try_load_selected_catalog_rows(
     }
 }
 
-pub(super) async fn missing_catalog_entity_ids(
-    state: &ServerState,
-    tenant: &TenantId,
-    entity_type: &str,
-    entity_ids: &[String],
-) -> Vec<String> {
-    if entity_ids.is_empty() {
-        return Vec::new();
-    }
-    let Some(query_plane) = state.query_plane_store() else {
-        return Vec::new();
-    };
-
-    let coverage_fields = [String::from("entity_id")];
-    let present_ids = match load_selected_catalog_rows_by_id(
-        &query_plane,
-        tenant.as_str(),
-        entity_type,
-        entity_ids,
-        &coverage_fields,
-    )
-    .await
-    {
-        Ok(CatalogRowsLoad::Available(rows)) => Some(rows.into_keys().collect::<Vec<_>>()),
-        Ok(CatalogRowsLoad::Unsupported) => {
-            match load_catalog_rows_by_id(&query_plane, tenant.as_str(), entity_type, entity_ids)
-                .await
-            {
-                Ok(CatalogRowsLoad::Available(rows)) => Some(rows.into_keys().collect()),
-                Ok(CatalogRowsLoad::Unsupported) => None,
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        tenant = %tenant,
-                        entity_type = %entity_type,
-                        "catalog coverage row check failed; trusting SQL filter push-down result"
-                    );
-                    None
-                }
-            }
-        }
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                tenant = %tenant,
-                entity_type = %entity_type,
-                "catalog coverage presence check failed; trusting SQL filter push-down result"
-            );
-            None
-        }
-    };
-
-    let Some(present_ids) = present_ids else {
-        return Vec::new();
-    };
-    let present = present_ids.into_iter().collect::<BTreeSet<_>>();
-    entity_ids
-        .iter()
-        .filter(|id| !present.contains(*id))
-        .cloned()
-        .collect()
-}
-
 /// Try to load a single entity body from the durable `entity_catalog`.
 ///
 /// Returns `Some(json)` when the catalog has a row for `(tenant, entity_type,
 /// key)` and catalog materialization is preferred or the catalog fast-read
 /// feature flag is enabled. Returns `None` when catalog reads are disabled,
 /// the catalog has no row, the row is behind a commit this server's actor
-/// already holds, or the read fails — caller is expected to fall back to
-/// actor hydration in that case.
+/// already holds or a cold record's journal holds, or the read fails. The caller
+/// falls back to actor hydration in that case.
 ///
 /// The returned JSON has the same shape as the actor's serialized
 /// `EntityState` so downstream code (`enrich_entity_response`, OData
@@ -239,19 +187,28 @@ pub(super) async fn try_load_entity_body_from_catalog(
     // ADR-0148: projection writes are queued, so a point read right after a
     // write can find the row one write behind. When this server's actor holds
     // a newer commit, the caller reads the actor instead.
-    if state
+    match state
         .resident_entity_sequence(tenant, entity_type, key)
         .await
-        .is_some_and(|committed| committed > row.sequence_nr)
     {
-        return None;
+        Some(committed) if committed > row.sequence_nr => return None,
+        Some(_) => {}
+        None => {
+            // Boot fixes old splits, but another writer can still advance a
+            // cold record after startup. Compare indexed journal/snapshot heads;
+            // a failed read falls back to strict actor recovery too.
+            if let Some((store, _)) = state.event_journal() {
+                let pid = format!("{tenant}:{entity_type}:{key}");
+                if store.latest_sequence_nr(&pid).await.ok()? > row.sequence_nr {
+                    return None;
+                }
+            }
+        }
     }
     maybe_spawn_catalog_shadow_check(state, tenant, entity_type, &row);
-    Some(catalog_row_to_entity_body(
-        entity_type,
-        entity_set_name,
-        row,
-    ))
+    let mut body = catalog_row_to_entity_body(entity_type, entity_set_name, row);
+    ReadDefaults::for_entity(state, tenant, entity_type).apply(&mut body);
+    Some(body)
 }
 
 pub(super) async fn materialize_entity_set_entities(
@@ -263,11 +220,13 @@ pub(super) async fn materialize_entity_set_entities(
     prefer_catalog: bool,
     selected_catalog_fields: Option<&[String]>,
 ) -> MaterializedEntitySet {
+    let defaults = ReadDefaults::for_entity(state, tenant, entity_type);
+    let projection_fields = selected_catalog_fields.map(|select| defaults.catalog_fields(select));
     let selected_catalog_fields_owned = selected_catalog_fields.map(Vec::from);
     let mut catalog_select_projection = false;
     let mut catalog_hits: BTreeMap<String, EntityCatalogRow> =
         if should_read_catalog_for_materialization(prefer_catalog) {
-            match selected_catalog_fields {
+            match projection_fields.as_deref() {
                 Some(select) => {
                     let (rows, sparse) = try_load_selected_catalog_rows(
                         state,
@@ -307,16 +266,28 @@ pub(super) async fn materialize_entity_set_entities(
             let entity_type = entity_type.to_string();
             let entity_set_name = entity_set_name.to_string();
             let selected_catalog_fields = selected_catalog_fields_owned.clone();
+            let defaults = &defaults;
             async move {
                 if let Some(row) = catalog_row {
                     let entity = match selected_catalog_fields.as_deref() {
-                        Some(select) => catalog_row_to_selected_entity_body(
-                            &entity_type,
-                            &entity_set_name,
-                            row,
-                            select,
-                        ),
-                        None => catalog_row_to_entity_body(&entity_type, &entity_set_name, row),
+                        Some(select) => {
+                            let fields =
+                                defaults.field_values(row.state.as_ref().unwrap_or(&row.fields));
+                            let mut entity = catalog_row_to_selected_entity_body(
+                                &entity_type,
+                                &entity_set_name,
+                                row,
+                                select,
+                            );
+                            defaults.apply_selected(&mut entity, select, &fields);
+                            entity
+                        }
+                        None => {
+                            let mut entity =
+                                catalog_row_to_entity_body(&entity_type, &entity_set_name, row);
+                            defaults.apply(&mut entity);
+                            entity
+                        }
                     };
                     return Some(entity);
                 }
@@ -325,38 +296,13 @@ pub(super) async fn materialize_entity_set_entities(
                     .await
                 {
                     Ok(response) => {
-                        if response.state.status != "Deleted"
-                            && let Some(query_plane) = state.query_plane_store()
-                        {
-                            let fields = state.query_projection_fields(
-                                &tenant,
-                                &entity_type,
-                                &response.state.fields,
-                            );
-                            let projected_state = state.query_projection_state(&response.state);
-                            if let Err(error) = query_plane
-                                .upsert_projection(
-                                    tenant.as_str(),
-                                    &entity_type,
-                                    &id,
-                                    &response.state.status,
-                                    &fields,
-                                    &projected_state,
-                                    response.state.sequence_nr,
-                                )
-                                .await
-                            {
-                                tracing::debug!(
-                                    error = %error,
-                                    tenant = %tenant,
-                                    entity_type = %entity_type,
-                                    entity_id = %id,
-                                    "failed to repair query projection after actor materialization fallback"
-                                );
-                            }
-                        }
+                        // Nothing is written back: a record's catalog row
+                        // commits with its events, so a row missing here is
+                        // a commit still in flight or a delete, not a lag.
                         let mut entity = serde_json::to_value(&response.state).unwrap_or_default();
+                        defaults.apply(&mut entity);
                         if let Some(obj) = entity.as_object_mut() {
+                            fill_event_metadata(obj);
                             obj.insert(
                                 "@odata.id".into(),
                                 serde_json::json!(format!("{entity_set_name}('{id}')")),

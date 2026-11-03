@@ -75,8 +75,55 @@ pub const TRIGGER_DECLARED_PRINCIPAL: &str = "triggerDeclaredPrincipal";
 /// hide that a reaction is one from a policy that refuses them.
 pub const TRIGGER_INHERITED_CONTEXT_APPROXIMATE: &str = "triggerInheritedContextApproximate";
 
+// How the move came about (`MoveCause`). The engine sets `via` and `depth` on
+// every check and the rest on a reaction's or a timer's, from the security
+// context's cause alone: neither a record field nor a context attribute
+// speaks under these names, so only the kernel's own reaction and timer paths
+// set them.
+
+/// `"request"`, `"reaction"` or `"timer"`. A field `via` set to `"reaction"`
+/// would pass an app's hook forbid narrowed to direct requests, for any move
+/// the hook picks.
+pub const VIA: &str = "via";
+
+/// Reaction hops since the chain's request or timer fire. A field would pass
+/// a policy that admits only a chain's later hops, for a direct request.
+pub const DEPTH: &str = "depth";
+
+/// The rule making a reaction, `<Type>:<Action>:<trigger>`. A field would
+/// pass a policy that lets only that rule's reaction make the move, for a
+/// caller's own move.
+pub const RULE: &str = "rule";
+
+/// The move that set a reaction off. A field would pass a policy that admits
+/// only reactions to that move.
+pub const CAUSE_ACTION: &str = "causeAction";
+
+/// The entity type of the move that set a reaction off. A field would pass a
+/// policy that admits only reactions to that type's moves.
+pub const CAUSE_ENTITY_TYPE: &str = "causeEntityType";
+
+/// The record whose move set a reaction off. A field would pass a policy
+/// that admits only reactions to that record's moves.
+pub const CAUSE_ENTITY_ID: &str = "causeEntityId";
+
+/// Who armed the timer a chain started from. A field would pass a policy
+/// that admits only the timers one principal armed, for anyone's request.
+pub const ARMED_BY: &str = "armedBy";
+
+/// The keys of a move's cause, which only the engine sets, from the cause.
+pub const CAUSE: [&str; 7] = [
+    VIA,
+    DEPTH,
+    RULE,
+    CAUSE_ACTION,
+    CAUSE_ENTITY_TYPE,
+    CAUSE_ENTITY_ID,
+    ARMED_BY,
+];
+
 /// Every key above.
-pub const ALL: [&str; 14] = [
+pub const ALL: [&str; 21] = [
     SESSION_ID,
     AGENT_ID,
     AGENT_TYPE,
@@ -91,4 +138,11 @@ pub const ALL: [&str; 14] = [
     TRIGGER_SOURCE_ACTION,
     TRIGGER_DECLARED_PRINCIPAL,
     TRIGGER_INHERITED_CONTEXT_APPROXIMATE,
+    VIA,
+    DEPTH,
+    RULE,
+    CAUSE_ACTION,
+    CAUSE_ENTITY_TYPE,
+    CAUSE_ENTITY_ID,
+    ARMED_BY,
 ];

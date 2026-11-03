@@ -1,0 +1,26 @@
+# A parent that tells its child a word as it closes. Its own check reads
+# nothing of the word; the child's rule over both records does.
+
+[automaton]
+name = "Parent"
+states = ["Open", "Closed"]
+initial = "Open"
+
+[[action]]
+name = "Close"
+kind = "input"
+from = ["Open"]
+to = "Closed"
+
+[[action.triggers]]
+name = "tell"
+kind = "entity"
+principal = "tell"
+target_entity = "Child"
+target_action = "Copy"
+
+[action.triggers.args]
+value = "'shipped'"
+
+[action.triggers.resolve_target]
+kind = "same_id"

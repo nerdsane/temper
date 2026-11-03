@@ -1,11 +1,10 @@
 use temper_runtime::persistence::PersistenceError;
 use temper_store_postgres::PostgresEventStore;
-use temper_store_turso::{QueryProjectionUpsert as TursoQueryProjectionUpsert, TursoEventStore};
+use temper_store_turso::TursoEventStore;
 
 use super::{
     CatalogGroup, CatalogRowFreshness, EntityCatalogRow, QueryFieldIndexOrder,
     QueryFieldIndexOrderDirection, QueryFieldIndexPage, QueryPlaneStore, QueryProjectionFieldsRow,
-    QueryProjectionUpsert,
 };
 
 pub(super) fn catalog_freshness(
@@ -18,6 +17,13 @@ pub(super) fn catalog_freshness(
             wrapped_fields,
         })
         .collect()
+}
+
+/// Whether `journal` is `store` itself. A separately supplied journal can have
+/// changes absent from this store's projection delta, so the delta's absence
+/// is evidence only about the store's own journal.
+fn journal_is<T>(store: &T, journal: &super::BoxedEventStore) -> bool {
+    std::ptr::addr_eq(store as *const T, std::sync::Arc::as_ptr(&journal.store))
 }
 
 pub(super) fn storage_order_by(order_by: &[QueryFieldIndexOrder]) -> Vec<(String, bool)> {
@@ -34,6 +40,35 @@ pub(super) fn storage_order_by(order_by: &[QueryFieldIndexOrder]) -> Vec<(String
 
 #[async_trait::async_trait]
 impl QueryPlaneStore for PostgresEventStore {
+    async fn reconciled_equality_candidates(
+        &self,
+        journal: &super::BoxedEventStore,
+        tenant: &str,
+        entity_type: &str,
+        predicates: &[(String, String)],
+        probe_budget: Option<usize>,
+    ) -> Result<Option<(Vec<String>, Vec<String>)>, PersistenceError> {
+        if !journal_is(self, journal) {
+            return Ok(None);
+        }
+        self.reconciled_equality_candidates_pg(tenant, entity_type, predicates, probe_budget)
+            .await
+            .map(Some)
+    }
+
+    async fn lagging_projections(
+        &self,
+        tenant: &str,
+    ) -> Result<Option<Vec<temper_runtime::persistence::ProjectionRepairCandidate>>, PersistenceError>
+    {
+        self.lagging_query_projections(tenant).await.map(Some)
+    }
+    async fn projection_checkpoints(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<temper_runtime::persistence::ProjectionCheckpoint>, PersistenceError> {
+        self.query_projection_checkpoints(tenant).await
+    }
     async fn upsert_projection(
         &self,
         tenant: &str,
@@ -45,6 +80,28 @@ impl QueryPlaneStore for PostgresEventStore {
         sequence_nr: u64,
     ) -> Result<(), PersistenceError> {
         self.upsert_query_projection_with_state(
+            tenant,
+            entity_type,
+            entity_id,
+            status,
+            fields,
+            state,
+            sequence_nr,
+        )
+        .await
+    }
+
+    async fn refresh_projection(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+        fields: &serde_json::Value,
+        state: &serde_json::Value,
+        sequence_nr: u64,
+    ) -> Result<(), PersistenceError> {
+        self.refresh_query_projection_with_state(
             tenant,
             entity_type,
             entity_id,
@@ -211,6 +268,19 @@ impl QueryPlaneStore for PostgresEventStore {
 
 #[async_trait::async_trait]
 impl QueryPlaneStore for TursoEventStore {
+    async fn lagging_projections(
+        &self,
+        tenant: &str,
+    ) -> Result<Option<Vec<temper_runtime::persistence::ProjectionRepairCandidate>>, PersistenceError>
+    {
+        self.lagging_query_projections(tenant).await.map(Some)
+    }
+    async fn projection_checkpoints(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<temper_runtime::persistence::ProjectionCheckpoint>, PersistenceError> {
+        self.query_projection_checkpoints(tenant).await
+    }
     async fn upsert_projection(
         &self,
         tenant: &str,
@@ -233,17 +303,26 @@ impl QueryPlaneStore for TursoEventStore {
         .await
     }
 
-    async fn upsert_projections(
+    async fn refresh_projection(
         &self,
         tenant: &str,
-        projections: &[QueryProjectionUpsert],
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+        fields: &serde_json::Value,
+        state: &serde_json::Value,
+        sequence_nr: u64,
     ) -> Result<(), PersistenceError> {
-        let turso_projections = projections
-            .iter()
-            .map(to_turso_projection)
-            .collect::<Vec<_>>();
-        self.upsert_query_projections(tenant, &turso_projections)
-            .await
+        self.refresh_query_projection_with_state(
+            tenant,
+            entity_type,
+            entity_id,
+            status,
+            fields,
+            state,
+            sequence_nr,
+        )
+        .await
     }
 
     async fn remove_projection(
@@ -351,6 +430,28 @@ impl QueryPlaneStore for TursoEventStore {
             .map(Some)
     }
 
+    async fn reconciled_equality_candidates(
+        &self,
+        journal: &super::BoxedEventStore,
+        tenant: &str,
+        entity_type: &str,
+        predicates: &[(String, String)],
+        probe_budget: Option<usize>,
+    ) -> Result<Option<(Vec<String>, Vec<String>)>, PersistenceError> {
+        if !journal_is(self, journal) {
+            return Ok(None);
+        }
+        TursoEventStore::reconciled_equality_candidates(
+            self,
+            tenant,
+            entity_type,
+            predicates,
+            probe_budget,
+        )
+        .await
+        .map(Some)
+    }
+
     async fn projection_catalog_freshness(
         &self,
         tenant: &str,
@@ -371,20 +472,5 @@ impl QueryPlaneStore for TursoEventStore {
         let rows =
             TursoEventStore::catalog_groups(self, tenant, entity_type, fields, statuses).await?;
         Ok(Some(CatalogGroup::from_rows(rows, fields)))
-    }
-}
-
-pub(super) fn to_turso_projection(
-    projection: &QueryProjectionUpsert,
-) -> TursoQueryProjectionUpsert {
-    TursoQueryProjectionUpsert {
-        entity_type: projection.entity_type.clone(),
-        entity_id: projection.entity_id.clone(),
-        status: projection.status.clone(),
-        fields: projection.fields.clone(),
-        state: projection.state.clone(),
-        indexed_fields: projection.indexed_fields.clone(),
-        sequence_nr: projection.sequence_nr,
-        known_new: projection.known_new,
     }
 }

@@ -1,0 +1,94 @@
+# The rebooking part of trip_getaway.ioa.toml: the flight home is cancelled,
+# the group looks for new seats, and the airline may move the group itself.
+# AirlineMoved checks that no seats are bought or being bought, but not that
+# the organiser is still being asked about dearer seats: after it, Approve and
+# Bought pay for a second flight home.
+[automaton]
+name = 'Rebooking'
+states = ['Away', 'Disrupted', 'Home']
+initial = 'Away'
+allow_indefinite_states = ['Away', 'Disrupted', 'Home']
+
+# Tickets home the group has paid for and can still fly on.
+[[state]]
+name = 'tickets_home'
+type = 'counter'
+initial = 1
+
+[[state]]
+name = 'searching'
+type = 'bool'
+initial = false
+
+[[state]]
+name = 'yes_wanted'
+type = 'bool'
+initial = false
+
+[[state]]
+name = 'buying'
+type = 'bool'
+initial = false
+
+[[state]]
+name = 'moved'
+type = 'bool'
+initial = false
+
+[[action]]
+name = 'FlightHomeCancelled'
+from = ['Away']
+to = 'Disrupted'
+effect = ['tickets_home -= 1']
+
+[[action]]
+name = 'Search'
+from = ['Disrupted']
+guard = '!moved && !searching && !yes_wanted && !buying && tickets_home == 0'
+effect = ['searching = true']
+
+[[action]]
+name = 'SeatsFound'
+from = ['Disrupted']
+guard = 'searching'
+effect = ['searching = false', 'buying = true']
+
+[[action]]
+name = 'SeatsOverLimit'
+from = ['Disrupted']
+guard = 'searching'
+effect = ['searching = false', 'yes_wanted = true']
+
+[[action]]
+name = 'Approve'
+from = ['Disrupted']
+guard = 'yes_wanted'
+effect = ['yes_wanted = false', 'buying = true']
+
+[[action]]
+name = 'Bought'
+from = ['Disrupted']
+guard = 'buying'
+effect = ['buying = false', 'tickets_home += 1']
+
+[[action]]
+name = 'BuyFailed'
+from = ['Disrupted']
+guard = 'buying'
+effect = ['buying = false']
+
+[[action]]
+name = 'AirlineMoved'
+from = ['Disrupted']
+guard = '!moved && !buying && tickets_home == 0'
+effect = ['moved = true', 'searching = false', 'tickets_home += 1']
+
+[[action]]
+name = 'FlyHome'
+from = ['Disrupted']
+to = 'Home'
+guard = 'tickets_home > 0 && !searching && !yes_wanted && !buying'
+
+[[invariant]]
+name = 'NeverPaysForTwoFlightsHome'
+assert = 'tickets_home <= 1'

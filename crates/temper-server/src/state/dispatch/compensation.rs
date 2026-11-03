@@ -29,6 +29,9 @@ use crate::request_context::AgentContext;
 /// that already model an error step participate without renaming.
 const FAILURE_TRANSITION_NAMES: &[&str] = &["Fail", "MarkFailed", "Error", "Abort"];
 
+/// The source a compensating transition derives its callback key under.
+const COMPENSATION_SOURCE: &str = "integration-compensation";
+
 impl crate::state::ServerState {
     /// Dispatch a compensating transition for a background integration failure
     /// (ADR-0152).
@@ -144,7 +147,15 @@ impl crate::state::ServerState {
                     return;
                 }
             };
-        let callback_ctx = match parent_ctx.for_callback() {
+        // A compensation answers the action's integrations failing, not one
+        // integration's run, so its key is named by the failure action it
+        // takes: two of them under one request stay two.
+        let callback_ctx = match parent_ctx.for_callback(
+            entity_type,
+            entity_id,
+            &action,
+            &format!("{COMPENSATION_SOURCE}:{action}"),
+        ) {
             Ok(context) => context,
             Err(budget_error) => {
                 self.record_generated_callback_refusal(
@@ -168,10 +179,17 @@ impl crate::state::ServerState {
                 return;
             }
         };
-        let agent_ctx =
-            AgentContext::for_service_inheriting("integration-compensation", &callback_ctx);
+        // The compensating move is made as whoever made the move whose
+        // integration failed, as a declared on_failure answer is.
         match self
-            .dispatch_tenant_action(tenant, entity_type, entity_id, &action, params, &agent_ctx)
+            .dispatch_tenant_action(
+                tenant,
+                entity_type,
+                entity_id,
+                &action,
+                params,
+                &callback_ctx.for_answer(),
+            )
             .await
         {
             Ok(resp) if resp.success => {

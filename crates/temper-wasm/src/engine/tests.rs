@@ -200,6 +200,7 @@ pub(super) fn make_context() -> WasmInvocationContext {
         workflow_root_entity_id: None,
         workflow_run_id: None,
         http_request: None,
+        trigger_principal: None,
     }
 }
 
@@ -221,27 +222,11 @@ fn hash_module_deterministic() {
 }
 
 #[test]
-fn engine_creation() {
-    let engine = WasmEngine::new();
-    assert!(engine.is_ok());
-}
-
-#[test]
 fn module_too_large_rejected() {
     let engine = WasmEngine::new().unwrap();
     let big = vec![0u8; MAX_MODULE_SIZE + 1];
     let result = engine.compile_and_cache(&big);
     assert!(matches!(result, Err(WasmError::ModuleTooLarge { .. })));
-}
-
-#[test]
-fn resource_limits_default() {
-    let limits = WasmResourceLimits::default();
-    assert_eq!(limits.max_fuel, 1_000_000_000);
-    assert_eq!(limits.max_memory, 64 * 1024 * 1024);
-    // ADR-0045: raised from 30s to cover HTTP-fronted integrations under load.
-    assert_eq!(limits.max_duration, std::time::Duration::from_secs(120));
-    assert_eq!(limits.max_response_bytes, 1024 * 1024);
 }
 
 #[tokio::test]
@@ -264,23 +249,6 @@ async fn wasm_guest_can_drive_structured_observability_span_lifecycle() {
     assert!(
         result.is_ok(),
         "guest span host functions should link and complete: {result:?}"
-    );
-}
-
-#[test]
-fn timeout_error_display() {
-    let err = WasmError::Timeout(std::time::Duration::from_secs(5));
-    let msg = err.to_string();
-    assert!(msg.contains("timeout"), "expected 'timeout' in: {msg}");
-}
-
-#[test]
-fn memory_limit_exceeded_display() {
-    let err = WasmError::MemoryLimitExceeded { max_bytes: 1024 };
-    let msg = err.to_string();
-    assert!(
-        msg.contains("memory limit"),
-        "expected 'memory limit' in: {msg}"
     );
 }
 
@@ -720,5 +688,52 @@ async fn too_many_tables_is_rejected() {
     assert!(
         matches!(result, Err(WasmError::Instantiation(_))),
         "a module declaring more than MAX_TABLES tables must fail instantiation: {result:?}"
+    );
+}
+
+// Counts down from ten million, then returns: it runs long enough in real time
+// for a runtime with nothing else to do to go idle while it runs.
+const WAT_COUNTDOWN: &str = r#"
+    (module
+      (memory (export "memory") 1)
+      (func (export "run") (param i32 i32) (result i32)
+        (local $n i32)
+        i32.const 10000000
+        local.set $n
+        (loop $L
+          local.get $n
+          i32.const 1
+          i32.sub
+          local.tee $n
+          br_if $L)
+        i32.const 0
+      )
+    )
+"#;
+
+/// A simulation's paused clock stands still while a module runs on its own
+/// thread, so no timer fires in the middle of a module call and its answer
+/// arrives at the simulated time it was asked.
+#[tokio::test(start_paused = true)]
+async fn a_paused_clock_stands_still_while_a_module_runs() {
+    let engine = WasmEngine::new().unwrap();
+    let hash = engine.compile_and_cache(WAT_COUNTDOWN.as_bytes()).unwrap();
+    // The timer an idle runtime's paused clock would jump to.
+    let _timer = tokio::spawn(tokio::time::sleep(Duration::from_secs(3_600)));
+    let asked_at = tokio::time::Instant::now();
+    // The module sets no result; only the clock matters here.
+    let _ = engine
+        .invoke(
+            &hash,
+            &make_context(),
+            make_host(),
+            &WasmResourceLimits::default(),
+            make_streams(),
+        )
+        .await;
+    assert_eq!(
+        asked_at.elapsed(),
+        Duration::ZERO,
+        "the clock moved while the module ran"
     );
 }

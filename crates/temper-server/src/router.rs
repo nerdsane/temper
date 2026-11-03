@@ -87,7 +87,9 @@ pub fn build_routes(state: ServerState) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             odata::refuse_unavailable_tenant,
-        ));
+        ))
+        // Outermost here, so a refused write's answer names its key too.
+        .layer(axum::middleware::from_fn(odata::key_every_write));
 
     let router = Router::new()
         .nest("/tdata", tdata)
@@ -146,7 +148,9 @@ pub fn build_routes(state: ServerState) -> Router {
             // request it makes are one trace.
             HeaderName::from_static("traceparent"),
             HeaderName::from_static("tracestate"),
-        ]);
+        ])
+        // A page reads the key its write was given, to send it again.
+        .expose_headers([odata::IDEMPOTENCY_KEY]);
 
     router
         .layer(cors)
@@ -157,6 +161,11 @@ pub fn build_routes(state: ServerState) -> Router {
         ))
         .layer(axum::middleware::from_fn(
             crate::authz::strip_inbound_identity_headers,
+        ))
+        // Outermost: every request is inbound, refused or not.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::wake::note_inbound,
         ))
         .with_state(state)
 }

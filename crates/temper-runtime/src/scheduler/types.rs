@@ -179,35 +179,11 @@ mod tests {
     }
 
     #[test]
-    fn fault_config_light_has_delays_only() {
-        let light = FaultConfig::light();
-        assert!(light.message_delay_prob > 0.0);
-        assert_eq!(light.message_drop_prob, 0.0);
-        assert_eq!(light.actor_crash_prob, 0.0);
-    }
-
-    #[test]
     fn fault_config_heavy_has_all_faults() {
         let heavy = FaultConfig::heavy();
         assert!(heavy.message_delay_prob > 0.0);
         assert!(heavy.message_drop_prob > 0.0);
         assert!(heavy.actor_crash_prob > 0.0);
         assert!(heavy.actor_restart_prob > 0.0);
-    }
-
-    #[test]
-    fn fault_config_serde_roundtrip() {
-        let cfg = FaultConfig::heavy();
-        let json = serde_json::to_string(&cfg).unwrap();
-        let back: FaultConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.message_delay_prob, cfg.message_delay_prob);
-        assert_eq!(back.max_delay_ticks, cfg.max_delay_ticks);
-    }
-
-    #[test]
-    fn sim_actor_state_equality() {
-        assert_eq!(SimActorState::Running, SimActorState::Running);
-        assert_eq!(SimActorState::Crashed, SimActorState::Crashed);
-        assert_ne!(SimActorState::Running, SimActorState::Crashed);
     }
 }

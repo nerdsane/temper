@@ -18,8 +18,7 @@ tracing-opentelemetry = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 sha2 = { workspace = true }
+tokio = { workspace = true }
 
 [dev-dependencies]
 temper-test-resource = { workspace = true }
-# Exercise competing conditional SQL writes on the workspace's existing async runtime.
-tokio = { workspace = true }

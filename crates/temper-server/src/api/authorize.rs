@@ -51,8 +51,10 @@ pub(crate) enum AuthorizeRequest {
 
 /// Ask Cedar without requesting a move. A question is a read and writes
 /// nothing: no decision, denial pattern or trajectory row, however many
-/// records and moves a page asks about. Denials stay visible as the authz
-/// wide event every check emits.
+/// records and moves a page asks about. Each answer is counted as
+/// `check:offer` in `temper_cedar_evaluations_total`, apart from the
+/// `check:gate` refusals of requests, and stays visible as the authz wide
+/// event every check emits.
 ///
 /// Each record's caller-supplied snapshot is decoded once and shared across its
 /// actions, exactly as for the original single check. Cost: one Cedar evaluation
@@ -118,7 +120,7 @@ pub(crate) async fn handle_authorize(
         let mut actions = Vec::with_capacity(record.actions.len());
         for action in record.actions {
             let reason = state
-                .authorize_with_context(
+                .authorize_offer_with_context(
                     security_ctx,
                     &action,
                     &record.resource_type,

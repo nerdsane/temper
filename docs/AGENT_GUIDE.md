@@ -268,10 +268,16 @@ from = ["Draft", "Submitted"]
 to = "Cancelled"
 params = ["Reason"]
 hint = "Cancel an order. Only from Draft or Submitted."
+says = "call it off"
 
 [[invariant]]
 name = "SubmitRequiresItems"
 assert = "status in ['Submitted'] => items > 0"
+
+[[group]]
+name = "Open"
+says = "still being put together"
+states = ["Draft", "Submitted"]
 ```
 
 **Rules for I/O Automaton specs:**
@@ -281,10 +287,11 @@ assert = "status in ['Submitted'] => items > 0"
 3. `[[action]]`: Define actions with `name`, `kind` (`input`/`output`/`internal`), `from` states, `to` state, optional `guard`, `params`, `effect`, and `hint`.
 4. `[[invariant]]`: Define safety invariants with `name` and one `assert` expression, proven over every reachable state and checked on every move: a move that would make one false is refused with its name ([predicates.md](predicates.md#invariants-on-every-move)).
 5. Every `guard` and `assert` is one expression in the predicate grammar (`&&`, `||`, `!`, `=>`, comparisons, `in`, `empty()`, `len()`, `Type[ref].status`); see [predicates.md](predicates.md).
-6. `effect` is a list of statements in the same grammar: `items += 1`, `retries -= 1`, `quota = params.quota`, `ready = true`, `append(tags, params.tag)`, `remove_at(tags, params.i)`, `schedule('Expire', 3600)`, `schedule_at('Expire', expires_at)`, `spawn('Task', 'Create', last_task_id)`. Statements are type-checked at load, and effects reading `params.p` are verified with `p` unknown. An action's name implies nothing: `AddItem` without an `effect` changes only `status`. See [predicates.md#effects](predicates.md#effects).
+6. `effect` is a list of statements in the same grammar: `items += 1`, `retries -= 1`, `quota = params.quota`, `ready = true`, `append(tags, params.tag)`, `remove(tags, params.tag)`, `remove_at(tags, params.i)`, `schedule('Expire', 3600)`, `schedule_at('Expire', expires_at)`, `spawn('Task', 'Create', last_task_id)`. Statements are type-checked at load, and effects reading `params.p` are verified with `p` unknown. An action's name implies nothing: `AddItem` without an `effect` changes only `status`. See [predicates.md#effects](predicates.md#effects).
 7. `[[action.triggers]]`: the only way an action causes work elsewhere — `kind = "entity"` (another entity's action), `"wasm"`, `"adapter"`, or `"hook"` (a platform hook registered by the host). `kind = "webhook"` is refused at load: make the call with `kind = "wasm"`, `module = "http_fetch"` (ADR-0182). See [Section 9](#9-integration-engine).
 8. Action kinds: `input` = from environment (HTTP), always enabled in from-states; `output` = emitted events; `internal` = private state transitions.
-9. `[[carry]]`: where a new version of a spec moves stored records it would otherwise leave with no way forward. See [Changing a spec with stored records](#changing-a-spec-with-stored-records).
+9. Statechart labels, which change nothing the spec does: an action's optional `says` is its arrow's label, non-empty when present; each `[[action]]` block of the same name keeps its own. A `[[group]]` has a `name`, an optional `says` (a reader shows the name without one) and a non-empty `states`, listing declared states and other groups' names, so groups nest. Group names differ from each other and from every state; every state and group sits in at most one group; groups never contain themselves. A group name is not a state: `from` and `to` cannot name one. `GET /observe/specs/{entity}` returns each action's `says` (`null` when absent) and the spec's `groups`, flat and in source order.
+10. `[[carry]]`: where a new version of a spec moves stored records it would otherwise leave with no way forward. See [Changing a spec with stored records](#changing-a-spec-with-stored-records).
 
 #### Changing a spec with stored records
 

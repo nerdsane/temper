@@ -88,6 +88,7 @@ async fn stored(
     let mut rows = conn
         .query(
             "SELECT sequence_nr, updated_at, status, fields, state FROM entity_catalog \
+             INDEXED BY sqlite_autoindex_entity_catalog_1 \
              WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
             params![tenant, ENTITY_TYPE, entity_id],
         )
@@ -187,7 +188,11 @@ async fn a_change_to_a_nested_field_or_the_state_still_lands() {
     assert_eq!(seq, 9);
     assert_eq!(status, "Waiting");
     assert_eq!(stored_fields, grown);
-    assert_eq!(state["fields"], grown);
+    assert_eq!(
+        state.get("fields"),
+        None,
+        "the stored state does not repeat the fields the fields column holds"
+    );
     assert_eq!(state["sequence_nr"], 9);
 }
 

@@ -1,5 +1,5 @@
 //! Scheduled-action rows commit with the event that arms them and with the
-//! event that fires them, and nowhere else.
+//! event that fires them. Cancellation durably clears the action before cleanup.
 
 use temper_runtime::persistence::{
     CommitRows, EventStore, PersistenceError, ScheduledActionRecord,
@@ -119,6 +119,29 @@ async fn scheduled_action_rows_commit_with_their_events() {
         1
     );
 
+    // A refused call is durably cancelled before deletion. Repeating the
+    // cancellation, including after deletion, is harmless and tenant-scoped.
+    for _ in 0..2 {
+        store
+            .cancel_scheduled_action("tenant-a", "Job", "job-1", "1.1")
+            .await
+            .expect("cancellation");
+    }
+    let cancelled = store.list_scheduled_actions("tenant-a").await.unwrap();
+    assert_eq!(cancelled.len(), 1);
+    assert!(
+        cancelled[0].action.is_empty(),
+        "a restart sees terminal disposition"
+    );
+    assert_eq!(
+        store.list_scheduled_actions("tenant-b").await.unwrap()[0].action,
+        "Fire"
+    );
+
+    store
+        .cancel_scheduled_action("tenant-a", "Job", "missing", "1.1")
+        .await
+        .expect("absent cancellation");
     // A removal outside a commit takes one row, and repeating it is a no-op.
     for _ in 0..2 {
         store
@@ -126,6 +149,10 @@ async fn scheduled_action_rows_commit_with_their_events() {
             .await
             .expect("removal");
     }
+    store
+        .cancel_scheduled_action("tenant-a", "Job", "job-1", "1.1")
+        .await
+        .expect("cancellation after deletion");
     assert!(
         store
             .list_scheduled_actions("tenant-a")

@@ -54,6 +54,30 @@ impl EventStore for StaticEventStore {
             .collect())
     }
 
+    async fn read_events_page(
+        &self,
+        _persistence_id: &str,
+        before_sequence: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        if self.unavailable.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(PersistenceError::Storage("injected journal outage".into()));
+        }
+        if let Some(error) = &self.read_error {
+            return Err(PersistenceError::Storage(error.clone()));
+        }
+        let mut page: Vec<_> = self
+            .events
+            .iter()
+            .rev()
+            .filter(|event| before_sequence.is_none_or(|before| event.sequence_nr < before))
+            .take(limit)
+            .cloned()
+            .collect();
+        page.reverse();
+        Ok(page)
+    }
+
     async fn save_snapshot(
         &self,
         _persistence_id: &str,
@@ -104,6 +128,7 @@ fn envelope(
         params: serde_json::json!({}),
         idempotency_key: None,
         outcome: None,
+        origin: Default::default(),
         kind: if action == "Deleted" {
             temper_runtime::persistence::EventKind::Tombstone
         } else {
@@ -352,6 +377,7 @@ async fn authoritative_replay_rejects_non_object_field_update_payloads() {
         timestamp: sim_now(),
         params: serde_json::json!([1, 2, 3]),
         idempotency_key: None,
+        origin: Default::default(),
         kind: temper_runtime::persistence::EventKind::Transition,
         outcome: None,
     };

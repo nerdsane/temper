@@ -3,14 +3,34 @@
 use temper_runtime::persistence::PersistenceError;
 use temper_store_turso::{TenantStoreRouter, TursoEventStore};
 
-use super::query_plane_impls::{catalog_freshness, storage_order_by, to_turso_projection};
+use super::query_plane_impls::{catalog_freshness, storage_order_by};
 use super::{
     CatalogGroup, CatalogRowFreshness, EntityCatalogRow, QueryFieldIndexOrder, QueryFieldIndexPage,
-    QueryPlaneStore, QueryProjectionFieldsRow, QueryProjectionUpsert,
+    QueryPlaneStore, QueryProjectionFieldsRow,
 };
 
 #[async_trait::async_trait]
 impl QueryPlaneStore for TenantStoreRouter {
+    async fn lagging_projections(
+        &self,
+        tenant: &str,
+    ) -> Result<Option<Vec<temper_runtime::persistence::ProjectionRepairCandidate>>, PersistenceError>
+    {
+        self.store_for_tenant(tenant)
+            .await?
+            .lagging_query_projections(tenant)
+            .await
+            .map(Some)
+    }
+    async fn projection_checkpoints(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<temper_runtime::persistence::ProjectionCheckpoint>, PersistenceError> {
+        self.store_for_tenant(tenant)
+            .await?
+            .query_projection_checkpoints(tenant)
+            .await
+    }
     async fn upsert_projection(
         &self,
         tenant: &str,
@@ -35,18 +55,27 @@ impl QueryPlaneStore for TenantStoreRouter {
             .await
     }
 
-    async fn upsert_projections(
+    async fn refresh_projection(
         &self,
         tenant: &str,
-        projections: &[QueryProjectionUpsert],
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+        fields: &serde_json::Value,
+        state: &serde_json::Value,
+        sequence_nr: u64,
     ) -> Result<(), PersistenceError> {
         let store = self.store_for_tenant(tenant).await?;
-        let turso_projections = projections
-            .iter()
-            .map(to_turso_projection)
-            .collect::<Vec<_>>();
         store
-            .upsert_query_projections(tenant, &turso_projections)
+            .refresh_query_projection_with_state(
+                tenant,
+                entity_type,
+                entity_id,
+                status,
+                fields,
+                state,
+                sequence_nr,
+            )
             .await
     }
 
@@ -169,6 +198,26 @@ impl QueryPlaneStore for TenantStoreRouter {
             }
         }
         Ok(Some(counts))
+    }
+
+    async fn reconciled_equality_candidates(
+        &self,
+        journal: &super::BoxedEventStore,
+        tenant: &str,
+        entity_type: &str,
+        predicates: &[(String, String)],
+        probe_budget: Option<usize>,
+    ) -> Result<Option<(Vec<String>, Vec<String>)>, PersistenceError> {
+        // A separately supplied journal can have changes absent from this
+        // store's delta. Its absence is never evidence about that journal.
+        if !std::ptr::addr_eq(self as *const Self, std::sync::Arc::as_ptr(&journal.store)) {
+            return Ok(None);
+        }
+        self.store_for_tenant(tenant)
+            .await?
+            .reconciled_equality_candidates(tenant, entity_type, predicates, probe_budget)
+            .await
+            .map(Some)
     }
 
     async fn projection_catalog_freshness(

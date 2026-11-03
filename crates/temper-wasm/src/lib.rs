@@ -23,5 +23,6 @@ pub use host_trait::{
 };
 pub use stream::{StreamRegistry, StreamRegistryConfig};
 pub use types::{
-    WasmAuthzContext, WasmInvocationContext, WasmInvocationResult, WasmResourceLimits,
+    TriggerPrincipal, WasmAuthzContext, WasmInvocationContext, WasmInvocationResult,
+    WasmResourceLimits,
 };

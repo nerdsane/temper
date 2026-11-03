@@ -26,12 +26,17 @@ from = ["Ready"]
 to = "Ready"
 params = [{ name = "amount", type = "counter" }]
 effect = ["total += params.amount"]
+
+# The model holds only a counter something reads.
+[[invariant]]
+name = "counted"
+assert = "total >= 0"
 "#,
     )
     .unwrap();
     let model = JointModel::new(
         &BTreeMap::from([("Total", &spec)]),
-        ["Total".to_string()].into(),
+        &["Total".to_string()].into(),
         "Total",
         &[],
         Sending::anyone(),
@@ -44,10 +49,10 @@ effect = ["total += params.amount"]
         target_state: None,
         params: BTreeMap::from([("amount".into(), ParamValue::Count(1))]),
         read: true,
-        depth: 1,
+        chain: Vec::new(),
         via: None,
         by: 0,
-        inline: false,
+        unread_guard: None,
     };
     for expected in 1..=super::super::JOINT_MAX_COUNTER {
         let outcomes = model.deliver(state, &dispatch, "add");

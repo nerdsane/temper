@@ -1,62 +1,97 @@
-//! Whether a stack's event store writes the stack's own entity rows in its
-//! commit.
+//! A stack's query plane is the rows its event store's commit writes.
 //!
-//! A store that can write a record's query-plane and timer rows with its
-//! events (`EventStore::commits_entity_rows`) writes them into itself. Those
-//! are the rows the server reads only when the stack reads them from that same
-//! store. A stack that pairs the journal with another query plane, or with
-//! none, still has the server write the rows after the commit. The stack that
-//! composes the stores is what knows which case it is.
+//! Every move writes the record's query-plane row and timer row in the commit
+//! of its event (`EventStore::commits_entity_rows`), so nothing writes them
+//! after the commit and a list read never asks whether a row is missing. A
+//! query plane that the journal does not write would be a second copy that
+//! nothing keeps up to date, so a stack refuses one: the plane must be the very
+//! store the journal appends to, and that store must write its rows in the
+//! commit.
 
 use std::sync::Arc;
 
 use super::{QueryPlaneStore, StorageStack};
 
-/// Which of a stack's rows its event store's commit writes.
-#[derive(Clone)]
-pub(super) enum CommitWrites {
-    /// None the stack reads.
-    Nothing,
-    /// The rows of this query plane, which is the event store itself. The
-    /// stack's timer rows are kept in the same store.
-    QueryPlane(Arc<dyn QueryPlaneStore>),
-    /// The stack has no query plane, and the event store's own rows are the
-    /// record's rows (a simulated store whose timer rows the server reads
-    /// through the same store).
-    OwnRows,
+/// Why a stack refused a query plane.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum QueryPlaneRefused {
+    /// The event store does not write a record's rows in its commit.
+    #[error("the {backend} event store does not write its query-plane rows in its commit")]
+    JournalWritesNoRows {
+        /// The stack's backend.
+        backend: &'static str,
+    },
+    /// The query plane is another store than the one the journal appends to.
+    #[error("the query plane is not the {backend} event store the journal appends to")]
+    NotTheJournal {
+        /// The stack's backend.
+        backend: &'static str,
+    },
 }
 
 impl StorageStack {
-    /// Mark the stack's query plane as the event store itself: its commits
-    /// write that query plane's rows and the timer rows.
-    pub(super) fn commits_its_query_plane(mut self) -> Self {
-        self.commit_writes = match &self.query_plane {
-            Some(plane) => CommitWrites::QueryPlane(plane.clone()),
-            None => CommitWrites::Nothing,
-        };
-        self
-    }
-
-    /// Declare that the event store's own rows are this stack's entity rows.
-    /// For a stack with no query plane, whose event store keeps each record's
-    /// rows itself (the simulated store).
-    pub fn with_entity_rows_in_journal(mut self) -> Self {
-        self.commit_writes = CommitWrites::OwnRows;
-        self
-    }
-
-    /// Whether each event's query-plane and timer rows are written in its
-    /// commit, so nothing writes them after it. True only while the store can
-    /// do it and the rows it writes are the ones this stack reads: replacing
-    /// the query plane (a wrapper, or none) makes the server write them again.
-    pub fn entity_rows_in_commit(&self) -> bool {
+    /// Read the stack's records from `plane`, which must be the store its
+    /// journal appends to.
+    ///
+    /// # Errors
+    ///
+    /// [`QueryPlaneRefused`] when the event store does not write its rows in
+    /// its commit, or `plane` is another store.
+    pub fn with_query_plane(
+        mut self,
+        plane: Arc<dyn QueryPlaneStore>,
+    ) -> Result<Self, QueryPlaneRefused> {
+        let backend = self.backend.as_str();
         if !self.events.commits_entity_rows() {
-            return false;
+            return Err(QueryPlaneRefused::JournalWritesNoRows { backend });
         }
-        match (&self.commit_writes, &self.query_plane) {
-            (CommitWrites::QueryPlane(written), Some(plane)) => Arc::ptr_eq(written, plane),
-            (CommitWrites::OwnRows, None) => true,
-            _ => false,
+        if !std::ptr::addr_eq(Arc::as_ptr(&self.events.store), Arc::as_ptr(&plane)) {
+            return Err(QueryPlaneRefused::NotTheJournal { backend });
         }
+        self.query_plane = Some(plane);
+        debug_assert!(self.query_plane_is_journal());
+        Ok(self)
+    }
+
+    /// The stack without its query plane: reads go to the records' actors.
+    pub fn without_query_plane(mut self) -> Self {
+        self.query_plane = None;
+        self
+    }
+
+    /// The store the stack's records are read from, which is the journal's.
+    pub fn query_plane(&self) -> Option<&Arc<dyn QueryPlaneStore>> {
+        self.query_plane.as_ref()
+    }
+
+    /// Read the stack's records through `probe`, a test's wrapper around its
+    /// own query plane that steps in between the reads a list makes. The
+    /// stack keeps writing through its journal.
+    #[cfg(test)]
+    pub(crate) fn with_read_probe(mut self, probe: Arc<dyn QueryPlaneStore>) -> Self {
+        assert!(
+            self.query_plane_is_journal(),
+            "a probe wraps the journal's plane"
+        );
+        self.query_plane = Some(probe);
+        self.read_probe = true;
+        self
+    }
+
+    /// Whether reads go through a test's probe ([`Self::with_read_probe`]).
+    pub(crate) fn reads_through_probe(&self) -> bool {
+        #[cfg(test)]
+        return self.read_probe;
+        #[cfg(not(test))]
+        false
+    }
+
+    /// Whether the query plane is the journal's own store. A stack refuses any
+    /// other plane, so this holds whenever the stack has one; it is checked
+    /// again where a stack is attached, as the `events` handle is public.
+    pub(crate) fn query_plane_is_journal(&self) -> bool {
+        self.query_plane.as_ref().is_some_and(|plane| {
+            std::ptr::addr_eq(Arc::as_ptr(&self.events.store), Arc::as_ptr(plane))
+        })
     }
 }

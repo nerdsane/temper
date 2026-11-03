@@ -32,12 +32,23 @@ pub struct Listener {
 
 impl Listener {
     pub fn start() -> Self {
+        Self::start_resetting(0)
+    }
+
+    /// A listener that closes each of the first `resets` connections as
+    /// soon as it accepts it, without reading or answering, as the
+    /// collector's end does to a new process's first sends around a handoff.
+    pub fn start_resetting(resets: usize) -> Self {
         let socket = TcpListener::bind(("127.0.0.1", 0)).expect("bind the OTLP listener");
         let port = socket.local_addr().expect("listener address").port();
         let received = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&received);
         std::thread::spawn(move || {
-            for stream in socket.incoming().flatten() {
+            for (accepted, stream) in socket.incoming().flatten().enumerate() {
+                if accepted < resets {
+                    drop(stream);
+                    continue;
+                }
                 let sink = Arc::clone(&sink);
                 std::thread::spawn(move || serve_connection(stream, &sink));
             }

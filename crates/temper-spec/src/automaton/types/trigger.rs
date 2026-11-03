@@ -99,8 +99,14 @@ pub enum TargetResolver {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ActionTrigger {
-    /// Human-readable name for logging and debugging.
+    /// The trigger's identifier: the reaction it makes is named
+    /// `{type}:{action}:{name}`, and logs name it. Words for people go in `says`.
     pub name: String,
+    /// Words for people reading the app, such as the answer a branch gives
+    /// ("CI passed"). Display only: the kernel never reads it, and `name`
+    /// stays the trigger's identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub says: Option<String>,
     /// Discriminator — determines which field set applies.
     pub kind: TriggerKind,
     /// Optional principal (names a registered `AgentType`). When `None`, the

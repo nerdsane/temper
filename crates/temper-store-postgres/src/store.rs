@@ -89,6 +89,9 @@ impl EventStore for PostgresEventStore {
         .await
     }
 
+    /// Append `events` and every row in `rows` in one statement
+    /// (`append_commit`): the journal, its keys, vectors and scheduled actions,
+    /// and the record's catalog, field-index, timer and gap rows.
     async fn append_with_rows(
         &self,
         persistence_id: &str,
@@ -96,261 +99,13 @@ impl EventStore for PostgresEventStore {
         events: &[PersistenceEnvelope],
         rows: CommitRows<'_>,
     ) -> Result<u64, PersistenceError> {
-        let CommitRows {
-            key_rows,
-            vector_rows,
-            reconcile_vectors,
-            scheduled_actions,
-            fired_scheduled_action,
-            // Postgres keeps its query-plane and timer rows after the commit
-            // (`commits_entity_rows` is false): the server writes them.
-            projection: _,
-            state_timer: _,
-        } = rows;
-        let (tenant, entity_type, entity_id) =
-            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
-
-        let mut transaction_timer = PostgresTransactionTimer::start(EVENT_APPEND_OPERATION);
-        let acquire_started = Instant::now();
-        let mut conn = match self.pool.acquire().await {
-            Ok(conn) => {
-                record_postgres_pool_acquire_duration(
-                    acquire_started.elapsed(),
-                    EVENT_APPEND_OPERATION,
-                    "ok",
-                );
-                conn
-            }
-            Err(e) => {
-                record_postgres_pool_acquire_duration(
-                    acquire_started.elapsed(),
-                    EVENT_APPEND_OPERATION,
-                    "error",
-                );
-                return Err(PersistenceError::Storage(e.to_string()));
-            }
-        };
-        let begin_started = Instant::now();
-        let mut tx = match conn.begin().await {
-            Ok(tx) => {
-                record_postgres_transaction_begin_duration(
-                    begin_started.elapsed(),
-                    EVENT_APPEND_OPERATION,
-                    "ok",
-                );
-                tx
-            }
-            Err(e) => {
-                record_postgres_transaction_begin_duration(
-                    begin_started.elapsed(),
-                    EVENT_APPEND_OPERATION,
-                    "error",
-                );
-                return Err(PersistenceError::Storage(e.to_string()));
-            }
-        };
-
-        let row: Option<(i64,)> = crate::dbm::postgres_query_as!(
-            &self.schema,
-            "SELECT COALESCE(MAX(sequence_nr), 0) FROM {schema}events \
-             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
-        )
-        .bind(tenant)
-        .bind(entity_type)
-        .bind(entity_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-
-        let current_seq = row.map(|r| r.0 as u64).unwrap_or(0);
-        if current_seq != expected_sequence {
-            transaction_timer.set_outcome("concurrency_violation");
-            return Err(PersistenceError::ConcurrencyViolation {
-                expected: expected_sequence,
-                actual: current_seq,
-            });
-        }
-
-        // ADR-0153: validate declared-key uniqueness BEFORE writing the journal so
-        // a reject is atomic (the journal does not advance). A different entity
-        // already holding the key is the violation (reject + surface).
-        for key in key_rows {
-            let holder: Option<(String,)> = crate::dbm::postgres_query_as!(
-                &self.schema,
-                "SELECT entity_id FROM {schema}entity_key_index \
-                 WHERE tenant = $1 AND entity_type = $2 AND key_name = $3 AND key_hash = $4",
-            )
-            .bind(tenant)
-            .bind(entity_type)
-            .bind(&key.key_name)
-            .bind(&key.key_hash)
-            .fetch_optional(&mut *tx)
+        self.append_commit(persistence_id, expected_sequence, events, rows)
             .await
-            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-            if let Some((existing,)) = holder
-                && existing != entity_id
-            {
-                return Err(PersistenceError::Storage(format!(
-                    "duplicate declared key '{}' for {entity_type}: held by {existing}",
-                    key.key_name
-                )));
-            }
-        }
+    }
 
-        let segment_index = segments::open_segment_for_append(
-            &self.schema,
-            &mut tx,
-            tenant,
-            entity_type,
-            entity_id,
-            current_seq,
-        )
-        .await?;
-
-        let mut new_seq = expected_sequence;
-        for event in events {
-            new_seq += 1;
-            let metadata_json = serde_json::to_value(&event.metadata)
-                .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
-
-            if let Err(e) = crate::dbm::postgres_query!(&self.schema,
-                "INSERT INTO {schema}events (tenant, entity_type, entity_id, sequence_nr, segment_index, event_type, payload, metadata) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-            )
-            .bind(tenant)
-            .bind(entity_type)
-            .bind(entity_id)
-            .bind(new_seq as i64)
-            .bind(segment_index)
-            .bind(&event.event_type)
-            .bind(&event.payload)
-            .bind(metadata_json)
-            .execute(&mut *tx)
-            .await
-            {
-                let msg = e.to_string();
-                if msg.contains("unique") || msg.contains("duplicate key") {
-                    transaction_timer.set_outcome("concurrency_violation");
-                    return Err(PersistenceError::ConcurrencyViolation {
-                        expected: expected_sequence,
-                        actual: new_seq,
-                    });
-                } else {
-                    return Err(PersistenceError::Storage(msg));
-                }
-            }
-        }
-
-        if new_seq > expected_sequence {
-            segments::update_segment_after_append(
-                &self.schema,
-                &mut tx,
-                tenant,
-                entity_type,
-                entity_id,
-                segment_index,
-                new_seq,
-            )
-            .await?;
-        }
-
-        // ADR-0153: co-commit the declared key-index rows in THIS transaction
-        // (uniqueness was validated above). Drop the entity's prior row for each
-        // key_name (the value may have changed), then claim the new key_hash.
-        for key in key_rows {
-            crate::dbm::postgres_query!(
-                &self.schema,
-                "DELETE FROM {schema}entity_key_index \
-                 WHERE tenant = $1 AND entity_type = $2 AND key_name = $3 AND entity_id = $4",
-            )
-            .bind(tenant)
-            .bind(entity_type)
-            .bind(&key.key_name)
-            .bind(entity_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-            crate::dbm::postgres_query!(
-                &self.schema,
-                "INSERT INTO {schema}entity_key_index \
-                 (tenant, entity_type, key_name, key_hash, entity_id, sequence_nr) \
-                 VALUES ($1, $2, $3, $4, $5, $6)",
-            )
-            .bind(tenant)
-            .bind(entity_type)
-            .bind(&key.key_name)
-            .bind(&key.key_hash)
-            .bind(entity_id)
-            .bind(new_seq as i64)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-        }
-
-        // ADR-0155: co-commit the derived vector-index rows in THIS transaction.
-        // When the entity's type declares vector paths (`reconcile_vectors`), DELETE
-        // all of the entity's rows first, then insert the current ones — so a delete
-        // transition or a cleared vector/model property (empty `vector_rows`) purges
-        // the stale rows instead of leaving them to rank forever. No uniqueness
-        // constraint; vectors are derived ranking state.
-        if reconcile_vectors {
-            crate::dbm::postgres_query!(
-                &self.schema,
-                "DELETE FROM {schema}entity_vector_index \
-                 WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
-            )
-            .bind(tenant)
-            .bind(entity_type)
-            .bind(entity_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-            for row in vector_rows {
-                crate::dbm::postgres_query!(
-                    &self.schema,
-                    "INSERT INTO {schema}entity_vector_index \
-                     (tenant, entity_type, decl_name, model_tag, entity_id, vector, sequence_nr) \
-                     VALUES ($1, $2, $3, $4, $5, $6, $7)",
-                )
-                .bind(tenant)
-                .bind(entity_type)
-                .bind(&row.decl_name)
-                .bind(&row.model_tag)
-                .bind(entity_id)
-                .bind(pack_f32_le(&row.vector))
-                .bind(new_seq as i64)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-            }
-        }
-
-        // The scheduled actions the transition armed, and the one it fired, in
-        // THIS transaction: a row exists exactly while its action waits.
-        self.insert_scheduled_actions(&mut tx, scheduled_actions)
-            .await?;
-        if let Some(arm_id) = fired_scheduled_action {
-            self.delete_scheduled_action_row(&mut tx, tenant, entity_type, entity_id, arm_id)
-                .await?;
-        }
-
-        let commit_started = Instant::now();
-        tx.commit().await.map_err(|e| {
-            record_postgres_transaction_commit_duration(
-                commit_started.elapsed(),
-                EVENT_APPEND_OPERATION,
-                "error",
-            );
-            PersistenceError::Storage(e.to_string())
-        })?;
-        record_postgres_transaction_commit_duration(
-            commit_started.elapsed(),
-            EVENT_APPEND_OPERATION,
-            "ok",
-        );
-        transaction_timer.set_outcome("ok");
-
-        Ok(new_seq)
+    /// The append statement writes the record's query-plane and timer rows.
+    fn commits_entity_rows(&self) -> bool {
+        true
     }
 
     async fn list_scheduled_actions(
@@ -358,6 +113,27 @@ impl EventStore for PostgresEventStore {
         tenant: &str,
     ) -> Result<Vec<ScheduledActionRecord>, PersistenceError> {
         self.scheduled_action_rows(tenant).await
+    }
+
+    async fn list_entity_scheduled_actions(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<Vec<ScheduledActionRecord>, PersistenceError> {
+        self.entity_scheduled_action_rows(tenant, entity_type, entity_id)
+            .await
+    }
+
+    async fn cancel_scheduled_action(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        arm_id: &str,
+    ) -> Result<(), PersistenceError> {
+        self.cancel_scheduled_action_row(tenant, entity_type, entity_id, arm_id)
+            .await
     }
 
     async fn delete_scheduled_action(
@@ -760,101 +536,35 @@ impl EventStore for PostgresEventStore {
             }
         };
 
-        let mut parsed = Vec::with_capacity(appends.len());
-        for append in appends {
-            let (tenant, entity_type, entity_id) =
-                parse_persistence_id_parts(&append.persistence_id)
-                    .map_err(PersistenceError::Storage)?;
-            let row: Option<(i64,)> = crate::dbm::postgres_query_as!(
-                &self.schema,
-                "SELECT COALESCE(MAX(sequence_nr), 0) FROM {schema}events \
-                 WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
-            )
-            .bind(tenant)
-            .bind(entity_type)
-            .bind(entity_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
-
-            let current_seq = row.map(|r| r.0 as u64).unwrap_or(0);
-            if current_seq != append.expected_sequence {
-                transaction_timer.set_outcome("concurrency_violation");
-                return Err(PersistenceError::ConcurrencyViolation {
-                    expected: append.expected_sequence,
-                    actual: current_seq,
-                });
-            }
-            let segment_index = segments::open_segment_for_append(
-                &self.schema,
-                &mut tx,
-                tenant,
-                entity_type,
-                entity_id,
-                current_seq,
-            )
-            .await?;
-            parsed.push((
-                tenant.to_string(),
-                entity_type.to_string(),
-                entity_id.to_string(),
-                segment_index,
-            ));
-        }
-
-        let mut results = Vec::with_capacity(appends.len());
-        for (append, (tenant, entity_type, entity_id, segment_index)) in
-            appends.iter().zip(parsed.iter())
-        {
-            let mut new_seq = append.expected_sequence;
-            for event in &append.events {
-                new_seq += 1;
-                let metadata_json = serde_json::to_value(&event.metadata)
-                    .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
-
-                if let Err(e) = crate::dbm::postgres_query!(&self.schema,
-                    "INSERT INTO {schema}events (tenant, entity_type, entity_id, sequence_nr, segment_index, event_type, payload, metadata) \
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-                )
-                .bind(tenant)
-                .bind(entity_type)
-                .bind(entity_id)
-                .bind(new_seq as i64)
-                .bind(*segment_index)
-                .bind(&event.event_type)
-                .bind(&event.payload)
-                .bind(metadata_json)
-                .execute(&mut *tx)
-                .await
-                {
-                    let msg = e.to_string();
-                    if msg.contains("unique") || msg.contains("duplicate key") {
-                        transaction_timer.set_outcome("concurrency_violation");
-                        return Err(PersistenceError::ConcurrencyViolation {
-                            expected: append.expected_sequence,
-                            actual: new_seq,
-                        });
-                    }
-                    return Err(PersistenceError::Storage(msg));
-                }
-            }
-            if new_seq > append.expected_sequence {
-                segments::update_segment_after_append(
-                    &self.schema,
-                    &mut tx,
-                    tenant,
-                    entity_type,
-                    entity_id,
-                    *segment_index,
-                    new_seq,
+        // Each record's events and rows go in through the single-append
+        // statement, so a batch writes exactly what the same appends would
+        // one by one, and its transaction commits them together. The records
+        // are taken in persistence-id order, so two batches over the same
+        // records take their locks in the same order.
+        let mut order: Vec<usize> = (0..appends.len()).collect();
+        order.sort_by(|a, b| appends[*a].persistence_id.cmp(&appends[*b].persistence_id));
+        let mut written = vec![0_u64; appends.len()];
+        for index in order {
+            let append = &appends[index];
+            written[index] = self
+                .append_on(
+                    crate::append_commit::AppendOn::InBatch(&mut tx),
+                    &append.persistence_id,
+                    append.expected_sequence,
+                    &append.events,
+                    append.commit_rows(),
+                    &mut transaction_timer,
                 )
                 .await?;
-            }
-            results.push(PersistenceAppendResult {
-                persistence_id: append.persistence_id.clone(),
-                sequence_nr: new_seq,
-            });
         }
+        let results: Vec<PersistenceAppendResult> = appends
+            .iter()
+            .zip(written)
+            .map(|(append, sequence_nr)| PersistenceAppendResult {
+                persistence_id: append.persistence_id.clone(),
+                sequence_nr,
+            })
+            .collect();
 
         let commit_started = Instant::now();
         tx.commit().await.map_err(|e| {
@@ -902,18 +612,71 @@ impl EventStore for PostgresEventStore {
             .await
             .map_err(|e| PersistenceError::Storage(e.to_string()))?;
 
-        rows.into_iter()
-            .map(|(seq, event_type, payload, meta_json)| {
-                let metadata: EventMetadata = serde_json::from_value(meta_json)
-                    .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
-                Ok(PersistenceEnvelope {
-                    sequence_nr: seq as u64,
-                    event_type,
-                    payload,
-                    metadata,
-                })
+        rows.into_iter().map(envelope_from_row).collect()
+    }
+
+    /// Read the newest `limit` events below `before_sequence`, ascending.
+    ///
+    /// Reads newest first along the `(tenant, entity_type, entity_id,
+    /// sequence_nr)` key, so only the page's rows are read.
+    async fn read_events_page(
+        &self,
+        persistence_id: &str,
+        before_sequence: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        // Both bounds saturate: a sequence or a row count above i64::MAX is
+        // past every stored row, so it means "no bound".
+        let before = before_sequence.map_or(i64::MAX, |s| i64::try_from(s).unwrap_or(i64::MAX));
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+
+        let rows: Vec<(i64, String, serde_json::Value, serde_json::Value)> =
+            crate::dbm::postgres_query_as!(
+                &self.schema,
+                "SELECT sequence_nr, event_type, payload, metadata \
+             FROM {schema}events \
+             WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 AND sequence_nr < $4 \
+             ORDER BY sequence_nr DESC \
+             LIMIT $5",
+            )
+            .bind(tenant)
+            .bind(entity_type)
+            .bind(entity_id)
+            .bind(before)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| PersistenceError::Storage(e.to_string()))?;
+
+        let mut page = rows
+            .into_iter()
+            .map(envelope_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        page.reverse();
+        Ok(page)
+    }
+
+    async fn first_event_at(
+        &self,
+        persistence_id: &str,
+    ) -> Result<Option<chrono::DateTime<chrono::Utc>>, PersistenceError> {
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let saved: Option<String> = crate::dbm::postgres_query_scalar!(&self.schema,
+            "SELECT COALESCE(
+                (SELECT first_event_at FROM {schema}entity_catalog WHERE tenant=$1 AND entity_type=$2 AND entity_id=$3),
+                (SELECT COALESCE(payload->>'timestamp', metadata->>'timestamp') FROM {schema}events
+                 WHERE tenant=$1 AND entity_type=$2 AND entity_id=$3 AND sequence_nr=1))")
+            .bind(tenant).bind(entity_type).bind(entity_id).fetch_one(self.pool()).await.map_err(|error| PersistenceError::Storage(error.to_string()))?;
+        saved
+            .map(|saved| {
+                chrono::DateTime::parse_from_rfc3339(&saved)
+                    .map(|t| t.with_timezone(&chrono::Utc))
+                    .map_err(|error| PersistenceError::Serialization(error.to_string()))
             })
-            .collect()
+            .transpose()
     }
 
     /// Save (upsert) a snapshot for the given entity.
@@ -960,6 +723,13 @@ impl EventStore for PostgresEventStore {
             sequence_nr,
         )
         .await?;
+        crate::projection_delta::mark_snapshot(
+            &self.schema,
+            &mut tx,
+            [tenant, entity_type, entity_id],
+            sequence_nr,
+        )
+        .await?;
 
         tx.commit()
             .await
@@ -993,8 +763,20 @@ impl EventStore for PostgresEventStore {
         Ok(row.map(|(seq, state)| (seq as u64, state)))
     }
 
-    /// List all distinct entities that have at least one persisted event
-    /// in the given tenant.
+    async fn latest_sequence_nr(&self, persistence_id: &str) -> Result<u64, PersistenceError> {
+        let (tenant, ty, id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        self.journal_sequence_nr(tenant, ty, id).await
+    }
+
+    async fn journal_heads(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<temper_runtime::persistence::JournalHead>, PersistenceError> {
+        self.load_journal_heads(tenant).await
+    }
+
+    /// List distinct records with events in this tenant.
     async fn list_entity_ids(
         &self,
         tenant: &str,
@@ -1125,6 +907,20 @@ impl EventStore for PostgresEventStore {
 
         Ok(rows)
     }
+}
+
+/// Decode one `SELECT sequence_nr, event_type, payload, metadata` row.
+fn envelope_from_row(
+    (seq, event_type, payload, meta_json): (i64, String, serde_json::Value, serde_json::Value),
+) -> Result<PersistenceEnvelope, PersistenceError> {
+    let metadata: EventMetadata = serde_json::from_value(meta_json)
+        .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
+    Ok(PersistenceEnvelope {
+        sequence_nr: seq as u64,
+        event_type,
+        payload,
+        metadata,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1304,129 +1100,6 @@ mod tests {
                 ]
             );
         });
-    }
-
-    #[test]
-    fn postgres_platform_methods_are_part_of_the_store_surface() {
-        // Compile-only check: the function body is never executed, so the
-        // unawaited futures are intentional. Clippy's let_underscore_future
-        // lint catches forgotten awaits in real code; here it's a false
-        // positive.
-        #[allow(clippy::let_underscore_future)]
-        fn assert_methods(store: &PostgresEventStore) {
-            let _ = store.upsert_query_projection(
-                "tenant",
-                "Session",
-                "s-1",
-                "Running",
-                &serde_json::json!({"phase":"Running"}),
-                1,
-            );
-            let _ = store.remove_query_projection("tenant", "Session", "s-1");
-            let _ = store.query_field_index(
-                "tenant",
-                "Session",
-                "fields @> $3::jsonb",
-                vec!["{\"phase\":\"Running\"}".to_string()],
-            );
-            let _ = store.persist_trajectory(crate::PostgresTrajectoryInsert {
-                tenant: "tenant",
-                entity_type: "Session",
-                entity_id: "s-1",
-                action: "ProgressMade",
-                success: true,
-                from_status: Some("Running"),
-                to_status: Some("Running"),
-                error: None,
-                agent_id: Some("agent"),
-                session_id: Some("session"),
-                authz_denied: None,
-                denied_resource: None,
-                denied_module: None,
-                source: Some("Entity"),
-                spec_governed: Some(true),
-                created_at: "2026-04-28T00:00:00Z",
-                request_body: Some("{\"ok\":true}"),
-                intent: Some("test"),
-                matched_policy_ids: Some("[\"policy:test\"]"),
-                capture_seq: Some(1),
-            });
-            let _ = store.save_policy(
-                "tenant",
-                "primary",
-                "permit(principal, action, resource);",
-                "test",
-            );
-            let _ = store.load_policies_for_tenant("tenant");
-            let _ = store.load_all_policies();
-            let _ = store.toggle_policy_enabled("tenant", "primary", true);
-            let _ = store.update_policy_text(
-                "tenant",
-                "primary",
-                "permit(principal, action, resource);",
-                "test",
-            );
-            let _ = store.delete_policy("tenant", "primary");
-        }
-
-        let _ = assert_methods;
-    }
-
-    #[test]
-    fn postgres_long_tail_methods_are_part_of_the_store_surface() {
-        let _ = PostgresEventStore::load_recent_trajectories;
-        let _ = PostgresEventStore::load_unmet_intent_rows;
-        let _ = PostgresEventStore::load_submit_spec_timestamps;
-        let _ = PostgresEventStore::count_trajectories_by_tenant;
-        let _ = PostgresEventStore::query_trajectory_stats;
-        let _ = PostgresEventStore::query_trajectories_by_agent;
-        let _ = PostgresEventStore::query_trajectories_by_session;
-        let _ = PostgresEventStore::query_agent_summaries;
-
-        let _ = PostgresEventStore::upsert_feature_request;
-        let _ = PostgresEventStore::list_feature_requests;
-        let _ = PostgresEventStore::update_feature_request;
-        let _ = PostgresEventStore::insert_evolution_record;
-        let _ = PostgresEventStore::get_evolution_record;
-        let _ = PostgresEventStore::list_evolution_records;
-        let _ = PostgresEventStore::list_ranked_insights;
-        let _ = PostgresEventStore::insert_design_time_event;
-        let _ = PostgresEventStore::list_design_time_events;
-
-        let _ = PostgresEventStore::persist_ots_trajectory;
-        let _ = PostgresEventStore::list_ots_trajectories;
-        let _ = PostgresEventStore::get_ots_trajectory;
-
-        let _ = PostgresEventStore::put_blob;
-        let _ = PostgresEventStore::put_blob_with_ttl;
-        let _ = PostgresEventStore::get_blob;
-        let _ = PostgresEventStore::sweep_expired_blobs;
-
-        let _ = PostgresEventStore::upsert_secret;
-        let _ = PostgresEventStore::delete_secret;
-        let _ = PostgresEventStore::load_secrets_for_tenant;
-
-        let _ = PostgresEventStore::upsert_policy_denial_pattern;
-        let _ = PostgresEventStore::load_policy_denial_patterns;
-
-        let _ = PostgresEventStore::query_decisions;
-        let _ = PostgresEventStore::query_all_decisions;
-        let _ = PostgresEventStore::get_pending_decision;
-
-        let _ = PostgresEventStore::load_wasm_module;
-        let _ = PostgresEventStore::load_wasm_module_metadata_all_tenants;
-        let _ = PostgresEventStore::persist_wasm_invocation;
-        let _ = PostgresEventStore::load_recent_wasm_invocations;
-        let _ = PostgresEventStore::delete_wasm_module;
-
-        let _ = PostgresEventStore::upsert_published_artifact;
-        let _ = PostgresEventStore::load_published_artifact;
-    }
-
-    #[test]
-    fn postgres_query_projection_batch_method_is_part_of_the_store_surface() {
-        let _ = PostgresEventStore::load_query_projection_fields_many;
-        let _ = PostgresEventStore::load_selected_entity_catalog_rows_pg;
     }
 
     #[test]

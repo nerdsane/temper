@@ -340,7 +340,14 @@ fn load_selected_entity_catalog_rows_pg_returns_sparse_json_values() {
             "entity_id": entity_id,
             "status": "Published",
             "Title": "State title",
-            "fields": fields,
+            "fields": {
+                "Id": entity_id,
+                "Name": "State name wins",
+                "Status": "Published",
+                "JsonField": { "kind": "nested", "score": 9 },
+                "Large": "x".repeat(4096),
+                "Private": "state only",
+            },
             "events": [{ "type": "ShouldNotLoad" }],
             "sequence_nr": 7,
             "total_event_count": 7,
@@ -352,7 +359,7 @@ fn load_selected_entity_catalog_rows_pg_returns_sparse_json_values() {
                 entity_type,
                 entity_id,
                 "Published",
-                state.get("fields").unwrap(),
+                &fields,
                 &state,
                 7,
             )
@@ -386,6 +393,18 @@ fn load_selected_entity_catalog_rows_pg_returns_sparse_json_values() {
         assert_eq!(rows[0].fields["Status"], "Published");
         assert!(rows[0].fields.get("Large").is_none());
         assert!(rows[0].fields.get("Missing").is_none());
+
+        let selected_fields = store
+            .load_selected_entity_catalog_rows_pg(
+                &tenant,
+                entity_type,
+                &[entity_id.to_string()],
+                &["fields".to_string()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(selected_fields[0].fields["fields"], state["fields"]);
+        assert!(selected_fields[0].state.is_none());
 
         crate::dbm::postgres_query!("DELETE FROM entity_field_index WHERE tenant = $1")
             .bind(&tenant)
@@ -692,7 +711,7 @@ fn upsert_query_projection_diffs_field_index_rows() {
 }
 
 #[test]
-fn native_data_only_create_inserts_event_catalog_and_index_atomically() {
+fn append_with_projection_commits_event_catalog_and_index_together() {
     let Some(database_url) = temper_test_resource::env_var("DATABASE_URL") else {
         return;
     };
@@ -715,15 +734,26 @@ fn native_data_only_create_inserts_event_catalog_and_index_atomically() {
         let mut envelope = test_envelope("Created", fields.clone());
         envelope.sequence_nr = 1;
 
+        let state = serde_json::json!({
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "status": "Active",
+            "fields": fields,
+            "events": [],
+            "total_event_count": 1,
+            "sequence_nr": 1
+        });
+        let rows = || temper_runtime::persistence::CommitRows {
+            projection: Some(temper_runtime::persistence::ProjectionRow::Upsert {
+                status: "Active",
+                fields: &fields,
+                state: &state,
+            }),
+            ..Default::default()
+        };
+        let pid = format!("{tenant}:{entity_type}:{entity_id}");
         let sequence_nr = store
-            .create_data_only_entity_native(
-                &tenant,
-                entity_type,
-                entity_id,
-                "Active",
-                &fields,
-                &envelope,
-            )
+            .append_with_rows(&pid, 0, std::slice::from_ref(&envelope), rows())
             .await
             .unwrap();
 
@@ -754,11 +784,23 @@ fn native_data_only_create_inserts_event_catalog_and_index_atomically() {
         let (status, stored_fields, stored_state, stored_sequence) = catalog.unwrap();
         assert_eq!(status, "Active");
         assert_eq!(stored_fields, fields);
-        let stored_state = stored_state.expect("native create should store full catalog state");
-        assert_eq!(stored_state["fields"], fields);
+        let stored_state = stored_state.expect("the append stores the catalog state");
+        assert!(
+            stored_state.get("fields").is_none(),
+            "the stored state leaves out fields the fields column holds"
+        );
         assert_eq!(stored_state["sequence_nr"], 1);
         assert_eq!(stored_state["total_event_count"], 1);
         assert_eq!(stored_sequence, 1);
+        let read = store
+            .load_entity_catalog_rows_pg(&tenant, entity_type, &[entity_id.to_string()])
+            .await
+            .unwrap();
+        let read_state = read[0].state.as_ref().expect("catalog read has a state");
+        assert_eq!(
+            read_state["fields"], fields,
+            "a catalog read puts the fields back"
+        );
 
         let indexed_count: i64 = crate::dbm::postgres_query_scalar!(
             "SELECT COUNT(*)::bigint FROM entity_field_index \
@@ -773,14 +815,7 @@ fn native_data_only_create_inserts_event_catalog_and_index_atomically() {
         assert!(indexed_count >= 5);
 
         let duplicate = store
-            .create_data_only_entity_native(
-                &tenant,
-                entity_type,
-                entity_id,
-                "Active",
-                &fields,
-                &envelope,
-            )
+            .append_with_rows(&pid, 0, std::slice::from_ref(&envelope), rows())
             .await;
         assert!(matches!(
             duplicate,
@@ -1229,6 +1264,11 @@ fn session_read_follows_capture_order_not_insert_order() {
 
 /// Every listing's tombstone probe reads `idx_events_deleted` (migration 0017)
 /// instead of scanning the whole journal. Gated on DATABASE_URL.
+///
+/// The catalog read names this test's schema: other tests migrate their own
+/// schemas, each with an `events` table and this index, and drop them when
+/// they finish. Reading every schema's index definition raced those drops
+/// ("could not open relation with OID").
 #[test]
 fn migrations_create_the_tombstone_index() {
     let Some(database_url) = temper_test_resource::env_var("DATABASE_URL") else {
@@ -1240,7 +1280,8 @@ fn migrations_create_the_tombstone_index() {
         run_migrations(&pool).await.unwrap();
         let definition: Option<String> = crate::dbm::postgres_query_scalar!(
             "SELECT indexdef FROM pg_indexes \
-             WHERE tablename = 'events' AND indexname = 'idx_events_deleted'",
+             WHERE schemaname = current_schema() \
+             AND tablename = 'events' AND indexname = 'idx_events_deleted'",
         )
         .fetch_optional(&pool)
         .await

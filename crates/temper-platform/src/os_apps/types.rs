@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
+use super::module_review_step::{ReviewAnswer, ReviewAsked};
 use super::{AdrEntry, AgentDefinition, AppSkillDefinition, SeedInstance, SystemFileEntry};
 
 /// Result of an app installation, categorising each spec by what happened.
@@ -43,6 +44,44 @@ pub struct InstallResult {
     /// found nothing.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub modules_reviewed: Vec<String>,
+    /// The reviews this install left running. What they say is not in
+    /// `warnings` or `modules_reviewed` until [`Self::with_reviews_read`], and
+    /// `GET /api/os-apps/{app}/review/{version}` answers with it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reviewing: Vec<ReviewAsked>,
+    #[serde(skip)]
+    pub(crate) review_answers: Vec<ReviewAnswer>,
+}
+
+impl InstallResult {
+    /// Allow completed reviews to replace saved findings only after the whole
+    /// install succeeds, including closure readiness and provenance writes.
+    pub(crate) fn publish_reviews(&self) {
+        for answer in &self.review_answers {
+            answer.publish();
+        }
+    }
+
+    /// Wait for the reviews this install left running and add what they said, for a caller that answers with all of
+    /// it. A review that stopped says so; none of them fails the install.
+    pub async fn with_reviews_read(mut self) -> Self {
+        for answer in std::mem::take(&mut self.review_answers) {
+            let said = answer.read().await;
+            self.warnings.extend(said.warnings);
+            self.modules_reviewed.extend(said.reviewed);
+        }
+        self.reviewing.clear();
+        self
+    }
+
+    /// Take on what a dependency's install said and left running, ahead of this install's own.
+    pub(crate) fn put_first(&mut self, dependency: InstallResult) {
+        self.warnings.splice(0..0, dependency.warnings);
+        self.modules_reviewed
+            .splice(0..0, dependency.modules_reviewed);
+        self.reviewing.splice(0..0, dependency.reviewing);
+        self.review_answers.splice(0..0, dependency.review_answers);
+    }
 }
 
 /// Something an install's checks found and did not refuse.
@@ -78,6 +117,26 @@ impl InstallWarning {
         }
     }
 
+    /// An entity type the app declares and does not run, or a spec file the
+    /// installer does not read (`entity_ownership`).
+    pub fn entity_ownership(message: String) -> Self {
+        Self {
+            check: "entity_ownership".to_string(),
+            message,
+            detail: None,
+        }
+    }
+
+    /// What an install did to the tenant's schema beyond the app's own
+    /// declarations (`own_schema`): a type kept, or apps that could not be read.
+    pub fn own_schema(message: String) -> Self {
+        Self {
+            check: "own_schema".to_string(),
+            message,
+            detail: None,
+        }
+    }
+
     /// A rule over several entities the install check could not prove,
     /// with why: only a rule found broken refuses an install.
     pub fn joint_invariants(message: String) -> Self {
@@ -85,6 +144,16 @@ impl InstallWarning {
             check: "joint_invariants".to_string(),
             message,
             detail: None,
+        }
+    }
+
+    /// A state timer whose lost fire nothing redoes (`timer_strands`):
+    /// advice, never a refusal.
+    pub fn timer_strands(message: String, detail: serde_json::Value) -> Self {
+        Self {
+            check: "timer_strands".to_string(),
+            message,
+            detail: Some(detail),
         }
     }
 }

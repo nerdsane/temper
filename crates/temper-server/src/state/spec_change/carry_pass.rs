@@ -27,6 +27,7 @@ use super::then_move::then_maker;
 use super::{CarryMove, Checked, SpecChange, SpecChangePlan, SpecChangeRefused};
 use crate::entity_actor::effects::entity_authorization_precondition;
 use crate::request_context::AgentContext;
+use crate::state::redecide::Redecide;
 use crate::state::{DispatchCommand, ServerState};
 
 /// The version a type is served from: the controller that swaps its table,
@@ -202,6 +203,7 @@ impl ServerState {
                 carry.params.clone(),
                 &AgentContext::system(),
                 false,
+                crate::state::write_record::WriteCaller::Kernel,
                 None,
             )
             .await;
@@ -217,7 +219,8 @@ impl ServerState {
     }
 
     /// Make a carry's `then` move on the record it carried, as any move is
-    /// made: decided by the version's Cedar on the record as it is now, with
+    /// made: decided by the version's Cedar on the record as it is now (and
+    /// again if the record changes before the move reaches it), with
     /// its effects, triggers and reactions, by [`then_maker`]. A carry itself
     /// is a system move, and a module gets no capability from a system move;
     /// the modules this move's triggers call get the capability any move's
@@ -229,47 +232,57 @@ impl ServerState {
         carry: &CarryMove,
         then: &str,
     ) -> Result<bool, String> {
-        let snapshot = self
-            .load_authz_resource_snapshot(tenant, &carry.entity_type, &carry.entity_id)
-            .await?;
-        let Some(agent_ctx) = then_maker(
-            &carry.action,
-            carry.acts_for.as_deref(),
-            &snapshot.current_state.state.fields,
-        ) else {
-            return Ok(false);
-        };
-        let security_ctx = agent_ctx
-            .security_ctx
-            .as_ref()
-            .expect("a then move's maker carries its security context");
-        self.authorize_with_context(
-            security_ctx,
-            then,
-            &carry.entity_type,
-            &snapshot.resource_attrs,
-            tenant.as_str(),
-        )
-        .map_err(|denial| denial.to_string())?;
-        let response = self
-            .dispatch_tenant_action_ext_typed_if_current(
-                DispatchCommand {
-                    tenant,
-                    entity_type: &carry.entity_type,
-                    entity_id: &carry.entity_id,
-                    action: then,
-                    params: serde_json::json!({}),
-                    agent_ctx: &agent_ctx,
-                    await_integration: false,
-                    await_reactions: true,
-                },
-                entity_authorization_precondition(&snapshot.current_state.state),
+        let mut redecide = Redecide::start(self);
+        loop {
+            let snapshot = self
+                .load_authz_resource_snapshot(tenant, &carry.entity_type, &carry.entity_id)
+                .await
+                .map_err(|error| error.to_string())?;
+            let Some(agent_ctx) = then_maker(
+                &carry.action,
+                carry.acts_for.as_deref(),
+                &snapshot.current_state.state.fields,
+            ) else {
+                return Ok(false);
+            };
+            let security_ctx = agent_ctx
+                .security_ctx
+                .as_ref()
+                .expect("a then move's maker carries its security context");
+            self.authorize_with_context(
+                security_ctx,
+                then,
+                &carry.entity_type,
+                &snapshot.resource_attrs,
+                tenant.as_str(),
             )
-            .await
-            .map_err(|error| error.to_string())?;
-        match response.success {
-            true => Ok(true),
-            false => Err(response.error.unwrap_or_default()),
+            .map_err(|denial| denial.to_string())?;
+            let decided_on = entity_authorization_precondition(&snapshot.current_state.state);
+            redecide.dispatching().await;
+            let response = self
+                .dispatch_tenant_action_ext_typed_if_current(
+                    DispatchCommand {
+                        tenant,
+                        entity_type: &carry.entity_type,
+                        entity_id: &carry.entity_id,
+                        action: then,
+                        params: serde_json::json!({}),
+                        agent_ctx: &agent_ctx,
+                        await_integration: false,
+                        await_reactions: true,
+                    },
+                    crate::state::write_record::WriteCaller::Kernel,
+                    decided_on,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            if redecide.again(response.is_record_changed(), "carry_then") {
+                continue;
+            }
+            return match response.success {
+                true => Ok(true),
+                false => Err(response.error.unwrap_or_default()),
+            };
         }
     }
 }

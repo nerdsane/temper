@@ -272,8 +272,8 @@ pub(super) fn composite_parent_idempotency(
     agent_ctx: &AgentContext,
     callback_params: &Value,
 ) -> String {
-    if let Some(key) = agent_ctx.idempotency_key.as_deref() {
-        return key.to_string();
+    if let Some(key) = agent_ctx.idempotency_key.as_ref() {
+        return key.as_str().to_string();
     }
 
     let mut hasher = Sha256::new();
@@ -385,9 +385,12 @@ pub(super) fn composite_batch_persistence_error(error: PersistenceError) -> Disp
         PersistenceError::ConcurrencyViolation { .. } => {
             DispatchError::Conflict(format!("composite batch persistence conflict: {error}"))
         }
-        PersistenceError::Serialization(_)
-        | PersistenceError::Storage(_)
-        | PersistenceError::OutcomeUnknown(_) => {
+        PersistenceError::Storage(_)
+        | PersistenceError::OutcomeUnknown(_)
+        | PersistenceError::StorageFull { .. } => {
+            DispatchError::StoreUnavailable(format!("composite batch persistence failed: {error}"))
+        }
+        PersistenceError::Serialization(_) => {
             DispatchError::Internal(format!("composite batch persistence failed: {error}"))
         }
         PersistenceError::EventTooLarge { .. } => DispatchError::QuotaExceeded(error.to_string()),

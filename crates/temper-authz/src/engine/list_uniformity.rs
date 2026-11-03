@@ -43,54 +43,97 @@ pub(super) fn classify(
     action: &str,
     resource_type: &str,
 ) -> ListReadUniformity {
-    let Some(principal_uid) = principal_uid(security_ctx) else {
-        return per_entity_unknown();
-    };
-    let Ok(action_uid) = EntityUid::from_str(&format!("Action::\"{action}\"")) else {
-        return per_entity_unknown();
-    };
-    let Ok(resource_type_name) = EntityTypeName::from_str(resource_type) else {
-        return per_entity_unknown();
-    };
+    split(policies, security_ctx, action, resource_type)
+        .map_or_else(per_entity_unknown, |split| split.uniformity)
+}
 
-    // Keys a row's fields cannot fill: authority keys, and those the request
-    // sets itself, which the engine puts in the context before the row's.
-    let request_fills = |key: &str| {
-        is_cedar_authority_context_key(key) || security_ctx.context_attrs.contains_key(key)
-    };
+/// The policies that can match one list read, parted by whether a row can
+/// change their result.
+///
+/// Cedar decides from the set of satisfied policies: a satisfied forbid
+/// denies, otherwise a satisfied permit allows. Whether one policy is
+/// satisfied never depends on another, so `list` can be evaluated once for
+/// the whole read and `row` once per row, and the two results combine into
+/// exactly the decision the whole set gives that row.
+pub(super) struct ListSplit {
+    pub(super) uniformity: ListReadUniformity,
+    /// Policies whose result is the same for every row of the read.
+    pub(super) list: Vec<Policy>,
+    /// Policies whose result can differ from row to row.
+    pub(super) row: Vec<Policy>,
+}
+
+/// Part the policies that can match this list read; `None` when the request
+/// itself cannot be named in Cedar.
+pub(super) fn split(
+    policies: &PolicySet,
+    security_ctx: &SecurityContext,
+    action: &str,
+    resource_type: &str,
+) -> Option<ListSplit> {
+    let principal_uid = principal_uid(security_ctx)?;
+    let action_uid = EntityUid::from_str(&format!("Action::\"{action}\"")).ok()?;
+    let resource_type_name = EntityTypeName::from_str(resource_type).ok()?;
+
+    // Use the engine's conversion: null, objects, and non-integer numbers
+    // are omitted, so their keys can still be filled by a row's fields.
+    let mut request_context = std::collections::HashMap::new();
+    for (key, value) in &security_ctx.context_attrs {
+        super::insert_json_as_cedar(&mut request_context, key.clone(), value);
+    }
+    // Authority keys never come from rows; actual request values take
+    // precedence over row values in evaluate_request.
+    let request_fills =
+        |key: &str| is_cedar_authority_context_key(key) || request_context.contains_key(key);
     let mut varies = false;
     let mut keys = Some(BTreeSet::new());
+    let mut list = Vec::new();
+    let mut row = Vec::new();
     for policy in policies.policies() {
         if !policy_might_apply(policy, &principal_uid, &action_uid, &resource_type_name) {
             continue;
         }
-        if !policy.is_static() {
-            return per_entity_unknown();
-        }
-        match row_variance(policy, &resource_type_name, &request_fills) {
-            RowVariance::Uniform => {}
+        let variance = if policy.is_static() {
+            row_variance(
+                policy,
+                &resource_type_name,
+                principal_uid.type_name() == &resource_type_name,
+                &request_fills,
+            )
+        } else {
+            RowVariance::Unknown
+        };
+        match variance {
+            RowVariance::Uniform => list.push(policy.clone()),
             RowVariance::Varies(policy_keys) => {
                 varies = true;
-                match policy_keys {
-                    Some(policy_keys) => {
-                        if let Some(keys) = keys.as_mut() {
-                            keys.extend(policy_keys);
-                        }
-                    }
-                    None => keys = None,
+                match (policy_keys, keys.as_mut()) {
+                    (Some(policy_keys), Some(keys)) => keys.extend(policy_keys),
+                    (Some(_), None) => {}
+                    (None, _) => keys = None,
                 }
+                row.push(policy.clone());
             }
-            RowVariance::Unknown => return per_entity_unknown(),
+            RowVariance::Unknown => {
+                varies = true;
+                keys = None;
+                row.push(policy.clone());
+            }
         }
     }
 
-    if varies {
+    let uniformity = if varies {
         ListReadUniformity::PerEntity {
             attribute_keys: keys,
         }
     } else {
         ListReadUniformity::Uniform
-    }
+    };
+    Some(ListSplit {
+        uniformity,
+        list,
+        row,
+    })
 }
 
 fn per_entity_unknown() -> ListReadUniformity {
@@ -109,6 +152,7 @@ enum RowVariance {
 fn row_variance(
     policy: &Policy,
     resource_type: &EntityTypeName,
+    principal_can_be_row: bool,
     request_fills: &dyn Fn(&str) -> bool,
 ) -> RowVariance {
     let scope_varies = match policy.resource_constraint() {
@@ -142,6 +186,16 @@ fn row_variance(
     if let Some(conditions) = json.get("conditions").and_then(|value| value.as_array()) {
         for condition in conditions {
             let body = condition.get("body").unwrap_or(condition);
+            // A self-row shares the principal's Cedar UID. evaluate_request
+            // merges its fields into that entity, filling attributes the
+            // identity did not supply, while identity attributes override
+            // resource fields (even has_spec). Keep the full merged entity
+            // for conditions reading either alias of it.
+            if principal_can_be_row
+                && (json_contains_var(body, "principal") || json_contains_var(body, "resource"))
+            {
+                return RowVariance::Unknown;
+            }
             scan.merge(collect_resource_attrs(body));
         }
     } else if json.get("conditions").is_some() {
@@ -283,11 +337,16 @@ fn classify_getattr(attr: &str, target: Option<&serde_json::Value>, scan: &mut A
         scan.nested_context_keys.insert(key.to_string());
         return;
     }
-    if json_contains_var(target, "resource") {
-        // `resource.owner.name` and other nested reads are not a field list
-        // this walker can project safely.
-        scan.unknown = true;
+    if json_var_is(target, "principal") {
+        // Principal reads on a type that can be the principal's own row
+        // were kept per-row above. Other direct request reads are fixed.
+        return;
     }
+    // An action, entity literal, or expression returning an entity can name
+    // the current row too: Order::"secret".blocked sees that field only
+    // while checking the secret row. Nested reads also need the full row.
+    // Do not infer independence from the absence of a `resource` variable.
+    scan.unknown = true;
 }
 
 /// The context key a chain of attribute reads starts from: `owner` for

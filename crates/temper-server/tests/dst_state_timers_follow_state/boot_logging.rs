@@ -54,6 +54,10 @@ fn boot_logs_scale_with_types_and_export_summary() {
         .build();
     let lines = Lines::default();
     let debug_lines = Lines::default();
+    // With one registered dispatcher, tracing-core registers a callsite using
+    // the emitting thread's default. Keep a second dispatcher alive so another
+    // simulation cannot register our boot diagnostics as globally disabled.
+    let _unobserved = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let capture = || {
         tracing::Dispatch::new(
             tracing_subscriber::registry()

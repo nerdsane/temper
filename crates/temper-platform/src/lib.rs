@@ -34,6 +34,7 @@ pub use bootstrap::{
 };
 pub use os_apps::{
     AppBundle, AppEntry, AppManifest, InstallResult, InstallWarning, install_os_app, list_os_apps,
+    restore_os_app,
 };
 pub use protocol::{PlatformEvent, VerifyStepStatus};
 pub use state::PlatformState;

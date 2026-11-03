@@ -9,7 +9,7 @@ use temper_server::state::TimerFollowHold;
 use tokio::sync::{Mutex as TenantLock, OwnedMutexGuard};
 
 /// What an install into one tenant holds until it ends.
-pub(super) struct TenantInstall {
+pub(crate) struct TenantInstall {
     _serialized: OwnedMutexGuard<()>,
     /// Keeps the tenant's changed specs out of every walk, this server's
     /// other tenants' included, until its policies and modules are in.
@@ -35,7 +35,7 @@ impl TenantInstall {
 /// tenant's active Cedar, merges its app's statements in and loads the result;
 /// two at once would both read the same text, and the second load would drop
 /// the first app's statements while both installs answered Ok.
-pub(super) async fn tenant(server: &ServerState, tenant: &str) -> TenantInstall {
+pub(crate) async fn tenant(server: &ServerState, tenant: &str) -> TenantInstall {
     static LOCKS: OnceLock<Mutex<BTreeMap<String, Arc<TenantLock<()>>>>> = OnceLock::new();
     let lock = LOCKS
         .get_or_init(Default::default)
