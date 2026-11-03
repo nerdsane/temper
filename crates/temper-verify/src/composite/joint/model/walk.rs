@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
+use super::super::env::Blind;
 use super::super::pack::{Packed, Packer};
 use super::super::room::{Bound, Held, MB, block};
 use super::super::state::render;
@@ -20,6 +21,8 @@ pub(in crate::composite::joint) struct Made {
     pub(in crate::composite::joint) by_system: bool,
     /// It sends an action outside code is relied on to send.
     pub(in crate::composite::joint) relied: bool,
+    /// It is a reaction from a type outside the scope.
+    pub(in crate::composite::joint) outside: bool,
     /// It always ends in one of the states its edges reach: it leads
     /// somewhere, none of its states is unsure, and none was held back.
     pub(in crate::composite::joint) covered: bool,
@@ -167,10 +170,36 @@ impl Explored<'_> {
     }
 }
 
+/// Who sends an action the walk leaves to a module.
+const ANSWER: &str = "a module whose trigger names no on_success";
+
+impl JointModel {
+    /// Note each move the runtime could make in `state` that the walk never
+    /// takes.
+    fn note_unwalked(&self, state: &JointState, unwalked: &mut BTreeSet<Unwalked>) {
+        for (entity, ways) in &self.unsent {
+            let open = state
+                .calls
+                .iter()
+                .any(|call| &call.to == entity && call.on_success.is_empty());
+            for index in ways {
+                let t = &self.models[entity].transitions[*index];
+                if open && self.enabled(entity, t, state, Blind::Nothing) {
+                    unwalked.insert(Unwalked {
+                        action: format!("{entity}.{}", t.name),
+                        sender: ANSWER.to_string(),
+                        from: state.records[entity].status.clone(),
+                    });
+                }
+            }
+        }
+    }
+}
+
 /// Why a walk that never took the moves `unwalked` proves nothing.
 pub(in crate::composite::joint) fn unwalked_reason(unwalked: &[String]) -> String {
     format!(
-        "the walk never takes moves the runtime can make, so it never goes where they lead: {}. Declare an action only a module answers with as internal, or name it in its trigger's on_success; the walk does not send a reaction from a type outside the rule's scope",
+        "the walk never takes moves the runtime can make, so it never goes where they lead: {}. Declare an action only a module answers with as internal, or name it in its trigger's on_success",
         unwalked.join("; ")
     )
 }
@@ -312,6 +341,7 @@ impl JointModel {
                         from: index as u32,
                         by_system: mv.by_system(),
                         relied: self.relies(mv),
+                        outside: mv.is_outside_reaction(),
                         covered: !held
                             && !nexts.is_empty()
                             && nexts.iter().all(|n| n.certainty != Certainty::Unsure),

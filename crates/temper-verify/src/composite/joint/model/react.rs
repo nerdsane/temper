@@ -190,11 +190,20 @@ impl JointModel {
                     action: reaction.target_action.clone(),
                     generated_for,
                 };
-                if chain.iter().any(|taken| step.repeats(taken)) {
+                // The runtime stops a step its chain already holds. A chain
+                // that came from outside the scope may hold one the model
+                // cannot see: then it is stopped or sent.
+                let repeats = self.repeats(chain, &step);
+                if repeats == Truth::True {
                     if !self.keep(&mut after, state, known) {
                         return Vec::new();
                     }
                     continue;
+                }
+                let known =
+                    known.then(Certainty::unless(repeats == Truth::False, Certainty::OneOf));
+                if repeats == Truth::Unknown && !self.keep(&mut after, state.clone(), known) {
+                    return Vec::new();
                 }
                 let mut next_chain = chain.to_vec();
                 next_chain.push(step);
