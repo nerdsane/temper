@@ -413,3 +413,7 @@ mod literals_tests;
 #[cfg(test)]
 #[path = "sure_test.rs"]
 mod sure_tests;
+
+#[cfg(test)]
+#[path = "outside_test.rs"]
+mod outside_tests;
