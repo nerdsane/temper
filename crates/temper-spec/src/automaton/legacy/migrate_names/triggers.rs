@@ -229,6 +229,7 @@ impl Pass<'_> {
         let allowed: &[&str] = match kind.as_str() {
             "entity" => &[
                 "principal",
+                "as",
                 "guard",
                 "liveness",
                 "drop_ok",
@@ -253,6 +254,7 @@ impl Pass<'_> {
         };
         let every = [
             "principal",
+            "as",
             "guard",
             "liveness",
             "drop_ok",

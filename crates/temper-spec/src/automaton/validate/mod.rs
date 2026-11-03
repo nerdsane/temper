@@ -8,6 +8,9 @@ mod triggers;
 mod webhooks;
 
 #[cfg(test)]
+#[path = "acts_for_test.rs"]
+mod acts_for_test;
+#[cfg(test)]
 #[path = "entry_rules_test.rs"]
 mod entry_rules_test;
 

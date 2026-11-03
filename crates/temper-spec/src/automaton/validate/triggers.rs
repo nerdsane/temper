@@ -28,6 +28,8 @@ fn state_names(automaton: &Automaton) -> BTreeSet<&str> {
 /// - For `Wasm`/`Adapter` kinds: `on_success`/`on_failure` reference
 ///   actions declared on the same source entity.
 /// - Trigger names within a single action must be unique.
+/// - An `as` names a field only its user's own identity writes, and is not
+///   set beside `principal`.
 pub(super) fn validate_action_triggers(
     automaton: &Automaton,
     action_names: &[&str],
@@ -118,6 +120,15 @@ pub(super) fn validate_action_triggers(
                     "{scope}: `{key}` does not apply to kind = \"{}\"",
                     trigger.kind.as_str()
                 )));
+            }
+            if let Some(field) = &trigger.acts_for {
+                if trigger.principal.is_some() {
+                    return Err(AutomatonParseError::Validation(format!(
+                        "{scope}: `as` and `principal` both say who the reaction is made as; set one"
+                    )));
+                }
+                super::carries::validate_acts_for(automaton, field)
+                    .map_err(|e| AutomatonParseError::Validation(format!("{scope}: {e}")))?;
             }
             for status in trigger.status_filter().unwrap_or_default() {
                 if !automaton.automaton.states.contains(&status) {

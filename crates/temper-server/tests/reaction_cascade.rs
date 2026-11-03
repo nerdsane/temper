@@ -68,6 +68,7 @@ fn ecommerce_registry() -> ReactionRegistry {
             },
             resolve_target: TargetResolver::SameId,
             principal: None,
+            acts_for: None,
         }],
     );
     reg
@@ -157,6 +158,7 @@ fn a_rule_past_the_advisory_threshold_still_dispatches() {
             },
             resolve_target: TargetResolver::SameId,
             principal: None,
+            acts_for: None,
         })
         .collect();
 
@@ -176,6 +178,7 @@ fn a_rule_past_the_advisory_threshold_still_dispatches() {
         },
         resolve_target: TargetResolver::SameId,
         principal: None,
+        acts_for: None,
     });
     assert_eq!(rules.len(), over);
 
@@ -269,6 +272,7 @@ fn looping_cascade_reports_the_reaction_it_stops() {
             },
             resolve_target: TargetResolver::SameId,
             principal: None,
+            acts_for: None,
         }],
     );
     let mut sys = SimReactionSystem::new(sim_config(), reg, "loop");
@@ -352,6 +356,7 @@ fn field_based_target_resolution() {
                 field: "payment_id".to_string(),
             },
             principal: None,
+            acts_for: None,
         }],
     );
 
@@ -410,6 +415,7 @@ fn multi_step_cascade_with_chained_reactions() {
                 },
                 resolve_target: TargetResolver::SameId,
                 principal: None,
+                acts_for: None,
             },
             ReactionRule {
                 name: "authorize_triggers_capture".to_string(),
@@ -425,6 +431,7 @@ fn multi_step_cascade_with_chained_reactions() {
                 },
                 resolve_target: TargetResolver::SameId,
                 principal: None,
+                acts_for: None,
             },
         ],
     );
@@ -490,6 +497,7 @@ fn cascade_with_field_args_fires_even_when_source_fields_missing() {
             },
             resolve_target: TargetResolver::SameId,
             principal: None,
+            acts_for: None,
         }],
     );
 
@@ -541,6 +549,7 @@ fn guard_passing_rule_fires_guard_failing_rule_skipped() {
                 },
                 resolve_target: TargetResolver::SameId,
                 principal: None,
+                acts_for: None,
             },
             ReactionRule {
                 name: "skipped_on_cancelled".to_string(),
@@ -556,6 +565,7 @@ fn guard_passing_rule_fires_guard_failing_rule_skipped() {
                 },
                 resolve_target: TargetResolver::SameId,
                 principal: None,
+                acts_for: None,
             },
         ],
     );
@@ -603,6 +613,7 @@ fn not_guard_skips_rule_when_inner_passes() {
             },
             resolve_target: TargetResolver::SameId,
             principal: None,
+            acts_for: None,
         }],
     );
 
@@ -700,6 +711,7 @@ field = "expected"
                 field: id_field.into(),
             },
             principal: None,
+            acts_for: None,
         });
     }
     registry.register_tenant_rules("projection", rules);
@@ -777,6 +789,7 @@ fn a_long_chain_of_distinct_steps_runs_to_its_end_on_a_small_thread() {
                         },
                         resolve_target: TargetResolver::SameId,
                         principal: None,
+                        acts_for: None,
                     })
                     .collect(),
             );

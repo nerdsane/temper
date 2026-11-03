@@ -300,7 +300,7 @@ fn reactions_in(by_name: &BTreeMap<&str, &Automaton>, scope: &BTreeSet<String>) 
                     source_action: action.name.clone(),
                     to: to.clone(),
                     target_action: target_action.clone(),
-                    guard: trigger.guard.clone(),
+                    guard: trigger.made_when(),
                     args: trigger.args.clone(),
                     resolve: trigger.resolve_target.clone(),
                     principal: senders::declared(trigger, from, &action.name),

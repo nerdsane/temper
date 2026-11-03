@@ -36,6 +36,11 @@ pub struct ReactionRule {
     /// source action.
     #[serde(default)]
     pub principal: Option<String>,
+    /// The source record's field naming the user the reaction is made for
+    /// (the trigger's `as`): the reaction acts for whoever the field names
+    /// after the source move commits, and is not made when it names no one.
+    #[serde(default)]
+    pub acts_for: Option<String>,
 }
 
 /// Trigger condition for a reaction rule.

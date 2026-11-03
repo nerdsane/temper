@@ -39,13 +39,17 @@ pub enum Asker {
     Outside,
     /// A kernel service as `AgentContext::for_service` builds it:
     /// `Agent::"service:<name>"` with `agent_type` the name, `role`
-    /// "service" and `agentTypeVerified` false, and these context
-    /// attributes besides the ones that builds.
+    /// "service" (none when it acts for a user) and `agentTypeVerified`
+    /// false, and these context attributes besides the ones that builds.
     Service {
         /// The service's name, without `service:`.
         name: String,
         /// Context attributes the kernel adds, such as a declared trigger's.
         context: BTreeMap<String, Attr>,
+        /// Whether the service acts for a user the model does not know, as a
+        /// reaction with `as` does: it then has no `role`, and `actingFor`
+        /// is that user, some string not known here.
+        acting_for: bool,
     },
 }
 

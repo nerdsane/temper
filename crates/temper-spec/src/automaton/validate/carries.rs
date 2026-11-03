@@ -1,9 +1,9 @@
 //! Checks on `[[carry]]` sections.
 
-use crate::predicate::{Scope, VarKind, check};
+use crate::predicate::{Arg, Effect, Literal, Scope, VarKind, check};
 
 use super::super::parser::AutomatonParseError;
-use super::super::types::{ActionKind, Automaton, CARRY_PREFIX, ParameterSource};
+use super::super::types::{Action, ActionKind, Automaton, CARRY_PREFIX, ParameterSource};
 
 /// Each carry ends in a state of this version, reads only the record its
 /// guard is about, and sets declared state variables to values of their
@@ -85,14 +85,15 @@ pub(super) fn validate_carries(automaton: &Automaton) -> Result<(), AutomatonPar
     Ok(())
 }
 
-/// A carry's `as` names a string field that only the kernel writes, from the
-/// identity of the caller who made a move on the record. The platform acts
-/// for whoever the field names, so a field anyone else can write would let
-/// them choose that user: in a spec that is not strict, a create body or a
-/// field update writes any declared field; a plain action parameter of that
-/// name writes it from the caller's body; and a carry's `set` writes it from
-/// the spec.
-fn validate_acts_for(automaton: &Automaton, field: &str) -> Result<(), String> {
+/// An `as` (a carry's, or a reaction's) names a string field that only the
+/// kernel writes, from the identity of the caller who made a move on the
+/// record. The platform acts for whoever the field names, so a field anyone
+/// else can write would let them choose that user: in a spec that is not
+/// strict, a create body or a field update writes any declared field; a plain
+/// action parameter of that name writes it from the caller's body; an effect
+/// copies another field or parameter into it; and a carry's `set` writes it
+/// from the spec. An effect may still clear it to `''`, which names no one.
+pub(super) fn validate_acts_for(automaton: &Automaton, field: &str) -> Result<(), String> {
     if !automaton
         .state
         .iter()
@@ -120,14 +121,38 @@ fn validate_acts_for(automaton: &Automaton, field: &str) -> Result<(), String> {
             action.name
         ));
     }
+    let subject_param = |action: &Action, name: &str| {
+        action.params.iter().any(|param| {
+            param.name() == name && param.source() == Some(ParameterSource::AuthenticatedSubject)
+        })
+    };
+    for action in &automaton.actions {
+        for effect in &action.effect {
+            let Effect::Assign { var, value, .. } = effect else {
+                continue;
+            };
+            if var != field {
+                continue;
+            }
+            let names_no_one = matches!(value, Arg::Lit(Literal::Str(text)) if text.is_empty());
+            let subject = matches!(value, Arg::Param(name) if subject_param(action, name));
+            if !names_no_one && !subject {
+                return Err(format!(
+                    "`as = \"{field}\"`: action '{}' writes '{field}' in an effect from something \
+                     other than its caller's identity; only an `authenticated_subject` parameter \
+                     may name the user, and an effect may only clear it to ''",
+                    action.name
+                ));
+            }
+        }
+    }
     if automaton
         .carries
         .iter()
         .any(|carry| carry.set.contains_key(field))
     {
         return Err(format!(
-            "`as = \"{field}\"`: a [[carry]] sets '{field}', which would choose the user the then \
-             move is made for"
+            "`as = \"{field}\"`: a [[carry]] sets '{field}', which would choose the user it acts for"
         ));
     }
     Ok(())
