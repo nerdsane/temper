@@ -11,19 +11,39 @@ use tracing::Instrument;
 
 mod actions;
 mod adapter;
+mod answers;
 mod authenticated_params;
+pub(crate) use authenticated_params::bind_authenticated_params;
+mod call_deadlines;
 mod compensation;
 mod composite;
 mod cross_entity;
+mod detached;
 mod effects;
+mod error;
+pub use error::DispatchError;
+pub(crate) mod entity_rows;
 mod generated_callbacks;
-mod projection_barrier;
+mod outside_write;
+pub(crate) mod owed_writes;
+pub(crate) mod spawn_plan;
+pub use outside_write::StaleWrite;
 pub(crate) mod retry;
+mod scheduled_actions;
 pub(crate) mod state_timeouts;
+mod state_timer_fire;
+mod state_timer_follow;
+mod state_timer_reconcile;
 mod state_timer_rows;
+mod state_timer_setter;
+mod state_timer_settled;
+mod state_timer_stop;
 #[cfg(test)]
 #[path = "strict_support_test.rs"]
 mod strict_test_support;
+mod timer_cause;
+mod timer_standing;
+mod trigger_failures;
 mod wasm;
 pub(crate) use wasm::authorized_http_endpoint_host;
 #[cfg(feature = "observe")]
@@ -31,6 +51,7 @@ pub(crate) use wasm::internal_http_capability_issuer;
 mod wasm_secrets;
 
 pub use state_timeouts::StateTimeoutTracker;
+pub use state_timer_follow::{BootTimerCounts, BootTimers, TimerFollowHold};
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum WasmDispatchMode {
@@ -62,132 +83,6 @@ pub(crate) struct WasmDispatchRequest<'a> {
     pub mode: WasmDispatchMode,
 }
 
-/// Typed error enum for action dispatch failures.
-///
-/// Replaces bare `String` errors in the dispatch chain with structured
-/// variants that preserve error context and enable pattern matching at
-/// the HTTP boundary.
-///
-/// See ADR-0048 (Dispatch retry and error taxonomy) for the classification
-/// contract. `Transient` and `Permanent` are the two error shapes an ask
-/// site can produce after retry exhaustion; `Deferred` is reserved for
-/// ADR-0051 (Admission control).
-#[derive(Debug, thiserror::Error)]
-pub enum DispatchError {
-    /// The actor was reachable but retry budget was exhausted. The caller
-    /// (or intermediary proxy) may retry with a fresh budget.
-    ///
-    /// `attempts` is how many tries were made before giving up; useful for
-    /// metrics and log correlation.
-    #[error("actor dispatch exhausted after {attempts} attempt(s): {source}")]
-    Transient {
-        source: temper_runtime::actor::ActorError,
-        attempts: u32,
-    },
-
-    /// The actor returned a permanent error — retrying will not help.
-    /// Includes stopped / panicked / init-failed / etc.
-    #[error("actor dispatch permanently failed: {source}")]
-    Permanent {
-        source: temper_runtime::actor::ActorError,
-    },
-
-    /// Admission control denied the call and the caller should retry
-    /// after `retry_after_ms` (ADR-0051).
-    #[error("dispatch deferred: retry after {retry_after_ms}ms")]
-    #[allow(dead_code)] // ADR-0051 will populate this from the admission layer
-    Deferred { retry_after_ms: u64 },
-
-    /// Legacy: generic actor failure as a string. Retained while callers
-    /// migrate to `Transient`/`Permanent`. Prefer the classified variants.
-    #[deprecated(note = "Use DispatchError::Transient or DispatchError::Permanent (ADR-0048)")]
-    #[error("actor dispatch failed: {0}")]
-    ActorFailed(String),
-
-    /// A WASM integration invocation or callback failed.
-    #[error("wasm integration failed: {0}")]
-    #[allow(dead_code)] // Reserved for structured error handling migration
-    WasmFailed(String),
-
-    /// An authorization check denied the action.
-    #[error("authorization denied: {0}")]
-    #[allow(dead_code)] // Reserved for structured error handling migration
-    AuthzDenied(String),
-
-    /// A tenant or owner quota denied the action before dispatch.
-    #[error("quota exceeded: {0}")]
-    QuotaExceeded(String),
-
-    /// The request conflicts with an existing governed row.
-    #[error("conflict: {0}")]
-    Conflict(String),
-
-    /// The entity type has no registered spec — all actions are denied by default.
-    #[error("entity type '{0}' is not governed by any registered spec")]
-    Ungoverned(String),
-
-    /// An internal error (serialization, persistence, unexpected state).
-    #[error("{0}")]
-    Internal(String),
-}
-
-impl DispatchError {
-    /// Classify an `ActorError` into the appropriate `DispatchError` variant
-    /// based on ADR-0048's transient/permanent taxonomy.
-    ///
-    /// `attempts` should be the number of retry attempts made before giving
-    /// up (1 if no retry was attempted).
-    pub(crate) fn from_actor_error(err: temper_runtime::actor::ActorError, attempts: u32) -> Self {
-        if err.is_transient() {
-            Self::Transient {
-                source: err,
-                attempts,
-            }
-        } else {
-            Self::Permanent { source: err }
-        }
-    }
-}
-
-#[cfg(test)]
-mod dispatch_error_tests {
-    use super::*;
-    use std::time::Duration;
-    use temper_runtime::actor::ActorError;
-
-    #[test]
-    fn transient_actor_errors_map_to_transient_dispatch_variant() {
-        let transient = ActorError::AskTimeout(Duration::from_secs(5));
-        match DispatchError::from_actor_error(transient, 3) {
-            DispatchError::Transient { attempts, .. } => assert_eq!(attempts, 3),
-            other => panic!("expected Transient, got {other:?}"),
-        }
-        let mailbox = ActorError::MailboxFull;
-        match DispatchError::from_actor_error(mailbox, 1) {
-            DispatchError::Transient { attempts, .. } => assert_eq!(attempts, 1),
-            other => panic!("expected Transient, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn permanent_actor_errors_map_to_permanent_dispatch_variant() {
-        for err in [
-            ActorError::Stopped,
-            ActorError::SendFailed,
-            ActorError::Panicked("boom".into()),
-            ActorError::InitFailed("init".into()),
-            ActorError::MaxRestartsExceeded(4),
-            ActorError::custom("misc"),
-        ] {
-            let label = format!("{err:?}");
-            match DispatchError::from_actor_error(err, 7) {
-                DispatchError::Permanent { .. } => {}
-                other => panic!("expected Permanent for {label}, got {other:?}"),
-            }
-        }
-    }
-}
-
 impl crate::state::ServerState {
     /// Build a retry policy for entity-ops ask sites (GetState, UpdateFields,
     /// Delete, etc.). Per-attempt timeout inherits from `action_dispatch_timeout`
@@ -200,12 +95,6 @@ impl crate::state::ServerState {
             ..retry::RetryPolicy::default()
         }
         .with_attempt_budget_floor()
-    }
-}
-
-impl From<String> for DispatchError {
-    fn from(s: String) -> Self {
-        Self::Internal(s)
     }
 }
 
@@ -387,7 +276,8 @@ impl crate::state::ServerState {
         let workflow_root_entity_type = workflow_root_type(&agent_ctx, &entity_type);
         let workflow_root_entity_id = workflow_root_id(&agent_ctx, &entity_id);
         let workflow_run_id = workflow_run_id(&agent_ctx, &entity_type, &entity_id);
-        let span = tracing::info_span!(
+        let span = crate::trace_context::runtime_work_span!(
+            crate::trace_context::cause(),
             "dispatch.background_wasm_integrations",
             workflow.root_entity_type = %workflow_root_entity_type,
             workflow.root_entity_id = %workflow_root_entity_id,
@@ -437,3 +327,7 @@ impl crate::state::ServerState {
 #[cfg(test)]
 #[path = "dispatch_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "runtime_work_trace_test.rs"]
+mod runtime_work_trace_tests;

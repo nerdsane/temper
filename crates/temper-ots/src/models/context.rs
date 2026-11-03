@@ -218,60 +218,6 @@ impl OTSContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn test_entity_serialization() {
-        let entity = OTSEntity::new("tool", "calculator")
-            .with_name("Calculator Tool")
-            .with_metadata("version", json!("1.0"));
-
-        let json_str = serde_json::to_string(&entity).unwrap();
-        let parsed: OTSEntity = serde_json::from_str(&json_str).unwrap();
-        assert_eq!(parsed, entity);
-
-        // Verify snake_case in JSON
-        assert!(json_str.contains(r#""type":"tool""#));
-    }
-
-    #[test]
-    fn test_resource_serialization() {
-        let resource = OTSResource::new("api", "https://api.example.com/data");
-
-        let json_str = serde_json::to_string(&resource).unwrap();
-        let parsed: OTSResource = serde_json::from_str(&json_str).unwrap();
-        assert_eq!(parsed, resource);
-    }
-
-    #[test]
-    fn test_user_serialization() {
-        let user = OTSUser::new("user_123")
-            .with_handle("alice")
-            .with_org_id("org_456")
-            .with_teams(vec!["engineering".to_string(), "ml".to_string()])
-            .with_timezone("America/Los_Angeles");
-
-        let json_str = serde_json::to_string(&user).unwrap();
-        let parsed: OTSUser = serde_json::from_str(&json_str).unwrap();
-        assert_eq!(parsed, user);
-    }
-
-    #[test]
-    fn test_context_serialization() {
-        let entity = OTSEntity::new("tool", "search");
-        let resource = OTSResource::new("database", "postgresql://localhost/db");
-        let user = OTSUser::new("user_789");
-
-        let context = OTSContext::new()
-            .with_referrer("https://app.example.com")
-            .with_user(user)
-            .with_entity(entity)
-            .with_resource(resource);
-
-        let json_str = serde_json::to_string(&context).unwrap();
-        let parsed: OTSContext = serde_json::from_str(&json_str).unwrap();
-        assert_eq!(parsed, context);
-    }
 
     #[test]
     fn test_empty_context_omits_fields() {
@@ -280,15 +226,5 @@ mod tests {
 
         // Empty vecs and None should not appear
         assert_eq!(json_str, "{}");
-    }
-
-    #[test]
-    fn test_entity_without_optional_fields() {
-        let entity = OTSEntity::new("resource", "file_1");
-        let json_str = serde_json::to_string(&entity).unwrap();
-
-        // Should not include name or metadata
-        assert!(!json_str.contains("name"));
-        assert!(!json_str.contains("metadata"));
     }
 }

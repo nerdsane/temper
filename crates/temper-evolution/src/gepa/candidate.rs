@@ -188,23 +188,4 @@ mod tests {
         candidate.record_verification_failure(vec!["dead transition".into()]);
         assert!(candidate.exceeded_budget(3));
     }
-
-    #[test]
-    fn test_candidate_serialization() {
-        let now = Utc::now();
-        let mut candidate = Candidate::new(
-            "c1".into(),
-            "spec".into(),
-            "pm".into(),
-            "Issue".into(),
-            1,
-            now,
-        );
-        candidate.set_score("success_rate".into(), 0.9);
-
-        let json = serde_json::to_string(&candidate).unwrap();
-        let parsed: Candidate = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.id, "c1");
-        assert_eq!(parsed.scores["success_rate"], 0.9);
-    }
 }

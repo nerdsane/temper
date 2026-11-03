@@ -21,32 +21,44 @@
 //! - **Deterministic**: Same input -> same output. No randomness in transition logic.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use temper_jit::table::{Effect, TransitionTable};
+use temper_jit::table::{Effect, Refusal, TransitionTable};
 use temper_observe::wide_event;
 use temper_runtime::actor::{Actor, ActorContext, ActorError};
 use temper_runtime::persistence::{
-    COMPOSITE_EVENT_TYPE, EventMetadata, PersistenceEnvelope, PersistenceError,
+    COMPOSITE_EVENT_TYPE, CommitRows, EventMetadata, PersistenceEnvelope, PersistenceError,
 };
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 pub(super) use tokio::time::sleep as sleep_persistence_retry; // determinism-ok: production persistence retry backoff
 
+use crate::request_context::AgentContext;
 use crate::storage::{BackendLabel, BoxedEventStore};
 
 use super::action_input::process_action_with_blob_prestate;
 use super::effects::{
     FieldSyncMode, build_eval_context_with_xref, prune_transient_action_fields_from_state,
 };
+use super::entity_rows::{EntityRows, EntityRowsHook, RowsInput};
+use super::field_updates::NotUpdated;
+use super::scheduled_rows::ScheduledRows;
 use super::snapshot_queue::{SnapshotEnqueueOutcome, SnapshotWriteQueue};
 use super::types::{
     EntityEvent, EntityMsg, EntityResponse, EntityState, MAX_EVENTS_SINCE_SNAPSHOT,
 };
+use super::watchdog::Doing;
+
+/// Routine walk recovery is quieter than hydration of a live actor.
+#[derive(Clone, Copy)]
+pub(super) enum ReplayLogging {
+    Actor,
+    Walk,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ReplayPolicy {
-    LenientSnapshot,
     StrictSnapshot,
     StrictFullJournal,
 }
@@ -56,23 +68,108 @@ impl ReplayPolicy {
         self != Self::StrictFullJournal
     }
 
-    fn strict_journal_read(self) -> bool {
-        self != Self::LenientSnapshot
-    }
-
     fn strict_event_validation(self) -> bool {
         self == Self::StrictFullJournal
     }
 }
 
-/// What the caller of a refused write is told. An oversized change is refused
-/// with its own words (what to keep elsewhere); anything else failed to persist.
+/// What the caller of a refused write is told. An oversized change and a full
+/// disk are told in their own words (what to do about it); anything else
+/// failed to persist.
+/// Why a delete decided on a state its record has left was not written.
+const STALE_DELETE: &str = "delete authorization became stale; retry against current state";
+
 pub(super) fn persistence_failure(error: &PersistenceError) -> String {
     match error {
-        PersistenceError::EventTooLarge { .. } => error.to_string(),
+        PersistenceError::EventTooLarge { .. } | PersistenceError::StorageFull { .. } => {
+            error.to_string()
+        }
         _ => format!("persistence failed: {error}"),
     }
 }
+
+/// The answer to an action whose event the store did not take. Only an event
+/// too large to write is a refusal. `persist_event` has already read the
+/// journal after any other failure: a write that landed is not answered
+/// here, a concurrency violation or a `not written` error did not land, and
+/// only an `outcome unknown` error may have. None of them is a refusal: the
+/// action itself was allowed, and a caller may try it again. A store that
+/// failed or a disk under the floor makes the store unavailable (503).
+fn persistence_failure_reply(state: EntityState, error: &PersistenceError) -> EntityResponse {
+    let said = persistence_failure(error);
+    match error {
+        PersistenceError::EventTooLarge { .. } => EntityResponse::refused(state, said),
+        PersistenceError::Storage(_)
+        | PersistenceError::OutcomeUnknown(_)
+        | PersistenceError::StorageFull { .. } => EntityResponse::store_unavailable(state, said),
+        PersistenceError::ConcurrencyViolation { .. } | PersistenceError::Serialization(_) => {
+            EntityResponse::write_failed(state, said)
+        }
+    }
+}
+
+/// What a write that answered with an error did, as the journal shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WriteOutcome {
+    /// The journal holds the event at `sequence_nr`.
+    Landed { sequence_nr: u64 },
+    /// The journal does not hold it, and never will.
+    NotWritten,
+    /// The journal cannot establish the outcome yet: why.
+    Unknown(String),
+}
+
+/// Why a concurrency retry (ADR-0046) gave up without writing the action.
+enum RetryGaveUp {
+    /// The journal, read again, does not hold the action and it no longer
+    /// applies: nothing was written.
+    Refused(String),
+    /// The journal kept moving, or it already holds the action: the action
+    /// may have landed.
+    WriteFailed(String),
+    /// The journal, read again, does not hold the action, and the record is
+    /// not the state the action's caller decided it on: nothing was written.
+    RecordChanged,
+    /// The store did not take a retry's event: answered as any write the
+    /// store did not take (`persistence_failure_reply`).
+    NotTaken(PersistenceError),
+}
+
+/// Why an action's field-overflow blobs, which its event refers to, were not
+/// stored, so the event was not written either.
+#[derive(Debug, thiserror::Error)]
+enum BlobsNotStored {
+    /// No object blob store is configured, so they cannot be stored at all.
+    #[error("field-overflow blobs require a configured object blob store")]
+    NoBlobStore,
+    /// The blob store did not take them: the store's failure, answered as an
+    /// event the store did not take is, so the caller may try again.
+    #[error("{0}")]
+    NotTaken(PersistenceError),
+}
+
+impl BlobsNotStored {
+    /// The answer to the action whose blobs these are, its record in `state`.
+    fn reply(self, state: EntityState) -> EntityResponse {
+        match self {
+            Self::NoBlobStore => EntityResponse::write_failed(state, self.to_string()),
+            Self::NotTaken(error) => persistence_failure_reply(state, &error),
+        }
+    }
+}
+
+impl From<BlobsNotStored> for RetryGaveUp {
+    fn from(not_stored: BlobsNotStored) -> Self {
+        match not_stored {
+            BlobsNotStored::NoBlobStore => Self::WriteFailed(not_stored.to_string()),
+            BlobsNotStored::NotTaken(error) => Self::NotTaken(error),
+        }
+    }
+}
+
+/// The refusal an action gets when its record changed after it was decided.
+const ACTION_RECORD_CHANGED: &str =
+    "action authorization became stale; retry against current state";
 
 pub(super) fn event_budget_workspace_id(state: &EntityState) -> String {
     if state.entity_type == "Workspace" {
@@ -97,13 +194,15 @@ fn duplicate_idempotency_custom_effects(
     table: &TransitionTable,
     state: &EntityState,
     action: &str,
+    params: &serde_json::Value,
     related: &temper_jit::table::RelatedMap,
 ) -> Vec<String> {
     if !table.composite_actions.contains_key(action) {
         return Vec::new();
     }
 
-    let ctx = build_eval_context_with_xref(state, related, table, Some(action));
+    let mut ctx = build_eval_context_with_xref(state, related, table, Some(action));
+    super::effects::with_params(&mut ctx, params);
     table
         .evaluate_ctx(&state.status, &ctx, action)
         .filter(|result| result.success)
@@ -118,6 +217,23 @@ fn duplicate_idempotency_custom_effects(
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The refusal for a request sent with a key this entity already recorded for
+/// a different request (`recorded` names that request's action).
+fn idempotency_key_reused(state: &EntityState, recorded: &str) -> EntityResponse {
+    EntityResponse {
+        refusal: Some(Refusal::IdempotencyKeyReused {
+            action: recorded.to_string(),
+        }),
+        ..EntityResponse::refused(
+            state.clone(),
+            format!(
+                "this Idempotency-Key was already used on this entity for a different request \
+                 (action `{recorded}`); send a new key for a new request"
+            ),
+        )
+    }
 }
 
 /// The entity actor -- processes actions through a TransitionTable.
@@ -147,7 +263,27 @@ pub struct EntityActor {
     /// Object store for field-overflow blob bytes. SQL stores only refs.
     pub(super) blob_store: Option<crate::blob_store::BlobStore>,
     legacy_blob_store: Option<Arc<dyn crate::storage::BlobStore>>,
+    /// Run once with the state this actor rehydrated from stored events.
+    on_rehydrated: Option<RehydrateHook>,
+    /// A write's outcome could not be learned, so the state in memory may not
+    /// be the journal's. Once the message that wrote it is answered, the
+    /// actor restarts and rebuilds from the journal before the next one.
+    rebuild_from_journal: AtomicBool,
+    /// What the current message is awaiting, for the watchdog's reports.
+    pub(super) now: super::watchdog::Now,
+    /// Per-attempt ask deadline: when startup and message reports begin.
+    action_dispatch_timeout: Duration,
+    /// Says which query-plane and timer rows an event writes, for a store
+    /// that keeps them in the journal's transaction.
+    entity_rows: Option<EntityRowsHook>,
+    /// Who creates the record, when this actor writes its `Created` event:
+    /// the caller its first state's timer row is armed as, in that commit.
+    created_by: Option<AgentContext>,
 }
+
+/// What an entity actor runs when it starts from stored events, with the
+/// state it rehydrated into, before it takes any message.
+pub(crate) type RehydrateHook = Arc<dyn Fn(&EntityState) + Send + Sync>;
 
 impl EntityActor {
     pub(crate) fn build_initial_state(
@@ -181,14 +317,16 @@ impl EntityActor {
             last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
             processed_idempotency_keys: BTreeMap::new(),
+            last_event: Default::default(),
             status_clock: Default::default(),
+            spawn_reservations: Default::default(),
         }
     }
 
     /// Snapshot frequency in events.
     ///
     /// Controlled by `TEMPER_SNAPSHOT_INTERVAL` (default 100).
-    fn snapshot_interval() -> u64 {
+    pub(super) fn snapshot_interval() -> u64 {
         static SNAPSHOT_INTERVAL: OnceLock<u64> = OnceLock::new();
         *SNAPSHOT_INTERVAL.get_or_init(|| {
             std::env::var("TEMPER_SNAPSHOT_INTERVAL") // determinism-ok: read once at startup
@@ -283,6 +421,12 @@ impl EntityActor {
             idempotency_cache: None,
             blob_store: None,
             legacy_blob_store: None,
+            on_rehydrated: None,
+            rebuild_from_journal: AtomicBool::new(false),
+            now: super::watchdog::Now::default(),
+            action_dispatch_timeout: crate::state::DEFAULT_ACTION_DISPATCH_TIMEOUT,
+            entity_rows: None,
+            created_by: None,
         }
     }
 
@@ -308,12 +452,24 @@ impl EntityActor {
             idempotency_cache: None,
             blob_store: None,
             legacy_blob_store: None,
+            on_rehydrated: None,
+            rebuild_from_journal: AtomicBool::new(false),
+            now: super::watchdog::Now::default(),
+            action_dispatch_timeout: crate::state::DEFAULT_ACTION_DISPATCH_TIMEOUT,
+            entity_rows: None,
+            created_by: None,
         }
     }
 
     /// Set the tenant for this actor (must be called before spawning).
     pub fn with_tenant(mut self, tenant: impl Into<String>) -> Self {
         self.tenant = tenant.into();
+        self
+    }
+
+    /// Use the dispatcher's per-attempt ask deadline for startup and message reports.
+    pub(crate) fn with_action_dispatch_timeout(mut self, timeout: Duration) -> Self {
+        self.action_dispatch_timeout = timeout;
         self
     }
 
@@ -342,6 +498,24 @@ impl EntityActor {
         self
     }
 
+    /// Attach the hook run when this actor rehydrates from stored events.
+    pub(crate) fn with_on_rehydrated(mut self, hook: Option<RehydrateHook>) -> Self {
+        self.on_rehydrated = hook;
+        self
+    }
+
+    /// Attach what says which query-plane and timer rows an event writes.
+    pub(crate) fn with_entity_rows(mut self, hook: Option<EntityRowsHook>) -> Self {
+        self.entity_rows = hook;
+        self
+    }
+
+    /// The record's creator, for a `Created` event this actor writes.
+    pub(crate) fn with_creator(mut self, created_by: Option<AgentContext>) -> Self {
+        self.created_by = created_by;
+        self
+    }
+
     pub(crate) fn with_blob_store(
         mut self,
         blob_store: Option<crate::blob_store::BlobStore>,
@@ -350,14 +524,21 @@ impl EntityActor {
         self
     }
 
+    /// Store the field-overflow blobs an event refers to, before the event.
     async fn persist_overflow_blobs(
         blob_store: Option<&crate::blob_store::BlobStore>,
         blobs: &[crate::blobs::OverflowBlobWrite],
-    ) -> Result<(), String> {
+    ) -> Result<(), BlobsNotStored> {
         let Some(blob_store) = blob_store else {
-            return Err("field-overflow blobs require a configured object blob store".to_string());
+            return Err(BlobsNotStored::NoBlobStore);
         };
-        crate::blobs::put_overflow_blobs(blob_store, blobs).await
+        crate::blobs::put_overflow_blobs(blob_store, blobs)
+            .await
+            .map_err(|error| {
+                BlobsNotStored::NotTaken(PersistenceError::Storage(format!(
+                    "field-overflow blob persistence failed: {error}"
+                )))
+            })
     }
 
     /// Persistence ID for this entity: "tenant:EntityType:EntityId".
@@ -365,7 +546,8 @@ impl EntityActor {
         format!("{}:{}:{}", self.tenant, self.entity_type, self.entity_id)
     }
 
-    fn field_sync_mode_for_backend(
+    /// Storage transformation shared by execution and outside-write previews.
+    pub(crate) fn field_sync_mode_for_backend(
         backend: Option<BackendLabel>,
         blob_store: Option<&crate::blob_store::BlobStore>,
     ) -> FieldSyncMode {
@@ -378,15 +560,48 @@ impl EntityActor {
         }
     }
 
-    /// Persist an event to the configured event store.
+    /// Persist an event to the configured event store, with the rows of the
+    /// scheduled actions it arms and the removal of the one it fires in the
+    /// same commit, and, for a store that keeps them there, the record's
+    /// query-plane row and timer row as the event leaves it (`caller` is who
+    /// a timer it arms fires as). `state` is the record after the event, at
+    /// the sequence before it.
+    ///
+    /// The answer is what the write did. `Ok` is the event's sequence: it
+    /// landed, also when the store answered an error and the journal, read
+    /// again, holds the event. A concurrency violation or a `not written`
+    /// storage error: it did not land. An `outcome unknown` error: the
+    /// journal cannot yet establish whether the failed commit landed.
     pub(super) async fn persist_event(
         &self,
         store: &BoxedEventStore,
         backend: BackendLabel,
-        persistence_id: &str,
         state: &mut EntityState,
         event: &EntityEvent,
+        scheduled: &ScheduledRows,
+        caller: Option<&AgentContext>,
     ) -> Result<u64, PersistenceError> {
+        let persistence_id = self.persistence_id();
+        let event_id = sim_uuid();
+        let entity_rows = match &self.entity_rows {
+            Some(hook) if store.commits_entity_rows() => {
+                // The record as the event leaves it. A delete sets its status
+                // only once its tombstone is written, so the status is the
+                // event's.
+                let mut after = state.clone();
+                after.sequence_nr = state.sequence_nr + 1;
+                if !event.to_status.is_empty() {
+                    after.status = event.to_status.clone();
+                }
+                after.push_event_bounded(event.clone());
+                hook(&RowsInput {
+                    state: &after,
+                    event,
+                    caller,
+                })
+            }
+            _ => EntityRows::default(),
+        };
         let payload = super::bootstrap::event_payload(event, state)
             .map_err(|e| PersistenceError::Serialization(e.to_string()))?;
         let envelope = PersistenceEnvelope {
@@ -394,11 +609,11 @@ impl EntityActor {
             event_type: event.action.clone(),
             payload,
             metadata: EventMetadata {
-                event_id: sim_uuid(),
+                event_id,
                 causation_id: sim_uuid(),
                 correlation_id: sim_uuid(),
                 timestamp: event.timestamp,
-                actor_id: persistence_id.to_string(),
+                actor_id: persistence_id.clone(),
             },
         };
 
@@ -459,14 +674,24 @@ impl EntityActor {
             (key_rows, vector_rows, reconcile_vectors)
         };
         let append_start = Instant::now(); // determinism-ok: production-only event-store wait metric
-        let result = store
-            .append_with_index_rows(
-                persistence_id,
-                state.sequence_nr,
-                &[envelope],
-                &key_rows,
-                &vector_rows,
-                reconcile_vectors,
+        let result = self
+            .now
+            .during(
+                Doing::Appending,
+                store.append_with_rows(
+                    &persistence_id,
+                    state.sequence_nr,
+                    &[envelope],
+                    entity_rows.commit_rows(CommitRows {
+                        key_rows: &key_rows,
+                        vector_rows: &vector_rows,
+                        reconcile_vectors,
+                        scheduled_actions: &scheduled.armed,
+                        fired_scheduled_action: scheduled.fired.as_deref(),
+                        projection: None,
+                        state_timer: None,
+                    }),
+                ),
             )
             .await;
         crate::runtime_metrics::record_event_store_append_wait(
@@ -474,21 +699,115 @@ impl EntityActor {
             "append",
             append_start.elapsed(),
         );
-        match result {
+        let error = match result {
             Ok(new_seq) => {
                 state.sequence_nr = new_seq;
                 tracing::debug!(entity = %state.entity_id, seq = new_seq, "event persisted");
-                Ok(new_seq)
+                return Ok(new_seq);
             }
-            // Refused for its size: the event store logged it once, with its words.
-            Err(e @ PersistenceError::EventTooLarge { .. }) => Err(e),
-            Err(e) => {
-                tracing::error!(
-                    entity = %state.entity_id, error = %e,
-                    "failed to persist event — state advanced but not durable"
-                );
-                Err(e)
+            // Refused before writing: nothing to learn. The event store logged
+            // a refusal for size once, with its words, and a full disk once
+            // when it began refusing.
+            Err(
+                e @ (PersistenceError::EventTooLarge { .. }
+                | PersistenceError::Serialization(_)
+                | PersistenceError::StorageFull { .. }),
+            ) => {
+                return Err(e);
             }
+            Err(e) => e,
+        };
+        // Any other answer can hide a write that landed: a commit whose answer
+        // was lost, or a store that retried one and met its own event as a
+        // concurrency violation. An unknown commit may still be running;
+        // journal absence cannot turn that into a definite failure.
+        let outcome = self
+            .now
+            .during(
+                Doing::LearningWriteOutcome,
+                Self::learn_write_outcome(
+                    store,
+                    &persistence_id,
+                    state.sequence_nr,
+                    event_id,
+                    &error,
+                ),
+            )
+            .await;
+        self.log_write_outcome(&event.action, &outcome, &error);
+        match outcome {
+            WriteOutcome::Landed { sequence_nr } => {
+                state.sequence_nr = sequence_nr;
+                Ok(sequence_nr)
+            }
+            WriteOutcome::NotWritten => match error {
+                PersistenceError::ConcurrencyViolation { .. } => Err(error),
+                error => Err(PersistenceError::Storage(format!("not written: {error}"))),
+            },
+            WriteOutcome::Unknown(reason) => {
+                self.rebuild_from_journal.store(true, Ordering::Release);
+                Err(PersistenceError::OutcomeUnknown(format!(
+                    "{error}; the journal cannot establish the outcome: {reason}"
+                )))
+            }
+        }
+    }
+
+    /// What a write of `event_id` after `from_sequence` that answered with an
+    /// error did, read from the journal.
+    async fn learn_write_outcome(
+        store: &BoxedEventStore,
+        persistence_id: &str,
+        from_sequence: u64,
+        event_id: uuid::Uuid,
+        append_error: &PersistenceError,
+    ) -> WriteOutcome {
+        match store.read_events(persistence_id, from_sequence).await {
+            Ok(events) => match events
+                .iter()
+                .find(|event| event.metadata.event_id == event_id)
+            {
+                Some(event) => WriteOutcome::Landed {
+                    sequence_nr: event.sequence_nr,
+                },
+                None if matches!(append_error, PersistenceError::OutcomeUnknown(_)) => {
+                    WriteOutcome::Unknown(
+                        "the event is absent but its commit may still finish".into(),
+                    )
+                }
+                None => WriteOutcome::NotWritten,
+            },
+            Err(error) => WriteOutcome::Unknown(error.to_string()),
+        }
+    }
+
+    /// Log what a write whose store answered `error` did, once it is known:
+    /// the entity, its type and the action, never the action's parameters.
+    fn log_write_outcome(&self, action: &str, outcome: &WriteOutcome, error: &PersistenceError) {
+        let conflict = matches!(error, PersistenceError::ConcurrencyViolation { .. });
+        match outcome {
+            WriteOutcome::Landed { sequence_nr } => tracing::warn!(
+                tenant = %self.tenant, entity_type = %self.entity_type,
+                entity_id = %self.entity_id, action, sequence_nr, error = %error,
+                "event landed: its write answered an error, and the journal holds it"
+            ),
+            // A conflict is the record moving on; the caller replays it.
+            WriteOutcome::NotWritten if conflict => tracing::debug!(
+                tenant = %self.tenant, entity_type = %self.entity_type,
+                entity_id = %self.entity_id, action, error = %error,
+                "event not written: the journal moved on"
+            ),
+            WriteOutcome::NotWritten => tracing::error!(
+                tenant = %self.tenant, entity_type = %self.entity_type,
+                entity_id = %self.entity_id, action, error = %error,
+                "event rolled back: not written, the record keeps its state"
+            ),
+            WriteOutcome::Unknown(reason) => tracing::error!(
+                tenant = %self.tenant, entity_type = %self.entity_type,
+                entity_id = %self.entity_id, action, error = %error,
+                reason = %reason,
+                "event outcome unknown: the journal cannot establish whether the write landed"
+            ),
         }
     }
 
@@ -548,10 +867,11 @@ impl EntityActor {
 
     /// Replay events from the configured store to rebuild state (called in pre_start).
     ///
-    /// Re-evaluates each event through the `TransitionTable` to reconstruct
-    /// all state variables (status, counters, booleans). This is option 2 from
-    /// the replay design: the TransitionTable is the authoritative source of
-    /// effects, so replay produces the same state as the original execution.
+    /// Each event restores what it committed: its stored `to_status`, the
+    /// outcome its effects recorded (counters, booleans, lists, and fields such
+    /// as a spawned child's id), and its params. Replay mints, spawns, schedules
+    /// and calls out nothing. Events journaled before outcomes were recorded
+    /// re-derive their effects from the `TransitionTable`, minting nothing.
     pub(super) async fn replay_events(
         table: &TransitionTable,
         store: &BoxedEventStore,
@@ -559,8 +879,19 @@ impl EntityActor {
         state: &mut EntityState,
         tenant: &str,
         blob_store: Option<&crate::blob_store::BlobStore>,
-        replay_policy: ReplayPolicy,
+        replay_options: (ReplayPolicy, ReplayLogging),
     ) -> Result<(), ActorError> {
+        let (replay_policy, logging) = replay_options;
+        // Keep failures visible for both callers; only successful replay
+        // diagnostics are reduced during a record walk.
+        macro_rules! replay_log {
+            ($($fields:tt)*) => {
+                match logging {
+                    ReplayLogging::Actor => tracing::info!($($fields)*),
+                    ReplayLogging::Walk => tracing::debug!($($fields)*),
+                }
+            };
+        }
         let replay_start = Instant::now(); // determinism-ok: wall-clock for production replay duration metric only
         let persistence_id = format!("{tenant}:{}:{}", state.entity_type, state.entity_id);
         let persistence_id = persistence_id.as_str();
@@ -573,7 +904,7 @@ impl EntityActor {
                     if Self::apply_snapshot_bytes(state, snapshot_seq, &snapshot_bytes) {
                         from_sequence = snapshot_seq;
                         loaded_snapshot = true;
-                        tracing::info!(
+                        replay_log!(
                             entity = %state.entity_id,
                             seq = snapshot_seq,
                             "loaded snapshot before replay"
@@ -611,6 +942,30 @@ impl EntityActor {
                 if !loaded_snapshot && from_sequence == 0 && !envelopes.is_empty() {
                     super::bootstrap::clear_for_replay(state, &table.initial_state);
                 }
+                // An old snapshot may lack creation metadata. Read exactly sequence
+                // one through the journal index, never the oldest retained event.
+                let event_time = |event: &PersistenceEnvelope| {
+                    event
+                        .payload
+                        .get("timestamp")
+                        .and_then(|value| serde_json::from_value(value.clone()).ok())
+                        .unwrap_or(event.metadata.timestamp)
+                };
+                let first_event_at = if state.last_event.first_event_at.is_some() {
+                    state.last_event.first_event_at
+                } else if let Some(event) = envelopes.first().filter(|event| event.sequence_nr == 1)
+                {
+                    Some(event_time(event))
+                } else if loaded_snapshot {
+                    store
+                        .first_event_at(persistence_id)
+                        .await
+                        .map_err(|error| {
+                            ActorError::custom(format!("creation time lookup failed: {error}"))
+                        })?
+                } else {
+                    None
+                };
                 let mut expected_sequence = from_sequence.saturating_add(1);
                 for (index, env) in envelopes.iter().enumerate() {
                     if replay_policy.strict_event_validation() {
@@ -652,19 +1007,21 @@ impl EntityActor {
 
                     let parsed_event = serde_json::from_value::<EntityEvent>(env.payload.clone());
 
-                    // Tombstone is terminal: once deleted, entity must not replay
-                    // into a live state. Stop at the first Deleted event.
-                    if env.event_type == "Deleted" {
+                    // The kernel's tombstone is terminal: once deleted, an entity
+                    // must not replay into a live state. A spec action that shares
+                    // the tombstone's name replays like any other action.
+                    if env.is_tombstone() {
                         let tombstone = match parsed_event {
                             Ok(mut event) => {
                                 if replay_policy.strict_event_validation() {
-                                    super::replay_validation::validate_strict_entity_event(
-                                        table, state, env, &event,
+                                    super::replay_validation::validate_strict_tombstone(
+                                        state, env, &event,
                                     )?;
                                 }
                                 event.params =
                                     super::effects::sanitize_action_params(&event.params)
                                         .into_owned();
+                                event.kind = temper_runtime::persistence::EventKind::Tombstone;
                                 event
                             }
                             Err(error) if replay_policy.strict_event_validation() => {
@@ -680,16 +1037,12 @@ impl EntityActor {
                                 timestamp: env.metadata.timestamp,
                                 params: serde_json::json!({}),
                                 idempotency_key: None,
+                                origin: Default::default(),
+                                kind: temper_runtime::persistence::EventKind::Tombstone,
+                                outcome: None,
                             },
                         };
-                        state.status = tombstone.to_status.clone();
-                        if let Some(obj) = state.fields.as_object_mut() {
-                            obj.insert(
-                                "Status".to_string(),
-                                serde_json::Value::String(state.status.clone()),
-                            );
-                        }
-                        state.push_event_bounded(tombstone);
+                        state.record_tombstone(tombstone);
                         state.sequence_nr = env.sequence_nr;
                         if replay_policy.strict_event_validation() && index + 1 != envelopes.len() {
                             return Err(ActorError::custom(format!(
@@ -698,6 +1051,38 @@ impl EntityActor {
                             )));
                         }
                         break;
+                    }
+
+                    // A refused spawn is the kernel's event too: it changes only
+                    // the field that named the child, through the live helper. So
+                    // is a stopped timer, which only says so (`LastEvent::record`).
+                    if env.event_type == super::spawn_refusal::SPAWN_REFUSED_EVENT
+                        || env.event_type == super::timer_needs_person::TIMER_NEEDS_PERSON_EVENT
+                    {
+                        match parsed_event {
+                            Ok(event) => {
+                                if env.event_type == super::spawn_refusal::SPAWN_REFUSED_EVENT {
+                                    super::spawn_refusal::apply(state, &event.params);
+                                }
+                                state.push_event_bounded(event);
+                            }
+                            Err(e) => {
+                                if replay_policy.strict_event_validation() {
+                                    return Err(ActorError::custom(format!(
+                                        "invalid spawn-refusal event for {}:{} at sequence {}: {e}",
+                                        state.entity_type, state.entity_id, env.sequence_nr
+                                    )));
+                                }
+                                tracing::warn!(
+                                    entity = %state.entity_id,
+                                    sequence_nr = env.sequence_nr,
+                                    error = %e,
+                                    "skipping spawn-refusal event with incompatible schema during replay"
+                                );
+                            }
+                        }
+                        state.sequence_nr = env.sequence_nr;
+                        continue;
                     }
 
                     // PATCH/PUT field updates are journaled outside the spec's
@@ -789,40 +1174,37 @@ impl EntityActor {
                             event.params =
                                 super::effects::sanitize_action_params(&event.params).into_owned();
                             // A persisted event is a historical fact: its guard
-                            // already passed at commit time and its `to_status`
-                            // is authoritative. Replay therefore re-derives the
-                            // transition's EFFECTS from the table but never
-                            // re-gates it — guards (especially cross-entity ones,
-                            // whose related-entity context is not reconstructed
-                            // here) must not silently drop committed history.
-                            // `replay_effects` returns the matching rule's
-                            // effects ignoring guards; `None` means the table no
-                            // longer knows this action/from-state, in which case
-                            // the stored `to_status` alone carries the state.
-                            let from_status = event.from_status.clone();
-                            if !frozen_bootstrap
+                            // already passed, and its stored outcome and target
+                            // status are authoritative. Never re-run recorded
+                            // effects against the active spec or mint child ids.
+                            // Legacy events select effects using the stored
+                            // from-status so earlier replay drift cannot prevent
+                            // later events from matching their original rule.
+                            let rule_from = if event.from_status.is_empty() {
+                                state.status.as_str()
+                            } else {
+                                event.from_status.as_str()
+                            };
+                            if !frozen_bootstrap && let Some(outcome) = event.outcome.as_ref() {
+                                outcome.restore(state);
+                            } else if !frozen_bootstrap
                                 && let Some(effects) =
-                                    table.replay_effects(&state.status, &event.action)
+                                    table.replay_effects(rule_from, &event.action)
                             {
+                                // Events predating outcomes re-derive effects,
+                                // ignoring guards and never minting child ids.
                                 let effects = effects.to_vec();
-                                // Shared effect application — same code as handle() and simulation.
-                                let (
-                                    _custom_effects,
-                                    _scheduled_actions,
-                                    _spawn_requests,
-                                    _schedule_at_requests,
-                                ) = super::effects::apply_effects(state, &effects, &event.params);
+                                super::effects::apply_legacy_replay_effects(
+                                    state,
+                                    &effects,
+                                    &event.params,
+                                );
                             }
-                            // Always honor the durably-stored target status. This
-                            // is safe (status is always persisted on the event)
-                            // and is the single source of truth for the post-
-                            // transition state across both the known-action and
-                            // unknown-action cases.
-                            super::effects::apply_new_state_fallback(
-                                state,
-                                &from_status,
-                                &event.to_status,
-                            );
+                            // The stored target always wins over the active
+                            // spec's SetState, including for legacy events.
+                            if !event.to_status.is_empty() {
+                                state.status.clone_from(&event.to_status);
+                            }
 
                             // Sync action params into fields — mirrors the live
                             // process_action() path (effects.rs:155) so data fields
@@ -883,6 +1265,7 @@ impl EntityActor {
                     }
                     state.sequence_nr = env.sequence_nr;
                 }
+                state.last_event.first_event_at = first_event_at;
                 if !envelopes.is_empty() {
                     let replayed_tail = state
                         .sequence_nr
@@ -896,7 +1279,7 @@ impl EntityActor {
                             "snapshot tail exceeds bounded replay cap"
                         );
                     }
-                    tracing::info!(
+                    replay_log!(
                         entity = %state.entity_id,
                         snapshot_loaded = loaded_snapshot,
                         replayed = envelopes.len(),
@@ -910,7 +1293,7 @@ impl EntityActor {
                         "state rebuilt from event journal via TransitionTable"
                     );
                 } else if loaded_snapshot {
-                    tracing::info!(
+                    replay_log!(
                         entity = %state.entity_id,
                         seq = state.sequence_nr,
                         total_events = state.total_event_count,
@@ -919,17 +1302,15 @@ impl EntityActor {
                     );
                 }
             }
+            // A journal that could not be read is never replaced by the
+            // snapshot or the initial state: either would answer with state
+            // older than the journal. The caller fails and the next message
+            // reads the journal again.
             Err(e) => {
-                if replay_policy.strict_journal_read() || table.has_input_contracts() {
-                    return Err(ActorError::custom(format!(
-                        "failed to read events for replay of {}:{}: {e}",
-                        state.entity_type, state.entity_id
-                    )));
-                }
-                tracing::error!(
-                    entity = %state.entity_id, error = %e,
-                    "failed to read events for replay — starting fresh"
-                );
+                return Err(ActorError::custom(format!(
+                    "failed to read events for replay of {}:{}: {e}",
+                    state.entity_type, state.entity_id
+                )));
             }
         }
         crate::runtime_metrics::record_event_replay_duration(
@@ -943,11 +1324,10 @@ impl EntityActor {
 
 /// Rebuild an entity's current state from its snapshot + event tail.
 ///
-/// `strict_journal_read`: when true, a journal read failure PROPAGATES as an error
-/// instead of being swallowed into a "start fresh"/stale state. The key-index backfill
-/// passes `true` so it can tell "no events" apart from "could not read the journal" —
-/// keying decisions and the per-type watermark depend on that distinction (ADR-0153
-/// soundness gate). Actor hydration passes `false` (keep serving on a transient read).
+/// A journal read failure is returned as an error, never folded into the
+/// snapshot or initial state. Actor hydration then fails its first message
+/// and the next message hydrates again; the backfills can tell "no events"
+/// apart from "could not read the journal" (ADR-0153).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn recover_entity_state_from_store(
     tenant: &str,
@@ -958,7 +1338,6 @@ pub(crate) async fn recover_entity_state_from_store(
     backend: BackendLabel,
     initial_fields: &serde_json::Value,
     blob_store: Option<&crate::blob_store::BlobStore>,
-    strict_journal_read: bool,
 ) -> Result<EntityState, ActorError> {
     let mut state = EntityActor::build_initial_state(entity_type, entity_id, table, initial_fields);
     EntityActor::replay_events(
@@ -968,11 +1347,33 @@ pub(crate) async fn recover_entity_state_from_store(
         &mut state,
         tenant,
         blob_store,
-        if strict_journal_read {
-            ReplayPolicy::StrictSnapshot
-        } else {
-            ReplayPolicy::LenientSnapshot
-        },
+        (ReplayPolicy::StrictSnapshot, ReplayLogging::Actor),
+    )
+    .await?;
+    Ok(state)
+}
+
+/// Replay for a record walk without emitting per-record info diagnostics.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn recover_entity_state_for_walk(
+    tenant: &str,
+    entity_type: &str,
+    entity_id: &str,
+    table: &TransitionTable,
+    store: &BoxedEventStore,
+    backend: BackendLabel,
+    initial_fields: &serde_json::Value,
+    blob_store: Option<&crate::blob_store::BlobStore>,
+) -> Result<EntityState, ActorError> {
+    let mut state = EntityActor::build_initial_state(entity_type, entity_id, table, initial_fields);
+    EntityActor::replay_events(
+        table,
+        store,
+        backend,
+        &mut state,
+        tenant,
+        blob_store,
+        (ReplayPolicy::StrictSnapshot, ReplayLogging::Walk),
     )
     .await?;
     Ok(state)
@@ -1003,17 +1404,24 @@ pub(crate) async fn recover_authoritative_entity_state_from_store(
         &mut state,
         tenant,
         blob_store,
-        ReplayPolicy::StrictFullJournal,
+        (ReplayPolicy::StrictFullJournal, ReplayLogging::Actor),
     )
     .await?;
     Ok(state)
 }
 
-impl Actor for EntityActor {
-    type Msg = EntityMsg;
-    type State = EntityState;
+impl EntityActor {
+    /// This record, as the watchdog's reports name it.
+    fn watched_record(&self) -> super::watchdog::Record<'_> {
+        super::watchdog::Record {
+            tenant: &self.tenant,
+            entity_type: &self.entity_type,
+            entity_id: &self.entity_id,
+        }
+    }
 
-    async fn pre_start(&self, _ctx: &mut ActorContext<Self>) -> Result<Self::State, ActorError> {
+    /// What `pre_start` does: replay the journal, and write `Created` for a new record.
+    async fn start(&self) -> Result<EntityState, ActorError> {
         // Snapshot the table for consistent startup (initial state + replay).
         // This is a cheap clone — TransitionTable is a few Vecs of strings.
         let table = self.table.read().expect("table lock poisoned").clone();
@@ -1029,18 +1437,27 @@ impl Actor for EntityActor {
         // Re-evaluates each event through the TransitionTable to reconstruct
         // all state variables (status, counters, booleans) — not just item_count.
         if let (Some(store), Some(backend)) = (self.event_journal.as_ref(), self.event_backend) {
-            state = recover_entity_state_from_store(
-                &self.tenant,
-                &self.entity_type,
-                &self.entity_id,
-                &table,
-                store,
-                backend,
-                &self.initial_fields,
-                self.blob_store.as_ref(),
-                false, // hydration: keep serving on a transient journal read failure
-            )
-            .await?;
+            state = self
+                .now
+                .during(
+                    Doing::Replaying,
+                    recover_entity_state_from_store(
+                        &self.tenant,
+                        &self.entity_type,
+                        &self.entity_id,
+                        &table,
+                        store,
+                        backend,
+                        &self.initial_fields,
+                        self.blob_store.as_ref(),
+                    ),
+                )
+                .await?;
+            if state.sequence_nr > 0
+                && let Some(hook) = self.on_rehydrated.as_ref()
+            {
+                hook(&state);
+            }
         }
 
         // Persist a bootstrap Created event for first-time entities so initial
@@ -1055,23 +1472,60 @@ impl Actor for EntityActor {
                 timestamp: sim_now(),
                 params: initial_params,
                 idempotency_key: None,
+                origin: super::EventOrigin::from_caller(self.created_by.as_ref()),
+                kind: temper_runtime::persistence::EventKind::Transition,
+                outcome: None,
             };
 
             if let (Some(store), Some(backend)) = (self.event_journal.as_ref(), self.event_backend)
             {
-                self.persist_event(store, backend, &self.persistence_id(), &mut state, &created)
-                    .await
-                    .map_err(|e| {
-                        ActorError::custom(format!(
-                            "failed to persist bootstrap Created event for {}:{}: {}",
-                            self.entity_type, self.entity_id, e
-                        ))
-                    })?;
+                // Its creator is its caller: a first state with a timer
+                // commits the timer's row with this event.
+                self.persist_event(
+                    store,
+                    backend,
+                    &mut state,
+                    &created,
+                    &ScheduledRows::default(),
+                    self.created_by.as_ref(),
+                )
+                .await
+                .map_err(|e| match e {
+                    // The journal moved on, or the write may have landed: a
+                    // restart replays the journal and finds out.
+                    PersistenceError::ConcurrencyViolation { .. }
+                    | PersistenceError::OutcomeUnknown(_) => ActorError::custom(format!(
+                        "failed to persist bootstrap Created event for {}:{}: {}",
+                        self.entity_type, self.entity_id, e
+                    )),
+                    // Not written, so the record is not created. A restart would
+                    // only retry the write, which its creator can do once told.
+                    e => ActorError::InitFailed(format!(
+                        "{}:{} was not created: {e}",
+                        self.entity_type, self.entity_id
+                    )),
+                })?;
             }
             state.push_event_bounded(created);
         }
 
         Ok(state)
+    }
+}
+
+impl Actor for EntityActor {
+    type Msg = EntityMsg;
+    type State = EntityState;
+
+    async fn pre_start(&self, _ctx: &mut ActorContext<Self>) -> Result<Self::State, ActorError> {
+        super::watchdog::watched(
+            self.watched_record(),
+            "start",
+            self.action_dispatch_timeout,
+            &self.now,
+            Box::pin(self.start()),
+        )
+        .await
     }
 
     async fn handle(
@@ -1080,14 +1534,65 @@ impl Actor for EntityActor {
         state: &mut Self::State,
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
+        let message = msg.name().to_owned();
+        let handled = super::watchdog::watched(
+            self.watched_record(),
+            &message,
+            self.action_dispatch_timeout,
+            &self.now,
+            Box::pin(self.handle_message(msg, state, ctx)),
+        )
+        .await;
+        // The message is answered. A write whose outcome could not be learned
+        // leaves memory that may not be the journal's: restart, so the next
+        // message is answered from the journal (`pre_start` replays it, and
+        // fails until it can read it).
+        if self.rebuild_from_journal.swap(false, Ordering::AcqRel) {
+            tracing::warn!(
+                tenant = %self.tenant, entity_type = %self.entity_type,
+                entity_id = %self.entity_id,
+                "rebuilding from the journal: a write's outcome could not be learned"
+            );
+            return Err(ActorError::custom(format!(
+                "{}:{} rebuilds from its journal: a write's outcome could not be learned",
+                self.entity_type, self.entity_id
+            )));
+        }
+        handled
+    }
+
+    async fn post_stop(&self, state: Self::State, _ctx: &mut ActorContext<Self>) {
+        tracing::info!(
+            entity = %state.entity_id,
+            status = %state.status,
+            events_total = state.total_event_count,
+            events_recent = state.events.len(),
+            "entity actor stopped"
+        );
+    }
+}
+
+impl EntityActor {
+    /// Handle one message (`Actor::handle` restarts the actor after it when
+    /// a write's outcome could not be learned).
+    async fn handle_message(
+        &self,
+        msg: EntityMsg,
+        state: &mut EntityState,
+        ctx: &mut ActorContext<Self>,
+    ) -> Result<(), ActorError> {
         match msg {
             EntityMsg::Action {
                 name,
                 params,
                 related,
-                idempotency_key,
+                idempotency_key: keyed,
                 expected_authorization_precondition,
+                caller,
             } => {
+                // What a retry under the key must repeat to be answered by it.
+                let request = keyed.as_ref().map(|key| key.request(&name, &params));
+                let idempotency_key = keyed.map(crate::idempotency::IdempotencyKey::into_string);
                 // Capture start time for span duration (DST-safe: sim_now()
                 // returns logical clock in simulation, wall clock in production).
                 let action_start = sim_now();
@@ -1105,18 +1610,13 @@ impl Actor for EntityActor {
                 // where a domain action first enters the actor.
                 if name == super::effects::FIELDS_UPDATED_EVENT
                     || name == super::effects::FIELDS_REPLACED_EVENT
+                    || name == super::spawn_refusal::SPAWN_REFUSED_EVENT
+                    || name == super::timer_needs_person::TIMER_NEEDS_PERSON_EVENT
                 {
-                    ctx.reply(EntityResponse {
-                        success: false,
-                        state: state.clone(),
-                        error: Some(format!(
-                            "action name `{name}` is reserved for journaled field updates"
-                        )),
-                        custom_effects: vec![],
-                        scheduled_actions: vec![],
-                        spawn_requests: vec![],
-                        spec_governed: true,
-                    });
+                    ctx.reply(EntityResponse::refused(
+                        state.clone(),
+                        format!("action name `{name}` is reserved for events the kernel journals"),
+                    ));
                     return Ok(());
                 }
 
@@ -1131,63 +1631,106 @@ impl Actor for EntityActor {
                 // execute. Here we consult the shared cache keyed on the
                 // caller's `Idempotency-Key` before executing; on a hit, the
                 // previously-computed response is returned as the reply.
+                //
+                // A key answers only a retry of the request it was first used
+                // for: the cache compares what the key names (the action and
+                // parameters, or a follow-up's cause), the durable key set the
+                // action. Anything else sent with the key is refused, so it can
+                // never report another request's success as its own.
                 let actor_key = self.persistence_id();
-                if let (Some(key), Some(cache)) =
-                    (idempotency_key.as_ref(), self.idempotency_cache.as_ref())
-                    && let Some(cached) = cache.get(&actor_key, key)
-                {
-                    // The cache keeps replies without event parameters or the
-                    // durable key set; the live state is the reply's state in
-                    // full only while this retry's own event is still newest.
-                    let newest_is_this_retry =
-                        crate::idempotency::live_state_is_the_reply(state, &cached.state, key);
-                    let reply = if newest_is_this_retry {
-                        EntityResponse {
-                            state: state.clone(),
-                            ..cached
+                if let (Some(key), Some(request), Some(cache)) = (
+                    idempotency_key.as_ref(),
+                    request.as_ref(),
+                    self.idempotency_cache.as_ref(),
+                ) {
+                    match cache.get(&actor_key, key, request) {
+                        crate::idempotency::CachedReply::Replay(cached) => {
+                            // The cache keeps replies without event parameters
+                            // or the durable key set; the live state is the
+                            // reply's state in full only while this retry's own
+                            // event is still newest.
+                            let newest_is_this_retry = crate::idempotency::live_state_is_the_reply(
+                                state,
+                                &cached.state,
+                                key,
+                            );
+                            let reply = if newest_is_this_retry {
+                                EntityResponse {
+                                    state: state.clone(),
+                                    ..*cached
+                                }
+                            } else {
+                                *cached
+                            };
+                            ctx.reply(reply);
+                            return Ok(());
                         }
-                    } else {
-                        cached
-                    };
-                    ctx.reply(reply);
+                        crate::idempotency::CachedReply::OtherRequest(recorded) => {
+                            ctx.reply(idempotency_key_reused(state, &recorded));
+                            return Ok(());
+                        }
+                        crate::idempotency::CachedReply::Miss => {}
+                    }
+                }
+                // A follow-up's retry is its cause again, whatever action it
+                // names now: the duplicate below answers it.
+                if let Some(key) = idempotency_key.as_deref()
+                    && let Some(recorded) = state.processed_idempotency_keys.get(key)
+                    && request
+                        .as_ref()
+                        .is_none_or(|request| request.repeats_action())
+                    && !recorded.was_for(&name)
+                {
+                    let recorded = recorded.action.clone().unwrap_or_default();
+                    ctx.reply(idempotency_key_reused(state, &recorded));
                     return Ok(());
                 }
                 if let Some(key) = idempotency_key.as_deref()
                     && state.has_processed_idempotency_key(key)
                 {
-                    let custom_effects =
-                        duplicate_idempotency_custom_effects(&table, state, &name, &related);
+                    // A follow-up's retry that names another action is
+                    // answered by the one its key recorded.
+                    let answered_action = state
+                        .processed_idempotency_keys
+                        .get(key)
+                        .and_then(|recorded| recorded.action.clone())
+                        .filter(|recorded| *recorded != name);
+                    let custom_effects = duplicate_idempotency_custom_effects(
+                        &table,
+                        state,
+                        answered_action.as_deref().unwrap_or(&name),
+                        &params,
+                        &related,
+                    );
                     let mut response_state = state.clone();
                     if !custom_effects.is_empty() {
                         prune_transient_action_fields_from_state(&mut response_state);
                     }
                     ctx.reply(EntityResponse {
                         success: true,
+                        refusal: None,
                         state: response_state,
                         error: None,
                         custom_effects,
                         scheduled_actions: vec![],
                         spawn_requests: vec![],
                         spec_governed: true,
+                        refused: false,
+                        answered_action,
+                        trigger_failures: Vec::new(),
+                        store_unavailable: false,
+                        unrecorded_at: None,
                     });
                     return Ok(());
                 }
 
-                if let Some(expected) = expected_authorization_precondition
+                if let Some(expected) = expected_authorization_precondition.as_deref()
                     && super::effects::entity_authorization_precondition(state) != expected
                 {
-                    ctx.reply(EntityResponse {
-                        success: false,
-                        state: state.clone(),
-                        error: Some(
-                            "action authorization became stale; retry against current state"
-                                .to_string(),
-                        ),
-                        custom_effects: vec![],
-                        scheduled_actions: vec![],
-                        spawn_requests: vec![],
-                        spec_governed: true,
-                    });
+                    ctx.reply(EntityResponse::record_changed(
+                        state.clone(),
+                        ACTION_RECORD_CHANGED.to_string(),
+                    ));
                     return Ok(());
                 }
 
@@ -1195,24 +1738,17 @@ impl Actor for EntityActor {
                 // source. Reject new actions without turning a normal caller
                 // error into an actor-stopping debug assertion.
                 if state.status == "Deleted" {
-                    ctx.reply(EntityResponse {
-                        success: false,
-                        state: state.clone(),
-                        error: Some("cannot execute actions after entity deletion".to_string()),
-                        custom_effects: vec![],
-                        scheduled_actions: vec![],
-                        spawn_requests: vec![],
-                        spec_governed: true,
-                    });
+                    ctx.reply(EntityResponse::refused(
+                        state.clone(),
+                        "cannot execute actions after entity deletion".to_string(),
+                    ));
                     return Ok(());
                 }
 
-                debug_assert!(
-                    table.states.contains(&state.status),
-                    "PRECONDITION: status '{}' not in valid states {:?}",
-                    state.status,
-                    table.states
-                );
+                // The status need not be a state of the spec: a record waits in
+                // a state a new version dropped until its `[[carry]]` moves it
+                // (temper-server's `spec_change`). Only a rule that starts from
+                // the status can move it, so every other action is refused.
 
                 // Exhaustion is a normal refusal in both debug and release.
                 if state.events_since_snapshot >= MAX_EVENTS_SINCE_SNAPSHOT {
@@ -1235,17 +1771,22 @@ impl Actor for EntityActor {
                         max_events_since_snapshot = MAX_EVENTS_SINCE_SNAPSHOT,
                         "Event budget exhausted (10000 max since snapshot)"
                     );
-                    ctx.reply(EntityResponse {
-                        success: false,
-                        state: state.clone(),
-                        error: Some(format!(
+                    ctx.reply(EntityResponse::refused(
+                        state.clone(),
+                        format!(
                             "Event budget exhausted ({MAX_EVENTS_SINCE_SNAPSHOT} max since snapshot)"
-                        )),
-                        custom_effects: vec![],
-                        scheduled_actions: vec![],
-                        spawn_requests: vec![],
-                        spec_governed: true,
-                    });
+                        ),
+                    ));
+                    return Ok(());
+                }
+
+                // A state timer's fire applies only at the journal sequence
+                // its timer was armed at (`timer_fire`): past it, another
+                // writer handled this arming or the record moved on.
+                let timer_armed_seq =
+                    super::timer_fire::armed_seq(caller.as_deref(), &self.tenant, state, &name);
+                if let Some(error) = super::timer_fire::moved_past(timer_armed_seq, state) {
+                    ctx.reply(EntityResponse::refused(state.clone(), error));
                     return Ok(());
                 }
 
@@ -1261,20 +1802,25 @@ impl Actor for EntityActor {
                 // retry can replace them with values re-evaluated against the
                 // caught-up state. The downstream telemetry and reply use
                 // whichever pair last succeeded in persist.
-                let mut result = process_action_with_blob_prestate(
-                    state,
-                    &table,
-                    &name,
-                    &params,
-                    &related,
-                    field_sync_mode,
-                    crate::blobs::BlobReadSource::Staged {
-                        store: self.blob_store.as_ref(),
-                        legacy: self.legacy_blob_store.as_deref(),
-                        blobs: &[],
-                    },
-                )
-                .await;
+                let mut result = self
+                    .now
+                    .during(
+                        Doing::ReadingBlobs,
+                        process_action_with_blob_prestate(
+                            state,
+                            &table,
+                            &name,
+                            &params,
+                            &related,
+                            field_sync_mode,
+                            crate::blobs::BlobReadSource::Staged {
+                                store: self.blob_store.as_ref(),
+                                legacy: self.legacy_blob_store.as_deref(),
+                                blobs: &[],
+                            },
+                        ),
+                    )
+                    .await;
 
                 if result.success {
                     // process_action returned a successful transition with event.
@@ -1285,6 +1831,7 @@ impl Actor for EntityActor {
                         .clone()
                         .expect("successful process_action always returns event"); // ci-ok: post-assertion, success guarantees Some
                     event.idempotency_key = idempotency_key.clone();
+                    event.origin = super::EventOrigin::from_caller(caller.as_deref());
 
                     // An event too large to be written stores no overflow blobs first.
                     if !result.overflow_blobs.is_empty()
@@ -1301,35 +1848,24 @@ impl Actor for EntityActor {
                             })
                     {
                         *state = state_before;
-                        ctx.reply(EntityResponse {
-                            success: false,
-                            state: state.clone(),
-                            error: Some(persistence_failure(&e)),
-                            custom_effects: vec![],
-                            scheduled_actions: vec![],
-                            spawn_requests: vec![],
-                            spec_governed: true,
-                        });
+                        ctx.reply(persistence_failure_reply(state.clone(), &e));
                         return Ok(());
                     }
 
                     if !result.overflow_blobs.is_empty()
-                        && let Err(e) = Self::persist_overflow_blobs(
-                            self.blob_store.as_ref(),
-                            &result.overflow_blobs,
-                        )
-                        .await
+                        && let Err(e) = self
+                            .now
+                            .during(
+                                Doing::WritingBlobs,
+                                Self::persist_overflow_blobs(
+                                    self.blob_store.as_ref(),
+                                    &result.overflow_blobs,
+                                ),
+                            )
+                            .await
                     {
                         *state = state_before;
-                        ctx.reply(EntityResponse {
-                            success: false,
-                            state: state.clone(),
-                            error: Some(format!("field-overflow blob persistence failed: {e}")),
-                            custom_effects: vec![],
-                            scheduled_actions: vec![],
-                            spawn_requests: vec![],
-                            spec_governed: true,
-                        });
+                        ctx.reply(e.reply(state.clone()));
                         return Ok(());
                     }
 
@@ -1338,11 +1874,74 @@ impl Actor for EntityActor {
                     // replay events, re-evaluate the action against the caught-up
                     // state, and retry the persist up to two more times. Other
                     // error variants fail immediately (same as before).
+                    // The rows of the scheduled actions it arms are written
+                    // with the event, so a restart arms them again.
+                    let scheduled = self
+                        .arm_scheduled_actions(
+                            &mut result.scheduled_actions,
+                            &result.custom_effects,
+                            state,
+                            &event,
+                            caller.as_deref(),
+                        )
+                        .await;
+                    // A machine's move that leaves its record as it was writes
+                    // nothing (`unrecorded`); its triggers still run.
+                    let fires_timer_once = super::timer_fire::fires_once(
+                        caller.as_deref(),
+                        &self.tenant,
+                        state,
+                        &name,
+                    );
+                    // Bringing a timer forward changes its due time through
+                    // this event's status clock, even if no fields changed.
+                    let brings_timer_forward = self
+                        .table
+                        .read()
+                        .expect("transition table poisoned")
+                        .action_contracts
+                        .get(&name)
+                        .is_some_and(|contract| contract.fire_now_in.contains(&state.status));
+                    if !brings_timer_forward
+                        && super::unrecorded::made_by_machine(&event.origin)
+                        && super::unrecorded::leaves_record_unchanged(
+                            &state_before,
+                            state,
+                            &result,
+                            &event,
+                            &scheduled,
+                            fires_timer_once,
+                        )
+                    {
+                        *state = state_before;
+                        let response = self.answer_unrecorded(state, result, &event);
+                        if let (Some(key), Some(request), Some(cache)) = (
+                            idempotency_key.as_ref(),
+                            request.as_ref(),
+                            self.idempotency_cache.as_ref(),
+                        ) {
+                            cache.put(&actor_key, key, request, &response);
+                        }
+                        ctx.reply(response);
+                        crate::runtime_metrics::record_actor_ask_reply_latency(
+                            &state.entity_type,
+                            &name,
+                            ask_reply_start.elapsed(),
+                        );
+                        return Ok(());
+                    }
                     if let (Some(store), Some(backend)) =
                         (self.event_journal.as_ref(), self.event_backend)
                     {
                         let first_persist = self
-                            .persist_event(store, backend, &self.persistence_id(), state, &event)
+                            .persist_event(
+                                store,
+                                backend,
+                                state,
+                                &event,
+                                &scheduled,
+                                caller.as_deref(),
+                            )
                             .await;
 
                         match first_persist {
@@ -1368,21 +1967,34 @@ impl Actor for EntityActor {
                                     outcome = tracing::field::Empty,
                                 );
 
-                                tracing::warn!(
-                                    parent: &retry_span,
-                                    entity = %state.entity_id,
-                                    action = %name,
-                                    actual_seq = actual,
-                                    "persist hit optimistic-concurrency violation; entering ADR-0046 retry"
-                                );
+                                if timer_armed_seq.is_some_and(|armed| actual > armed) {
+                                    // The replay below drops this fire.
+                                    tracing::info!(
+                                        parent: &retry_span,
+                                        entity = %state.entity_id,
+                                        action = %name,
+                                        actual_seq = actual,
+                                        "state timer fire found its record past its arming; replaying to drop it"
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        parent: &retry_span,
+                                        entity = %state.entity_id,
+                                        action = %name,
+                                        actual_seq = actual,
+                                        "persist hit optimistic-concurrency violation; entering ADR-0046 retry"
+                                    );
+                                }
 
                                 // 2 retries + 1 initial = 3 total attempts (ADR-0046).
                                 const MAX_RETRIES: u32 = 2;
                                 let mut retry_idx: u32 = 0;
                                 let mut retry_final: Option<(
                                     crate::runtime_metrics::ConcurrencyRetryOutcome,
-                                    Option<String>,
+                                    Option<RetryGaveUp>,
                                 )> = None;
+                                // The typed reason when the replayed action is refused.
+                                let mut retry_refusal = None;
                                 // ADR-0046 Sub-Decision 4: track the most
                                 // recent authoritative sequence across retries
                                 // so the post-replay assertion catches a
@@ -1398,18 +2010,23 @@ impl Actor for EntityActor {
                                     *state = state_before.clone();
 
                                     // Catch up to the authoritative sequence.
-                                    Self::replay_events(
-                                        &table,
-                                        store,
-                                        backend,
-                                        state,
-                                        &self.tenant,
-                                        self.blob_store.as_ref(),
-                                        // Actor hydration keeps the lenient "start
-                                        // fresh on read error" behavior (unchanged).
-                                        ReplayPolicy::LenientSnapshot,
-                                    )
-                                    .await?;
+                                    self.now
+                                        .during(
+                                            Doing::Replaying,
+                                            Self::replay_events(
+                                                &table,
+                                                store,
+                                                backend,
+                                                state,
+                                                &self.tenant,
+                                                self.blob_store.as_ref(),
+                                                (
+                                                    ReplayPolicy::StrictSnapshot,
+                                                    ReplayLogging::Actor,
+                                                ),
+                                            ),
+                                        )
+                                        .await?;
 
                                     // ADR-0046 Sub-Decision 4: replay must at
                                     // minimum reach the sequence the store
@@ -1429,34 +2046,101 @@ impl Actor for EntityActor {
                                     state_before = state.clone();
                                     event_count_before = state.total_event_count;
 
+                                    // This attempt's own write did not land
+                                    // (`persist_event` read the journal). If the
+                                    // journal holds this action's key, another
+                                    // ask carrying the same key wrote it: writing
+                                    // it again would apply it twice, and its
+                                    // guard refusing it now is not a refusal.
+                                    if let Some(key) = idempotency_key.as_deref()
+                                        && state.has_processed_idempotency_key(key)
+                                    {
+                                        retry_final = Some((
+                                            crate::runtime_metrics::ConcurrencyRetryOutcome::AlreadyWritten,
+                                            Some(RetryGaveUp::WriteFailed(format!(
+                                                "action {name} may have been written: the journal holds its key after a concurrency violation"
+                                            ))),
+                                        ));
+                                        break;
+                                    }
+
+                                    // A timer's fire is not evaluated again on
+                                    // a record that moved past its arming: the
+                                    // move was another writer's fire of the same
+                                    // arming, or a change the timer's next arm
+                                    // follows. With its key absent from the
+                                    // journal, this fire did not land.
+                                    if let Some(error) =
+                                        super::timer_fire::moved_past(timer_armed_seq, state)
+                                    {
+                                        let gave_up = if idempotency_key.is_some() {
+                                            RetryGaveUp::Refused(error)
+                                        } else {
+                                            RetryGaveUp::WriteFailed(error)
+                                        };
+                                        retry_final = Some((
+                                            crate::runtime_metrics::ConcurrencyRetryOutcome::TimerSuperseded,
+                                            Some(gave_up),
+                                        ));
+                                        break;
+                                    }
+
+                                    // An action its caller decided on the state
+                                    // it read (Cedar and the route's checks) is
+                                    // not evaluated again on the caught-up one,
+                                    // which they never saw. Its key is absent
+                                    // from the journal, so it did not land: the
+                                    // caller decides it again on this state.
+                                    if expected_authorization_precondition.is_some() {
+                                        retry_final = Some((
+                                            crate::runtime_metrics::ConcurrencyRetryOutcome::RecordChanged,
+                                            Some(RetryGaveUp::RecordChanged),
+                                        ));
+                                        break;
+                                    }
+
                                     // Re-evaluate the action against the caught-up
                                     // state. It may now fail (entity reached a
                                     // terminal state during the race) — if so,
                                     // surface that error rather than silently
                                     // dropping the caller.
-                                    let retry_result = process_action_with_blob_prestate(
-                                        state,
-                                        &table,
-                                        &name,
-                                        &params,
-                                        &related,
-                                        field_sync_mode,
-                                        crate::blobs::BlobReadSource::Staged {
-                                            store: self.blob_store.as_ref(),
-                                            legacy: self.legacy_blob_store.as_deref(),
-                                            blobs: &[],
-                                        },
-                                    )
-                                    .await;
+                                    let mut retry_result = self
+                                        .now
+                                        .during(
+                                            Doing::ReadingBlobs,
+                                            process_action_with_blob_prestate(
+                                                state,
+                                                &table,
+                                                &name,
+                                                &params,
+                                                &related,
+                                                field_sync_mode,
+                                                crate::blobs::BlobReadSource::Staged {
+                                                    store: self.blob_store.as_ref(),
+                                                    legacy: self.legacy_blob_store.as_deref(),
+                                                    blobs: &[],
+                                                },
+                                            ),
+                                        )
+                                        .await;
 
                                     if !retry_result.success {
+                                        retry_refusal = retry_result.refusal;
+                                        let error = retry_result.error.unwrap_or_else(|| {
+                                            format!(
+                                                "action {name} no longer legal after concurrency replay"
+                                            )
+                                        });
+                                        // Without a key the journal cannot show
+                                        // whether an earlier attempt landed.
+                                        let gave_up = if idempotency_key.is_some() {
+                                            RetryGaveUp::Refused(error)
+                                        } else {
+                                            RetryGaveUp::WriteFailed(error)
+                                        };
                                         retry_final = Some((
                                             crate::runtime_metrics::ConcurrencyRetryOutcome::ActionIllegal,
-                                            Some(retry_result.error.unwrap_or_else(|| {
-                                                format!(
-                                                    "action {name} no longer legal after concurrency replay"
-                                                )
-                                            })),
+                                            Some(gave_up),
                                         ));
                                         break;
                                     }
@@ -1467,38 +2151,57 @@ impl Actor for EntityActor {
                                         .expect("successful process_action always returns event"); // ci-ok: post-assertion, success guarantees Some
                                     let mut retry_event = retry_event;
                                     retry_event.idempotency_key = idempotency_key.clone();
+                                    retry_event.origin =
+                                        super::EventOrigin::from_caller(caller.as_deref());
 
                                     // Overflow blobs for the re-evaluated result.
                                     if !retry_result.overflow_blobs.is_empty()
-                                        && let Err(e) = Self::persist_overflow_blobs(
-                                            self.blob_store.as_ref(),
-                                            &retry_result.overflow_blobs,
-                                        )
-                                        .await
+                                        && let Err(e) = self
+                                            .now
+                                            .during(
+                                                Doing::WritingBlobs,
+                                                Self::persist_overflow_blobs(
+                                                    self.blob_store.as_ref(),
+                                                    &retry_result.overflow_blobs,
+                                                ),
+                                            )
+                                            .await
                                     {
                                         retry_final = Some((
                                             crate::runtime_metrics::ConcurrencyRetryOutcome::Exhausted,
-                                            Some(format!(
-                                                "field-overflow blob persistence failed during retry: {e}"
-                                            )),
+                                            Some(e.into()),
                                         ));
                                         break;
                                     }
 
                                     // Backoff: retry 1 → 10ms, retry 2 → 50ms.
                                     let backoff_ms = if retry_idx == 1 { 10 } else { 50 };
-                                    sleep_persistence_retry(std::time::Duration::from_millis(
-                                        backoff_ms,
-                                    ))
-                                    .await;
+                                    self.now
+                                        .during(
+                                            Doing::RetryPause,
+                                            sleep_persistence_retry(
+                                                std::time::Duration::from_millis(backoff_ms),
+                                            ),
+                                        )
+                                        .await;
 
+                                    let retry_scheduled = self
+                                        .arm_scheduled_actions(
+                                            &mut retry_result.scheduled_actions,
+                                            &retry_result.custom_effects,
+                                            state,
+                                            &retry_event,
+                                            caller.as_deref(),
+                                        )
+                                        .await;
                                     match self
                                         .persist_event(
                                             store,
                                             backend,
-                                            &self.persistence_id(),
                                             state,
                                             &retry_event,
+                                            &retry_scheduled,
+                                            caller.as_deref(),
                                         )
                                         .await
                                     {
@@ -1533,27 +2236,22 @@ impl Actor for EntityActor {
                                             continue;
                                         }
                                         Err(PersistenceError::ConcurrencyViolation { .. }) => {
+                                            // The last attempt did not land
+                                            // either (`persist_event` read the
+                                            // journal); the record kept moving.
                                             retry_final = Some((
                                                 crate::runtime_metrics::ConcurrencyRetryOutcome::Exhausted,
-                                                Some(
+                                                Some(RetryGaveUp::WriteFailed(
                                                     "persistence failed: optimistic concurrency retry exhausted"
                                                         .to_string(),
-                                                ),
+                                                )),
                                             ));
                                             break;
                                         }
                                         Err(e) => {
-                                            let said = match &e {
-                                                PersistenceError::EventTooLarge { .. } => {
-                                                    e.to_string()
-                                                }
-                                                _ => {
-                                                    format!("persistence failed during retry: {e}")
-                                                }
-                                            };
                                             retry_final = Some((
                                                 crate::runtime_metrics::ConcurrencyRetryOutcome::Exhausted,
-                                                Some(said),
+                                                Some(RetryGaveUp::NotTaken(e)),
                                             ));
                                             break;
                                         }
@@ -1563,7 +2261,7 @@ impl Actor for EntityActor {
                                 // Record the retry outcome. `total_attempts` is
                                 // 1-based; `retry_idx` counts completed retries.
                                 let total_attempts = u64::from(1 + retry_idx);
-                                if let Some((outcome, err_msg)) = retry_final {
+                                if let Some((outcome, gave_up)) = retry_final {
                                     // Close the ADR-0046 APM span with the
                                     // final attempt count + outcome so APM
                                     // views can filter by either.
@@ -1574,34 +2272,36 @@ impl Actor for EntityActor {
                                         outcome,
                                         total_attempts,
                                     );
-                                    if let Some(msg) = err_msg {
+                                    if let Some(gave_up) = gave_up {
                                         *state = state_before;
-                                        ctx.reply(EntityResponse {
-                                            success: false,
-                                            state: state.clone(),
-                                            error: Some(msg),
-                                            custom_effects: vec![],
-                                            scheduled_actions: vec![],
-                                            spawn_requests: vec![],
-                                            spec_governed: true,
-                                        });
+                                        let reply = match gave_up {
+                                            RetryGaveUp::Refused(error) => EntityResponse {
+                                                refusal: retry_refusal,
+                                                ..EntityResponse::refused(state.clone(), error)
+                                            },
+                                            RetryGaveUp::WriteFailed(error) => EntityResponse {
+                                                refusal: retry_refusal,
+                                                ..EntityResponse::write_failed(state.clone(), error)
+                                            },
+                                            RetryGaveUp::RecordChanged => {
+                                                EntityResponse::record_changed(
+                                                    state.clone(),
+                                                    ACTION_RECORD_CHANGED.to_string(),
+                                                )
+                                            }
+                                            RetryGaveUp::NotTaken(error) => {
+                                                persistence_failure_reply(state.clone(), &error)
+                                            }
+                                        };
+                                        ctx.reply(reply);
                                         return Ok(());
                                     }
                                 }
                             }
                             Err(e) => {
-                                // Non-concurrency persistence error — unchanged:
-                                // roll back and fail.
+                                // Non-concurrency persistence error: roll back and fail.
                                 *state = state_before;
-                                ctx.reply(EntityResponse {
-                                    success: false,
-                                    state: state.clone(),
-                                    error: Some(persistence_failure(&e)),
-                                    custom_effects: vec![],
-                                    scheduled_actions: vec![],
-                                    spawn_requests: vec![],
-                                    spec_governed: true,
-                                });
+                                ctx.reply(persistence_failure_reply(state.clone(), &e));
                                 return Ok(());
                             }
                         }
@@ -1636,13 +2336,18 @@ impl Actor for EntityActor {
 
                     let persistence_id = self.persistence_id();
                     if let Some(ref store) = self.event_journal
-                        && let Err(e) = Self::maybe_save_snapshot(
-                            store,
-                            self.snapshot_queue.as_ref(),
-                            &persistence_id,
-                            state,
-                        )
-                        .await
+                        && let Err(e) = self
+                            .now
+                            .during(
+                                Doing::Snapshotting,
+                                Self::maybe_save_snapshot(
+                                    store,
+                                    self.snapshot_queue.as_ref(),
+                                    &persistence_id,
+                                    state,
+                                ),
+                            )
+                            .await
                     {
                         tracing::warn!(
                             entity = %state.entity_id,
@@ -1687,20 +2392,28 @@ impl Actor for EntityActor {
 
                     let response = EntityResponse {
                         success: true,
+                        refusal: None,
                         state: state.clone(),
                         error: None,
                         custom_effects: result.custom_effects,
                         scheduled_actions: result.scheduled_actions,
                         spawn_requests: result.spawn_requests,
                         spec_governed: true,
+                        refused: false,
+                        answered_action: None,
+                        trigger_failures: Vec::new(),
+                        store_unavailable: false,
+                        unrecorded_at: None,
                     };
                     // ADR-0048 sub-decision 5: cache the successful response
                     // so a racing retry that lands after this reply returns
                     // the cached value instead of re-executing.
-                    if let (Some(key), Some(cache)) =
-                        (idempotency_key.as_ref(), self.idempotency_cache.as_ref())
-                    {
-                        cache.put(&actor_key, key, &response);
+                    if let (Some(key), Some(request), Some(cache)) = (
+                        idempotency_key.as_ref(),
+                        request.as_ref(),
+                        self.idempotency_cache.as_ref(),
+                    ) {
+                        cache.put(&actor_key, key, request, &response);
                     }
                     ctx.reply(response);
                 } else {
@@ -1727,13 +2440,13 @@ impl Actor for EntityActor {
                     wide_event::emit_metrics(&wide);
 
                     ctx.reply(EntityResponse {
-                        success: false,
-                        state: state.clone(),
-                        error: result.error,
-                        custom_effects: vec![],
-                        scheduled_actions: vec![],
-                        spawn_requests: vec![],
-                        spec_governed: true,
+                        refusal: result.refusal,
+                        ..EntityResponse::refused(
+                            state.clone(),
+                            result
+                                .error
+                                .unwrap_or_else(|| format!("action {name} refused")),
+                        )
                     });
                 }
                 // Inside-actor ask reply latency (excludes dispatch and retry
@@ -1749,27 +2462,37 @@ impl Actor for EntityActor {
             EntityMsg::GetState => {
                 ctx.reply(EntityResponse {
                     success: true,
+                    refusal: None,
                     state: state.clone(),
                     error: None,
                     custom_effects: vec![],
                     scheduled_actions: vec![],
                     spawn_requests: vec![],
                     spec_governed: true,
+                    refused: false,
+                    answered_action: None,
+                    trigger_failures: Vec::new(),
+                    store_unavailable: false,
+                    unrecorded_at: None,
                 });
             }
-            EntityMsg::GetField { field } => {
-                let value = state
-                    .fields
-                    .get(&field)
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
-                ctx.reply(value);
-            }
             EntityMsg::UpdateFields {
+                caller,
                 fields,
                 replace,
                 expected_precondition,
             } => {
+                // Refused before anything is written, like a stale action or
+                // delete, so the route decides the update again on this state.
+                if let Some(expected) = expected_precondition.as_deref()
+                    && super::effects::entity_authorization_precondition(state) != expected
+                {
+                    ctx.reply(EntityResponse::record_changed(
+                        state.clone(),
+                        super::field_updates::STALE_AUTHORIZATION.to_string(),
+                    ));
+                    return Ok(());
+                }
                 // The whole durable transaction — validation, budget, journal
                 // append, conflict recovery — lives in `field_updates`. This arm
                 // only turns its outcome into a reply.
@@ -1778,21 +2501,82 @@ impl Actor for EntityActor {
                     state,
                     fields,
                     replace,
-                    expected_precondition,
+                    expected_precondition.is_some(),
+                    caller.as_deref(),
                 )
                 .await;
+                ctx.reply(match outcome {
+                    Ok(()) => EntityResponse {
+                        success: true,
+                        refusal: None,
+                        state: state.clone(),
+                        error: None,
+                        custom_effects: vec![],
+                        scheduled_actions: vec![],
+                        spawn_requests: vec![],
+                        spec_governed: true,
+                        refused: false,
+                        answered_action: None,
+                        trigger_failures: Vec::new(),
+                        store_unavailable: false,
+                        unrecorded_at: None,
+                    },
+                    Err(NotUpdated::RecordChanged) => EntityResponse::record_changed(
+                        state.clone(),
+                        super::field_updates::STALE_AUTHORIZATION.to_string(),
+                    ),
+                    Err(NotUpdated::Failed(reason)) => {
+                        EntityResponse::write_failed(state.clone(), reason)
+                    }
+                    Err(NotUpdated::Store(error)) => {
+                        persistence_failure_reply(state.clone(), &error)
+                    }
+                });
+            }
+
+            EntityMsg::RecordSpawnRefusal { refusal } => {
+                let outcome = super::spawn_refusal::commit(self, state, &refusal).await;
                 ctx.reply(EntityResponse {
                     success: outcome.is_ok(),
+                    refusal: None,
                     state: state.clone(),
                     error: outcome.err(),
                     custom_effects: vec![],
                     scheduled_actions: vec![],
                     spawn_requests: vec![],
                     spec_governed: true,
+                    refused: false,
+                    answered_action: None,
+                    trigger_failures: Vec::new(),
+                    store_unavailable: false,
+                    unrecorded_at: None,
+                });
+            }
+
+            EntityMsg::RecordTimerNeedsPerson { action, checked } => {
+                let outcome =
+                    super::timer_needs_person::commit(self, state, &action, checked).await;
+                // A record that moved since is refused, with nothing written.
+                let moved = outcome == Ok(super::timer_needs_person::Stop::Moved);
+                ctx.reply(EntityResponse {
+                    success: outcome.is_ok() && !moved,
+                    refusal: None,
+                    state: state.clone(),
+                    error: outcome.err(),
+                    custom_effects: vec![],
+                    scheduled_actions: vec![],
+                    spawn_requests: vec![],
+                    spec_governed: true,
+                    refused: moved,
+                    answered_action: None,
+                    trigger_failures: Vec::new(),
+                    store_unavailable: false,
+                    unrecorded_at: None,
                 });
             }
 
             EntityMsg::Delete {
+                caller,
                 expected_authorization_precondition,
             } => {
                 if self
@@ -1801,94 +2585,106 @@ impl Actor for EntityActor {
                     .expect("table lock poisoned")
                     .strict_action_params
                 {
-                    ctx.reply(EntityResponse {
-                        success: false,
-                        state: state.clone(),
-                        error: Some(
-                            "Strict entities require a declared action for deletion".to_owned(),
-                        ),
-                        custom_effects: vec![],
-                        scheduled_actions: vec![],
-                        spawn_requests: vec![],
-                        spec_governed: true,
-                    });
+                    ctx.reply(EntityResponse::refused(
+                        state.clone(),
+                        "Strict entities require a declared action for deletion".to_owned(),
+                    ));
                     return Ok(());
                 }
+                let has_precondition = expected_authorization_precondition.is_some();
                 if let Some(expected) = expected_authorization_precondition
                     && super::effects::entity_authorization_precondition(state) != expected
                 {
+                    ctx.reply(EntityResponse::record_changed(
+                        state.clone(),
+                        STALE_DELETE.to_string(),
+                    ));
+                    return Ok(());
+                }
+                // Deleted already, by a delete that reached it first: the
+                // record is what this one asked for, and a second tombstone
+                // would record nothing. A tombstone is terminal, so it is the
+                // record's newest event; a spec's own `Deleted` state is not
+                // one, and still takes a tombstone.
+                if state.events.back().is_some_and(|event| {
+                    event.kind == temper_runtime::persistence::EventKind::Tombstone
+                }) {
                     ctx.reply(EntityResponse {
-                        success: false,
+                        success: true,
                         state: state.clone(),
-                        error: Some(
-                            "delete authorization became stale; retry against current state"
-                                .to_string(),
-                        ),
+                        error: None,
+                        refusal: None,
                         custom_effects: vec![],
                         scheduled_actions: vec![],
                         spawn_requests: vec![],
                         spec_governed: true,
+                        refused: false,
+                        answered_action: None,
+                        trigger_failures: Vec::new(),
+                        store_unavailable: false,
+                        unrecorded_at: None,
                     });
                     return Ok(());
                 }
-                let deleted = EntityEvent {
-                    action: "Deleted".to_string(),
-                    from_status: state.status.clone(),
-                    to_status: "Deleted".to_string(),
-                    timestamp: sim_now(),
-                    params: serde_json::json!({}),
-                    idempotency_key: None,
-                };
+                let mut deleted = EntityEvent::tombstone(state.status.clone());
+                deleted.origin = super::EventOrigin::from_caller(caller.as_deref());
 
                 if let (Some(store), Some(backend)) =
                     (self.event_journal.as_ref(), self.event_backend)
                     && let Err(e) = self
-                        .persist_event(store, backend, &self.persistence_id(), state, &deleted)
+                        .persist_event(
+                            store,
+                            backend,
+                            state,
+                            &deleted,
+                            &ScheduledRows::default(),
+                            None,
+                        )
                         .await
                 {
-                    ctx.reply(EntityResponse {
-                        success: false,
-                        state: state.clone(),
-                        error: Some(format!("persistence failed: {e}")),
-                        custom_effects: vec![],
-                        scheduled_actions: vec![],
-                        spawn_requests: vec![],
-                        spec_governed: true,
-                    });
+                    // A delete decided on a state the journal had left, as an
+                    // action or a field update is: caught up, it is refused
+                    // as RecordChanged, and the route decides it again.
+                    let reply = match e {
+                        PersistenceError::ConcurrencyViolation { actual, .. }
+                            if has_precondition =>
+                        {
+                            match super::field_updates::catch_up(self, state, 1, actual, "Delete")
+                                .await
+                            {
+                                Ok(()) => EntityResponse::record_changed(
+                                    state.clone(),
+                                    STALE_DELETE.to_string(),
+                                ),
+                                Err(reason) => EntityResponse::write_failed(state.clone(), reason),
+                            }
+                        }
+                        e => persistence_failure_reply(state.clone(), &e),
+                    };
+                    ctx.reply(reply);
                     return Ok(());
                 }
 
-                state.status = deleted.to_status.clone();
-                if let Some(obj) = state.fields.as_object_mut() {
-                    obj.insert(
-                        "Status".to_string(),
-                        serde_json::Value::String(state.status.clone()),
-                    );
-                }
-                state.push_event_bounded(deleted);
+                state.record_tombstone(deleted);
 
                 ctx.reply(EntityResponse {
                     success: true,
+                    refusal: None,
                     state: state.clone(),
                     error: None,
                     custom_effects: vec![],
                     scheduled_actions: vec![],
                     spawn_requests: vec![],
                     spec_governed: true,
+                    refused: false,
+                    answered_action: None,
+                    trigger_failures: Vec::new(),
+                    store_unavailable: false,
+                    unrecorded_at: None,
                 });
             }
         }
         Ok(())
-    }
-
-    async fn post_stop(&self, state: Self::State, _ctx: &mut ActorContext<Self>) {
-        tracing::info!(
-            entity = %state.entity_id,
-            status = %state.status,
-            events_total = state.total_event_count,
-            events_recent = state.events.len(),
-            "entity actor stopped"
-        );
     }
 }
 
@@ -1907,3 +2703,19 @@ mod event_size_tests;
 #[cfg(test)]
 #[path = "contract_state_test.rs"]
 pub(super) mod contract_state_tests;
+
+#[cfg(all(test, feature = "sim"))]
+#[path = "held_action_test.rs"]
+mod held_action_tests;
+
+#[cfg(all(test, feature = "sim"))]
+#[path = "hydration_test.rs"]
+mod hydration_tests;
+
+#[cfg(all(test, feature = "sim"))]
+#[path = "blob_refusal_test.rs"]
+mod blob_refusal_tests;
+
+#[cfg(all(test, feature = "sim"))]
+#[path = "record_changed_test.rs"]
+mod record_changed_tests;

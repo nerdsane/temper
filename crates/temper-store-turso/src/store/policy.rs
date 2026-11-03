@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use temper_runtime::persistence::{PersistenceError, storage_error};
 use tracing::instrument;
 
+use super::write_gate::WritePriority;
 use super::{PolicyDenialPatternRow, TursoEventStore};
 use crate::metrics::TursoQueryTimer;
 
@@ -60,7 +61,9 @@ impl TursoEventStore {
     ) -> Result<bool, PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.save_policy");
         let policy_hash = compute_policy_hash(cedar_text);
-        let conn = self.configured_connection().await?;
+        let conn = self
+            .write_connection("turso.save_policy", WritePriority::High)
+            .await?;
 
         // Check existing hash to avoid redundant writes.
         let existing_hash: Option<String> = {
@@ -210,7 +213,9 @@ impl TursoEventStore {
         timestamp: &str,
     ) -> Result<(), PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.upsert_policy_denial_pattern");
-        let conn = self.configured_connection().await?;
+        let conn = self
+            .write_connection("turso.upsert_policy_denial_pattern", WritePriority::Low)
+            .await?;
         let agent_type_key = agent_type.unwrap_or("");
 
         let existing = {
@@ -218,6 +223,7 @@ impl TursoEventStore {
                 .query(
                     "SELECT count, first_seen, last_seen, distinct_resource_ids_json \
                      FROM policy_denial_patterns \
+                     INDEXED BY sqlite_autoindex_policy_denial_patterns_1 \
                      WHERE tenant = ?1 AND agent_type = ?2 AND action = ?3 AND resource_type = ?4",
                     params![tenant, agent_type_key, action, resource_type],
                 )
@@ -344,7 +350,9 @@ impl TursoEventStore {
         enabled: bool,
     ) -> Result<bool, PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.toggle_policy_enabled");
-        let conn = self.configured_connection().await?;
+        let conn = self
+            .write_connection("turso.toggle_policy_enabled", WritePriority::High)
+            .await?;
         let enabled_int: i32 = if enabled { 1 } else { 0 };
         let affected = conn
             .execute(
@@ -371,7 +379,9 @@ impl TursoEventStore {
     ) -> Result<bool, PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.update_policy_text");
         let policy_hash = compute_policy_hash(cedar_text);
-        let conn = self.configured_connection().await?;
+        let conn = self
+            .write_connection("turso.update_policy_text", WritePriority::High)
+            .await?;
         let affected = conn
             .execute(
                 "UPDATE policies SET cedar_text = ?3, policy_hash = ?4, created_by = ?5, \
@@ -399,7 +409,9 @@ impl TursoEventStore {
     ) -> Result<bool, PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.replace_policy_if_hash");
         let policy_hash = compute_policy_hash(cedar_text);
-        let conn = self.configured_connection().await?;
+        let conn = self
+            .write_connection("turso.replace_policy_if_hash", WritePriority::High)
+            .await?;
         let affected = conn
             .execute(
                 "UPDATE policies SET cedar_text = ?3, policy_hash = ?4, created_by = ?5, \
@@ -429,7 +441,9 @@ impl TursoEventStore {
         policy_id: &str,
     ) -> Result<(), PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.delete_policy");
-        let conn = self.configured_connection().await?;
+        let conn = self
+            .write_connection("turso.delete_policy", WritePriority::High)
+            .await?;
         conn.execute(
             "DELETE FROM policies WHERE tenant = ?1 AND policy_id = ?2",
             params![tenant, policy_id],

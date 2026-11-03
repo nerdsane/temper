@@ -6,6 +6,9 @@ use temper_server::storage::PolicyStoreRow;
 use super::{AppBundle, merge_bundle_policies};
 use crate::state::PlatformState;
 
+mod writes;
+pub(super) use writes::{delete_dropped_rows, persist_bundle_policy_rows};
+
 /// Row written by `PUT /api/tenants/{tenant}/policies`. At boot it replaces the
 /// legacy aggregate, so it is a snapshot of every app's Cedar, not an owner.
 const PRIMARY_POLICY_ID: &str = "primary";
@@ -51,39 +54,6 @@ fn os_app_policy_owner(app_name: &str) -> String {
     format!("os-app:{app_name}")
 }
 
-pub(super) async fn persist_bundle_policy_rows(
-    state: &PlatformState,
-    tenant: &str,
-    app_name: &str,
-    bundle: &AppBundle,
-) -> Result<(), String> {
-    if bundle.cedar_policy_sources.is_empty() {
-        return Ok(());
-    }
-    let Some(policy_store) = state.server.policy_store() else {
-        return Ok(());
-    };
-    let created_by = os_app_policy_owner(app_name);
-    for source in &bundle.cedar_policy_sources {
-        let cedar_text = source.text.trim();
-        if cedar_text.is_empty() {
-            continue;
-        }
-        let policy_id = os_app_policy_row_id(app_name, &source.relative_path);
-        // `save_policy` skips an insert when an enabled row already has
-        // this cedar_text (ARN-286/399). Reinstall must not grow duplicates.
-        policy_store
-            .save_policy(tenant, &policy_id, cedar_text, &created_by)
-            .await
-            .map_err(|error| {
-                format!(
-                    "Failed to persist OS app Cedar policy row '{policy_id}' for '{app_name}': {error}"
-                )
-            })?;
-    }
-    Ok(())
-}
-
 /// The Cedar a reinstall of one app replaces.
 ///
 /// An earlier install of the app recorded each of its policy files as a row.
@@ -100,6 +70,8 @@ pub(super) struct SupersededAppPolicies {
     statements: BTreeSet<StatementKey>,
     /// This app's rows whose source file is gone from the new bundle.
     removed_row_ids: Vec<String>,
+    /// This app's disabled rows that the new bundle still has.
+    disabled_row_ids: Vec<String>,
     /// The tenant's `primary` snapshot row, when one exists.
     primary: Option<PolicyStoreRow>,
 }
@@ -179,6 +151,8 @@ pub(super) async fn superseded_app_policies(
             previous.extend(parsed_statements(&row.policy_id, &row.cedar_text)?);
             if !bundle_row_ids.contains(&row.policy_id) {
                 superseded.removed_row_ids.push(row.policy_id.clone());
+            } else if !row.enabled {
+                superseded.disabled_row_ids.push(row.policy_id.clone());
             }
         } else if row.policy_id == PRIMARY_POLICY_ID {
             // Boot ignores a disabled snapshot, so only an enabled one matters.
@@ -266,31 +240,6 @@ pub(super) async fn rewrite_primary_snapshot(
             "Conflict: the '{PRIMARY_POLICY_ID}' policy row changed during the install; \
              nothing was written, install again against the current policies"
         ));
-    }
-    Ok(())
-}
-
-/// Delete the rows of source files the bundle no longer has.
-///
-/// Runs after the bundle's rows are written, so the app is never left with
-/// fewer policies than either version.
-///
-/// # Errors
-///
-/// Returns an error when a row cannot be deleted.
-pub(super) async fn delete_dropped_rows(
-    state: &PlatformState,
-    tenant: &str,
-    superseded: &SupersededAppPolicies,
-) -> Result<(), String> {
-    let Some(policy_store) = state.server.policy_store() else {
-        return Ok(());
-    };
-    for policy_id in &superseded.removed_row_ids {
-        policy_store
-            .delete_policy(tenant, policy_id)
-            .await
-            .map_err(|error| format!("Failed to delete Cedar policy row '{policy_id}': {error}"))?;
     }
     Ok(())
 }

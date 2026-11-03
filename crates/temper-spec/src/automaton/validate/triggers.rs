@@ -132,13 +132,19 @@ pub(super) fn validate_action_triggers(
 
             // on_success / on_failure must reference actions declared on this
             // source entity (they dispatch on the source after module/HTTP).
-            if let Some(ref cb) = trigger.on_success
-                && !action_names.contains(&cb.as_str())
-            {
-                return Err(AutomatonParseError::Validation(format!(
-                    "trigger '{}' on action '{}' on_success references unknown action '{cb}'",
-                    trigger.name, action.name
-                )));
+            for (i, cb) in trigger.on_success.iter().enumerate() {
+                if !action_names.contains(&cb.as_str()) {
+                    return Err(AutomatonParseError::Validation(format!(
+                        "trigger '{}' on action '{}' on_success references unknown action '{cb}'",
+                        trigger.name, action.name
+                    )));
+                }
+                if trigger.on_success[..i].contains(cb) {
+                    return Err(AutomatonParseError::Validation(format!(
+                        "trigger '{}' on action '{}' on_success names '{cb}' twice",
+                        trigger.name, action.name
+                    )));
+                }
             }
             if let Some(ref cb) = trigger.on_failure
                 && !action_names.contains(&cb.as_str())
@@ -184,11 +190,8 @@ fn check_args(
 pub(super) fn validate_timeout_args(automaton: &Automaton) -> Result<(), AutomatonParseError> {
     let state_names = state_names(automaton);
     for st in &automaton.state_timeouts {
-        check_args(
-            &format!("state_timeout for '{}' args", st.state),
-            &st.args,
-            &state_names,
-        )?;
+        let scope = format!("state_timeout for '{}'", st.state);
+        check_args(&format!("{scope} args"), &st.args, &state_names)?;
     }
     Ok(())
 }

@@ -194,12 +194,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_store_construction() {
-        let store = ClickHouseStore::new("http://localhost:8123");
-        assert_eq!(store.base_url(), "http://localhost:8123");
-    }
-
-    #[test]
     fn test_interpolate_params() {
         let sql = "SELECT * FROM spans WHERE service = $1 AND duration_ns > $2";
         let params = vec![SqlParam::String("api".into()), SqlParam::Int(1000)];

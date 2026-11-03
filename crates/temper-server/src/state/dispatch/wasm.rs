@@ -11,14 +11,13 @@ use crate::entity_actor::{EntityResponse, EntityState};
 use crate::request_context::AgentContext;
 use crate::secrets::template::resolve_secret_templates;
 use crate::state::sim_now;
-use temper_authz::{AuthenticatedRequestContext, PrincipalKind, SecurityContext};
+use temper_authz::{AuthenticatedRequestContext, PrincipalKind, SecurityContext, platform_keys};
 use temper_runtime::tenant::TenantId;
 use temper_wasm::host_trait::clamp_redacted_metadata_value;
 use temper_wasm::{
     AuthorizedWasmHost, BinaryHttpInterceptorFn, InternalHttpCapability,
     InternalHttpCapabilityIssuerFn, ProductionWasmHost, ProgressEmitterFn, StreamRegistry,
-    TextHttpInterceptorFn, WasmAuthzContext, WasmAuthzGate, WasmHost, WasmInvocationContext,
-    WasmResourceLimits,
+    WasmAuthzContext, WasmAuthzGate, WasmHost, WasmInvocationContext, WasmResourceLimits,
 };
 
 use super::{
@@ -31,6 +30,7 @@ mod boxed;
 mod invocation_artifacts;
 mod local_tdata_host;
 mod replay_inputs;
+mod trigger_principal;
 
 pub(super) use boxed::{
     dispatch_callback_action_boxed, dispatch_wasm_callback_boxed, dispatch_wasm_integrations_boxed,
@@ -52,10 +52,13 @@ fn wasm_module_security_context(module_name: &str) -> SecurityContext {
             role: Some("wasm_module".to_string()),
             acting_for: None,
             agent_type: None,
+            label: None,
             attributes: std::collections::HashMap::new(), // determinism-ok: Principal uses HashMap
         },
         context_attrs: std::collections::HashMap::new(), // determinism-ok: SecurityContext uses HashMap
         correlation_id: temper_runtime::scheduler::sim_uuid().to_string(),
+        cause: None,
+        credential: None,
     }
 }
 
@@ -88,12 +91,12 @@ pub(crate) fn internal_http_capability_issuer(
     match module {
         Some(module) => {
             security_context.context_attrs.insert(
-                "module".to_string(),
+                platform_keys::MODULE.to_string(),
                 serde_json::Value::String(module.to_string()),
             );
         }
         None => {
-            security_context.context_attrs.remove("module");
+            security_context.context_attrs.remove(platform_keys::MODULE);
         }
     }
     let authenticated = AuthenticatedRequestContext::new(tenant.clone(), security_context);
@@ -193,6 +196,7 @@ pub(crate) fn authorized_http_endpoint_host(
     .with_progress_emitter(progress_emitter)
     .with_internal_api_base_url(internal_api_url)
     .with_internal_capability_issuer(capability_issuer)
+    .with_local_sandbox(state.local_sandbox.get().cloned())
     .with_invocation_context(invocation_context.clone())
     .with_redirect_gate(Arc::clone(&gate), authz_context.clone())
     // ARN-243: the HttpEndpoint path honours the same per-tenant LLM content
@@ -246,7 +250,9 @@ fn agent_ctx_for_composite_wasm_result(
     if composite_agent_ctx.idempotency_key.is_none()
         && let Some(idempotency_key) = dispatch_idempotency_key
     {
-        composite_agent_ctx.idempotency_key = Some(idempotency_key.to_string());
+        composite_agent_ctx.idempotency_key = Some(crate::idempotency::IdempotencyKey::Request(
+            idempotency_key.to_string(),
+        ));
     }
     composite_agent_ctx
 }
@@ -263,8 +269,9 @@ fn agent_ctx_for_composite_wasm_result(
 /// per-write path (no journal, or a sub-write with its own effects), a write
 /// refused after an earlier one applied leaves that earlier write in place.
 ///
-/// Other errors, such as storage failures or a reload after the batch
-/// committed, are not refusals: the writes may have landed, so the declared
+/// Other errors, such as storage failures, a reload after the batch
+/// committed, or a sub-write that committed before its query projection
+/// failed, are not refusals: the writes may have landed, so the declared
 /// `on_failure` does not run for them and the error propagates.
 fn composite_sub_writes_refused(error: &DispatchError) -> bool {
     matches!(
@@ -458,93 +465,6 @@ pub(crate) fn internal_api_base_url(state: &crate::state::ServerState) -> Option
         })
 }
 
-fn parse_internal_file_value_request(base_url: &str, url: &str) -> Option<String> {
-    let prefix = format!("{}/tdata/Files('", base_url.trim_end_matches('/'));
-    let remainder = url.strip_prefix(&prefix)?;
-    let file_id = remainder.strip_suffix("')/$value")?;
-    Some(file_id.replace("''", "'"))
-}
-
-fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
-    headers
-        .iter()
-        .find(|(key, _)| key.eq_ignore_ascii_case(name))
-        .map(|(_, value)| value.as_str())
-}
-
-fn local_file_value_text_interceptor(
-    state: crate::state::ServerState,
-    tenant: TenantId,
-    agent_ctx: AgentContext,
-    temper_api_url: Option<String>,
-) -> Option<TextHttpInterceptorFn> {
-    let base_url = temper_api_url?.trim_end_matches('/').to_string();
-    let is_loopback = base_url.starts_with("http://127.0.0.1:")
-        || base_url.starts_with("http://localhost:")
-        || base_url.starts_with("http://[::1]:")
-        || base_url.starts_with("https://localhost:");
-    if !is_loopback {
-        return None;
-    }
-
-    Some(Arc::new(
-        move |method: String, url: String, headers: Vec<(String, String)>, body: String| {
-            let state = state.clone();
-            let tenant = tenant.clone();
-            let agent_ctx = agent_ctx.clone();
-            let base_url = base_url.clone();
-            Box::pin(async move {
-                let file_id = match parse_internal_file_value_request(&base_url, &url) {
-                    Some(file_id) => file_id,
-                    None => return None,
-                };
-
-                tracing::info!(
-                    method = %method,
-                    file_id = %file_id,
-                    "handling internal File $value request without loopback HTTP"
-                );
-
-                match method.as_str() {
-                    "GET" => {
-                        let (status, bytes) = match state
-                            .get_file_stream_content(&tenant, &file_id, &agent_ctx)
-                            .await
-                        {
-                            Ok(result) => result,
-                            Err(error) => return Some(Err(error)),
-                        };
-                        if status != 200 {
-                            return Some(Ok((status, String::new())));
-                        }
-                        match String::from_utf8(bytes) {
-                            Ok(text) => Some(Ok((200, text))),
-                            Err(_) => None,
-                        }
-                    }
-                    "PUT" => {
-                        let content_type = header_value(&headers, "content-type")
-                            .unwrap_or("application/octet-stream");
-                        Some(
-                            state
-                                .put_file_stream_content(
-                                    &tenant,
-                                    &file_id,
-                                    body.as_bytes(),
-                                    content_type,
-                                    &agent_ctx,
-                                )
-                                .await
-                                .map(|_| (204, String::new())),
-                        )
-                    }
-                    _ => None,
-                }
-            })
-        },
-    ))
-}
-
 impl crate::state::ServerState {
     #[instrument(skip_all, fields(
         otel.name = %format_args!("{}.{}.integrations", req.entity_type, req.action),
@@ -588,6 +508,9 @@ impl crate::state::ServerState {
             mode: req.mode,
         };
         let mut last_response: Option<EntityResponse> = None;
+        // Triggers on one action are independent: one that fails is kept, and
+        // the triggers after it still run.
+        let mut failures: Vec<String> = Vec::new();
 
         for effect_name in req.custom_effects {
             let integration = integrations
@@ -597,22 +520,43 @@ impl crate::state::ServerState {
             let Some(integration) = integration else {
                 continue;
             };
+            // A background call that names an `on_failure` has a deadline
+            // row; its answer is made in a context that removes it.
+            let call = self.call_deadline_row(req.tenant, req.entity_state, &integration, req.mode);
+            let call_agent_ctx = AgentContext {
+                ends_call: call.clone(),
+                ..req.agent_ctx.clone()
+            };
+            let call_ctx = WasmDispatchCtx {
+                agent_ctx: &call_agent_ctx,
+                ..ctx
+            };
 
-            if let Some(resp) = self
+            match self
                 .dispatch_single_integration(
-                    &ctx,
+                    &call_ctx,
                     &integration,
                     req.entity_state,
                     req.action_params,
                     &base_gate,
                 )
-                .await?
+                .await
             {
-                last_response = Some(resp);
+                Ok(Some(resp)) => last_response = Some(resp),
+                Ok(None) => {}
+                Err(error) => failures.push(error),
+            }
+            // The call has ended, answered or not.
+            if let Some(call) = &call {
+                self.end_call(call, &integration.name, req.agent_ctx);
             }
         }
 
-        Ok(last_response)
+        if failures.is_empty() {
+            Ok(last_response)
+        } else {
+            Err(failures.join("; "))
+        }
     }
 
     /// Dispatch a single WASM integration: resolve module, invoke, handle result.
@@ -734,7 +678,7 @@ impl crate::state::ServerState {
                     trigger_action: ctx.action.to_string(),
                     wasm_module: Some(module_name.clone()),
                     trigger_params,
-                    entity_state: serde_json::to_value(entity_state).unwrap_or_default(),
+                    entity_state: entity_state.for_module(),
                     agent_id: ctx.agent_ctx.agent_id.clone(),
                     session_id: ctx.agent_ctx.session_id.clone(),
                     integration_config: match self.secrets_vault.as_ref() {
@@ -752,6 +696,7 @@ impl crate::state::ServerState {
                     workflow_root_entity_id: ctx.agent_ctx.workflow_root_entity_id.clone(),
                     workflow_run_id: ctx.agent_ctx.workflow_run_id.clone(),
                     http_request: None,
+                    trigger_principal: trigger_principal::trigger_principal(ctx.agent_ctx),
                 };
                 (authz_ctx, inv_ctx)
             },
@@ -819,12 +764,6 @@ impl crate::state::ServerState {
                     ctx.entity_ref.tenant.clone(),
                     tenant_secrets.get("blob_endpoint").cloned(),
                 );
-                let local_file_interceptor = local_file_value_text_interceptor(
-                    self.clone(),
-                    ctx.entity_ref.tenant.clone(),
-                    ctx.agent_ctx.clone(),
-                    internal_api_url.clone(),
-                );
                 // Use integration config timeout for both WASM execution and HTTP client.
                 //
                 // When no explicit `timeout_secs` is configured, fall back to the
@@ -836,11 +775,7 @@ impl crate::state::ServerState {
                 //
                 // Apps that fire the counter frequently should wire an explicit
                 // `timeout_secs` in their integration config.
-                let explicit_timeout = integration
-                    .config
-                    .get("timeout_secs")
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .map(std::time::Duration::from_secs);
+                let explicit_timeout = super::call_deadlines::configured_timeout(integration);
                 let http_timeout =
                     explicit_timeout.unwrap_or_else(|| WasmResourceLimits::default().max_duration);
                 if explicit_timeout.is_some() {
@@ -891,13 +826,10 @@ impl crate::state::ServerState {
                 .with_spec_evaluator(spec_evaluator_fn())
                 .with_progress_emitter(progress_emitter)
                 .with_internal_api_base_url(internal_api_url)
+                .with_local_sandbox(self.local_sandbox.get().cloned())
                 .with_invocation_context(host_invocation_context)
                 .with_redirect_gate(Arc::clone(&gate), authz_ctx.clone())
                 .with_llm_content_export(self.export_llm_content(ctx.entity_ref.tenant.as_str()))
-                .with_text_http_interceptor(
-                    local_file_interceptor
-                        .unwrap_or_else(|| Arc::new(|_, _, _, _| Box::pin(async { None }))),
-                )
                 .with_trace_id(
                     current_otel_trace_id(active_span).or_else(|| ctx.agent_ctx.trace_id.clone()),
                 );
@@ -1167,7 +1099,14 @@ impl crate::state::ServerState {
                 "integration": integration.name.clone(),
             });
             return self
-                .dispatch_wasm_callback(ctx.entity_ref, cb, params, ctx.agent_ctx, ctx.mode)
+                .dispatch_wasm_callback(
+                    ctx.entity_ref,
+                    &integration.name,
+                    cb,
+                    params,
+                    ctx.agent_ctx,
+                    ctx.mode,
+                )
                 .await;
         }
         Ok(None)
@@ -1437,23 +1376,54 @@ impl crate::state::ServerState {
                 )
                 .await;
 
-                // Determine callback action: prefer static on_success from spec,
-                // fall back to dynamic callback_action from WASM result. Composite
-                // integrations may return only a data envelope for the kernel to
-                // apply; the default SDK "callback" action should not become an
-                // implicit source-entity dispatch in that path.
-                let mut callback_action = integration
-                    .on_success
-                    .as_deref()
-                    .unwrap_or(&result.callback_action);
-                if composite_result_consumed
-                    && integration.on_success.is_none()
-                    && result.callback_action == "callback"
+                // The answer: one of the trigger's `on_success` actions, the
+                // first the record takes with the module's values (see
+                // `answers.rs`); none for an empty answer (`"empty": true`). A trigger without
+                // `on_success` still takes the action the result names.
+                // Composite integrations may return only a data envelope for
+                // the kernel to apply; the default SDK "callback" action
+                // should not become an implicit source-entity dispatch then.
+                let named = [result.callback_action.clone()];
+                let answers: &[String] = if result.empty_answer {
+                    &[]
+                } else if !integration.on_success.is_empty() {
+                    &integration.on_success
+                } else if result.callback_action.is_empty()
+                    || (composite_result_consumed && result.callback_action == "callback")
                 {
-                    callback_action = "";
+                    &[]
+                } else {
+                    &named
+                };
+                // A silent exit (ADR-0056 Sub-Decision 3): the module succeeded
+                // but sends no answer, did not say it has none (`"empty":
+                // true`), and wrote nothing as a composite, so the record waits
+                // for a move that will not come. An answer that keeps the
+                // record's status is a move, and one the record refuses is
+                // journaled as a rejected answer; neither is counted here.
+                if answers.is_empty() && !result.empty_answer && !composite_result_consumed {
+                    tracing::warn!(
+                        target: "temper_server::integration",
+                        tenant = %ctx.entity_ref.tenant,
+                        entity_type = ctx.entity_ref.entity_type,
+                        entity_id = ctx.entity_ref.entity_id,
+                        action = ctx.action,
+                        integration = %integration.name,
+                        state = %entity_state.status,
+                        "integration answered no move"
+                    );
+                    crate::runtime_metrics::record_integration_silent_exit(
+                        ctx.entity_ref.tenant.as_str(),
+                        ctx.entity_ref.entity_type,
+                        ctx.action,
+                        &entity_state.status,
+                    );
                 }
+                let callback_action = self
+                    .choose_answer(ctx.entity_ref, answers, &callback_params)
+                    .await;
 
-                if !callback_action.is_empty() {
+                if let Some(callback_action) = callback_action {
                     let callback_response = instrument_wasm_dispatch_phase_result(
                         phase_parent_span.clone(),
                         ctx,
@@ -1461,6 +1431,7 @@ impl crate::state::ServerState {
                         WASM_DISPATCH_PHASE_DISPATCH_CALLBACK,
                         self.dispatch_wasm_callback(
                             ctx.entity_ref,
+                            &integration.name,
                             callback_action,
                             callback_params,
                             ctx.agent_ctx,
@@ -1672,6 +1643,7 @@ impl crate::state::ServerState {
         .with_spec_evaluator(spec_evaluator_fn())
         .with_progress_emitter(progress_emitter)
         .with_internal_api_base_url(internal_api_base_url(self))
+        .with_local_sandbox(self.local_sandbox.get().cloned())
         .with_invocation_context(context.clone())
         .with_redirect_gate(Arc::clone(&base_gate), authz_ctx.clone())
         .with_llm_content_export(self.export_llm_content(tenant.as_str()));

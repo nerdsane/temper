@@ -111,11 +111,6 @@ kind = "input"
 params = ["decided_by", "scope", "generated_policy"]
 
 [[action.triggers]]
-name = "GenerateCedarPolicy"
-kind = "hook"
-hook = "GenerateCedarPolicy"
-
-[[action.triggers]]
 name = "DispatchCallback"
 kind = "hook"
 hook = "DispatchCallback"

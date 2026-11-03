@@ -162,19 +162,32 @@ fn restored_csdl_for_rows<R>(
     }))
 }
 
+/// Restore every tenant in `grouped` into `registry`.
+///
+/// Each tenant's rows belong to that tenant alone, so a tenant whose stored
+/// CSDL or constraints do not load is logged, marked unavailable in the
+/// registry and left out; every other tenant is still restored. Its rows stay
+/// in the store untouched, so once they are fixed the next start restores it.
+/// Only store-level read failures, handled by the callers, stop a restore.
 fn populate_registry<R: SpecRowLike>(
     registry: &mut SpecRegistry,
     grouped: BTreeMap<String, Vec<R>>,
     constraints_by_tenant: &mut BTreeMap<String, String>,
     get_csdl: impl Fn(&R) -> Option<String>,
     get_ioa: impl Fn(&R) -> (String, String),
-) -> Result<usize, String> {
+) -> usize {
     let mut restored_specs = 0usize;
     for (tenant, tenant_rows) in grouped {
-        let Some((csdl, csdl_xml)) = restored_csdl_for_rows(&tenant, &tenant_rows, &get_csdl)?
-        else {
-            tracing::warn!(tenant = %tenant, "skipping restored tenant due to missing CSDL");
-            continue;
+        let (csdl, csdl_xml) = match restored_csdl_for_rows(&tenant, &tenant_rows, &get_csdl) {
+            Ok(Some(restored)) => restored,
+            Ok(None) => {
+                tracing::warn!(tenant = %tenant, "skipping restored tenant due to missing CSDL");
+                continue;
+            }
+            Err(reason) => {
+                mark_unrestorable(registry, &tenant, reason);
+                continue;
+            }
         };
 
         // A stored spec in the old predicate syntax is converted in memory; one
@@ -197,16 +210,21 @@ fn populate_registry<R: SpecRowLike>(
             .collect();
 
         let cross_invariants_toml = constraints_by_tenant.remove(&tenant);
-        registry
-            .try_register_tenant_with_constraints(
-                tenant.as_str(),
-                csdl,
-                csdl_xml,
-                &ioa_pairs,
-                cross_invariants_toml,
-                false,
-            )
-            .map_err(|e| format!("Failed to restore tenant '{tenant}' into registry: {e}"))?;
+        if let Err(error) = registry.try_register_tenant_with_constraints(
+            tenant.as_str(),
+            csdl,
+            csdl_xml,
+            &ioa_pairs,
+            cross_invariants_toml,
+            false,
+        ) {
+            mark_unrestorable(
+                registry,
+                &tenant,
+                format!("Failed to restore tenant '{tenant}' into registry: {error}"),
+            );
+            continue;
+        }
         let tenant_id = TenantId::new(&tenant);
         for row in &tenant_rows {
             let entity_type = get_ioa(row).0;
@@ -220,7 +238,17 @@ fn populate_registry<R: SpecRowLike>(
             restored_specs += 1;
         }
     }
-    Ok(restored_specs)
+    restored_specs
+}
+
+/// Log a tenant whose stored rows do not load and mark it unavailable.
+fn mark_unrestorable(registry: &mut SpecRegistry, tenant: &str, reason: String) {
+    tracing::error!(
+        tenant,
+        %reason,
+        "stored specs for this tenant do not load; the tenant is unavailable until they are fixed, every other tenant is restored"
+    );
+    registry.mark_tenant_unavailable(tenant, reason);
 }
 
 /// Restore a [`SpecRegistry`] from Postgres.
@@ -290,13 +318,13 @@ pub async fn restore_registry_from_postgres_store(
         grouped.entry(row.tenant.clone()).or_default().push(row);
     }
 
-    populate_registry(
+    Ok(populate_registry(
         registry,
         grouped,
         &mut constraints_by_tenant,
         |rows| rows.csdl_xml.clone(),
         |row| (row.entity_type.clone(), row.ioa_source.clone()),
-    )
+    ))
 }
 
 /// Restore a [`SpecRegistry`] from Turso.
@@ -335,13 +363,13 @@ pub async fn restore_registry_from_turso(
         grouped.entry(row.tenant.clone()).or_default().push(row);
     }
 
-    populate_registry(
+    Ok(populate_registry(
         registry,
         grouped,
         &mut constraints_by_tenant,
         |rows| rows.csdl_xml.clone(),
         |row| (row.entity_type.clone(), row.ioa_source.clone()),
-    )
+    ))
 }
 
 /// Restore a [`SpecRegistry`] from a [`PlatformStore`] (trait-based).

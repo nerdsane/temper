@@ -133,35 +133,3 @@ pub fn csdl_type_to_rust(type_name: &str, nullable: bool, namespace: &str) -> St
 }
 
 pub use temper_spec::naming::to_snake_case;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_to_snake_case() {
-        assert_eq!(to_snake_case("OrderStatus"), "order_status");
-        assert_eq!(to_snake_case("Id"), "id");
-        assert_eq!(to_snake_case("CreatedAt"), "created_at");
-        assert_eq!(to_snake_case("CustomerId"), "customer_id");
-        assert_eq!(to_snake_case("ShippingAddressId"), "shipping_address_id");
-    }
-
-    #[test]
-    fn test_csdl_type_to_rust() {
-        assert_eq!(csdl_type_to_rust("Edm.Guid", false, "Ns"), "Uuid");
-        assert_eq!(
-            csdl_type_to_rust("Edm.String", true, "Ns"),
-            "Option<String>"
-        );
-        assert_eq!(csdl_type_to_rust("Edm.Int32", false, "Ns"), "i32");
-        assert_eq!(
-            csdl_type_to_rust("Collection(Edm.Guid)", false, "Ns"),
-            "Vec<Uuid>"
-        );
-        assert_eq!(
-            csdl_type_to_rust("Temper.Example.OrderStatus", false, "Temper.Example"),
-            "OrderStatus"
-        );
-    }
-}

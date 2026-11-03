@@ -58,6 +58,14 @@ pub async fn bearer_auth_check(
         return Ok(next.run(req).await);
     }
 
+    // A tenant startup could not restore has no credential records loaded, so
+    // a lookup would answer 401 for a valid credential. Name its state instead.
+    if let Some(response) =
+        temper_server::odata::unavailable_tenant_response(&state.server, &tenant)
+    {
+        return Ok(response);
+    }
+
     let matched_endpoint = match state.server.http_endpoint_tables.get(&tenant).await {
         Some(table) => {
             table
@@ -106,7 +114,9 @@ pub async fn bearer_auth_check(
         };
         // A trusted-issuer JWT resolves to an agent acting for a human (or the
         // human themselves, a Customer) and carries a verified acting_for/role
-        // that from_resolved_identity cannot express (ARN-255, RFC-0002). The
+        // that from_resolved_identity cannot express (ARN-255, RFC-0002). An
+        // agent's context also keeps what its token was issued under, so a
+        // timer it sets stops when the token would be refused. The
         // AgentCredential path stays exactly as before.
         let security_context = if identity.from_jwt {
             let kind = if identity.is_human {
@@ -127,6 +137,9 @@ pub async fn bearer_auth_check(
                 identity.role.as_deref(),
                 verified_session,
             )
+            .with_principal_records(&identity.principal_records)
+            .with_credential(identity.credential.clone())
+            .with_label(identity.label.as_deref())
         } else {
             temper_authz::SecurityContext::from_resolved_identity(
                 &identity.agent_instance_id,

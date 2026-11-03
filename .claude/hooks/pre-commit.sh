@@ -62,20 +62,20 @@ if [ -n "$STAGED_RS" ]; then
     fi
 fi
 
-# --- Item 8: Source Collection Verification ---
+# --- Item 8: Spec Verification ---
 STAGED_SPECS="$(git diff --cached --name-only --diff-filter=ACM -- '*.ioa.toml' || true)"
 
 if [ -n "$STAGED_SPECS" ]; then
-    echo "Pre-commit: verifying source collections..." >&2
+    echo "Pre-commit: verifying staged specs (temper verify-ioa)..." >&2
 
-    for SPEC in $STAGED_SPECS; do
-        # Check source behavior and CSDL bindings before policies/modules are packaged.
-        if ! "$WORKSPACE_ROOT/scripts/verify-source-collection.sh" "$(dirname "$SPEC")"; then
-            echo "BLOCKED: Source verification failed for $SPEC" >&2
-            echo "Fix the spec before committing." >&2
-            exit 1
-        fi
-    done
+    # Each staged spec parses and passes its cascade; no tests run here.
+    # Lint, CSDL bindings, policies and the composite check run in CI.
+    # shellcheck disable=SC2086 # one path per word, as git prints them
+    if ! "$WORKSPACE_ROOT/scripts/verify-ioa.sh" $STAGED_SPECS; then
+        echo "BLOCKED: Spec verification failed" >&2
+        echo "Fix the spec before committing." >&2
+        exit 1
+    fi
 fi
 
 # --- Item 9: Dependency Audit ---

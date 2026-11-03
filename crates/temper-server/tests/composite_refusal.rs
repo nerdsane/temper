@@ -7,248 +7,23 @@
 //! declared `on_failure` (`Missed`) runs with the refusal as its `error`.
 //! Before, the refusal left the Notice in `Answered` as if the answer had moved
 //! the Release. Each case runs with an event journal (the atomic batch) and
-//! without one (the per-write path).
+//! without one (the per-write path). A sub-write that commits is not a
+//! refusal, even when a later step of its write reports a failure. Neither is
+//! one whose storage fails, since that write may have landed, nor one the store
+//! wrote although it answered with a concurrency violation. A sub-write that
+//! meets a journal another server moved, and no longer applies once the
+//! journal is read again, is a refusal.
+
+#[path = "composite_refusal/support.rs"]
+mod support;
 
 use std::time::Duration;
 
-use serde_json::json;
-use temper_runtime::ActorSystem;
-use temper_runtime::tenant::TenantId;
-use temper_server::registry::SpecRegistry;
-use temper_server::request_context::AgentContext;
-use temper_server::{ServerState, StorageStack};
-use temper_spec::csdl::parse_csdl;
+use temper_runtime::persistence::EventStore;
+use temper_server::StorageStack;
 use temper_store_sim::SimEventStore;
 
-const CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
-<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
-  <edmx:DataServices>
-    <Schema Namespace="Temper.CompositeRefusal" xmlns="http://docs.oasis-open.org/odata/ns/edm">
-      <EntityType Name="Notice">
-        <Key><PropertyRef Name="Id"/></Key>
-        <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
-        <Property Name="error" Type="Edm.String"/>
-      </EntityType>
-      <EntityType Name="Release">
-        <Key><PropertyRef Name="Id"/></Key>
-        <Property Name="Id" Type="Edm.String" Nullable="false"/>
-        <Property Name="Status" Type="Edm.String"/>
-      </EntityType>
-      <EntityContainer Name="Container">
-        <EntitySet Name="Notices" EntityType="Temper.CompositeRefusal.Notice"/>
-        <EntitySet Name="Releases" EntityType="Temper.CompositeRefusal.Release"/>
-      </EntityContainer>
-    </Schema>
-  </edmx:DataServices>
-</edmx:Edmx>"#;
-
-/// The owner's yes is a composite: its trigger answers with the Release's
-/// `Approve`. `Missed` records an answer that could not move the Release.
-const NOTICE_IOA: &str = r#"
-[automaton]
-name = "Notice"
-states = ["AsksLive", "Answered", "Closed"]
-initial = "AsksLive"
-allow_indefinite_states = ["AsksLive", "Answered", "Closed"]
-strict_action_params = true
-
-[[state]]
-name = "error"
-type = "string"
-initial = ""
-
-[[action]]
-name = "PutItLive"
-kind = "composite"
-from = ["AsksLive"]
-to = "Answered"
-params = []
-
-[[action.triggers]]
-name = "yes"
-kind = "wasm"
-module = "answer"
-on_failure = "Missed"
-
-[[action.sub_writes]]
-target_entity = "Release"
-action = "Approve"
-
-[[action]]
-name = "Missed"
-kind = "input"
-from = ["Answered"]
-to = "Closed"
-params = [{ name = "error", type = "string" }]
-"#;
-
-const RELEASE_IOA: &str = r#"
-[automaton]
-name = "Release"
-states = ["Unmade", "Held", "Live", "Out"]
-initial = "Unmade"
-allow_indefinite_states = ["Unmade", "Held", "Live", "Out"]
-strict_action_params = true
-
-[[action]]
-name = "Hold"
-kind = "input"
-from = ["Unmade"]
-to = "Held"
-params = []
-
-[[action]]
-name = "Approve"
-kind = "input"
-from = ["Held"]
-to = "Live"
-params = []
-
-[[action]]
-name = "Reject"
-kind = "input"
-from = ["Held"]
-to = "Out"
-params = []
-"#;
-
-const PERMIT_ALL: &str = "permit(principal, action, resource);";
-
-/// Cedar refuses the Release's `Approve`, and allows everything else.
-const FORBID_APPROVE: &str = r#"
-permit(principal, action, resource);
-forbid(principal, action == Action::"Approve", resource is Release);
-"#;
-
-const NOTICE: &str = "notice-1";
-const RELEASE: &str = "release-1";
-
-/// Whether the server keeps an event journal, which decides how a composite's
-/// sub-writes are written.
-#[derive(Clone, Copy, Debug)]
-enum Journal {
-    /// Sub-writes are appended in one atomic batch.
-    Atomic,
-    /// No journal: sub-writes are dispatched one at a time.
-    PerWrite,
-}
-
-/// A wasm module that answers with the Release's `Approve` as its sub-write.
-fn answer_module() -> String {
-    let result = json!({
-        "success": true,
-        "params": {
-            "sub_writes": [{
-                "entity_type": "Release",
-                "entity_id": RELEASE,
-                "action": "Approve",
-                "params": {}
-            }]
-        }
-    })
-    .to_string();
-    let escaped = result.replace('\\', "\\\\").replace('"', "\\\"");
-    format!(
-        r#"(module
-             (import "env" "host_set_result" (func $result (param i32 i32)))
-             (memory (export "memory") 1)
-             (data (i32.const 0) "{escaped}")
-             (func (export "run") (param i32 i32) (result i32)
-               i32.const 0
-               i32.const {len}
-               call $result
-               i32.const 0))"#,
-        len = result.len()
-    )
-}
-
-fn notice_state(journal: Journal, policy: &str) -> ServerState {
-    let mut registry = SpecRegistry::new();
-    registry.register_tenant(
-        "default",
-        parse_csdl(CSDL).expect("test CSDL should parse"),
-        CSDL.to_string(),
-        &[("Notice", NOTICE_IOA), ("Release", RELEASE_IOA)],
-    );
-    let mut state = ServerState::from_registry(ActorSystem::new("composite-refusal"), registry);
-    if let Journal::Atomic = journal {
-        state.set_storage_stack(StorageStack::from_sim(SimEventStore::no_faults(29), None));
-    }
-    let tenant = TenantId::default();
-    state
-        .authz
-        .reload_tenant_policies(tenant.as_str(), policy)
-        .expect("test policy should load");
-    let hash = state
-        .wasm_engine
-        .compile_and_cache(answer_module().as_bytes())
-        .expect("answer module should compile");
-    state.register_wasm_module(&tenant, "answer", &hash);
-    state
-}
-
-fn agent() -> AgentContext {
-    AgentContext::for_service("composite-refusal-test")
-}
-
-async fn act(state: &ServerState, entity_type: &str, entity_id: &str, action: &str) {
-    let response = state
-        .dispatch_tenant_action(
-            &TenantId::default(),
-            entity_type,
-            entity_id,
-            action,
-            json!({}),
-            &agent(),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{entity_type}.{action} should dispatch: {error}"));
-    assert!(
-        response.success,
-        "{entity_type}.{action} should apply: {:?}",
-        response.error
-    );
-}
-
-/// The record's status and fields once its status is one of `wanted`, or when
-/// the wait runs out.
-async fn settle(
-    state: &ServerState,
-    entity_type: &str,
-    entity_id: &str,
-    wanted: &[&str],
-) -> (String, serde_json::Value) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-    loop {
-        let entity = state
-            .get_tenant_entity_state(&TenantId::default(), entity_type, entity_id)
-            .await
-            .expect("record should exist");
-        let status = entity.state.status.clone();
-        if wanted.contains(&status.as_str()) || tokio::time::Instant::now() >= deadline {
-            return (status, entity.state.fields);
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
-async fn status_of(state: &ServerState, entity_type: &str, entity_id: &str) -> String {
-    state
-        .get_tenant_entity_state(&TenantId::default(), entity_type, entity_id)
-        .await
-        .expect("record should exist")
-        .state
-        .status
-}
-
-fn error_field(fields: &serde_json::Value) -> String {
-    fields
-        .get("error")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default()
-        .to_string()
-}
+use support::*;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_answer_moves_the_release_when_nothing_refuses_it() {
@@ -320,5 +95,135 @@ async fn a_sub_write_refused_by_cedar_runs_the_composites_on_failure() {
             "Held",
             "{journal:?}: the denied sub-write leaves the Release as it was"
         );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sub_write_whose_storage_fails_does_not_run_the_composites_on_failure() {
+    for (path, release_ioa) in [
+        ("atomic batch", RELEASE_IOA.to_string()),
+        ("per-write", release_with_own_effect()),
+    ] {
+        let store = SimEventStore::no_faults(37);
+        let stack = StorageStack::from_sim(store.clone(), None);
+        let state = notice_server(&release_ioa, Some(stack), PERMIT_ALL);
+        act(&state, "Release", RELEASE, "Hold").await;
+        const FAILURES: usize = 100;
+        store.fail_next_appends(RELEASE_JOURNAL, FAILURES);
+
+        act(&state, "Notice", NOTICE, "PutItLive").await;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while store.pending_append_failures(RELEASE_JOURNAL) == FAILURES
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            store.pending_append_failures(RELEASE_JOURNAL) < FAILURES,
+            "{path}: the composite should have tried to write the Release"
+        );
+        notice_stays_answered(
+            &state,
+            &format!("{path}: a sub-write whose storage failed does not run on_failure"),
+        )
+        .await;
+        assert_eq!(
+            status_of(&state, "Release", RELEASE).await,
+            "Held",
+            "{path}: the failed write leaves the Release as it was"
+        );
+    }
+}
+
+/// Another server sharing the event store rejects the Release while this one
+/// still holds it as `Held`, and this server's `Approve` meets the moved
+/// journal. The atomic batch is refused as a conflict. On the per-write path
+/// the actor reads the journal again, finds the Release `Out` and no
+/// `Approve`, and its guard refuses the sub-write. Either way `Missed` runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sub_write_refused_after_another_server_moved_the_release_runs_on_failure() {
+    for (path, release_ioa, refusal) in [
+        ("atomic batch", RELEASE_IOA.to_string(), "conflict"),
+        (
+            "per-write",
+            release_with_own_effect(),
+            "Action 'Approve' not valid from state 'Out'",
+        ),
+    ] {
+        let store = SimEventStore::no_faults(41);
+        let server = |store: &SimEventStore| {
+            let stack = StorageStack::from_sim(store.clone(), None);
+            notice_server(&release_ioa, Some(stack), PERMIT_ALL)
+        };
+        let here = server(&store);
+        let elsewhere = server(&store);
+        act(&here, "Release", RELEASE, "Hold").await;
+        act(&elsewhere, "Release", RELEASE, "Reject").await;
+        assert_eq!(
+            status_of(&here, "Release", RELEASE).await,
+            "Held",
+            "{path}: this server has not read the Reject yet"
+        );
+
+        act(&here, "Notice", NOTICE, "PutItLive").await;
+
+        let (notice, fields) = settle(&here, "Notice", NOTICE, &["Closed"]).await;
+        assert_eq!(
+            notice, "Closed",
+            "{path}: the refused sub-write should run Missed"
+        );
+        let error = error_field(&fields);
+        assert!(
+            error.contains(refusal),
+            "{path}: Missed should carry the refusal {refusal:?}, got {error:?}"
+        );
+        assert!(
+            !error.contains("would fail"),
+            "{path}: the refusal should come from the write, not the composite's preflight, got {error:?}"
+        );
+    }
+}
+
+/// The store writes the Release's `Approve` and then loses its answer, so it
+/// reports a concurrency violation, as the Turso store does when it retries a
+/// write whose first answer was lost. Read again, the journal holds the
+/// `Approve`: the sub-write landed, so it is not a refusal, `on_failure` does
+/// not run, and the Release is approved once. With the atomic batch the whole
+/// batch landed behind the violation.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sub_write_that_landed_behind_a_concurrency_violation_does_not_run_on_failure() {
+    for (path, release_ioa) in [
+        ("atomic batch", RELEASE_IOA.to_string()),
+        ("per-write", release_with_own_effect()),
+    ] {
+        let store = SimEventStore::no_faults(43);
+        let stack = StorageStack::from_sim(store.clone(), None);
+        let state = notice_server(&release_ioa, Some(stack), PERMIT_ALL);
+        act(&state, "Release", RELEASE, "Hold").await;
+        store.lose_next_append_answers(RELEASE_JOURNAL, 1);
+
+        act(&state, "Notice", NOTICE, "PutItLive").await;
+
+        let (release, _) = settle(&state, "Release", RELEASE, &["Live"]).await;
+        assert_eq!(release, "Live", "{path}: the Approve landed");
+        assert_eq!(
+            store.pending_lost_append_answers(RELEASE_JOURNAL),
+            0,
+            "{path}: the Approve's answer was lost"
+        );
+        notice_stays_answered(
+            &state,
+            &format!("{path}: a sub-write that landed does not run on_failure"),
+        )
+        .await;
+        let approvals = store
+            .read_events(RELEASE_JOURNAL, 0)
+            .await
+            .expect("read the Release journal")
+            .into_iter()
+            .filter(|event| event.event_type == "Approve")
+            .count();
+        assert_eq!(approvals, 1, "{path}: the Approve is written once");
     }
 }

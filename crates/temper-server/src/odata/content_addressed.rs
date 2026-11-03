@@ -40,6 +40,7 @@ use crate::blobs::{FIELD_OVERFLOW_BLOB_PREFIX, blob_ref_value};
 use crate::request_context::extract_agent_context;
 use crate::response::{ODataResponse, odata_error};
 use crate::state::ServerState;
+use crate::state::write_record::{RecordWrite, WriteCaller};
 
 const EXPECTED_OBJECT_ID_HEADER: &str = "x-expected-object-id";
 
@@ -211,20 +212,28 @@ async fn ingest_raw_inner(
 
     if let Err(response) = run_write_prechecks(
         &state,
-        &tenant,
-        entity_type,
-        &expected_object_id,
-        "Create",
-        "create",
+        RecordWrite {
+            caller: WriteCaller::of_request(&security_ctx),
+            tenant: &tenant,
+            entity_type,
+            entity_id: &expected_object_id,
+            action: "Create",
+            operation: "create",
+        },
         &admission_fields,
     )
     .await
     {
         return response;
     }
-    if let Err(response) =
-        enforce_commons_account_verified_for_write(&state, &tenant, entity_type, &admission_fields)
-            .await
+    if let Err(response) = enforce_commons_account_verified_for_write(
+        &state,
+        &tenant,
+        entity_type,
+        &admission_fields,
+        &security_ctx,
+    )
+    .await
     {
         return *response;
     }
@@ -354,11 +363,14 @@ async fn ingest_raw_inner(
     }
     if let Err(response) = run_write_prechecks(
         &state,
-        &tenant,
-        entity_type,
-        &expected_object_id,
-        "Create",
-        "create",
+        RecordWrite {
+            caller: WriteCaller::of_request(&security_ctx),
+            tenant: &tenant,
+            entity_type,
+            entity_id: &expected_object_id,
+            action: "Create",
+            operation: "create",
+        },
         &initial_fields,
     )
     .await
@@ -366,9 +378,14 @@ async fn ingest_raw_inner(
         drop(final_guard);
         return response;
     }
-    if let Err(response) =
-        enforce_commons_account_verified_for_write(&state, &tenant, entity_type, &initial_fields)
-            .await
+    if let Err(response) = enforce_commons_account_verified_for_write(
+        &state,
+        &tenant,
+        entity_type,
+        &initial_fields,
+        &security_ctx,
+    )
+    .await
     {
         drop(final_guard);
         return *response;
@@ -411,6 +428,10 @@ async fn ingest_raw_inner(
                 body,
             }
             .into_response()
+        }
+        Err(crate::state::CreateError::StoreUnavailable(reason)) => {
+            drop(final_guard);
+            crate::write_health::store_unavailable(&reason)
         }
         Err(error) => {
             drop(final_guard);

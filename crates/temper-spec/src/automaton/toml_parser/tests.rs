@@ -415,7 +415,8 @@ fn old_predicate_syntax_fails_with_a_migration_hint() {
 
 #[test]
 fn an_invariant_the_verifier_cannot_model_fails_to_load() {
-    let spec = "[automaton]\nname = \"T\"\nstates = [\"A\"]\ninitial = \"A\"\n\n[[state]]\nname = \"title\"\ntype = \"string\"\ninitial = \"\"\n\n[[invariant]]\nname = \"HasTitle\"\nassert = \"title != ''\"\n";
+    // An integer that is not a counter: the model checker does not track it.
+    let spec = "[automaton]\nname = \"T\"\nstates = [\"A\"]\ninitial = \"A\"\n\n[[state]]\nname = \"score\"\ntype = \"int\"\ninitial = 0\n\n[[invariant]]\nname = \"Scored\"\nassert = \"score > 0\"\n";
     let err = crate::automaton::parse_automaton_with_liveness(
         spec,
         crate::automaton::LivenessEnforcement::WarnOnly,

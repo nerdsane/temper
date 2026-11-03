@@ -41,9 +41,8 @@ async fn dst_genesis_install_rollback_pins_prior_good_version() {
 
         // ── Baseline (faults off): install the good app, then record the prior good Genesis
         //    provenance (v1) carrying the real bundle digest so the rollback's digest-integrity
-        //    check is satisfied. Then simulate a failed new install: reconcile overwrites the
-        //    durable record with a local-provenance row (`source_kind = "local"`, `app_ref = ""`) —
-        //    exactly the partial state a failed publish leaves behind. ─────────────────────────────
+        //    check is satisfied. Then seed a failed install's partial local row explicitly:
+        //    reinstalling the same bundle now correctly preserves its Genesis source. ─────────────────────────────
         let prev = harness.sim_platform_store.disable_faults();
         harness
             .install_app(tenant, APP)
@@ -74,11 +73,14 @@ async fn dst_genesis_install_rollback_pins_prior_good_version() {
             .record_installed_app_metadata(&v1_good)
             .await
             .unwrap_or_else(|e| panic!("seed {seed}: record prior good failed: {e}"));
-        // Failed new install leaves a local-provenance partial row.
+        // The initial install's local row models the partial state a failed
+        // changed-bundle install can leave. Keep this setup independent of
+        // unchanged-bundle repair, which must retain valid provenance.
         harness
-            .install_app(tenant, APP)
+            .sim_platform_store
+            .record_installed_app_metadata(&installed)
             .await
-            .unwrap_or_else(|e| panic!("seed {seed}: reconcile of new version failed: {e}"));
+            .unwrap_or_else(|e| panic!("seed {seed}: seed partial install failed: {e}"));
         let partial = harness
             .sim_platform_store
             .get_installed_app(tenant, APP)

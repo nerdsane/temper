@@ -3,6 +3,7 @@
 - Status: Proposed
 - Date: 2026-04-21
 - Amended: 2026-10-16, armed timers keep a durable row and are armed again at boot (see "Amendment: timer rows and the boot re-arm")
+- Amended: 2026-10-26, a timer's fire applies only at the journal sequence it was armed at (see "Amendment: a fire applies at its arming's sequence")
 - Deciders: Temper core maintainers
 - Supersedes: the "Non-durable under the MVP" caveat at `crates/temper-server/src/state/dispatch/state_timeouts.rs:145` introduced by ADR-0049
 - Related:
@@ -146,6 +147,8 @@ if let Some(ref post_response) = inline_response
 }
 ```
 
+**Amendment: a silent exit is a trigger that sends no answer (2026-11-02).** The guard above compared the record's status before and after an inline trigger. It counted every answer that keeps the status (Katagami's `KatagamiApp.UseSurface` answers `SurfaceUsed`, which stays `Live`: every use of an app's interface counted), and it never saw a module that answered nothing, because that dispatch returns no response. The count now happens where the kernel reads the module's result (`dispatch/wasm.rs`), inline or in the background: a successful module that names no move, does not answer `"empty": true`, and wrote nothing as a composite. An answer the record refuses is journaled as a rejected answer and is not counted here.
+
 Under healthy operation `temper_integration_silent_exit_total` is permanently zero. The consumer (openpaw) is responsible for enforcing the invariant at the WASM layer (per openpaw ADR-0039 Sub-Decision 3a). This platform-side check is a belt-and-suspenders regression guard — if the WASM-side invariant ever regresses, operators see the counter go nonzero and can act before user-visible impact.
 
 **Why no automatic `on_silent_exit` recovery field on actions:** scope control. The consumer-side invariant + persist retries close the common causes. A declarative recovery primitive is appealing but adds spec grammar and requires usage-pattern data we don't have yet. Revisit once we have production evidence that this regression-guard fires — at that point we'll know what shape of recovery operators actually want.
@@ -202,6 +205,30 @@ repeating timer ticks once more, and a reset timer fires once early. A fire
 whose load or dispatch fails removes its row like any other end, as before
 rows existed. Every boot arms every row, which assumes one process per store,
 as the kernel is single-node today (docs/POSITIONING.md).
+
+**Amendment: a fire applies at its arming's sequence (2026-10-26).** A deploy
+runs the old and the new process on one store for a few seconds. On 26 Oct
+2026 both fired the same due 60 s self-loop timer on two records: the old one
+from memory, the new one from its row. The old one wrote the event; the new
+one hit a concurrency violation, and the ADR-0046 retry replayed the journal,
+evaluated the action again and wrote a second one 21 ms later. A repeating
+timer passes the "already ran since its clock started" check, because its own
+action restarts the clock. Any two writers of one arming do the same, such as
+a fire sent again after its answer was lost.
+
+A timer's fire now carries the record's journal sequence when the timer was
+armed (`StateTimerFire` on the dispatch's context). The record's actor applies
+it only while the record is at that sequence: at its first evaluation and
+again after a retry's replay, a fire on a record past its arming is refused,
+not evaluated again. The first writer to commit moves the journal past the
+arming, and the store's sequence check picks that writer, so an arming commits
+its action at most once with no signal between processes and no deploy
+ordering. Fencing the old process was rejected for that reason. A timer whose
+record moved past its arming, found before the fire or in the refusal, makes
+the record's timer follow its current state, armed at the current sequence:
+the next tick of a repeating timer, the rest of the budget after an action the
+timer does not reset on, or nothing for a timer that fired once. Callers'
+actions keep the ADR-0046 retry as before.
 
 ## Readiness Gates
 

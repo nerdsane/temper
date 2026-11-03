@@ -9,13 +9,20 @@
 
 mod actor_runtime;
 mod bootstrap;
+mod data_dir;
 mod loader;
+mod local_sandbox;
 mod observe_ui;
 pub(crate) mod options;
+#[cfg(test)]
+mod pushed_boot_tests;
 mod storage;
 mod sync_copy;
+#[cfg(test)]
+mod unavailable_tenant_tests;
 
 use std::collections::{BTreeMap, HashMap};
+use std::future::IntoFuture;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::{path::Path, sync::Arc};
 
@@ -25,7 +32,7 @@ use temper_evolution::PostgresRecordStore;
 use temper_observe::ClickHouseStore;
 use temper_observe::otel::init_observability;
 use temper_platform::optimization::run_optimization_cycle;
-use temper_platform::router::build_platform_router;
+use temper_platform::router::build_platform_routes;
 use temper_platform::state::PlatformState;
 use temper_runtime::tenant::TenantId;
 use temper_server::registry::{EntityLevelSummary, EntityVerificationResult, VerificationStatus};
@@ -71,19 +78,29 @@ pub async fn run(
     discord_bot_token: Option<String>,
     tenant: String,
 ) -> Result<()> {
-    let _otel_guard = init_observability("temper-platform");
+    let otel_guard = init_observability("temper-platform");
     temper_authz::init_metrics();
     temper_store_postgres::init_metrics();
     temper_store_turso::init_metrics();
     let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
 
     // Phase 1: Storage backend
-    let (pg_pool, storage_stack, turso_sync_copy) =
+    let (pg_pool, storage_stack, turso_synced_store) =
         bootstrap::init_storage(storage.clone(), storage_explicit).await?;
 
     // Phase 2: Registry (restore + disk apps)
     let (registry, tenant_policy_seed) =
         bootstrap::build_registry(pg_pool.as_ref(), storage_stack.as_ref(), &apps).await?;
+    // build_registry already said which disk apps it skipped; the later phases
+    // (webhooks, hydration, tenant bootstrap, verification) skip them as well.
+    let apps: Vec<(String, String)> = apps
+        .into_iter()
+        .filter(|(tenant, _)| {
+            registry
+                .tenant_unavailable_reason(&temper_runtime::tenant::TenantId::new(tenant))
+                .is_none()
+        })
+        .collect();
 
     // Assemble platform state
     let mut state = PlatformState::with_registry(registry, api_key);
@@ -92,9 +109,18 @@ pub async fn run(
     if state.api_token.is_some() {
         println!("  API key: configured (Bearer token required)");
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let data_dir = Path::new(&home).join(".local/share/temper");
-    state.server.data_dir = data_dir.clone();
+    // Jev reads an app's changed modules at install when this server has a key or pass for it; never printed.
+    if std::env::var(temper_platform::module_review::JEV_KEY_ENV)
+        .is_ok_and(|key| !key.trim().is_empty())
+    {
+        let judge = std::sync::Arc::new(temper_platform::module_review::JevJudge::from_env());
+        state.set_module_reviewer(std::sync::Arc::new(
+            temper_platform::module_review::ModuleReviewer::new(judge),
+        ));
+    }
+    // TEMPER_DATA_DIR puts this server's files (pushed app versions, blobs,
+    // caches) where they outlive the machine, such as a mounted volume.
+    state.server.data_dir = data_dir::data_dir();
     state.server.files_need_object_store = storage::files_need_object_store();
 
     seed_cedar_policies(&state, tenant_policy_seed);
@@ -193,48 +219,7 @@ pub async fn run(
             } else {
                 let sandbox_port = port + 10; // e.g., 3000 → 3010
                 let sandbox_url = format!("http://127.0.0.1:{sandbox_port}");
-
-                // Find the local sandbox script relative to the binary or os-apps.
-                let sandbox_script =
-                    std::path::Path::new("os-apps/temper-agent/sandbox/local_sandbox.py");
-                if sandbox_script.exists() {
-                    // Use /tmp/temper-sandbox as the base; create /workspace for tool_runner
-                    // which sends cwd="/workspace" by default (matching E2B's layout).
-                    let _ = std::fs::create_dir_all("/tmp/temper-sandbox");
-                    let _ = std::fs::create_dir_all("/workspace");
-
-                    // determinism-ok: subprocess spawn at startup for local dev sandbox
-                    let mut sandbox_cmd = std::process::Command::new("python3");
-                    sandbox_cmd
-                        .arg(sandbox_script)
-                        .arg("--port")
-                        .arg(sandbox_port.to_string())
-                        .arg("--workdir")
-                        .arg("/tmp/temper-sandbox")
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null());
-                    if bind != Ipv4Addr::UNSPECIFIED {
-                        // Keep the sandbox no more reachable than the API. Passed
-                        // only when non-default, so older sandbox scripts still start.
-                        sandbox_cmd.arg("--host").arg(bind.to_string());
-                    }
-                    match sandbox_cmd.spawn() {
-                        Ok(_child) => {
-                            println!("  Local sandbox: {sandbox_url} (auto-started)");
-                        }
-                        Err(e) => {
-                            eprintln!("  Warning: failed to start local sandbox: {e}");
-                            eprintln!(
-                                "  Run manually: python3 {sandbox_script:?} --port {sandbox_port}"
-                            );
-                        }
-                    }
-                } else {
-                    eprintln!("  Warning: local sandbox script not found at {sandbox_script:?}");
-                    eprintln!(
-                        "  Set SANDBOX_URL env var or ensure os-apps/temper-agent/sandbox/local_sandbox.py exists"
-                    );
-                }
+                local_sandbox::start(&state.server, sandbox_port, &sandbox_url);
 
                 sandbox_url
             };
@@ -261,7 +246,7 @@ pub async fn run(
     }
 
     // Phase 8: Bootstrap system + agent tenants
-    bootstrap::bootstrap_tenants(&state, &apps).await;
+    bootstrap::bootstrap_tenants(&state, &apps, bootstrap::EarlierOperatorKeys::from_env()).await;
     // Phase 8b: Restore persisted apps + apply CLI `--app` requests.
     bootstrap::bootstrap_installed_apps(&state, &os_app_installs).await?;
     if actor_runtime == ActorRuntimeBackend::Postgres {
@@ -277,8 +262,7 @@ pub async fn run(
     }
 
     // Phase 9: Bind, start background tasks, serve
-    let router =
-        sync_copy::answer_after_copy(build_platform_router(state.clone()), turso_sync_copy);
+    let router = sync_copy::serve_router(build_platform_routes(state.clone()), turso_synced_store);
     let listener = tokio::net::TcpListener::bind(SocketAddr::from((bind, port)))
         .await
         .with_context(|| format!("Failed to bind to {bind}:{port}"))?;
@@ -296,7 +280,6 @@ pub async fn run(
     }
     spawn_optimization_loop(&state);
     spawn_actor_passivation_loop(&state);
-    state.server.spawn_runtime_metrics_loop();
     temper_server::profiling::spawn_continuous_profiler();
     let _pg_actor_runtime_cancel = pg_actor_runtime_cancel;
 
@@ -346,16 +329,83 @@ pub async fn run(
         }
     }
 
-    // ADR-0056: arm again the state timers the last process left waiting,
-    // before the first request can act on their records.
-    state.server.rearm_state_timers().await;
+    // Where this process reports its earliest due time, so a control plane
+    // that suspends it can wake it then. Both are needed; either alone is a
+    // misconfiguration, logged and otherwise ignored.
+    match (
+        std::env::var("TEMPER_WAKE_REPORT_URL").ok(), // determinism-ok: startup config
+        std::env::var("TEMPER_WAKE_REPORT_TOKEN").ok(), // determinism-ok: startup config
+    ) {
+        (Some(url), Some(token)) if !url.is_empty() && !token.is_empty() => {
+            match temper_server::wake::HttpWakeSink::new(url, token) {
+                Ok(sink) => state.server.set_wake_sink(std::sync::Arc::new(sink)),
+                Err(error) => tracing::error!(%error, "wake reports off"),
+            }
+        }
+        (None, None) => {}
+        _ => tracing::error!(
+            "wake reports off: TEMPER_WAKE_REPORT_URL and TEMPER_WAKE_REPORT_TOKEN are needed together"
+        ),
+    }
+    // How long the sandbox stays awake after an inbound request, in seconds:
+    // a timer due before then fires on its own and is not reported. The
+    // control plane sets it below the time its sandboxes really stay awake,
+    // for margin. Unset, every due time from now is reported.
+    if let Ok(awake) = std::env::var("TEMPER_WAKE_AWAKE_SECS") {
+        // determinism-ok: startup config
+        match awake.parse::<u64>() {
+            Ok(secs) => state
+                .server
+                .set_wake_awake(std::time::Duration::from_secs(secs)),
+            Err(error) => {
+                tracing::error!(%error, "TEMPER_WAKE_AWAKE_SECS is not a number of seconds; every due time is reported")
+            }
+        }
+    }
+
+    // The kernel runtime: state timers re-armed from their rows (ADR-0056)
+    // before the first request can act on their records, and runtime metrics.
+    let _boot_timers = state.server.start_runtime().await;
 
     println!("Listening on http://{bind}:{actual_port}");
-    axum::serve(listener, router)
-        .await
-        .context("Server error")?;
+    // A stop signal ends the server. The kernel then logs and counts each
+    // write it still owes and holds only in memory, and telemetry is flushed
+    // so those reports leave the process before it exits.
+    tokio::select! {
+        served = axum::serve(listener, router).into_future() => served.context("Server error")?,
+        () = stop_signal() => {}
+    }
+    state.server.report_owed_writes_at_shutdown();
+    if let Some(guard) = otel_guard {
+        guard.shutdown();
+    }
 
     Ok(())
+}
+
+/// Resolves when the process is asked to stop: Ctrl-C, or SIGTERM from the
+/// platform it runs on. A signal that cannot be watched never resolves.
+async fn stop_signal() {
+    let interrupt = async {
+        if tokio::signal::ctrl_c().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                terminate.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        () = interrupt => {}
+        () = terminate => {}
+    }
 }
 
 fn seed_cedar_policies(state: &PlatformState, tenant_policy_seed: BTreeMap<String, String>) {

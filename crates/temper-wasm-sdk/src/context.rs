@@ -127,6 +127,27 @@ pub struct Context {
     /// unwrap this then drive the inbound exchange via
     /// `temper_wasm_sdk::http_stream::InboundHttp`.
     pub http_request: Option<Value>,
+    /// Who the move that set this integration off was made as: the
+    /// principal Cedar saw for that move. A timer's move is its setter's,
+    /// and a reaction's is the move it reacts to's. `None` when the kernel
+    /// made the move itself (a system or service move), when it was made
+    /// anonymously, and on a host that predates the field.
+    pub trigger_principal: Option<TriggerPrincipal>,
+}
+
+/// The principal a triggering move was made as.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TriggerPrincipal {
+    /// The principal's id: the person, or the agent instance.
+    pub id: String,
+    /// `Customer` (a person), `Agent` or `Admin`.
+    pub kind: String,
+    /// For an agent, the person it acts for.
+    #[serde(default)]
+    pub acting_for: Option<String>,
+    /// For an agent, its type.
+    #[serde(default)]
+    pub agent_type: Option<String>,
 }
 
 pub struct WideEventInput<'a> {
@@ -283,6 +304,9 @@ impl Context {
             .to_string();
 
         let http_request = parsed.get("http_request").cloned();
+        let trigger_principal = parsed
+            .get("trigger_principal")
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
 
         Ok(Self {
             config,
@@ -294,6 +318,7 @@ impl Context {
             trigger_action,
             wasm_module,
             http_request,
+            trigger_principal,
         })
     }
 

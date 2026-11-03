@@ -9,7 +9,7 @@ use super::{
 };
 use crate::entity_actor::{EntityResponse, EntityState};
 use crate::request_context::AgentContext;
-use crate::state::dispatch::DispatchCommand;
+use crate::state::dispatch::{DispatchCommand, DispatchError};
 use temper_wasm::{WasmHost, WasmInvocationContext, WasmResourceLimits};
 
 /// Heap-allocate the complete inline WASM integration state machine.
@@ -86,6 +86,7 @@ pub(in crate::state::dispatch::wasm) fn handle_wasm_failure_boxed<'a>(
 pub(in crate::state::dispatch) fn dispatch_wasm_callback_boxed<'a>(
     state: &'a crate::state::ServerState,
     entity_ref: WasmEntityRef<'a>,
+    integration: &'a str,
     callback_action: &'a str,
     callback_params: serde_json::Value,
     agent_context: &'a AgentContext,
@@ -94,6 +95,7 @@ pub(in crate::state::dispatch) fn dispatch_wasm_callback_boxed<'a>(
     state
         .dispatch_wasm_callback(
             entity_ref,
+            integration,
             callback_action,
             callback_params,
             agent_context,
@@ -106,17 +108,9 @@ pub(in crate::state::dispatch) fn dispatch_wasm_callback_boxed<'a>(
 pub(in crate::state::dispatch) fn dispatch_callback_action_boxed<'a>(
     state: &'a crate::state::ServerState,
     command: DispatchCommand<'a>,
-) -> BoxFuture<'a, Result<EntityResponse, String>> {
-    // Boxing bounds future storage, but nested polls still share the caller's
-    // stack. Grow only at this recursive boundary, both while constructing the
-    // future and while polling it. Callback depth separately bounds nesting.
-    const RED_ZONE: usize = 2 * 1024 * 1024;
-    const STACK_BYTES: usize = 8 * 1024 * 1024;
-    stacker::maybe_grow(RED_ZONE, STACK_BYTES, || {
-        let mut future = state.dispatch(command).boxed();
-        futures_util::future::poll_fn(move |context| {
-            stacker::maybe_grow(RED_ZONE, STACK_BYTES, || future.as_mut().poll(context))
-        })
-        .boxed()
-    })
+) -> BoxFuture<'a, Result<EntityResponse, DispatchError>> {
+    // Nested polls share the caller's stack; grow it at this recursive
+    // boundary. A callback that would repeat a step of its inline chain is
+    // refused before it gets here (`AgentContext::for_callback`).
+    crate::growable_stack::on_growable_stack(|| state.dispatch_typed(command).boxed())
 }

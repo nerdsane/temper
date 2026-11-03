@@ -4,8 +4,18 @@
 //! service document, and error responses via the axum router.
 
 mod common;
+#[path = "odata_read/filter_literals.rs"]
+mod filter_literals;
+#[path = "odata_read/list_context_owner.rs"]
+mod list_context_owner;
+#[path = "odata_read/page_rows.rs"]
+mod page_rows;
 #[path = "odata_read/pagination_count.rs"]
 mod pagination_count;
+#[path = "odata_read/pagination_metadata.rs"]
+mod pagination_metadata;
+#[path = "odata_read/platform_context_keys.rs"]
+mod platform_context_keys;
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
@@ -18,6 +28,7 @@ use temper_server::registry::{
 };
 use temper_server::{ServerState, StorageStack};
 use temper_spec::csdl::parse_csdl;
+use temper_store_sim::SimEventStore;
 use temper_store_turso::TursoEventStore;
 use tower::ServiceExt;
 
@@ -52,10 +63,13 @@ fn authenticate(mut request: Request<Body>, principal_id: &str) -> Request<Body>
             role: None,
             acting_for: None,
             agent_type: None,
+            label: None,
             attributes: Default::default(),
         },
         context_attrs: Default::default(),
         correlation_id: "odata-read-test".to_string(),
+        cause: None,
+        credential: None,
     };
     request
         .extensions_mut()
@@ -360,6 +374,18 @@ async fn composite_entity_key_resolves_through_query_plane_index() {
     assert_eq!(body["entity_id"].as_str(), Some("entry-1199"));
     assert_eq!(body["fields"]["SessionId"].as_str(), Some("session-hot"));
     assert_eq!(body["fields"]["EntryId"].as_str(), Some("entry-1199"));
+
+    let (status, body) = get_json(
+        &state,
+        "/tdata/Orders(SessionId='session-hot',EntryId='entry-1199')/EntryId",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["value"], "entry-1199");
+    assert_eq!(
+        body["@odata.context"],
+        "$metadata#Orders('entry-1199')/EntryId"
+    );
 }
 
 #[tokio::test]
@@ -578,8 +604,11 @@ async fn entity_set_authorizes_against_fields_omitted_by_select() {
     let _ = std::fs::remove_file(db_path);
 }
 
+/// A record whose catalog row is missing while its actor has state still shows
+/// in a filtered read. The read does not write the row back: boot repair does
+/// that, before the server serves.
 #[tokio::test]
-async fn filtered_entity_set_repairs_missing_catalog_rows_before_trusting_pushdown() {
+async fn filtered_entity_set_shows_a_record_whose_catalog_row_is_missing() {
     let db_path = std::env::temp_dir().join(format!(
         "temper-odata-read-missing-catalog-filter-{}.db",
         uuid::Uuid::new_v4()
@@ -615,21 +644,7 @@ async fn filtered_entity_set_repairs_missing_catalog_rows_before_trusting_pushdo
         values
             .iter()
             .any(|value| value["entity_id"].as_str() == Some(entity_id)),
-        "filtered reads should hydrate missing catalog rows before trusting pushdown: {body:?}"
-    );
-
-    let repaired = store
-        .query_field_index(
-            TenantId::default().as_str(),
-            "Order",
-            "status = ?3",
-            vec!["Draft".to_string()],
-        )
-        .await
-        .expect("query repaired status projection");
-    assert!(
-        repaired.iter().any(|id| id == entity_id),
-        "actor fallback should repair the durable catalog for future pushdown reads: {repaired:?}"
+        "a filtered read shows the record from its actor: {body:?}"
     );
 
     let _ = std::fs::remove_file(db_path);
@@ -808,7 +823,76 @@ async fn patch_and_put_authorize_the_prospective_resource() {
 /// was still told the write had succeeded.
 #[tokio::test]
 async fn patch_returns_an_error_status_when_the_update_is_refused() {
-    let (state, sim) = build_default_state(4711, "odata-patch-fail-closed");
+    let (state, sim) = verified_order(4711, "odata-patch-fail-closed", "ord-fail-closed").await;
+
+    // A PATCH the actor cannot journal. The entity exists and the request is
+    // well-formed, so it reaches the actor and is refused there. The OData
+    // handler maps a refused response to an error status itself, so this does not
+    // exercise `update_tenant_entity_fields`' own propagation — see
+    // `field_update_failure_is_reported_to_callers_that_do_not_inspect_success`
+    // for that. What it pins is the end-to-end property: an update that was not
+    // persisted is never answered 2xx.
+    sim.fail_next_appends("default:Order:ord-fail-closed", 8);
+
+    let (status, body) = patch_json(
+        &state,
+        "/tdata/Orders('ord-fail-closed')",
+        serde_json::json!({ "Currency": "USD" }),
+    )
+    .await;
+    assert!(
+        !status.is_success(),
+        "an update the actor could not persist must not answer 2xx; got {status} {body:?}"
+    );
+
+    // And the entity is unchanged — the refusal was not a partial write.
+    sim.fail_next_appends("default:Order:ord-fail-closed", 0);
+    let (status, body) = get_json(&state, "/tdata/Orders('ord-fail-closed')").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_ne!(
+        body["fields"]["Currency"].as_str(),
+        Some("USD"),
+        "a refused update must leave the entity untouched: {body:?}"
+    );
+}
+
+/// A PATCH whose write meets a conflict is decided again on the record and
+/// written once, not refused: a conflict says the record may have moved since
+/// the PATCH was decided, not that the store cannot write. Each injected
+/// conflict leaves the journal where it was, so the update lands as asked once
+/// they stop, well inside the route's deadline.
+#[tokio::test]
+async fn patch_that_meets_conflicts_is_decided_again_and_written_once() {
+    let (state, sim) = verified_order(4712, "odata-patch-conflicts", "ord-conflicts").await;
+    sim.inject_concurrency_violations("default:Order:ord-conflicts", 8);
+
+    let (status, body) = patch_json(
+        &state,
+        "/tdata/Orders('ord-conflicts')",
+        serde_json::json!({ "Currency": "USD" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(
+        sim.pending_concurrency_violations("default:Order:ord-conflicts"),
+        0
+    );
+
+    let (status, body) = get_json(&state, "/tdata/Orders('ord-conflicts')").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["fields"]["Currency"], "USD", "{body:?}");
+    let updates = body["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .filter(|event| event["action"] == "FieldsUpdated")
+        .count();
+    assert_eq!(updates, 1, "the update is written once: {body:?}");
+}
+
+/// A verified `Order` named `id`, created, on a sim store with no faults.
+async fn verified_order(seed: u64, system: &str, id: &str) -> (ServerState, SimEventStore) {
+    let (state, sim) = build_default_state(seed, system);
     install_order_crud_test_policy(&state);
     // HTTP writes are gated on verification status; the sim harness leaves it
     // pending, so mark it Completed exactly as `build_turso_state` does.
@@ -829,48 +913,17 @@ async fn patch_returns_an_error_status_when_the_update_is_refused() {
             }),
         );
     }
-    let tenant = TenantId::default();
-
     dispatch(
         &state,
-        &tenant,
+        &TenantId::default(),
         "Order",
-        "ord-fail-closed",
+        id,
         "Create",
         serde_json::json!({}),
     )
     .await
-    .expect("create ord-fail-closed");
-
-    // A PATCH the actor cannot journal. The entity exists and the request is
-    // well-formed, so it reaches the actor and is refused there. The OData
-    // handler maps a refused response to an error status itself, so this does not
-    // exercise `update_tenant_entity_fields`' own propagation — see
-    // `field_update_failure_is_reported_to_callers_that_do_not_inspect_success`
-    // for that. What it pins is the end-to-end property: an update that was not
-    // persisted is never answered 2xx.
-    sim.inject_concurrency_violations("default:Order:ord-fail-closed", 8);
-
-    let (status, body) = patch_json(
-        &state,
-        "/tdata/Orders('ord-fail-closed')",
-        serde_json::json!({ "Currency": "USD" }),
-    )
-    .await;
-    assert!(
-        !status.is_success(),
-        "an update the actor could not persist must not answer 2xx; got {status} {body:?}"
-    );
-
-    // And the entity is unchanged — the refusal was not a partial write.
-    sim.inject_concurrency_violations("default:Order:ord-fail-closed", 0);
-    let (status, body) = get_json(&state, "/tdata/Orders('ord-fail-closed')").await;
-    assert_eq!(status, StatusCode::OK);
-    assert_ne!(
-        body["fields"]["Currency"].as_str(),
-        Some("USD"),
-        "a refused update must leave the entity untouched: {body:?}"
-    );
+    .unwrap_or_else(|error| panic!("create {id}: {error:?}"));
+    (state, sim)
 }
 
 /// ARN-189 regression guard. `update_tenant_entity_fields` converts a refused

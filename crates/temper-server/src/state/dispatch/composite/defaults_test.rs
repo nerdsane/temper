@@ -60,7 +60,6 @@ async fn parent_gated_contracted_creation_preserves_defaults_on_both_recovery_pa
         BackendLabel::Sim,
         &json!({}),
         None,
-        false,
     )
     .await
     .unwrap();

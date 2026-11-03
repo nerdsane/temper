@@ -8,7 +8,6 @@ exclude = [
     "wasm-modules/gepa-reflective",
     "wasm-modules/gepa-proposer-agent",
     "wasm-modules/gepa-verify",
-    "crates/temper-wasm/tests/fixtures/echo-integration-src",
     "os-apps/temper-agent/wasm/llm_caller",
     "os-apps/temper-agent/wasm/tool_runner",
     "os-apps/temper-agent/wasm/sandbox_provisioner",
@@ -42,6 +41,7 @@ members = [
     "crates/temper-transport",
     "crates/temper-actor-runtime",
     "crates/temper-agents",
+    "crates/temper-test-resource",
     "reference-apps/crucible",
     "reference-apps/ecommerce",
     "reference-apps/oncall",
@@ -163,6 +163,7 @@ temper-ots = { path = "crates/temper-ots" }
 temper-transport = { path = "crates/temper-transport" }
 temper-actor-runtime = { path = "crates/temper-actor-runtime" }
 temper-agents = { path = "crates/temper-agents" }
+temper-test-resource = { path = "crates/temper-test-resource" }
 
 # WASM runtime. Floor is 36.0.13: 36.0.7 fixes RUSTSEC-2026-0096 (the ARN-169
 # objective), and 36.0.13 additionally fixes RUSTSEC-2026-0222, so the lower bound
@@ -209,6 +210,12 @@ opt-level = 1
 opt-level = 1
 
 [profile.dev.package.sha2]
+opt-level = 1
+
+# Turso's engine runs every store test's SQL. Unoptimized, its row loops set
+# those tests' pace: on CI a 50 ms change log DELETE removed 190 to 255 rows,
+# so the long-log test's time depended on the runner, not on the trim.
+[profile.dev.package.turso_core]
 opt-level = 1
 
 [profile.release]

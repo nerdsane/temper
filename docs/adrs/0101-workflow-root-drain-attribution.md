@@ -1,6 +1,6 @@
 # ADR-0101: Workflow Root Drain Attribution
 
-- Status: Accepted
+- Status: Superseded by ADR-0183
 - Date: 2026-05-18
 - Deciders: Temper core maintainers
 - Related:

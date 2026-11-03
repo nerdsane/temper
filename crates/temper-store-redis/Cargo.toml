@@ -17,3 +17,6 @@ chrono = { workspace = true }
 tokio = { workspace = true }
 futures-core = "0.3"
 tokio-stream = { workspace = true }
+
+[dev-dependencies]
+temper-test-resource = { workspace = true }

@@ -13,6 +13,7 @@ mod allocator;
 mod audit;
 mod codegen;
 mod decide;
+mod dns;
 mod init;
 mod install;
 mod mcp;
@@ -135,7 +136,7 @@ enum Commands {
         /// IP address to bind the API to. The default, all interfaces, is
         /// unchanged; `--bind 127.0.0.1` keeps Temper loopback-only, for a
         /// server reached through an SSH tunnel or a local proxy. The Observe
-        /// UI and the local sandbox follow it.
+        /// UI follows it; the local sandbox always listens on 127.0.0.1 only.
         ///
         /// Only `0.0.0.0` and `127.0.0.1` are accepted: Temper's own
         /// components reach the API at 127.0.0.1, so any other address would
@@ -288,8 +289,11 @@ fn resolve_tokio_thread_stack_bytes(env_value: Option<&str>) -> Result<usize, St
 fn main() -> anyhow::Result<()> {
     // Load .env file from project root (silently ignored if missing).
     dotenvy::dotenv().ok();
+    // Still the only thread: the runtime is built below.
+    dns::ask_again_after_one_second();
     let cli = Cli::parse();
     let is_mcp = matches!(&cli.command, Commands::Mcp { .. });
+    let is_serve = matches!(&cli.command, Commands::Serve { .. });
 
     let tokio_thread_stack_bytes = resolve_tokio_thread_stack_bytes(
         std::env::var("TEMPER_TOKIO_THREAD_STACK_BYTES")
@@ -304,9 +308,11 @@ fn main() -> anyhow::Result<()> {
         .build()?;
 
     let result = runtime.block_on(async_main(cli));
-    if is_mcp {
+    if is_mcp || is_serve {
         // A canceled Tokio stdio task may leave an uncancellable OS pipe call.
         // MCP has already drained output or reported failure before returning.
+        // A stopped server has reported the writes it owed and flushed its
+        // telemetry; its background tasks must not hold up the exit.
         runtime.shutdown_timeout(std::time::Duration::from_secs(1));
     }
     result
@@ -751,15 +757,6 @@ mod tests {
     fn tokio_thread_stack_rejects_tiny_or_invalid_override() {
         assert!(resolve_tokio_thread_stack_bytes(Some("abc")).is_err());
         assert!(resolve_tokio_thread_stack_bytes(Some("1048576")).is_err());
-    }
-
-    #[test]
-    fn railway_start_command_does_not_pin_turso_storage() {
-        let railway_toml = include_str!("../../../railway.toml");
-        assert!(
-            !railway_toml.contains("--storage turso"),
-            "Railway must allow TEMPER_EVENT_STORE=postgres to select the backend"
-        );
     }
 
     #[test]

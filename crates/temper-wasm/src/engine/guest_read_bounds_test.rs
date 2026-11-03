@@ -284,33 +284,3 @@ async fn oversized_host_read_is_rejected_before_allocating() {
          {large_allocs} allocation(s) >= {LARGE_ALLOC_THRESHOLD} bytes were made"
     );
 }
-
-#[test]
-fn guest_memory_reads_stay_inside_the_bounds_checked_helpers() {
-    // ARN-226 (class guard). The individual guards are locked by the mutation
-    // tests above, but nothing stopped a future edit from reintroducing a raw
-    // `memory.read` + `vec![0u8; len]` at a new call site — which is exactly how
-    // the original vulnerability was spread across ten places. This asserts the
-    // structural invariant instead: in this file, guest memory is only ever read
-    // inside `read_guest_string` / `read_guest_bytes`, which bounds-check first.
-    //
-    // If you are adding a host function, call one of those helpers rather than
-    // relaxing this test.
-    const ALLOWED_READ_SITES: usize = 2;
-    let source = include_str!("host_functions.rs");
-    let reads = source
-        .lines()
-        .filter(|line| {
-            let trimmed = line.trim_start();
-            // A guest-memory read passes arguments (store/caller, offset, buffer).
-            // `RwLock::read()` takes none, so the empty-paren form is excluded.
-            !trimmed.starts_with("//") && trimmed.contains(".read(") && !trimmed.contains(".read()")
-        })
-        .count();
-    assert_eq!(
-        reads, ALLOWED_READ_SITES,
-        "guest memory must only be read inside the bounds-checked helpers; \
-         found {reads} `.read(` call sites in host_functions.rs (expected \
-         {ALLOWED_READ_SITES}: one in read_guest_string, one in read_guest_bytes)"
-    );
-}

@@ -1,6 +1,10 @@
 //! Strict OData requests use the actual HTTP router and PostgreSQL actor runtime.
 #[path = "strict_postgres_actions/authorization.rs"]
 mod authorization;
+#[path = "strict_postgres_actions/related_records.rs"]
+mod related_records;
+#[path = "strict_postgres_actions/stored_record.rs"]
+mod stored_record;
 use std::sync::Arc;
 
 use axum::{body::Body, http::Request, middleware::Next};

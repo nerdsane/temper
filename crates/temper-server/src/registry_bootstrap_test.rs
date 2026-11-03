@@ -112,8 +112,7 @@ fn populate_registry_merges_csdl_fragments_from_all_restored_rows() {
         &mut constraints,
         |row| Some(row.csdl_xml.clone()),
         |row| (row.entity_type.clone(), row.ioa_source.clone()),
-    )
-    .expect("restore should register tenant");
+    );
 
     let tenant = TenantId::new("default");
     assert!(registry.get_table(&tenant, "Order").is_some());
@@ -178,8 +177,7 @@ fn populate_registry_converts_a_stored_spec_in_the_old_syntax() {
         &mut BTreeMap::new(),
         |row| Some(row.csdl_xml.clone()),
         |row| (row.entity_type.clone(), row.ioa_source.clone()),
-    )
-    .expect("one bad stored spec must not fail the restore");
+    );
 
     let tenant = TenantId::new("default");
     assert_eq!(restored, 2);
@@ -222,8 +220,7 @@ fn populate_registry_skips_a_stored_spec_that_cannot_be_read() {
         &mut BTreeMap::new(),
         |row| Some(row.csdl_xml.clone()),
         |row| (row.entity_type.clone(), row.ioa_source.clone()),
-    )
-    .expect("one unreadable stored spec must not fail the restore");
+    );
 
     let tenant = TenantId::new("default");
     assert_eq!(restored, 1);

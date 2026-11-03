@@ -1,15 +1,18 @@
 //! Bounded joint-state verification entry point (ADR-0150).
 //!
-//! Ties the trigger graph, [`CompositeVerificationPlan`], and
-//! [`CompositeTemperModel`] together into an always-on cross-entity check:
+//! Ties the trigger graph, [`CompositeVerificationPlan`], and the joint
+//! model ([`super::joint`]) together into an always-on cross-entity check:
 //!
 //! 1. [`seed_cover`] picks one seed per weakly-connected component of the
 //!    entity trigger graph, so every entity is covered by exactly one plan
 //!    and no entity is left unverified.
-//! 2. [`verify_composite`] builds the plan + model for a seed and runs a
-//!    BFS bounded by a target state-count budget. If the budget is
-//!    exhausted before the space is, the result is marked
-//!    [`CompositeOutcome::Incomplete`] — never a silent pass.
+//! 2. [`verify_composite`] walks the joint model of the seed's component
+//!    (one record of each type, nothing sliced) breadth first, in the memory
+//!    its [`Room`](super::Room) gives it, as the joint checks do, and names
+//!    every reaction a target refuses when it lands. The dispatches a move
+//!    sends land, in any order, before the next move from outside. If the
+//!    walk does not fit before the space is exhausted, the result is marked
+//!    [`CompositeOutcome::Incomplete`], never a silent pass.
 //! 3. [`verify_all`] runs every seed and aggregates.
 //!
 //! Determinism: weakly-connected components are computed over `BTreeSet`s
@@ -19,20 +22,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use stateright::{Checker, Model};
 use temper_spec::automaton::{Automaton, TriggerGraph};
 
-use super::model::{CompositeTemperModel, DroppedReaction};
+use super::joint::{Bound, DroppedReaction, dropped_reactions};
 use super::{CompositePlanError, CompositeVerificationPlan};
-
-/// Default joint-state BFS budget (target unique-state count). The checker
-/// may slightly exceed it for performance, but stops near it; if the space
-/// is larger, the run is reported [`CompositeOutcome::Incomplete`].
-///
-/// Sized to comfortably cover small app compositions (a handful of entities,
-/// each with a few states + bounded counters) while bounding pathological
-/// products. Tune via [`verify_composite_with_budget`] when needed.
-pub const DEFAULT_COMPOSITE_STATE_BUDGET: usize = 250_000;
 
 /// Outcome of a bounded composite BFS run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,9 +34,10 @@ pub enum CompositeOutcome {
     Verified,
     /// At least one property (e.g. `no_dropped_reaction`) was violated.
     Violated,
-    /// BFS hit the state budget before exhausting the space. The proof is
-    /// partial: discovered violations are still real, but absence of a
-    /// violation does NOT mean the property holds. Never treated as a pass.
+    /// The walk did not fit in its memory before exhausting the space. The
+    /// proof is partial: discovered violations are still real, but absence
+    /// of a violation does NOT mean the property holds. Never treated as a
+    /// pass.
     Incomplete,
 }
 
@@ -68,12 +62,10 @@ pub struct CompositeVerifyResult {
     pub outcome: CompositeOutcome,
     /// Unique joint states explored.
     pub states_explored: usize,
-    /// Dropped-reaction counterexamples discovered (one per distinct drop
-    /// witnessed at the end of a counterexample path).
+    /// Each distinct dropped reaction found.
     pub dropped_reactions: Vec<DroppedReaction>,
-    /// Names of any other violated properties (e.g. a joint local
-    /// invariant), for completeness.
-    pub other_violations: Vec<String>,
+    /// Why the walk did not see every joint state, when it did not.
+    pub incomplete: Option<String>,
 }
 
 impl CompositeVerifyResult {
@@ -141,87 +133,45 @@ pub fn seed_cover(automatons: &[&Automaton]) -> Vec<String> {
     roots.into_iter().collect()
 }
 
-/// Verify the composite rooted at `seed` with the default state budget.
+/// Verify the composite rooted at `seed`, its walk taking memory from
+/// `bound`'s room. See [`CompositeOutcome::Incomplete`].
 pub fn verify_composite(
     automatons: &[&Automaton],
     seed: &str,
-) -> Result<CompositeVerifyResult, CompositePlanError> {
-    verify_composite_with_budget(automatons, seed, DEFAULT_COMPOSITE_STATE_BUDGET)
-}
-
-/// Verify the composite rooted at `seed`, bounding the BFS to roughly
-/// `state_budget` unique states. See [`CompositeOutcome::Incomplete`].
-pub fn verify_composite_with_budget(
-    automatons: &[&Automaton],
-    seed: &str,
-    state_budget: usize,
+    bound: Bound<'_>,
 ) -> Result<CompositeVerifyResult, CompositePlanError> {
     let plan = CompositeVerificationPlan::new(automatons, seed)?;
-    let scope: Vec<String> = plan.models.keys().cloned().collect();
-    let model = CompositeTemperModel::from_plan(plan);
-
-    let checker = model
-        .checker()
-        .target_state_count(state_budget)
-        .spawn_bfs()
-        .join();
-
-    let states_explored = checker.unique_state_count();
-    // The run is genuinely complete only when the checker exhausted the space
-    // WITHOUT the budget ever gating it. `is_done()` alone is unreliable here:
-    // a worker that stops on the state-count budget still drops its job-broker
-    // handle, which can flip `is_done()` true even though jobs remained. So we
-    // additionally require that exploration stayed strictly under the budget —
-    // if it reached the ceiling, the budget may have cut it short and we must
-    // report INCOMPLETE rather than claim a pass.
-    let property_complete = checker.is_done() && states_explored < state_budget;
-
-    // Collect every non-`no_dropped_reaction` property violation (e.g. a joint
-    // local invariant) from the Stateright run.
-    let mut other_violations = Vec::new();
-    for (property_name, _path) in checker.discoveries() {
-        if property_name != "no_dropped_reaction" {
-            other_violations.push(property_name.to_string());
-        }
-    }
-
-    // Enumerate EVERY distinct dropped reaction, not just the single
-    // counterexample Stateright surfaces — authors want to see all of them in
-    // one run. `enumerate_drops` walks the reachable joint space directly.
-    let model = checker.model();
-    let (dropped_reactions, drops_complete) = model.enumerate_drops(state_budget);
-
-    let is_complete = property_complete && drops_complete;
-    let has_violation = !dropped_reactions.is_empty() || !other_violations.is_empty();
-    let outcome = if has_violation {
+    let scope: BTreeSet<String> = plan.models.into_keys().collect();
+    let found = dropped_reactions(automatons, scope.clone(), bound);
+    let outcome = if !found.drops.is_empty() {
         CompositeOutcome::Violated
-    } else if is_complete {
+    } else if found.stopped.is_none() {
         CompositeOutcome::Verified
     } else {
         CompositeOutcome::Incomplete
     };
-
     Ok(CompositeVerifyResult {
         seed: seed.to_string(),
-        scope,
+        scope: scope.into_iter().collect(),
         outcome,
-        states_explored,
-        dropped_reactions,
-        other_violations,
+        states_explored: found.states,
+        dropped_reactions: found.drops,
+        incomplete: found.stopped,
     })
 }
 
 /// Run composite verification across the seed cover, returning one result
 /// per seed. The aggregate is gating: any [`CompositeOutcome::Violated`]
 /// fails; any [`CompositeOutcome::Incomplete`] is surfaced as a warning by
-/// the caller (the proof is partial, not a pass).
-pub fn verify_all(automatons: &[&Automaton]) -> Vec<CompositeVerifyResult> {
+/// the caller (the proof is partial, not a pass). Each seed's walk takes
+/// memory from `bound`'s room and gives it back when it ends.
+pub fn verify_all(automatons: &[&Automaton], bound: Bound<'_>) -> Vec<CompositeVerifyResult> {
     let seeds = seed_cover(automatons);
     let mut results = Vec::with_capacity(seeds.len());
     for seed in seeds {
-        match verify_composite(automatons, &seed) {
+        match verify_composite(automatons, &seed, bound) {
             Ok(result) => results.push(result),
-            Err(_) => {
+            Err(error) => {
                 // A seed that cannot build a plan (e.g. a trigger to an
                 // entity outside the supplied set) is reported as an
                 // incomplete result so the caller never reads it as a pass.
@@ -231,9 +181,7 @@ pub fn verify_all(automatons: &[&Automaton]) -> Vec<CompositeVerifyResult> {
                     outcome: CompositeOutcome::Incomplete,
                     states_explored: 0,
                     dropped_reactions: Vec::new(),
-                    other_violations: vec![
-                        "plan build failed (unknown trigger target?)".to_string(),
-                    ],
+                    incomplete: Some(error.to_string()),
                 });
             }
         }

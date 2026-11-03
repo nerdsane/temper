@@ -4,6 +4,7 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use temper_authz::{AuthenticatedRequestContext, SecurityContext};
 use temper_runtime::tenant::TenantId;
+use temper_server::platform_store::InstalledAppRecord;
 use tower::ServiceExt;
 
 use super::tenant_api_router;
@@ -64,10 +65,13 @@ async fn typed_admin_kind_does_not_bypass_platform_cedar() {
                     role: None,
                     acting_for: None,
                     agent_type: None,
+                    label: None,
                     attributes: Default::default(),
                 },
                 context_attrs: Default::default(),
                 correlation_id: "platform-admin-side-channel-test".to_string(),
+                cause: None,
+                credential: None,
             },
         ));
     let response = app.oneshot(request).await.expect("request should run");
@@ -302,4 +306,175 @@ async fn requested_install_denial_offers_decision_only_in_credential_tenant() {
             assert_eq!(decision.session_id.as_deref(), Some("install-session"));
         }
     }
+}
+
+fn installed_app(tenant: &str, app_name: &str, version_hash: &str) -> InstalledAppRecord {
+    InstalledAppRecord {
+        tenant: tenant.to_string(),
+        app_name: app_name.to_string(),
+        source_kind: "genesis".to_string(),
+        app_ref: format!("owner/{app_name}@{version_hash}"),
+        version_hash: version_hash.to_string(),
+        pinned_version_hash: version_hash.to_string(),
+        current_version_hash: version_hash.to_string(),
+        follow_policy: "pinned".to_string(),
+        status: "installed".to_string(),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn app_installs_lists_only_the_credential_tenants_apps() {
+    let db_path = format!("/tmp/temper-test-app-installs-{}.db", uuid::Uuid::new_v4());
+    let turso = temper_store_turso::TursoEventStore::new(&format!("file:{db_path}"), None)
+        .await
+        .expect("turso store");
+    let mut state = PlatformState::new(None);
+    state
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso));
+    let platform_store = state
+        .server
+        .storage_stack
+        .as_ref()
+        .and_then(|stack| stack.platform.clone())
+        .expect("platform store");
+    // Recorded out of name order: the route sorts by app name.
+    for record in [
+        installed_app("tenant-a", "beta-app", "fd62a5dc"),
+        installed_app("tenant-a", "alpha-app", "0a1b2c3d"),
+        installed_app("tenant-b", "alpha-app", "99999999"),
+    ] {
+        platform_store
+            .record_installed_app_metadata(&record)
+            .await
+            .expect("record installed app");
+    }
+    state
+        .server
+        .authz
+        .reload_tenant_policies(
+            "tenant-a",
+            r#"
+permit(
+  principal == Agent::"agent-1",
+  action == Action::"read_app_installs",
+  resource == AppInstall::"tenant-a"
+);
+"#,
+        )
+        .expect("install read policy should parse");
+    let app = tenant_api_router().with_state(state);
+
+    let response = app
+        .clone()
+        .oneshot(typed_request(
+            Method::GET,
+            "/genesis/apps/installs",
+            serde_json::Value::Null,
+            "tenant-a",
+        ))
+        .await
+        .expect("request should run");
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 1_000_000)
+        .await
+        .expect("body");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    let rows = body["value"].as_array().expect("value array");
+    let summary: Vec<(&str, &str, &str, &str)> = rows
+        .iter()
+        .map(|row| {
+            (
+                row["app_name"].as_str().expect("app_name"),
+                row["version_hash"].as_str().expect("version_hash"),
+                row["pinned_version_hash"]
+                    .as_str()
+                    .expect("pinned_version_hash"),
+                row["current_version_hash"]
+                    .as_str()
+                    .expect("current_version_hash"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            ("alpha-app", "0a1b2c3d", "0a1b2c3d", "0a1b2c3d"),
+            ("beta-app", "fd62a5dc", "fd62a5dc", "fd62a5dc"),
+        ],
+        "only tenant-a's apps, sorted by name, with the hashes each runs"
+    );
+    assert_eq!(rows[1]["app_ref"], "owner/beta-app@fd62a5dc");
+    assert_eq!(rows[1]["source_kind"], "genesis");
+    assert_eq!(rows[1]["follow_policy"], "pinned");
+    assert_eq!(rows[1]["status"], "installed");
+    assert!(rows[1]["installed_at"].is_string());
+
+    let unauthenticated = app
+        .clone()
+        .oneshot(
+            Request::get("/genesis/apps/installs")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should run");
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+    // tenant-b has no policy granting the read, so Cedar refuses it.
+    let unpermitted = app
+        .oneshot(typed_request(
+            Method::GET,
+            "/genesis/apps/installs",
+            serde_json::Value::Null,
+            "tenant-b",
+        ))
+        .await
+        .expect("request should run");
+    assert_eq!(unpermitted.status(), StatusCode::FORBIDDEN);
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(format!("{db_path}-wal"));
+    let _ = std::fs::remove_file(format!("{db_path}-shm"));
+}
+
+#[tokio::test]
+async fn an_install_from_a_registry_other_than_the_configured_one_is_refused() {
+    let state = PlatformState::new(None);
+    state
+        .server
+        .authz
+        .reload_tenant_policies(
+            "tenant-a",
+            r#"permit(principal, action == Action::"install_app", resource);"#,
+        )
+        .expect("install policy should parse");
+    let app = tenant_api_router().with_state(state);
+    // Whether or not this process has a registry configured, a registry_url
+    // that is not it is refused before anything is fetched.
+    let response = app
+        .oneshot(typed_request(
+            Method::POST,
+            "/genesis/apps/install",
+            serde_json::json!({
+                "tenant": "tenant-a",
+                "app_ref": "acme/notes@0123456789abcdef0123456789abcdef01234567",
+                "registry_url": "http://127.0.0.1:9/not-the-configured-registry",
+            }),
+            "tenant-a",
+        ))
+        .await
+        .expect("request should run");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let bytes = axum::body::to_bytes(response.into_body(), 1_000_000)
+        .await
+        .expect("body");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("TEMPER_GENESIS_REGISTRY_URL")),
+        "{body}"
+    );
 }

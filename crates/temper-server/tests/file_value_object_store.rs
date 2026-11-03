@@ -491,10 +491,11 @@ fn json_request(method: &str, uri: &str, body: serde_json::Value) -> Request<Bod
         .expect("request")
 }
 
-/// A File names only bytes this server stored: its `$value` PUT writes `content_hash`, and no caller does, even one
-/// whose Cedar lets it dispatch every action on Files. A hash of bytes it stored passes; any other is refused.
+/// A File names only bytes sent to it: its `$value` PUT writes `content_hash`, and no caller does, even one whose
+/// Cedar lets it dispatch every action on Files. A caller's StreamUpdated is refused whichever hash it names, the
+/// hash of another File's stored bytes included, so a File's `$value` is never another File's bytes.
 #[tokio::test]
-async fn a_files_content_hash_is_only_ever_the_hash_of_bytes_this_server_stored() {
+async fn a_files_content_hash_is_only_ever_the_hash_of_bytes_sent_to_it() {
     let mock = MockServer::start().await;
     Mock::given(method("PUT"))
         .and(path_regex("^/bucket/.*"))
@@ -540,68 +541,62 @@ async fn a_files_content_hash_is_only_ever_the_hash_of_bytes_this_server_stored(
         assert!(made.status().is_success(), "{id}: {}", made.status());
     }
 
-    // Another File pointed at bytes this server never stored: refused, and the File stays as it was.
+    // A caller's StreamUpdated is refused whatever it names: bytes this server never stored, another File's stored
+    // bytes, no hash at all. The File stays as it was, and its `$value` serves none of another File's bytes.
     let elsewhere = content_hash(b"bytes kept somewhere else");
     let size = stored.len();
     let ready = |hash: &str| json!({ "content_hash": hash, "size_bytes": size, "mime_type": "image/png", "version_number": 1, "previous_version_id": "", "created_by": "member" });
-    let refused = app
-        .clone()
-        .oneshot(json_request(
-            "POST",
-            "/tdata/Files('fl-pointed')/Temper.StreamUpdated",
-            ready(&elsewhere),
-        ))
-        .await
-        .expect("respond");
-    assert_eq!(refused.status(), StatusCode::CONFLICT);
-    let file = state
-        .get_tenant_entity_state(&TenantId::default(), "File", "fl-pointed")
-        .await
-        .expect("file");
-    let hash = file
-        .state
-        .fields
-        .get("content_hash")
-        .and_then(|h| h.as_str())
-        .unwrap_or_default();
-    assert_eq!(
-        (file.state.status.as_str(), hash),
-        ("Created", ""),
-        "never made Ready by a hash"
-    );
-
-    // Nor without a hash, or with another size than the stored bytes.
     let mut no_hash = ready("");
     no_hash
         .as_object_mut()
         .expect("object")
         .remove("content_hash");
-    let mut wrong_size = ready(&stored_hash);
-    wrong_size["size_bytes"] = json!(size + 1);
-    for (action, body) in [("StreamUpdated", no_hash), ("StreamUpdated", wrong_size)] {
-        let response = app
+    for (id, body) in [
+        ("fl-pointed", ready(&elsewhere)),
+        ("fl-copy", ready(&stored_hash)),
+        ("fl-pointed", no_hash),
+    ] {
+        let refused = app
             .clone()
             .oneshot(json_request(
                 "POST",
-                &format!("/tdata/Files('fl-pointed')/Temper.{action}"),
-                body,
+                &format!("/tdata/Files('{id}')/Temper.StreamUpdated"),
+                body.clone(),
             ))
             .await
             .expect("respond");
-        assert_eq!(response.status(), StatusCode::CONFLICT, "{action}");
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST, "{id} {body}");
+        let file = state
+            .get_tenant_entity_state(&TenantId::default(), "File", id)
+            .await
+            .expect("file");
+        let hash = file
+            .state
+            .fields
+            .get("content_hash")
+            .and_then(|h| h.as_str())
+            .unwrap_or_default();
+        assert_eq!(
+            (file.state.status.as_str(), hash),
+            ("Created", ""),
+            "{id} never made Ready by a hash"
+        );
     }
-
-    // A hash of bytes it did store passes: they are the File's own to name.
-    let passed = app
+    let copy_read = app
         .clone()
-        .oneshot(json_request(
-            "POST",
-            "/tdata/Files('fl-copy')/Temper.StreamUpdated",
-            ready(&stored_hash),
-        ))
+        .oneshot(
+            Request::get("/tdata/Files('fl-copy')/$value")
+                .header("x-test-principal", "member")
+                .body(Body::empty())
+                .expect("request"),
+        )
         .await
         .expect("respond");
-    assert!(passed.status().is_success(), "{}", passed.status());
+    assert_ne!(
+        copy_read.status(),
+        StatusCode::OK,
+        "no bytes were sent to fl-copy"
+    );
 
     // Neither a create nor a PATCH nor a PUT writes what the bytes decide.
     for (verb, uri, body) in [

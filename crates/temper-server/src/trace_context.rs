@@ -1,16 +1,53 @@
 //! One piece of work is one span in one trace.
 //!
-//! A request's work stays in the request's trace, including the work it queues
-//! for later: the queue keeps the trace context of the span that queued an item
-//! ([`capture`]), and the worker's span for that item continues it
+//! A request's work stays in the request's trace, including the bookkeeping it
+//! queues for later: the queue keeps the trace context of the span that queued
+//! an item ([`capture`]), and the worker's span for that item continues it
 //! ([`continue_in`]). Work that already runs inside a span never re-parents
 //! itself onto a context it was handed: a span is only ever in the trace it was
 //! created in, so nothing appears in two traces and no trace has two roots.
-//! Work that belongs to a different trace (an agent workflow, a late callback)
-//! is connected with span links instead ([`link_both`], [`link_if_other_trace`]).
+//!
+//! Work the runtime starts on its own, after the move that caused it (a state
+//! timer, a scheduled action, a spawned record, a background reaction, an
+//! integration and the callback it dispatches), is a trace of its own: its first
+//! span has no parent and links to the move that caused it
+//! ([`runtime_work_span!`]). The trace ends, and its root is exported, when that
+//! piece of work ends, so a record that keeps moving makes many short traces,
+//! each linked to the move before it, instead of one trace that grows with every
+//! later move.
 
 use opentelemetry::trace::{SpanContext, TraceContextExt};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+/// Open the root span of work the runtime starts on its own:
+/// `runtime_work_span!(cause, "span.name", fields...)`.
+///
+/// The span has no parent, so the work is its own trace, exported when the work
+/// ends. It links to `cause`, a [`SpanContext`] taken with [`cause`] where the
+/// work was handed off: the span of the move that started it. Create the span
+/// when the work starts (after a timer's wait, not before), so its duration is
+/// the work's.
+macro_rules! runtime_work_span {
+    ($cause:expr, $name:literal $(, $($field:tt)*)?) => {{
+        let span = ::tracing::info_span!(parent: None, $name $(, $($field)*)?);
+        $crate::trace_context::link_cause(&span, &$cause);
+        span
+    }};
+}
+pub(crate) use runtime_work_span;
+
+/// The span of the move that is handing off work, for the work's own trace to
+/// link back to. Invalid when no span is active (a timer armed at boot).
+pub(crate) fn cause() -> SpanContext {
+    span_context(&tracing::Span::current())
+}
+
+/// Link the root span of runtime-started work to the move that caused it.
+pub(crate) fn link_cause(span: &tracing::Span, cause: &SpanContext) {
+    if cause.is_valid() {
+        span.add_link(cause.clone());
+    }
+}
 
 /// The current span's trace context, to be continued by work that runs later on
 /// another task.
@@ -23,27 +60,6 @@ pub(crate) fn capture() -> opentelemetry::Context {
 pub(crate) fn continue_in(span: &tracing::Span, parent: &opentelemetry::Context) {
     if parent.span().span_context().is_valid() {
         span.set_parent(parent.clone());
-    }
-}
-
-/// Link two spans of different traces to each other.
-pub(crate) fn link_both(a: &tracing::Span, b: &tracing::Span) {
-    let (a_context, b_context) = (span_context(a), span_context(b));
-    if b_context.is_valid() {
-        a.add_link(b_context);
-    }
-    if a_context.is_valid() {
-        b.add_link(a_context);
-    }
-}
-
-/// Link `span` to `remote` when `remote` is a span of another trace. `span`
-/// keeps its own parent.
-pub(crate) fn link_if_other_trace(span: &tracing::Span, remote: &opentelemetry::Context) {
-    let remote = remote.span().span_context().clone();
-    let own = span_context(span);
-    if remote.is_valid() && own.is_valid() && remote.trace_id() != own.trace_id() {
-        span.add_link(remote);
     }
 }
 

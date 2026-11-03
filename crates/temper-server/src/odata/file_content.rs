@@ -1,15 +1,13 @@
-//! What a File (and a FileVersion) says of its bytes comes from bytes this server stored. Its `$value` PUT hashes the
-//! bytes it keeps and writes `content_hash`, `size_bytes` and `has_content` itself; a read then fetches the bytes
-//! stored under that hash. So no caller writes those fields: a create, PATCH or PUT naming one is refused, a bound
-//! action that carries a `content_hash` (`File.StreamUpdated`, `FileVersion.Create`) must name bytes this server
-//! stored for the tenant, with their size, and any other bound action names none of them.
+//! What a File (and a FileVersion) says of its bytes comes from bytes this server stored for it. Its `$value` PUT
+//! hashes the bytes it keeps and records `content_hash`, `size_bytes` and `has_content` with `File.StreamUpdated`,
+//! which the server dispatches itself; a read then fetches the bytes stored under that hash. So no caller writes
+//! those fields: a create, PATCH or PUT naming one is refused, a caller's bound `File.StreamUpdated` is refused, and
+//! any other bound action names none of them. A File's `$value` is then only ever bytes sent to that File.
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use temper_runtime::tenant::TenantId;
 
 use crate::response::odata_error;
-use crate::state::ServerState;
 
 /// The fields only a File's stored bytes decide.
 const CONTENT_FIELDS: [&str; 3] = ["content_hash", "has_content", "size_bytes"];
@@ -43,12 +41,9 @@ pub(super) fn refuse_content_fields(
     })
 }
 
-/// A bound action on a File or FileVersion that says what its bytes are: refused unless they are bytes this server
-/// stored. `File.StreamUpdated` and `FileVersion.Create` may name a `content_hash` of stored bytes, with their
-/// `size_bytes` when the store knows it; `StreamUpdated` must name one. Any other action names none of the fields.
-pub(super) async fn refuse_caller_content(
-    state: &ServerState,
-    tenant: &TenantId,
+/// A caller's bound action on a File or FileVersion. `File.StreamUpdated` is the server's own record of bytes a
+/// `$value` PUT stored, so a caller's is refused; any other action names none of the content fields.
+pub(super) fn refuse_caller_content(
     entity_type: &str,
     action: &str,
     body: &serde_json::Value,
@@ -57,64 +52,17 @@ pub(super) async fn refuse_caller_content(
         return None;
     }
     let action = action.rsplit('.').next().unwrap_or(action);
-    if !matches!(
-        (entity_type, action),
-        ("File", "StreamUpdated") | ("FileVersion", "Create")
-    ) {
-        return refuse_content_fields(entity_type, body);
-    }
-    let not_stored = |why: String| {
-        Some(
+    if (entity_type, action) == ("File", "StreamUpdated") {
+        return Some(
             odata_error(
-                StatusCode::CONFLICT,
-                "FileBytesNotStored",
-                &format!("{why}; a File's bytes come from its $value PUT"),
+                StatusCode::BAD_REQUEST,
+                "FileContentFields",
+                "File.StreamUpdated is recorded by the File's $value PUT, which stores the bytes; send the bytes there instead",
             )
             .into_response(),
-        )
-    };
-    if body.get("has_content").is_some() {
-        return not_stored(format!("{entity_type}.{action} does not take has_content"));
+        );
     }
-    let hash = body
-        .get("content_hash")
-        .and_then(|hash| hash.as_str())
-        .unwrap_or_default();
-    if hash.is_empty() {
-        if entity_type == "File" {
-            return not_stored(
-                "File.StreamUpdated needs the content_hash of bytes this server stored".to_string(),
-            );
-        }
-        return refuse_content_fields(entity_type, body);
-    }
-    let stored = match state.stored_file_bytes(tenant, hash).await {
-        Ok(Some(stored)) => stored,
-        Ok(None) => {
-            return not_stored(format!(
-                "{entity_type}.{action} names content_hash '{hash}', and this server stored no such bytes for this tenant"
-            ));
-        }
-        Err(error) => {
-            return Some(
-                odata_error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "FileStoreUnavailable",
-                    &error,
-                )
-                .into_response(),
-            );
-        }
-    };
-    let said = body
-        .get("size_bytes")
-        .and_then(|size| size.as_u64().or_else(|| size.as_str()?.parse().ok()));
-    match stored.size {
-        Some(size) if said != Some(size) => not_stored(format!(
-            "{entity_type}.{action} must say size_bytes {size}, the size of the stored bytes"
-        )),
-        _ => None,
-    }
+    refuse_content_fields(entity_type, body)
 }
 
 #[cfg(test)]
@@ -147,6 +95,29 @@ mod tests {
         // Any other type keeps its own fields of those names.
         assert!(
             refuse_content_fields("Picture", &serde_json::json!({ "content_hash": "x" })).is_none()
+        );
+    }
+
+    #[test]
+    fn a_callers_stream_updated_is_refused_whatever_it_names() {
+        let refused = refuse_caller_content(
+            "File",
+            "Temper.StreamUpdated",
+            &serde_json::json!({ "content_hash": "sha256:00", "size_bytes": 1 }),
+        )
+        .expect("refused");
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        // Other bound actions are refused only when they name a content field.
+        assert!(
+            refuse_caller_content("File", "Lock", &serde_json::json!({ "reason": "x" })).is_none()
+        );
+        assert!(
+            refuse_caller_content(
+                "FileVersion",
+                "Create",
+                &serde_json::json!({ "content_hash": "sha256:00" })
+            )
+            .is_some()
         );
     }
 }

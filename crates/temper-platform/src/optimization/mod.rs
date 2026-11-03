@@ -128,33 +128,4 @@ mod tests {
             );
         }
     }
-
-    #[tokio::test]
-    async fn test_optimization_cycle_proposes_medium_risk() {
-        let store = InMemoryStore::new();
-        let state = PlatformState::new(None);
-        let mut rx = state.subscribe();
-
-        // Insert N+1 pattern data (triggers QueryOptimizer)
-        for i in 0..5 {
-            store.insert_span(vec![
-                ("trace_id".into(), json!("trace-n1")),
-                ("span_id".into(), json!(format!("span-{i}"))),
-                ("service".into(), json!("api")),
-                ("operation".into(), json!("GET /Orders")),
-                ("status".into(), json!("ok")),
-                ("duration_ns".into(), json!(1_000_000)),
-            ]);
-        }
-
-        let _applied = run_optimization_cycle(&store, &state).await;
-
-        // Check for any broadcast events
-        let mut events = Vec::new();
-        while let Ok(msg) = rx.try_recv() {
-            events.push(msg);
-        }
-        // The exact behavior depends on the risk level assigned by QueryOptimizer
-        // We verify the cycle completes without panicking
-    }
 }

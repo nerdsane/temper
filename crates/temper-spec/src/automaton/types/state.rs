@@ -214,6 +214,9 @@ pub enum ActionParam {
 pub enum ParameterSource {
     /// Verified delegated subject when present, otherwise the principal ID.
     AuthenticatedSubject,
+    /// The name its issuer gave the calling agent instance, so a record can
+    /// keep who made it. Empty for a person in person and an agent with none.
+    AuthenticatedAgentLabel,
 }
 
 #[derive(Deserialize)]
