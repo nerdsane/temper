@@ -262,7 +262,7 @@ impl ServerState {
                 if row.due_at != due_at
                     && let Some(due_at) = due_at
                 {
-                    undated.push((store.clone(), row, due_at));
+                    undated.push((store.clone(), row.clone(), due_at));
                 }
                 if is_state_timer_service(&timer.agent_ctx) {
                     // Armed for no one. The walk after this arms it, as the

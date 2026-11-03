@@ -351,7 +351,11 @@ async fn a_batch_commits_timer_resets_and_ends_or_none_of_its_rows() {
     let reset = arm("one", 2);
     let refused = store
         .append_batch(&[
-            append("one", 1, Some(AppendStateTimer::Arm(Box::new(reset.clone())))),
+            append(
+                "one",
+                1,
+                Some(AppendStateTimer::Arm(Box::new(reset.clone()))),
+            ),
             append("two", 0, Some(AppendStateTimer::End)),
         ])
         .await;
@@ -373,7 +377,11 @@ async fn a_batch_commits_timer_resets_and_ends_or_none_of_its_rows() {
     );
     store
         .append_batch(&[
-            append("one", 1, Some(AppendStateTimer::Arm(Box::new(reset.clone())))),
+            append(
+                "one",
+                1,
+                Some(AppendStateTimer::Arm(Box::new(reset.clone()))),
+            ),
             append("two", 1, Some(AppendStateTimer::End)),
         ])
         .await

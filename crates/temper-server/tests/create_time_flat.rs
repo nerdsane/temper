@@ -17,7 +17,7 @@
 //! runner made the wall-clock medians 0.48 ms and 1.75 ms with no walk).
 //! Medians of 200 creates keep one slow create from deciding it.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use temper_runtime::ActorSystem;
 use temper_runtime::tenant::TenantId;
