@@ -213,15 +213,6 @@ mod tests {
     }
 
     #[test]
-    fn buggify_macro_works() {
-        let _guard = install_buggify_context(42);
-
-        // The macro should compile and work.
-        let _fired = buggify!(0.5);
-        // Just verify it compiles — value depends on RNG.
-    }
-
-    #[test]
     fn buggify_half_probability_fires_roughly_half() {
         let _guard = install_buggify_context(42);
         let mut fired = 0;

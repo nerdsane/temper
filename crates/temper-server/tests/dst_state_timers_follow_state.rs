@@ -3,14 +3,17 @@
 //! Workload, per seed: records in three tenants enter `Waiting`, timed in
 //! `alpha` and `beta` and untimed in `gamma`; some are poked, deleted,
 //! passivated and rehydrated. An install then changes two specs: `alpha`'s,
-//! under which replay lands its records in another timed state (`Start` now
-//! goes to `Review`, not `Waiting`), and `gamma`'s, which gains the timeouts.
-//! In some seeds the process stops before the install's walk reaches `gamma`.
-//! The server restarts, so records that were never snapshotted replay into
-//! the new state while their timer rows still name the old one, and `gamma`'s
-//! records may have no row at all.
+//! whose `Start` now goes to `Review` and whose `Waiting` timer has another
+//! budget, and `gamma`'s, which gains the timeouts. Records that already
+//! started keep their stored `Waiting` on replay, so their timers must follow
+//! `Waiting`'s new declaration and never `Review`'s. In some seeds the process
+//! stops before the install's walk reaches `gamma`. The server restarts, so
+//! records that were never snapshotted replay under the new specs, and
+//! `gamma`'s records may have no row at all.
 //!
 //! Invariants:
+//! - the boot arms every record it finds in a timed state with no row, and
+//!   leaves none waiting;
 //! - after a record rehydrates, it has exactly one armed timer row, for its
 //!   current state, when that state declares a timeout, and none otherwise
 //!   (none for a deleted record);
@@ -28,16 +31,35 @@
 //!
 //! Two more workloads share this world: `boot_burst` (the timers a boot finds
 //! due fire a few at a time) and `delete_race` (a delete while timer rows are
-//! still landing leaves no row).
+//! still landing leaves no row). So do two regressions: `read_failure` (an
+//! install walk retries a record it could not read) and `unanswered_fire` (a
+//! timer whose fire got no answer is tried again until it lands; a refused
+//! one is not).
 
 #[path = "dst_state_timers_follow_state/boot_burst.rs"]
 mod boot_burst;
+#[path = "dst_state_timers_follow_state/boot_listing_retry.rs"]
+mod boot_listing_retry;
+#[path = "dst_state_timers_follow_state/boot_logging.rs"]
+mod boot_logging;
 #[path = "dst_state_timers_follow_state/delete_race.rs"]
 mod delete_race;
 #[path = "dst_state_timers_follow_state/embedder.rs"]
 mod embedder;
+#[path = "dst_state_timers_follow_state/final_denials.rs"]
+mod final_denials;
 #[path = "dst_state_timers_follow_state/invariants.rs"]
 mod invariants;
+#[path = "dst_state_timers_follow_state/late_reconcile.rs"]
+mod late_reconcile;
+#[path = "dst_state_timers_follow_state/process_clock.rs"]
+mod process_clock;
+#[path = "dst_state_timers_follow_state/slow_store.rs"]
+mod slow_store;
+#[path = "dst_state_timers_follow_state/slow_store_env.rs"]
+mod slow_store_env;
+#[path = "dst_state_timers_follow_state/specs.rs"]
+mod specs;
 #[path = "dst_state_timers_follow_state/world.rs"]
 mod world;
 
@@ -46,7 +68,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use invariants::{check_all_done, check_boot_counts, check_rows_follow_state, check_seeds};
+use process_clock::ProcessClock;
 use serde_json::json;
+use specs::{CSDL, JOB_V1, install, job_untimed, job_v2, timer_action};
 use temper_runtime::ActorSystem;
 use temper_runtime::scheduler::{DeterministicIdGen, DeterministicRng, install_sim_context};
 use temper_runtime::tenant::TenantId;
@@ -56,100 +80,12 @@ use temper_server::state::BootTimers;
 use temper_server::{ServerState, StorageStack};
 use temper_spec::csdl::parse_csdl;
 use temper_store_sim::SimEventStore;
-use world::{ProcessClock, SimTimerRows};
+use world::SimTimerRows;
 
 const SEEDS: u64 = 48;
 
-/// The first spec: `Start` enters `Waiting`. `Expire` and `Approve` are
-/// accepted from every live state, so a timer that fired outside its state
-/// would leave an event saying so instead of being refused.
-const JOB_V1: &str = r#"
-[automaton]
-name = "Job"
-states = ["Idle", "Waiting", "Review", "Done"]
-initial = "Idle"
-allow_indefinite_states = ["Idle", "Done"]
-
-[[action]]
-name = "Start"
-from = ["Idle"]
-to = "Waiting"
-
-[[action]]
-name = "Poke"
-from = ["Waiting", "Review"]
-
-[[action]]
-name = "Expire"
-from = ["Waiting", "Review", "Done"]
-to = "Done"
-
-[[action]]
-name = "Approve"
-from = ["Waiting", "Review", "Done"]
-to = "Done"
-
-[[state_timeout]]
-state = "Waiting"
-after_seconds = 3600
-on_timeout = "Expire"
-
-[[state_timeout]]
-state = "Review"
-after_seconds = 1800
-on_timeout = "Approve"
-"#;
-
-const CSDL: &str = r#"<?xml version="1.0"?>
-<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
-<edmx:DataServices><Schema Namespace="Jobs" xmlns="http://docs.oasis-open.org/odata/ns/edm">
-<EntityType Name="Job"><Key><PropertyRef Name="Id"/></Key>
-<Property Name="Id" Type="Edm.String" Nullable="false"/>
-</EntityType>
-<Action Name="Start" IsBound="true"><Parameter Name="bindingParameter" Type="Jobs.Job"/></Action>
-<Action Name="Poke" IsBound="true"><Parameter Name="bindingParameter" Type="Jobs.Job"/></Action>
-<Action Name="Expire" IsBound="true"><Parameter Name="bindingParameter" Type="Jobs.Job"/></Action>
-<Action Name="Approve" IsBound="true"><Parameter Name="bindingParameter" Type="Jobs.Job"/></Action>
-<EntityContainer Name="Container"><EntitySet Name="Jobs" EntityType="Jobs.Job"/></EntityContainer>
-</Schema></edmx:DataServices></edmx:Edmx>"#;
-
-/// `Job` with no timeout: records wait in `Waiting` and `Review` for good.
-fn job_untimed() -> String {
-    let untimed = JOB_V1[..JOB_V1.find("[[state_timeout]]").unwrap()].to_string();
-    untimed.replacen(
-        "allow_indefinite_states = [\"Idle\", \"Done\"]",
-        "allow_indefinite_states = [\"Idle\", \"Waiting\", \"Review\", \"Done\"]",
-        1,
-    )
-}
-
-/// The second spec: replay of a stored `Start` now lands in `Review`.
-fn job_v2() -> String {
-    JOB_V1.replacen(
-        "from = [\"Idle\"]\nto = \"Waiting\"",
-        "from = [\"Idle\"]\nto = \"Review\"",
-        1,
-    )
-}
-
 /// The tenants of the workload: `gamma` starts with [`job_untimed`].
 const TENANTS: [&str; 3] = ["alpha", "beta", "gamma"];
-
-/// Install `spec` as `tenant`'s `Job`, replacing the one it had.
-fn install(state: &ServerState, tenant: &str, spec: &str) {
-    let mut registry = state.registry.write().unwrap();
-    let csdl = parse_csdl(CSDL).unwrap();
-    registry.register_tenant(tenant, csdl, CSDL.to_string(), &[("Job", spec)]);
-}
-
-/// The declared timer of each state: the action it fires.
-fn timer_action(state: &str) -> Option<&'static str> {
-    match state {
-        "Waiting" => Some("Expire"),
-        "Review" => Some("Approve"),
-        _ => None,
-    }
-}
 
 /// What outlives a process: the journal, the timer rows and the clock.
 struct World {
@@ -262,7 +198,8 @@ struct Run {
     trace: Vec<String>,
     deleted: BTreeSet<(String, String)>,
     /// Records in a timed state that nothing armed: no dispatch since their
-    /// type gained its timeouts, and no install walk. They wait, with no row.
+    /// type gained its timeouts, and no install walk. They have no row until
+    /// their next action or the next boot arms them.
     unarmed: BTreeSet<(String, String)>,
 }
 
@@ -385,7 +322,7 @@ fn run_seed(seed: u64) -> Result<(), String> {
             state
                 .get_or_create_tenant_entity(&job.tenant, "Job", &job.id, json!({}))
                 .await
-                .map_err(|error| run.fail("records are created", error))?;
+                .map_err(|error| run.fail("records are created", error.to_string()))?;
             if !act(state, job, "Start").await {
                 return Err(run.fail("records start", format!("{}/{}", job.tenant, job.id)));
             }
@@ -427,7 +364,8 @@ fn run_seed(seed: u64) -> Result<(), String> {
             // The process stops before the install's walk reaches gamma.
             install(state, "gamma", JOB_V1);
             state.registry.write().unwrap().take_changed_types();
-            // Nothing armed gamma's records: they wait until their next action.
+            // Nothing armed gamma's records: they have no row until their next
+            // action or the next boot.
             for job in &jobs {
                 if job.tenant.as_str() == "gamma" && !run.is_deleted(job) {
                     run.unarmed.insert((job.tenant.to_string(), job.id.clone()));
@@ -477,12 +415,13 @@ fn run_seed(seed: u64) -> Result<(), String> {
     first.kill(&world, downtime);
 
     let second = Process::start(&world, &v2, JOB_V1, &format!("follow-{seed}-b"));
+    // The boot arms the records the install's walk never reached.
+    run.unarmed.clear();
     second.runtime.block_on(async {
         let state = &second.state;
-        check_boot_counts(&second.booted, &jobs, &run)?;
+        check_boot_counts(&second.booted, &run)?;
         check_rows_follow_state(state, &world, &jobs, &run, "after the restart").await?;
-        // A read rehydrates a record: one with a row follows its state, one
-        // without stays unarmed.
+        // A read rehydrates a record, which follows its state.
         let looked: Vec<Job> = jobs.iter().filter(|_| rng.chance(0.4)).cloned().collect();
         run.note(format!(
             "rehydrated {:?}",
@@ -507,6 +446,8 @@ fn run_seed(seed: u64) -> Result<(), String> {
 
 #[path = "dst_state_timers_follow_state/read_failure.rs"]
 mod read_failure;
+#[path = "dst_state_timers_follow_state/unanswered_fire.rs"]
+mod unanswered_fire;
 
 #[test]
 fn dst_state_timers_follow_the_current_state() {

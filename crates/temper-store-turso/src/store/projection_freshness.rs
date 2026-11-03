@@ -7,7 +7,8 @@ use tracing::instrument;
 use super::TursoEventStore;
 
 /// Every catalog row of one entity type, with `1` when no journal event is
-/// newer than the projected sequence and `0` when one is: a committed change
+/// newer than the projected sequence (the catalog row's, or a newer unchanged
+/// projection's in `entity_catalog_counters`) and `0` when one is: a committed change
 /// whose projection has not landed, or the entity's tombstone. Each `EXISTS`
 /// probe is one seek on `idx_events_entity`. The third column is the row's
 /// projected fields when they hold a `fields` object, which the field index
@@ -15,6 +16,8 @@ use super::TursoEventStore;
 const CATALOG_FRESHNESS_SQL: &str = "\
 SELECT c.entity_id, 1, CASE WHEN json_type(c.fields, '$.fields') = 'object' THEN c.fields END
     FROM entity_catalog c
+    LEFT JOIN entity_catalog_counters k
+      ON k.tenant = c.tenant AND k.entity_type = c.entity_type AND k.entity_id = c.entity_id
     WHERE c.tenant = ?1
       AND c.entity_type = ?2
       AND NOT EXISTS (
@@ -23,11 +26,13 @@ SELECT c.entity_id, 1, CASE WHEN json_type(c.fields, '$.fields') = 'object' THEN
         WHERE e.tenant = c.tenant
           AND e.entity_type = c.entity_type
           AND e.entity_id = c.entity_id
-          AND e.sequence_nr > c.sequence_nr
+          AND e.sequence_nr > COALESCE(k.sequence_nr, c.sequence_nr)
       )
 UNION ALL
 SELECT c.entity_id, 0, CASE WHEN json_type(c.fields, '$.fields') = 'object' THEN c.fields END
     FROM entity_catalog c
+    LEFT JOIN entity_catalog_counters k
+      ON k.tenant = c.tenant AND k.entity_type = c.entity_type AND k.entity_id = c.entity_id
     WHERE c.tenant = ?1
       AND c.entity_type = ?2
       AND EXISTS (
@@ -36,7 +41,7 @@ SELECT c.entity_id, 0, CASE WHEN json_type(c.fields, '$.fields') = 'object' THEN
         WHERE e.tenant = c.tenant
           AND e.entity_type = c.entity_type
           AND e.entity_id = c.entity_id
-          AND e.sequence_nr > c.sequence_nr
+          AND e.sequence_nr > COALESCE(k.sequence_nr, c.sequence_nr)
       )";
 
 impl TursoEventStore {

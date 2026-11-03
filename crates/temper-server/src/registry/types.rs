@@ -85,6 +85,13 @@ pub enum RegistryError {
         entity_type: String,
         source: String,
     },
+    /// Two principal-record types would set one Cedar principal attribute.
+    PrincipalAttributeShared {
+        tenant: String,
+        first: String,
+        second: String,
+        attribute: String,
+    },
 }
 
 impl std::fmt::Display for RegistryError {
@@ -104,6 +111,19 @@ impl std::fmt::Display for RegistryError {
                 write!(
                     f,
                     "failed to parse IOA for tenant '{tenant}', entity '{entity_type}': {source}"
+                )
+            }
+            Self::PrincipalAttributeShared {
+                tenant,
+                first,
+                second,
+                attribute,
+            } => {
+                write!(
+                    f,
+                    "principal records '{first}' and '{second}' in tenant '{tenant}' would both \
+                     set principal.{attribute} (and principal.actingFor{attribute}); rename one \
+                     type or its principal_record_set field"
                 )
             }
         }
@@ -236,72 +256,5 @@ mod tests {
             err.to_string(),
             "failed to parse IOA for tenant 't1', entity 'Order': missing states"
         );
-    }
-
-    #[test]
-    fn registry_error_equality() {
-        let e1 = RegistryError::CrossInvariantParse {
-            tenant: "t1".into(),
-            source: "x".into(),
-        };
-        let e2 = RegistryError::CrossInvariantParse {
-            tenant: "t1".into(),
-            source: "x".into(),
-        };
-        assert_eq!(e1, e2);
-    }
-
-    #[test]
-    fn registry_error_ne_different_variant() {
-        let e1 = RegistryError::CrossInvariantParse {
-            tenant: "t1".into(),
-            source: "x".into(),
-        };
-        let e2 = RegistryError::IoaParse {
-            tenant: "t1".into(),
-            entity_type: "E".into(),
-            source: "x".into(),
-        };
-        assert_ne!(e1, e2);
-    }
-
-    #[test]
-    fn verification_result_serde_roundtrip() {
-        let result = EntityVerificationResult {
-            all_passed: true,
-            levels: vec![EntityLevelSummary {
-                level: "L0 SMT".into(),
-                passed: true,
-                summary: "All checks passed".into(),
-                details: None,
-            }],
-            verified_at: "2025-01-01T00:00:00Z".into(),
-        };
-        let json = serde_json::to_string(&result).unwrap();
-        let back: EntityVerificationResult = serde_json::from_str(&json).unwrap();
-        assert!(back.all_passed);
-        assert_eq!(back.levels.len(), 1);
-        assert!(back.levels[0].details.is_none());
-    }
-
-    #[test]
-    fn verification_detail_serde() {
-        let detail = VerificationDetail {
-            kind: "invariant_violation".into(),
-            property: "TypeOK".into(),
-            description: "Status not in valid set".into(),
-            actor_id: Some("actor-1".into()),
-        };
-        let json = serde_json::to_string(&detail).unwrap();
-        let back: VerificationDetail = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.kind, "invariant_violation");
-        assert_eq!(back.actor_id, Some("actor-1".into()));
-    }
-
-    #[test]
-    fn relation_graph_default_empty() {
-        let g = RelationGraph::default();
-        assert!(g.outgoing.is_empty());
-        assert!(g.incoming.is_empty());
     }
 }

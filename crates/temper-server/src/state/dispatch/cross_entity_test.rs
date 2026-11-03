@@ -171,7 +171,7 @@ to = "Locked"
 /// resolve the related entities, build the evaluation context, evaluate.
 async fn submit_guard_passes(state: &ServerState, tenant: &TenantId) -> bool {
     let related = state
-        .resolve_cross_entity_guards(tenant, "Doc", "doc-1", "Submit")
+        .resolve_related_statuses(tenant, "Doc", "doc-1", "Submit")
         .await;
     let current = state
         .get_tenant_entity_state(tenant, "Doc", "doc-1")

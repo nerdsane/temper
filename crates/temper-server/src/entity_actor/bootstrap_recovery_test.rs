@@ -91,7 +91,7 @@ async fn skipped_history_does_not_append_a_fresh_bootstrap_on_restart() {
 }
 
 #[tokio::test]
-async fn round_four_recovery_does_not_invent_new_declared_fields() {
+async fn round_four_recovery_stores_no_declared_value_and_reads_its_initial() {
     let table = TransitionTable::from_ioa_source(
         r#"
 [automaton]
@@ -132,14 +132,26 @@ constraints = [{ kind="param_equals_field", param="expected", field="revision" }
         !recovered.counters.contains_key("revision"),
         "replay invented a declaration default"
     );
+    // The constraint reads the missing counter as its declared initial value.
     let mut recovered = recovered;
-    let refused = crate::entity_actor::effects::process_action(
+    let stale = crate::entity_actor::effects::process_action(
+        &mut recovered,
+        &table,
+        "Advance",
+        &serde_json::json!({"expected":0}),
+    );
+    assert!(!stale.success, "a missing counter read as its type's zero");
+    let advanced = crate::entity_actor::effects::process_action(
         &mut recovered,
         &table,
         "Advance",
         &serde_json::json!({"expected":7}),
     );
-    assert!(!refused.success, "new default became stored authority");
+    assert!(advanced.success, "{:?}", advanced.error);
+    assert!(
+        !recovered.counters.contains_key("revision"),
+        "a read wrote the declared value into the record"
+    );
 }
 
 #[tokio::test]
@@ -318,8 +330,6 @@ async fn closed_cached_actor_recovers_once_after_journal_outage() {
         StorageStack::new(
             BackendLabel::Turso,
             store,
-            None,
-            None,
             None,
             None,
             None,

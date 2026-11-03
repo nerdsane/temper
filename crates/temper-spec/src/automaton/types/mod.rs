@@ -8,11 +8,15 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 mod action;
+mod carry;
+mod group;
 mod state;
 mod trigger;
 mod webhook;
 
 pub use action::*;
+pub use carry::*;
+pub use group::*;
 pub use state::*;
 pub use trigger::*;
 pub use webhook::*;
@@ -29,7 +33,26 @@ pub fn is_server_derived_field_name(name: &str) -> bool {
     matches!(
         name,
         "Id" | "id" | "Status" | "status" | "has_spec" | "HasSpec"
-    ) || is_server_derived_context_status_name(name)
+    ) || is_event_metadata_field(name)
+        || is_server_derived_context_status_name(name)
+}
+
+/// What the kernel keeps of a record's events, read at the top of the record
+/// and never from an app's fields.
+pub const EVENT_METADATA_FIELDS: [&str; 8] = [
+    "first_event_at",
+    "last_event_at",
+    "last_event_via",
+    "last_event_by",
+    "last_event_for",
+    "last_event_agent_type",
+    "last_event_label",
+    "timer_needs_person",
+];
+
+/// Whether `name` is one of the [`EVENT_METADATA_FIELDS`].
+pub fn is_event_metadata_field(name: &str) -> bool {
+    EVENT_METADATA_FIELDS.contains(&name)
 }
 
 /// Return whether a field is in the server-derived context-status namespace.
@@ -52,6 +75,9 @@ pub struct Automaton {
     /// Safety invariants (must always hold).
     #[serde(default, rename = "invariant")]
     pub invariants: Vec<Invariant>,
+    /// Rules every move into a place must meet as it fires.
+    #[serde(default, rename = "entry_rule")]
+    pub entry_rules: Vec<EntryRule>,
     /// Liveness properties (something eventually happens).
     #[serde(default, rename = "liveness")]
     pub liveness: Vec<Liveness>,
@@ -85,11 +111,19 @@ pub struct Automaton {
     /// Empty when the spec declared no `[[vector]]`.
     #[serde(default, rename = "vector")]
     pub vectors: Vec<VectorDecl>,
+    /// Where this version moves stored records it would otherwise leave with
+    /// no way forward (see [`Carry`]).
+    #[serde(default, rename = "carry")]
+    pub carries: Vec<Carry>,
     /// Admission control caps (ADR-0051). When present, the dispatch layer
     /// gates concurrent calls per `(tenant, entity_type, action)` before
     /// reaching the actor.
     #[serde(default)]
     pub admission: Option<Admission>,
+    /// State groups for drawing the spec as a statechart, flat and in source
+    /// order; nesting is by name. Labels only.
+    #[serde(default, rename = "group")]
+    pub groups: Vec<Group>,
 }
 
 /// ADR-0153: a declared unique key (alternate key) on an entity. `properties`
@@ -153,6 +187,18 @@ pub struct AutomatonMeta {
     /// them in `from`.
     #[serde(default)]
     pub terminal: Vec<String>,
+    /// A record of this type whose id is a user's `sub` describes that user:
+    /// Cedar sees its status on the principal, as `principal.<Type>` when the
+    /// user calls in person and `principal.actingFor<Type>` when an agent
+    /// calls for them, read from the record's actor on every request.
+    #[serde(default)]
+    pub principal_record: bool,
+    /// A list state variable of a `principal_record` type whose items Cedar
+    /// also sees on the principal, as a set: `principal.<Type>_<field>` in
+    /// person and `principal.actingFor<Type>_<field>` for an agent's user,
+    /// such as the roles one person holds in an app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal_record_set: Option<String>,
 }
 
 /// A safety invariant, proven by the verification cascade.
@@ -162,6 +208,29 @@ pub struct Invariant {
     /// Invariant name.
     pub name: String,
     /// Must hold in every reachable state.
+    pub assert: Expr,
+}
+
+/// A rule on entering a place, proven by the verification cascade: every
+/// move into `place` from one of `from` must have `assert` true in the state
+/// just before it fires.
+///
+/// It says how a record may start something, which an invariant cannot: a
+/// cup may start being made only while its topping is in stock, yet the
+/// topping may run out while the cup is being made.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EntryRule {
+    /// Rule name.
+    pub name: String,
+    /// The place the rule guards.
+    pub place: String,
+    /// The places whose moves into `place` the rule covers. Empty: every
+    /// other place, so a move that stays in `place` is not covered.
+    #[serde(default)]
+    pub from: Vec<String>,
+    /// Must hold just before each covered move fires. It reads what a guard
+    /// reads, except the move's parameters: the rule covers several moves.
     pub assert: Expr,
 }
 
@@ -180,9 +249,28 @@ pub struct Liveness {
     /// Target states that must eventually be reached.
     #[serde(default)]
     pub reaches: Vec<String>,
+    /// Places a record in `from` (in any place when `from` is empty) can
+    /// always still reach: from each such state, some moves lead to one of
+    /// them. Unlike `reaches`, not every path has to get there; the way must
+    /// never be closed off. Checked on the model check's whole walk.
+    #[serde(default)]
+    pub can_reach: Vec<String>,
     /// If true, asserts that actions are always available (no deadlock).
     #[serde(default)]
     pub has_actions: Option<bool>,
+    /// A condition the records reach by themselves: from every reachable
+    /// state, the moves the system makes (state timers, module answers,
+    /// reactions, and the actions in `relies_on`) can bring them to a state
+    /// with nothing in flight where it holds. It may read related records
+    /// (`Type[id].field`), and is checked on their joint model.
+    #[serde(default)]
+    pub eventually: Option<Expr>,
+    /// Actions of this entity that code outside the specs sends whenever
+    /// `eventually` does not hold, such as a site that nudges a record it
+    /// finds behind. The check counts them as moves the system makes while
+    /// the condition is false.
+    #[serde(default)]
+    pub relies_on: Vec<String>,
 }
 
 /// A dispatch record the runtime's WASM and adapter dispatchers look up by
@@ -201,9 +289,10 @@ pub struct Integration {
     /// WASM module name (required when `type = "wasm"`).
     #[serde(default)]
     pub module: Option<String>,
-    /// Action to dispatch on successful WASM execution (required when `type = "wasm"`).
-    #[serde(default)]
-    pub on_success: Option<String>,
+    /// The actions a successful call may take, in the order the kernel tries
+    /// them (see [`ActionTrigger::on_success`]).
+    #[serde(default, with = "trigger::one_or_many")]
+    pub on_success: Vec<String>,
     /// Action to dispatch on failed WASM execution (required when `type = "wasm"`).
     #[serde(default)]
     pub on_failure: Option<String>,
@@ -275,12 +364,28 @@ pub struct StateTimeout {
     /// the current moment. Progress signals such as `Heartbeat` go here.
     #[serde(default)]
     pub reset_on: Vec<String>,
+    /// Actions that, taken while in `state` and staying there, make the
+    /// armed timer fire now instead of at its deadline. The fire is still
+    /// the timer's own: it runs as whoever armed it, with its standing
+    /// checked, and Cedar sees `via == "timer"`. The move that brings it
+    /// forward lends it no identity and picks no move: unlike `reset_on`, it
+    /// does not re-arm the timer as its own caller. Timers are deadlines:
+    /// this is for a deadline that stands in for news that may never come,
+    /// such as a webhook delivery the sender lost, so that news which does
+    /// arrive is acted on at once. A timer that fires once and already fired
+    /// is not fired again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fire_now_on: Vec<String>,
     /// Parameters passed to the `on_timeout` action, read when the timer is
     /// armed. Each value is a literal (`'text'`, an integer, `true`, `false`,
     /// `null`) or a declared state variable (`Id` is the entity's id).
     /// Typically includes an `error_message` for observability.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub args: BTreeMap<String, Arg>,
+    /// Words for people reading the app: what the timer does ("check CI
+    /// again"). Display only: the kernel never reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub says: Option<String>,
 }
 
 /// Admission control declaration (ADR-0051).

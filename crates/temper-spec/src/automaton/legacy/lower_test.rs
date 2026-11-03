@@ -76,7 +76,7 @@ impl Env for State {
 }
 
 /// Reference: `temper_jit::table::Guard::check` plus the server's
-/// `resolve_cross_entity_guards` (state/dispatch/cross_entity.rs).
+/// `resolve_related_statuses` (state/dispatch/cross_entity.rs).
 fn reference_guard(guard: &Guard, s: &State) -> bool {
     match guard {
         Guard::StateIn { values } => values.contains(&s.status),

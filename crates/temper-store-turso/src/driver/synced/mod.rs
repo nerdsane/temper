@@ -6,7 +6,9 @@
 //! request, and returns only once the remote has committed it. Callers that
 //! answer a request after a write await it first, so a confirmed change is
 //! never only on this machine. A fresh machine with no local file starts from
-//! the remote copy.
+//! the remote copy. That restore runs as long as it keeps writing the file
+//! (see `restore`), and one stopped part way is kept aside and run again at
+//! the next start.
 //!
 //! Writes are confirmed only in [`CopyState::Copying`]. A start that cannot
 //! reach the remote serves reads and waits ([`CopyState::Unchecked`]); a file
@@ -23,13 +25,17 @@ use temper_runtime::persistence::{PersistenceError, storage_error};
 
 use super::{Connection, DriverError, DriverHandle, Lease};
 
+mod checkpoint;
 mod files;
 mod pool;
 mod push;
 mod remote;
+mod restore;
+mod trim;
 use files::{DIVERGED_SUFFIX, check_local_files, sidecar};
 pub(crate) use pool::ConnectionPool;
 use remote::Remote;
+pub(crate) use trim::Writers as TrimWriters;
 
 /// Whether writes to the file can be confirmed against its remote copy.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,11 +80,11 @@ struct Inner {
     /// change capture on it, which also fails while another connection
     /// writes; reuse makes that rare and `connect` retries it.
     pool: ConnectionPool,
-    /// Every connection in use holds this shared. While the engine
-    /// checkpoints, every statement on any connection fails at once with
-    /// "database is locked", so a checkpoint takes it exclusively, and only
-    /// when it is free right away: waiting for it could deadlock a store call
-    /// that holds one connection while opening another.
+    /// Every connection in use holds this shared. While the log is reset,
+    /// every statement on any connection fails at once with "database is
+    /// locked", so a checkpoint takes it exclusively, waiting at most
+    /// [`CHECKPOINT_TURN_BUDGET`]: longer could deadlock a store call that
+    /// holds one connection while opening another.
     in_use: Arc<tokio::sync::RwLock<()>>,
     /// The newest change a successful push carried (from `last_change`).
     pushed: AtomicI64,
@@ -90,6 +96,11 @@ struct Inner {
     timeouts: AtomicU32,
     /// Whether the remote may hold a push the engine never heard back from.
     unsure: AtomicBool,
+    /// What the next trim batch deletes, planned from what the last one cost.
+    trim_plan: std::sync::Mutex<trim::Plan>,
+    /// Time added to every trim batch (see `simulate_slow_trim`).
+    #[cfg(feature = "test-support")]
+    simulated_trim: std::sync::Mutex<trim::SimulatedTrim>,
 }
 
 /// The sync engine's text for a statement the remote refused.
@@ -97,9 +108,6 @@ const REMOTE_STATEMENT_FAILED: &str = "failed to execute sql";
 
 /// One push attempt. The engine's HTTP client has no timeout of its own.
 const PUSH_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// How long opening the engine (a restore included) may take.
-const BUILD_TIMEOUT: Duration = Duration::from_secs(120);
 
 impl std::fmt::Debug for SyncCopy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -116,6 +124,8 @@ impl SyncCopy {
     /// copy) is moved aside and the database restored from the remote, which
     /// holds everything the older copy did. A remote that cannot be reached
     /// leaves the copy [`CopyState::Unchecked`] until [`Self::recheck`] passes.
+    /// A file that a stopped restore left part way is moved aside the same
+    /// way, and restored again.
     pub(crate) async fn open(
         path: &str,
         remote_url: &str,
@@ -152,6 +162,13 @@ impl SyncCopy {
         // workspace does): the engine's IO thread then panics and every sync
         // call waits forever. An error here means one is already installed.
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        // Without sync metadata the engine restores the file from the remote,
+        // and writes the metadata only once every page is on disk. Until then
+        // the file is marked, so a start that stops part way is not taken
+        // for a database that was never synced.
+        if !sidecar(path, "-info").exists() {
+            files::mark_restoring(path)?;
+        }
         let local = path.to_string_lossy();
         let opening = turso::sync::Builder::new_remote(&local)
             .with_remote_url(remote_url)
@@ -159,16 +176,16 @@ impl SyncCopy {
             .with_client_name("temper")
             .bootstrap_if_empty(true)
             .build();
-        // A restore downloads the whole database; the engine sets no timeout.
-        let db = tokio::time::timeout(BUILD_TIMEOUT, opening)
+        let db = restore::while_progressing(opening, || restore::footprint(path))
             .await
-            .map_err(|_| {
+            .ok_or_else(|| {
                 DriverError::SyncSetup(format!(
-                    "opening {} with its remote copy took over {} s",
+                    "opening {} with its remote copy made no progress for {} s",
                     path.display(),
-                    BUILD_TIMEOUT.as_secs()
+                    restore::RESTORE_STALL_BUDGET.as_secs()
                 ))
             })??;
+        files::restored(path);
         let state = match std::fs::read_to_string(sidecar(path, DIVERGED_SUFFIX)) {
             Ok(cause) => CopyState::Stopped(cause),
             Err(_) => CopyState::Unchecked,
@@ -188,6 +205,9 @@ impl SyncCopy {
                 state: std::sync::Mutex::new(state),
                 timeouts: AtomicU32::new(0),
                 unsure: AtomicBool::new(true),
+                trim_plan: std::sync::Mutex::new(trim::FIRST_PLAN),
+                #[cfg(feature = "test-support")]
+                simulated_trim: std::sync::Mutex::new(trim::SimulatedTrim::default()),
             }),
         };
         // Change numbers follow commit order only with one writer at a time
@@ -314,6 +334,15 @@ impl SyncCopy {
             match opened {
                 Ok(conn) => {
                     conn.busy_timeout(Duration::from_secs(5))?;
+                    // A commit does not wait for the disk: NORMAL flushes the
+                    // file at each checkpoint instead of each commit. Every
+                    // confirmed write is already on the remote, so a machine
+                    // crash that rolls the file back to its last checkpoint
+                    // loses only writes answered "not confirmed", and the next
+                    // start restores a file behind its remote. Unsynced stores
+                    // keep Turso's FULL. Rita's choice on 27 Oct 2026: on a
+                    // Tensorlake drive FULL fell behind at 20 moves a second.
+                    conn.execute("PRAGMA synchronous = NORMAL", ()).await?;
                     let conn = Lease::new(Arc::new(DriverHandle::new(conn)), in_use);
                     return Ok(Connection::Local { conn, pool });
                 }
@@ -324,25 +353,6 @@ impl SyncCopy {
                 Err(error) => return Err(error.into()),
             }
         }
-    }
-
-    /// Move the local write-ahead log into the database file once it is larger
-    /// than `max_wal_bytes`. Turso Sync turns automatic checkpoints off, so
-    /// without this the log grows with every write.
-    pub async fn checkpoint_if_wal_over(
-        &self,
-        max_wal_bytes: u64,
-    ) -> Result<bool, PersistenceError> {
-        let _engine = self.inner.engine.lock().await;
-        let Ok(_idle) = self.inner.in_use.try_write() else {
-            return Ok(false);
-        };
-        let stats = self.inner.db.stats().await.map_err(storage_error)?;
-        if stats.main_wal_size < max_wal_bytes {
-            return Ok(false);
-        }
-        self.inner.db.checkpoint().await.map_err(storage_error)?;
-        Ok(true)
     }
 
     /// With the app stopped: clear a [`CopyState::Stopped`] copy once its
@@ -359,13 +369,52 @@ impl SyncCopy {
             .map_err(storage_error)
     }
 
+    /// With the app stopped: download the remote copy into `path`, which must
+    /// not exist yet, the way a start restores it, without serving, pushing or
+    /// changing the remote. Returns [`Self::describe`] of the result.
+    pub async fn fetch(
+        path: &str,
+        remote_url: &str,
+        auth_token: &str,
+    ) -> Result<String, PersistenceError> {
+        let local = path.strip_prefix("file:").unwrap_or(path);
+        files::refuse_existing(Path::new(local)).map_err(storage_error)?;
+        let copy = Self::open(local, remote_url, auth_token)
+            .await
+            .map_err(storage_error)?;
+        drop(copy);
+        Self::describe(local)
+    }
+
+    /// How far a restore into `path` has got: the bytes written so far, and
+    /// the database's whole size once the remote has sent it.
+    pub fn restored_bytes(path: &str) -> (u64, u64) {
+        restore::written(Path::new(path.strip_prefix("file:").unwrap_or(path)))
+    }
+
     /// What is on disk for `path`: the stop, if any, and how far the file and
     /// its last push got. For an operator; the app may be running.
     pub fn describe(path: &str) -> Result<String, PersistenceError> {
         files::describe(Path::new(path.strip_prefix("file:").unwrap_or(path)))
             .map_err(storage_error)
     }
+
+    /// Run one statement on the local file and return the rows it changed.
+    /// For tests that need a state no store call makes, such as a change log
+    /// longer than one push can carry; never built into the server.
+    #[cfg(feature = "test-support")]
+    pub async fn execute_local(&self, sql: &str) -> Result<u64, PersistenceError> {
+        let conn = self.connect().await.map_err(storage_error)?;
+        conn.execute(sql, ()).await.map_err(storage_error)
+    }
 }
+
+/// How long a checkpoint waits for the calls in flight before it gives way.
+/// Every new call waits behind it meanwhile, so it stays well inside the
+/// 10 s a request may wait for its answer; and a write holds its connection
+/// for one commit, about 1 s at worst on a Tensorlake drive (fsync p99 on the
+/// staging canary, 26 Oct 2026).
+const CHECKPOINT_TURN_BUDGET: Duration = Duration::from_secs(1);
 
 /// How long opening a connection retries while other connections write; as
 /// long as the store's statements wait for a busy database.

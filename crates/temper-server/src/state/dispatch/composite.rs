@@ -78,6 +78,7 @@ struct AtomicCompositeStream {
     state: EntityState,
     expected_sequence: u64,
     events: Vec<PersistenceEnvelope>,
+    state_timer: Option<temper_runtime::persistence::AppendStateTimer>,
 }
 
 #[derive(Debug, Clone)]
@@ -150,7 +151,9 @@ impl crate::state::ServerState {
                 .security_ctx
                 .clone()
                 .unwrap_or_else(SecurityContext::anonymous)
-                .with_action_context(composite_action_context),
+                .with_action_context(composite_action_context)
+                // The module picked these writes: each is its request.
+                .as_request(),
         );
 
         let prepared_sub_writes = self
@@ -196,6 +199,7 @@ impl crate::state::ServerState {
                     prepared.unresolved_params,
                     &sub_agent_ctx,
                     false,
+                    crate::state::write_record::WriteCaller::Kernel,
                     None,
                 )
                 .await?;
@@ -297,8 +301,8 @@ impl crate::state::ServerState {
             .await?;
 
             let table = self.transition_table_for_dispatch(tenant, &write.entity_type)?;
-            let related = if table_has_cross_entity_guards_for_action(&table, &write.action) {
-                self.resolve_cross_entity_guards(
+            let related = if table_reads_related_records(&table, &write.action) {
+                self.resolve_related_statuses(
                     tenant,
                     &write.entity_type,
                     &write.entity_id,
@@ -375,19 +379,18 @@ impl crate::state::ServerState {
                 .push(composite_envelope(&persistence_id, &event, &stream.state)?);
             stream.state.sequence_nr = stream.state.sequence_nr.saturating_add(1);
             stream.state.push_event_bounded(event);
-            timed.extend(self.timed_transition(&parent, write, &stream.state));
+            if let Some(transition) = self.timed_transition(&parent, write, &stream.state) {
+                // Keep the latest mutation, even if subsequent sub-writes
+                // leave this timer's clock and captured arguments unchanged.
+                if let Some(row) = transition.timer_row(self, tenant) {
+                    stream.state_timer = Some(row);
+                }
+                timed.push(transition);
+            }
         }
         let stage_ms = stage_started_at.map(|started| started.elapsed().as_millis() as u64);
 
-        let appends = streams
-            .iter()
-            .filter(|(_, stream)| !stream.events.is_empty())
-            .map(|(persistence_id, stream)| PersistenceAppend {
-                persistence_id: persistence_id.clone(),
-                expected_sequence: stream.expected_sequence,
-                events: stream.events.clone(),
-            })
-            .collect::<Vec<_>>();
+        let appends = self.composite_appends(tenant, store.commits_entity_rows(), &streams);
         if appends.is_empty() {
             return Ok(true);
         }
@@ -434,8 +437,7 @@ impl crate::state::ServerState {
         self.invalidate_batch_state_timeouts(tenant, &timed);
 
         let projection_collect_started_at = timing_enabled.then(std::time::Instant::now);
-        self.update_composite_query_projections(tenant, &streams)
-            .await?;
+        self.index_composite_streams(tenant, &streams)?;
         let projection_collect_ms =
             projection_collect_started_at.map(|started| started.elapsed().as_millis() as u64);
 
@@ -452,7 +454,7 @@ impl crate::state::ServerState {
                 continue;
             }
             self.stop_and_remove_entity(tenant, &stream.entity_type, &stream.entity_id);
-            if stream.state.status == "Deleted" {
+            if stream.state.is_tombstoned() {
                 continue;
             }
             if !self
@@ -545,6 +547,7 @@ impl crate::state::ServerState {
                 state,
                 expected_sequence,
                 events,
+                state_timer: None,
             },
         );
         Ok(())
@@ -840,6 +843,7 @@ impl crate::state::ServerState {
             state: before.state.clone(),
             expected_sequence: before.state.sequence_nr,
             events: Vec::new(),
+            state_timer: None,
         };
         if should_skip_existing_pack_object_create(write, &stream)
             || (!is_incomplete_existing_pack_object_create(write, &stream)
@@ -865,8 +869,8 @@ impl crate::state::ServerState {
             stream.state.sequence_nr += 1;
             stream.state.push_event_bounded(created);
         }
-        let related = if table_has_cross_entity_guards_for_action(&table, &write.action) {
-            self.resolve_cross_entity_guards(
+        let related = if table_reads_related_records(&table, &write.action) {
+            self.resolve_related_statuses(
                 tenant,
                 &write.entity_type,
                 &write.entity_id,
@@ -973,7 +977,7 @@ impl crate::state::ServerState {
             .await
             .map_err(DispatchError::Internal)?;
         let related = self
-            .resolve_cross_entity_guards(tenant, entity_type, entity_id, action)
+            .resolve_related_statuses(tenant, entity_type, entity_id, action)
             .await;
         let eval_ctx = build_eval_context_with_xref(&current.state, &related, &table, Some(action));
 

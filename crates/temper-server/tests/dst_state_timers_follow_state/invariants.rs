@@ -9,25 +9,17 @@ use temper_runtime::tenant::TenantId;
 use temper_server::ServerState;
 use temper_server::state::BootTimers;
 
-/// Invariant: the boot counts, for each tenant, the records it found in a
-/// timed state with no row and left waiting, and only those.
-pub(super) fn check_boot_counts(
-    booted: &BootTimers,
-    jobs: &[Job],
-    run: &Run,
-) -> Result<(), String> {
+/// Invariant: the boot arms every record it finds in a timed state, a record
+/// with no row too, so it leaves none waiting: no `Job` timeout binds a caller.
+pub(super) fn check_boot_counts(booted: &BootTimers, run: &Run) -> Result<(), String> {
     for tenant in TENANTS {
-        let unarmed = jobs
-            .iter()
-            .filter(|job| job.tenant.as_str() == tenant && run.is_unarmed(job))
-            .count();
         let waiting = booted
             .get(&(TenantId::new(tenant), "Job".to_string()))
             .map_or(0, |counts| counts.waiting);
-        if waiting != unarmed {
+        if waiting != 0 {
             return Err(run.fail(
-                "the boot counts the records that wait without a row",
-                format!("{tenant}/Job: {unarmed} records have no row, the boot counted {waiting}"),
+                "the boot arms the records left without a row",
+                format!("{tenant}/Job: the boot left {waiting} records waiting"),
             ));
         }
     }
@@ -37,7 +29,9 @@ pub(super) fn check_boot_counts(
 /// Invariant: each record has exactly the timer row its current state
 /// declares, and none when nothing armed it ([`Run::unarmed`]) or it was
 /// deleted. Rows are captured before any read. At restart the expected state
-/// is derived from storage, so the timer-only wait keeps untouched records.
+/// is derived from storage, so the timer-only wait keeps untouched records:
+/// the status of the snapshot, then each later event's stored `to_status`,
+/// which replay keeps whatever the active spec says the action targets.
 pub(super) async fn check_rows_follow_state(
     state: &ServerState,
     world: &World,
@@ -63,17 +57,11 @@ pub(super) async fn check_rows_follow_state(
                 None => (0, "Idle".to_string()),
             };
             for event in world.events.read_events(&key, seq).await.unwrap() {
-                match event.event_type.as_str() {
-                    "Start" => {
-                        expected = if job.tenant.as_str() == "alpha" {
-                            "Review"
-                        } else {
-                            "Waiting"
-                        }
-                        .to_string()
-                    }
-                    "Expire" | "Approve" => expected = "Done".to_string(),
-                    _ => {}
+                if let Some(to) = event.payload["to_status"]
+                    .as_str()
+                    .filter(|to| !to.is_empty())
+                {
+                    expected = to.to_string();
                 }
             }
             expected
@@ -98,9 +86,8 @@ pub(super) async fn check_rows_follow_state(
     Ok(())
 }
 
-/// Invariants at the end: every armed record reached `Done` on its timers,
-/// every timer fired once and in its own state, every unarmed one still waits
-/// in `Waiting` with no fire, and no row is left.
+/// Invariants at the end: every record reached `Done` on its timers, every
+/// timer fired once and in its own state, and no row is left.
 pub(super) async fn check_all_done(
     state: &ServerState,
     world: &World,
@@ -129,20 +116,7 @@ pub(super) async fn check_all_done(
                 ));
             }
         }
-        if run.is_unarmed(job) {
-            if record.status != "Waiting" || !fires.is_empty() {
-                return Err(run.fail(
-                    "a record with no row waits for its next action",
-                    format!(
-                        "{}/{} is {} after {} timer fires",
-                        job.tenant,
-                        job.id,
-                        record.status,
-                        fires.len()
-                    ),
-                ));
-            }
-        } else if record.status != "Done" || fires.len() != 1 {
+        if record.status != "Done" || fires.len() != 1 {
             return Err(run.fail(
                 "every record leaves its timed state on its timer",
                 format!(

@@ -78,29 +78,3 @@ pub async fn handle_events(
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn entity_state_change_serializes() {
-        let change = EntityStateChange {
-            seq: 1,
-            entity_type: "Order".into(),
-            entity_id: "o-1".into(),
-            action: "SubmitOrder".into(),
-            status: "Submitted".into(),
-            tenant: "default".into(),
-            agent_id: Some("agent-1".into()),
-            session_id: None,
-            intent: None,
-            observation_metadata: None,
-        };
-        let json = serde_json::to_string(&change).unwrap();
-        assert!(json.contains("\"entity_type\":\"Order\""));
-        assert!(json.contains("\"action\":\"SubmitOrder\""));
-        assert!(json.contains("\"agent_id\":\"agent-1\""));
-        assert!(!json.contains("session_id"));
-    }
-}

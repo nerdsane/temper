@@ -10,21 +10,28 @@
 //! 3. **Property-based tests** — random action sequences with invariant checking
 
 pub mod budget;
+pub mod can_reach;
 pub mod cascade;
 pub mod checker;
 pub mod composite;
 pub mod diagnostics;
+pub mod lost_places;
 pub mod model;
 pub mod paths;
 pub mod proptest_gen;
+mod reach;
+pub mod reaches;
 pub mod simulation;
 pub mod smt;
 
 // Re-export key types.
-pub use budget::Budget;
-pub use cascade::{ActorSimResult, CascadeLevel, CascadeResult, LevelResult, VerificationCascade};
-pub use checker::{VerificationResult, check_model};
+pub use budget::{Budget, Clock};
+pub use cascade::{
+    ActorSimResult, CascadeLevel, CascadeResult, KeptKey, LevelResult, VerificationCascade,
+};
+pub use checker::{Reached, VerificationResult, check_model};
 pub use composite::{CompositePlanError, CompositeVerificationPlan};
+pub use lost_places::LostPlace;
 pub use model::{
     ModelEffect, ParamValue, ResolvedTransition, TemperModel, TemperModelAction, TemperModelState,
     build_model_from_ioa,

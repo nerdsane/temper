@@ -2033,8 +2033,7 @@ mod tests {
     #[tokio::test]
     async fn smoke_migration_copies_events_snapshots_specs_projections_and_blobs_when_database_url_set()
      {
-        let Ok(database_url) = std::env::var("DATABASE_URL") else {
-            eprintln!("skipping migration smoke test: DATABASE_URL is not set");
+        let Some(database_url) = temper_test_resource::env_var("DATABASE_URL") else {
             return;
         };
         let temp = tempfile::tempdir().expect("tempdir");

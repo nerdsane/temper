@@ -5,6 +5,7 @@ use temper_runtime::persistence::{PersistenceError, storage_error};
 use tracing::instrument;
 
 use super::TursoEventStore;
+use super::write_gate::WritePriority;
 use crate::metrics::TursoQueryTimer;
 
 /// Row returned by OTS trajectory list queries (metadata only, not full data).
@@ -80,7 +81,9 @@ impl TursoEventStore {
         p: &OtsTrajectoryParams<'_>,
     ) -> Result<(), PersistenceError> {
         let _timer = TursoQueryTimer::start("turso.persist_ots_trajectory");
-        let conn = self.connection().await?;
+        let conn = self
+            .write_connection("turso.persist_ots_trajectory", WritePriority::Low)
+            .await?;
         conn.execute(
             "INSERT INTO ots_trajectories \
              (trajectory_id, tenant, agent_id, session_id, outcome, turn_count, data, persistence_status, persist_attempts, last_error, created_at, updated_at) \
@@ -116,7 +119,9 @@ impl TursoEventStore {
         p: &OtsTrajectoryParams<'_>,
     ) -> Result<(), PersistenceError> {
         let _timer = TursoQueryTimer::start("turso.enqueue_ots_trajectory");
-        let conn = self.connection().await?;
+        let conn = self
+            .write_connection("turso.enqueue_ots_trajectory", WritePriority::Low)
+            .await?;
         conn.execute(
             "INSERT INTO ots_trajectories \
              (trajectory_id, tenant, agent_id, session_id, outcome, turn_count, data, persistence_status, persist_attempts, last_error, created_at, updated_at) \
@@ -151,7 +156,9 @@ impl TursoEventStore {
         trajectory_id: &str,
     ) -> Result<(), PersistenceError> {
         let _timer = TursoQueryTimer::start("turso.mark_ots_trajectory_persisted");
-        let conn = self.connection().await?;
+        let conn = self
+            .write_connection("turso.mark_ots_trajectory_persisted", WritePriority::Low)
+            .await?;
         conn.execute(
             "UPDATE ots_trajectories \
              SET persistence_status = 'persisted', last_error = NULL, updated_at = datetime('now') \
@@ -171,9 +178,11 @@ impl TursoEventStore {
         error: &str,
     ) -> Result<(), PersistenceError> {
         let _timer = TursoQueryTimer::start("turso.mark_ots_trajectory_failed");
-        let conn = self.connection().await?;
+        let conn = self
+            .write_connection("turso.mark_ots_trajectory_failed", WritePriority::Low)
+            .await?;
         conn.execute(
-            "UPDATE ots_trajectories \
+            "UPDATE ots_trajectories INDEXED BY sqlite_autoindex_ots_trajectories_1 \
              SET persistence_status = 'failed', persist_attempts = persist_attempts + 1, last_error = ?3, updated_at = datetime('now') \
              WHERE tenant = ?1 AND trajectory_id = ?2",
             params![
@@ -297,7 +306,8 @@ impl TursoEventStore {
         let mut rows = conn
             .query(
                 "SELECT agent_id, COALESCE(session_id, ''), outcome, data \
-                 FROM ots_trajectories WHERE tenant = ?1 AND trajectory_id = ?2",
+                 FROM ots_trajectories INDEXED BY sqlite_autoindex_ots_trajectories_1 \
+                 WHERE tenant = ?1 AND trajectory_id = ?2",
                 params![tenant.to_string(), trajectory_id.to_string()],
             )
             .await

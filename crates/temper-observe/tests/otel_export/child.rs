@@ -6,6 +6,7 @@
 //! started again with only [`entry`] selected.
 
 use std::process::Command;
+use std::time::Duration;
 
 use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -16,6 +17,16 @@ use crate::wire::{self, Attributes, LogRecord, Metric, Span};
 const SCENARIO_ENV: &str = "OTEL_EXPORT_TEST_SCENARIO";
 const WORKLOAD: &str = "workload";
 const LOG_PROBE_THEN_WORKLOAD: &str = "log-probe-then-workload";
+const LOG_AFTER_SHUTDOWN: &str = "log-after-shutdown";
+const WORKLOAD_THEN_WAIT: &str = "workload-then-wait";
+
+/// How long the child keeps running after the workload in
+/// [`run_with_resets`]. The batch processors send every second, and a batch
+/// sent twice more after it failed has arrived 0.75 s after that.
+const WAIT_AFTER_WORKLOAD: Duration = Duration::from_secs(3);
+
+/// The line the child logs once its telemetry has shut down.
+pub const AFTER_SHUTDOWN_LINE: &str = "test log after the telemetry shut down";
 
 /// Service name `temper serve` passes to the telemetry setup.
 pub const BUILT_IN_SERVICE_NAME: &str = "temper-platform";
@@ -100,11 +111,21 @@ impl Run {
             .collect()
     }
 
+    /// The bodies sent to `path`, each checked to be OTLP protobuf, the only
+    /// encoding [`wire`] reads.
     fn bodies<'a>(&'a self, path: &'a str) -> impl Iterator<Item = &'a [u8]> {
         self.received
             .iter()
             .filter(move |request| request.path == path)
-            .map(|request| request.body.as_slice())
+            .map(|request| {
+                assert_eq!(
+                    request.header("content-type"),
+                    "application/x-protobuf",
+                    "export to {} is not OTLP protobuf",
+                    request.path
+                );
+                request.body.as_slice()
+            })
     }
 }
 
@@ -120,8 +141,24 @@ pub fn run_after_log_probe(env: &[(&str, &str)]) -> Run {
     run_scenario(LOG_PROBE_THEN_WORKLOAD, env)
 }
 
+/// Like [`run`], but the child logs one more line after it has shut its
+/// telemetry down, as `temper serve`'s other tasks can while it stops.
+pub fn run_then_log_after_shutdown(env: &[(&str, &str)]) -> Run {
+    run_scenario(LOG_AFTER_SHUTDOWN, env)
+}
+
+/// Like [`run`], but the listener closes the first `resets` connections the
+/// child opens, and the child keeps running for [`WAIT_AFTER_WORKLOAD`]
+/// after the workload, as a server does after it boots.
+pub fn run_with_resets(resets: usize, env: &[(&str, &str)]) -> Run {
+    run_scenario_against(Listener::start_resetting(resets), WORKLOAD_THEN_WAIT, env)
+}
+
 fn run_scenario(scenario: &str, env: &[(&str, &str)]) -> Run {
-    let listener = Listener::start();
+    run_scenario_against(Listener::start(), scenario, env)
+}
+
+fn run_scenario_against(listener: Listener, scenario: &str, env: &[(&str, &str)]) -> Run {
     let mut command = Command::new(std::env::current_exe().expect("path of the test binary"));
     command.args(["--exact", "child::entry", "--nocapture"]);
     for (name, _) in std::env::vars_os() {
@@ -173,7 +210,13 @@ fn entry() {
         probe_log_enabled();
     }
     emit_workload();
+    if scenario == WORKLOAD_THEN_WAIT {
+        std::thread::sleep(WAIT_AFTER_WORKLOAD);
+    }
     guard.shutdown();
+    if scenario == LOG_AFTER_SHUTDOWN {
+        tracing::warn!("{AFTER_SHUTDOWN_LINE}");
+    }
 }
 
 /// Ask the `log` bridge whether logging is enabled without logging anything:

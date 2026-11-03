@@ -79,15 +79,20 @@ fn cold_postgres_backfill_recovers_snapshot_tail() {
         );
         reader.populate_index_from_store(&b.tenant).await;
         reader.populate_field_index_from_snapshots(&b.tenant).await;
-        assert_projection(&store, b.tenant.as_str(), &b.current).await;
+        assert_eq!(
+            store
+                .load_entity_catalog_rows(b.tenant.as_str(), "Order", &[ENTITY_ID.into()])
+                .await
+                .unwrap()
+                .unwrap(),
+            missing,
+            "while serving, the backfill leaves a missing catalog row to boot repair"
+        );
         assert_projection(&store, a.tenant.as_str(), &a.current).await;
         assert!(reader.actor_registry.read().unwrap().is_empty());
         eprintln!(
-            "PostgreSQL seed=519: stale catalog S={} -> T={}, missing catalog S={} -> T={}",
-            a.snapshot.sequence_nr,
-            a.current.sequence_nr,
-            b.snapshot.sequence_nr,
-            b.current.sequence_nr,
+            "PostgreSQL seed=519: stale catalog S={} -> T={}, missing catalog left missing",
+            a.snapshot.sequence_nr, a.current.sequence_nr,
         );
         drop(reader);
         sqlx::query(&format!(

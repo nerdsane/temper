@@ -1,26 +1,43 @@
 //! Armed state timers survive a server restart (ADR-0056).
 //!
-//! Each server runs in its own Tokio runtime; dropping the runtime kills its
-//! in-memory timers as a process exit would. After the restart, a timer that
-//! fell due while the server was down fires at once, one still waiting fires
-//! when its budget ends (not a full budget after boot), each fires exactly
-//! once and as the principal whose action armed it, and a repeating timer
-//! does not replay the ticks it missed. Run against Turso always, and against
-//! PostgreSQL when `TEMPER_TEST_POSTGRES_URL` names a disposable database.
-use std::time::{Duration, Instant};
+//! After the restart, a timer that fell due while the server was down fires
+//! at once, one still waiting fires when its budget ends (not a full budget
+//! after boot), each fires exactly once and as the principal whose action
+//! armed it, and a repeating timer does not replay the ticks it missed. Run
+//! against Turso always, and against PostgreSQL when
+//! `TEMPER_TEST_POSTGRES_URL` names a disposable database.
+//!
+//! Time is simulated (see `state_timer_restart/server.rs`): every server
+//! runs on a paused clock that moves only while the scenario waits and no
+//! task can run, and the store is real. Each scenario runs [`SEEDS`] seeds;
+//! a seed draws the scenario's times within the bounds each one states, and
+//! its ids.
 
+#[path = "state_timer_restart/boot_walk.rs"]
+mod boot_walk;
+#[path = "dst_state_timers_follow_state/process_clock.rs"]
+mod process_clock;
 #[path = "state_timer_restart/recovery.rs"]
 mod recovery;
+#[path = "state_timer_restart/server.rs"]
+mod server;
+#[path = "state_timer_restart/unrecorded.rs"]
+mod unrecorded;
 
-use serde_json::{Value, json};
-use temper_authz::{PrincipalKind, SecurityContext};
-use temper_runtime::persistence::StateTimerRecord;
-use temper_runtime::{ActorSystem, tenant::TenantId};
-use temper_server::registry::SpecRegistry;
-use temper_server::request_context::AgentContext;
-use temper_server::{ServerState, StorageStack};
-use temper_store_postgres::{PostgresEventStore, PostgresSchema, migration};
-use temper_store_turso::TursoEventStore;
+use std::time::Duration;
+
+use serde_json::json;
+use server::{Backend, SETTLE, Server, World, millis_between, person, turso};
+use temper_store_postgres::{PostgresSchema, migration};
+
+/// Seeds per scenario.
+const SEEDS: u64 = 8;
+
+/// `PROBE_IOA`'s `after_seconds`.
+const BUDGET: Duration = Duration::from_secs(4);
+
+/// `TICKER_IOA`'s `after_seconds`.
+const PERIOD: Duration = Duration::from_secs(2);
 
 /// `Fire` records who it ran as and counts its runs; it stays in `Armed`
 /// and does not reset the timer, so the timer fires once.
@@ -54,6 +71,11 @@ from = ["Armed"]
 params = []
 
 [[action]]
+name = "Reset"
+from = ["Armed"]
+params = []
+
+[[action]]
 name = "Fire"
 from = ["Armed"]
 params = [{ name = "fired_by", type = "string", source = "authenticated_subject" }]
@@ -63,6 +85,7 @@ effect = ["fires += 1"]
 state = "Armed"
 after_seconds = 4
 on_timeout = "Fire"
+reset_on = ["Reset"]
 "#;
 
 /// A repeating timer: every `Tick` resets the clock for the next one.
@@ -98,6 +121,118 @@ on_timeout = "Tick"
 reset_on = ["Tick"]
 "#;
 
+/// A watcher whose timer polls every 15 s. `Poll` changes nothing: it only
+/// sets off its trigger, a `Pass` on the record's relay.
+const POLLER_IOA: &str = r#"
+[automaton]
+name = "Poller"
+states = ["Idle", "Watching"]
+initial = "Idle"
+allow_indefinite_states = ["Idle", "Watching"]
+strict_action_params = true
+
+[[action]]
+name = "Watch"
+from = ["Idle"]
+to = "Watching"
+params = []
+
+[[action]]
+name = "Poll"
+from = ["Watching"]
+params = []
+
+[[action.triggers]]
+name = "relays"
+kind = "entity"
+target_entity = "Relay"
+target_action = "Pass"
+resolve_target = { kind = "same_id" }
+
+[[state_timeout]]
+state = "Watching"
+after_seconds = 15
+on_timeout = "Poll"
+reset_on = ["Poll"]
+"#;
+
+/// `POLLER_IOA` whose `Poll` counts itself, so each poll changes the record.
+const COUNTING_POLLER_IOA: &str = r#"
+[automaton]
+name = "CountingPoller"
+states = ["Idle", "Watching"]
+initial = "Idle"
+allow_indefinite_states = ["Idle", "Watching"]
+strict_action_params = true
+
+[[state]]
+name = "polls"
+type = "counter"
+initial = 0
+
+[[action]]
+name = "Watch"
+from = ["Idle"]
+to = "Watching"
+params = []
+
+[[action]]
+name = "Poll"
+from = ["Watching"]
+params = []
+effect = ["polls += 1"]
+
+[[state_timeout]]
+state = "Watching"
+after_seconds = 15
+on_timeout = "Poll"
+reset_on = ["Poll"]
+"#;
+
+/// A reaction's hop that changes nothing: `Pass` only sets off its own
+/// trigger, a `Count` on the record's tally.
+const RELAY_IOA: &str = r#"
+[automaton]
+name = "Relay"
+states = ["Open"]
+initial = "Open"
+allow_indefinite_states = ["Open"]
+strict_action_params = true
+
+[[action]]
+name = "Pass"
+from = ["Open"]
+params = []
+
+[[action.triggers]]
+name = "tallies"
+kind = "entity"
+target_entity = "Tally"
+target_action = "Count"
+resolve_target = { kind = "same_id" }
+"#;
+
+/// Counts what reaches it, so each `Count` changes the record.
+const TALLY_IOA: &str = r#"
+[automaton]
+name = "Tally"
+states = ["Open"]
+initial = "Open"
+allow_indefinite_states = ["Open"]
+strict_action_params = true
+
+[[state]]
+name = "count"
+type = "counter"
+initial = 0
+
+[[action]]
+name = "Count"
+from = ["Open"]
+params = []
+effect = ["count += 1"]
+"#;
+
 const CSDL: &str = r#"<?xml version="1.0"?>
 <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
 <edmx:DataServices><Schema Namespace="Probe" xmlns="http://docs.oasis-open.org/odata/ns/edm">
@@ -108,6 +243,18 @@ const CSDL: &str = r#"<?xml version="1.0"?>
 <EntityType Name="Ticker"><Key><PropertyRef Name="Id"/></Key>
 <Property Name="Id" Type="Edm.String" Nullable="false"/>
 </EntityType>
+<EntityType Name="Poller"><Key><PropertyRef Name="Id"/></Key>
+<Property Name="Id" Type="Edm.String" Nullable="false"/>
+</EntityType>
+<EntityType Name="CountingPoller"><Key><PropertyRef Name="Id"/></Key>
+<Property Name="Id" Type="Edm.String" Nullable="false"/>
+</EntityType>
+<EntityType Name="Relay"><Key><PropertyRef Name="Id"/></Key>
+<Property Name="Id" Type="Edm.String" Nullable="false"/>
+</EntityType>
+<EntityType Name="Tally"><Key><PropertyRef Name="Id"/></Key>
+<Property Name="Id" Type="Edm.String" Nullable="false"/>
+</EntityType>
 <Action Name="Arm" IsBound="true"><Parameter Name="bindingParameter" Type="Probe.Probe"/></Action>
 <Action Name="Fire" IsBound="true"><Parameter Name="bindingParameter" Type="Probe.Probe"/></Action>
 <Action Name="Note" IsBound="true"><Parameter Name="bindingParameter" Type="Probe.Probe"/></Action>
@@ -116,245 +263,53 @@ const CSDL: &str = r#"<?xml version="1.0"?>
 <EntityContainer Name="Container">
 <EntitySet Name="Probes" EntityType="Probe.Probe"/>
 <EntitySet Name="Tickers" EntityType="Probe.Ticker"/>
+<EntitySet Name="Pollers" EntityType="Probe.Poller"/>
+<EntitySet Name="CountingPollers" EntityType="Probe.CountingPoller"/>
+<EntitySet Name="Relays" EntityType="Probe.Relay"/>
+<EntitySet Name="Tallies" EntityType="Probe.Tally"/>
 </EntityContainer>
 </Schema></edmx:DataServices></edmx:Edmx>"#;
 
 /// Test-only blanket permit: this file checks timers, not authorization.
 const PERMIT_ALL: &str = "permit(principal, action, resource);";
 
-#[derive(Clone)]
-enum Backend {
-    Turso(String),
-    Postgres(String, PostgresSchema),
-}
-
-impl Backend {
-    async fn open(&self) -> StorageStack {
-        match self {
-            Self::Turso(url) => {
-                StorageStack::from_turso(TursoEventStore::new(url, None).await.unwrap())
-            }
-            Self::Postgres(url, schema) => {
-                let pool = sqlx::PgPool::connect(url).await.unwrap();
-                StorageStack::from_postgres(PostgresEventStore::with_schema(pool, schema.clone()))
-            }
-        }
+/// Run `scenario` once per seed, each on a fresh Turso database.
+fn on_turso(scenario: fn(&World)) {
+    for seed in 0..SEEDS {
+        let (_dir, backend) = turso();
+        eprintln!("seed {seed}");
+        scenario(&World::new(seed, backend));
     }
-}
-
-/// One server process: its own runtime, so dropping it kills its timers.
-struct Server {
-    runtime: tokio::runtime::Runtime,
-    state: ServerState,
-}
-
-impl Server {
-    /// Start a server on `backend`, the way `temper serve` boots: specs,
-    /// policies, then the boot re-arm of timers left waiting.
-    fn start(backend: &Backend, name: &str) -> Self {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .unwrap();
-        let state = runtime.block_on(async {
-            let mut registry = SpecRegistry::new();
-            registry.register_tenant(
-                "default",
-                temper_spec::csdl::parse_csdl(CSDL).unwrap(),
-                CSDL.to_string(),
-                &[("Probe", PROBE_IOA), ("Ticker", TICKER_IOA)],
-            );
-            let mut state = ServerState::from_registry(ActorSystem::new(name), registry);
-            state.set_storage_stack(backend.open().await);
-            state
-                .authz
-                .reload_tenant_policies("default", PERMIT_ALL)
-                .unwrap();
-            state.start_runtime().await;
-            state
-        });
-        Self { runtime, state }
-    }
-
-    /// Kill the server the way a process exit would: every task stops.
-    fn kill(self) {
-        let Self { runtime, state } = self;
-        drop(state);
-        runtime.shutdown_background();
-    }
-
-    fn act(&self, entity_type: &str, id: &str, action: &str, who: &AgentContext) {
-        self.runtime.block_on(async {
-            let tenant = TenantId::default();
-            self.state
-                .get_or_create_tenant_entity(&tenant, entity_type, id, json!({}))
-                .await
-                .unwrap();
-            let response = self
-                .state
-                .dispatch_tenant_action(&tenant, entity_type, id, action, json!({}), who)
-                .await
-                .unwrap();
-            assert!(response.success, "{action} on {id}: {:?}", response.error);
-        });
-    }
-
-    /// Arm many records at once: each is created and sent
-    /// `Arm` concurrently, so all are armed well inside one timer's budget.
-    fn arm_all(&self, entity_type: &str, ids: &[String], who: &AgentContext) {
-        self.runtime.block_on(async {
-            let mut arming = tokio::task::JoinSet::new();
-            for id in ids {
-                let (state, id, who) = (self.state.clone(), id.clone(), who.clone());
-                let entity_type = entity_type.to_string();
-                arming.spawn(async move {
-                    let tenant = TenantId::default();
-                    state
-                        .get_or_create_tenant_entity(&tenant, &entity_type, &id, json!({}))
-                        .await
-                        .unwrap();
-                    let response = state
-                        .dispatch_tenant_action(&tenant, &entity_type, &id, "Arm", json!({}), &who)
-                        .await
-                        .unwrap();
-                    assert!(response.success, "Arm on {id}: {:?}", response.error);
-                });
-            }
-            while let Some(armed) = arming.join_next().await {
-                armed.unwrap();
-            }
-        });
-    }
-
-    /// `(counter, fired_by)` for one entity.
-    fn read(&self, entity_type: &str, id: &str, counter: &str) -> (usize, Value) {
-        self.runtime.block_on(async {
-            let entity = self
-                .state
-                .get_tenant_entity_state(&TenantId::default(), entity_type, id)
-                .await
-                .unwrap();
-            let count = entity.state.counters.get(counter).copied().unwrap_or(0);
-            (count, entity.state.fields["fired_by"].clone())
-        })
-    }
-
-    fn wait_for(
-        &self,
-        entity_type: &str,
-        id: &str,
-        counter: &str,
-        at_least: usize,
-        within: Duration,
-    ) -> usize {
-        let deadline = Instant::now() + within;
-        loop {
-            let (count, _) = self.read(entity_type, id, counter);
-            if count >= at_least || Instant::now() >= deadline {
-                return count;
-            }
-            std::thread::sleep(Duration::from_millis(50)); // determinism-ok: real-time restart test
-        }
-    }
-
-    /// Remove every timer row, as for timers armed before rows were kept.
-    fn forget_rows(&self) {
-        self.runtime.block_on(async {
-            let store = self
-                .state
-                .metadata_store_for_tenant("default")
-                .await
-                .unwrap();
-            for row in store.list_state_timers("default").await.unwrap() {
-                store
-                    .delete_state_timer("default", &row.entity_type, &row.entity_id, &row.arm_id)
-                    .await
-                    .unwrap();
-            }
-        });
-    }
-
-    /// Every timer row the store holds.
-    fn rows(&self) -> Vec<StateTimerRecord> {
-        self.runtime.block_on(async {
-            let store = self
-                .state
-                .metadata_store_for_tenant("default")
-                .await
-                .unwrap();
-            store.list_state_timers("default").await.unwrap()
-        })
-    }
-
-    /// Write a row back, as one whose delete never happened.
-    fn restore_row(&self, row: &StateTimerRecord) {
-        self.runtime.block_on(async {
-            let store = self
-                .state
-                .metadata_store_for_tenant("default")
-                .await
-                .unwrap();
-            store.upsert_state_timer(row).await.unwrap();
-        });
-    }
-
-    /// Wait until the store holds a timer row for each of `ids`.
-    fn wait_for_rows(&self, ids: &[&str]) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            let rows = self.rows();
-            if ids
-                .iter()
-                .all(|id| rows.iter().any(|row| row.entity_id == *id))
-            {
-                return;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "timer rows not written: {rows:?}"
-            );
-            std::thread::sleep(Duration::from_millis(20)); // determinism-ok: real-time restart test
-        }
-    }
-}
-
-fn person(id: &str) -> AgentContext {
-    AgentContext {
-        security_ctx: Some(SecurityContext::from_verified_jwt(
-            id,
-            PrincipalKind::Agent,
-            Some("test"),
-            None,
-            None,
-            None,
-        )),
-        ..Default::default()
-    }
-}
-
-fn sleep_until(instant: Instant) {
-    std::thread::sleep(instant.saturating_duration_since(Instant::now())); // determinism-ok: real-time restart test
 }
 
 /// The overdue and the due-soon timer fire once each, on time, as whoever armed them.
-fn timers_fire_once_as_their_principal_after_restart(backend: &Backend) {
-    let first = Server::start(backend, "timers-run-1");
-    let t0 = Instant::now();
+fn timers_fire_once_as_their_principal_after_restart(world: &World) {
+    let mut rng = world.rng();
+    // `due-soon` is armed `gap` after `overdue`. The server is down from
+    // then until `late` past `overdue`'s deadline, at least 0.8 s before
+    // `due-soon`'s.
+    let gap = millis_between(&mut rng, 1_500, 3_000);
+    let late = millis_between(&mut rng, 200, gap.as_millis() as u64 - 800);
+
+    let first = Server::start(world, "timers-run-1");
+    let t0 = first.now();
     first.act("Probe", "overdue", "Arm", &person("alice"));
-    sleep_until(t0 + Duration::from_secs(2));
+    first.run_until(t0 + gap);
     first.act("Probe", "due-soon", "Arm", &person("bob"));
-    first.wait_for_rows(&["overdue", "due-soon"]);
-    first.kill();
+    first.run_for(SETTLE);
+    assert!(
+        first.has_row("overdue") && first.has_row("due-soon"),
+        "each waiting timer has its row: {:?}",
+        first.rows()
+    );
+    first.kill(world, t0 + BUDGET + late);
 
-    // Down long enough for `overdue` (due at t0+4s) to fall due; `due-soon`
-    // is due at about t0+6s.
-    sleep_until(t0 + Duration::from_millis(4_500));
-    let second = Server::start(backend, "timers-run-2");
-    let booted = Instant::now();
-
+    let second = Server::start(world, "timers-run-2");
+    let booted = second.now();
+    let due_soon = t0 + gap + BUDGET;
+    second.run_for(SETTLE);
     assert_eq!(
-        second.wait_for("Probe", "overdue", "fires", 1, Duration::from_secs(1)),
+        second.read("Probe", "overdue", "fires").0,
         1,
         "a timer that fell due while the server was down fires at once"
     );
@@ -363,92 +318,122 @@ fn timers_fire_once_as_their_principal_after_restart(backend: &Backend) {
         0,
         "a waiting timer does not fire early"
     );
-    sleep_until(t0 + Duration::from_millis(5_500));
+    second.run_until(due_soon - Duration::from_millis(300));
     assert_eq!(
         second.read("Probe", "due-soon", "fires").0,
         0,
         "a waiting timer does not fire early"
     );
-    // A full budget after boot would be t0+8.5s; the rest of its budget ends at t0+6s.
+    // A full budget after boot would end at `booted + BUDGET`, at least
+    // 1.2 s after this.
+    second.run_until(due_soon + Duration::from_millis(500));
+    assert!(
+        booted + BUDGET > second.now(),
+        "this check comes before a full budget after boot"
+    );
     assert_eq!(
-        second.wait_for(
-            "Probe",
-            "due-soon",
-            "fires",
-            1,
-            Duration::from_millis(1_800)
-        ),
+        second.read("Probe", "due-soon", "fires").0,
         1,
         "a waiting timer fires when its own budget ends"
     );
 
     // Past the point where a second firing of either would show.
-    sleep_until(booted + Duration::from_secs(5));
+    second.run_until(due_soon + BUDGET + Duration::from_millis(500));
     assert_eq!(
         second.read("Probe", "overdue", "fires"),
         (1, json!("alice"))
     );
     assert_eq!(second.read("Probe", "due-soon", "fires"), (1, json!("bob")));
-    second.kill();
+    let stopped = second.now();
+    second.kill(world, stopped);
 
     // Both timers ended: a later restart has nothing to fire.
-    let third = Server::start(backend, "timers-run-3");
-    sleep_until(Instant::now() + Duration::from_secs(1));
+    let third = Server::start(world, "timers-run-3");
+    third.run_for(BUDGET + Duration::from_millis(500));
     assert_eq!(third.read("Probe", "overdue", "fires").0, 1);
     assert_eq!(third.read("Probe", "due-soon", "fires").0, 1);
-    third.kill();
+    let stopped = third.now();
+    third.kill(world, stopped);
 }
 
 /// A repeating timer that missed several ticks fires once, then keeps its pace.
-fn repeating_timer_resumes_without_replaying_missed_ticks(backend: &Backend) {
-    let first = Server::start(backend, "ticker-run-1");
-    first.act("Ticker", "feed", "Start", &person("alice"));
-    assert_eq!(
-        first.wait_for("Ticker", "feed", "ticks", 1, Duration::from_secs(4)),
-        1
-    );
-    first.wait_for_rows(&["feed"]);
-    first.kill();
+fn repeating_timer_resumes_without_replaying_missed_ticks(world: &World) {
+    let mut rng = world.rng();
+    // Stopped between its first and second tick, then down for more than
+    // two more periods.
+    let stop_after = millis_between(&mut rng, 2_200, 3_800);
+    let down = millis_between(&mut rng, 5_000, 11_000);
 
-    // Down for more than three ticks.
-    std::thread::sleep(Duration::from_secs(7)); // determinism-ok: real-time restart test
-    let second = Server::start(backend, "ticker-run-2");
-    let booted = Instant::now();
+    let first = Server::start(world, "ticker-run-1");
+    let t0 = first.now();
+    first.act("Ticker", "feed", "Start", &person("alice"));
+    first.run_until(t0 + stop_after);
     assert_eq!(
-        second.wait_for("Ticker", "feed", "ticks", 2, Duration::from_secs(1)),
+        first.read("Ticker", "feed", "ticks").0,
+        1,
+        "the first tick fires a period after the start"
+    );
+    assert!(first.has_row("feed"), "the next tick has its row");
+    first.kill(world, t0 + stop_after + down);
+
+    let second = Server::start(world, "ticker-run-2");
+    let booted = second.now();
+    second.run_for(SETTLE);
+    assert_eq!(
+        second.read("Ticker", "feed", "ticks").0,
         2,
         "the overdue tick fires at once"
     );
-    sleep_until(booted + Duration::from_millis(1_500));
+    second.run_until(booted + Duration::from_millis(1_500));
     assert_eq!(
         second.read("Ticker", "feed", "ticks").0,
         2,
         "missed ticks are not replayed"
     );
+    second.run_until(booted + PERIOD + Duration::from_millis(500));
     assert_eq!(
-        second.wait_for("Ticker", "feed", "ticks", 3, Duration::from_millis(1_500)),
+        second.read("Ticker", "feed", "ticks").0,
         3,
         "the next tick comes a full period after the catch-up"
     );
-    second.kill();
-}
-
-fn turso() -> (tempfile::TempDir, Backend) {
-    let dir = tempfile::tempdir().unwrap();
-    let url = format!("file:{}", dir.path().join("events.db").display());
-    (dir, Backend::Turso(url))
+    second.run_until(booted + PERIOD * 3 + Duration::from_millis(500));
+    assert_eq!(
+        second.read("Ticker", "feed", "ticks").0,
+        5,
+        "and the ticks keep that pace"
+    );
+    let stopped = second.now();
+    second.kill(world, stopped);
 }
 
 #[test]
 fn turso_timers_fire_once_as_their_principal_after_restart() {
-    let (_dir, backend) = turso();
-    timers_fire_once_as_their_principal_after_restart(&backend);
+    on_turso(timers_fire_once_as_their_principal_after_restart);
 }
 
 #[test]
 fn turso_repeating_timer_resumes_without_replaying_missed_ticks() {
-    let (_dir, backend) = turso();
-    repeating_timer_resumes_without_replaying_missed_ticks(&backend);
+    on_turso(repeating_timer_resumes_without_replaying_missed_ticks);
+}
+
+#[test]
+fn turso_polls_that_change_nothing_write_nothing_and_still_trigger() {
+    on_turso(unrecorded::polls_that_change_nothing_write_nothing_and_still_trigger);
+}
+
+#[test]
+fn turso_polls_that_change_the_record_are_recorded() {
+    on_turso(unrecorded::polls_that_change_the_record_are_recorded);
+}
+
+#[test]
+fn turso_one_shot_reset_survives_reconciliation_and_restart() {
+    on_turso(unrecorded::one_shot_reset_survives_reconciliation_and_restart);
+}
+
+#[test]
+fn turso_a_restart_arms_the_poll_from_the_newest_unrecorded_one() {
+    on_turso(unrecorded::a_restart_arms_the_poll_from_the_newest_unrecorded_one);
 }
 
 #[test]
@@ -456,28 +441,36 @@ fn turso_repeating_timer_resumes_without_replaying_missed_ticks() {
 fn postgres_timers_survive_restart() {
     let url = std::env::var("TEMPER_TEST_POSTGRES_URL").expect("disposable PostgreSQL"); // determinism-ok: integration-test configuration
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    let schema = PostgresSchema::new(format!(
-        "state_timers_{}",
-        temper_runtime::scheduler::sim_uuid().simple()
-    ))
-    .unwrap();
-    runtime.block_on(async {
-        let pool = sqlx::PgPool::connect(&url).await.unwrap();
-        migration::run_migrations_in_schema(&pool, &schema)
+    for seed in 0..SEEDS {
+        // Named before the seed's context is installed, so every run has its own.
+        let schema = PostgresSchema::new(format!(
+            "state_timers_{}",
+            temper_runtime::scheduler::sim_uuid().simple()
+        ))
+        .unwrap();
+        runtime.block_on(async {
+            let pool = sqlx::PgPool::connect(&url).await.unwrap();
+            migration::run_migrations_in_schema(&pool, &schema)
+                .await
+                .unwrap();
+        });
+        eprintln!("seed {seed}");
+        {
+            let world = World::new(seed, Backend::Postgres(url.clone(), schema.clone()));
+            timers_fire_once_as_their_principal_after_restart(&world);
+            repeating_timer_resumes_without_replaying_missed_ticks(&world);
+            unrecorded::a_restart_arms_the_poll_from_the_newest_unrecorded_one(&world);
+            unrecorded::one_shot_reset_survives_reconciliation_and_restart(&world);
+        }
+        runtime.block_on(async {
+            let pool = sqlx::PgPool::connect(&url).await.unwrap();
+            sqlx::query(&format!(
+                "DROP SCHEMA {} CASCADE",
+                schema.qualify_sql("{schema}").trim_end_matches('.')
+            ))
+            .execute(&pool)
             .await
             .unwrap();
-    });
-    let backend = Backend::Postgres(url.clone(), schema.clone());
-    timers_fire_once_as_their_principal_after_restart(&backend);
-    repeating_timer_resumes_without_replaying_missed_ticks(&backend);
-    runtime.block_on(async {
-        let pool = sqlx::PgPool::connect(&url).await.unwrap();
-        sqlx::query(&format!(
-            "DROP SCHEMA {} CASCADE",
-            schema.qualify_sql("{schema}").trim_end_matches('.')
-        ))
-        .execute(&pool)
-        .await
-        .unwrap();
-    });
+        });
+    }
 }

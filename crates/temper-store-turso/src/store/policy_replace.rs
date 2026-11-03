@@ -5,6 +5,7 @@ use temper_runtime::persistence::{PersistenceError, storage_error};
 
 use super::TursoEventStore;
 use super::policy::compute_policy_hash;
+use super::write_gate::WritePriority;
 
 impl TursoEventStore {
     /// Make `policy_id` the tenant's only enabled entry, holding `cedar_text`.
@@ -19,7 +20,9 @@ impl TursoEventStore {
         created_by: &str,
     ) -> Result<(), PersistenceError> {
         let policy_hash = compute_policy_hash(cedar_text);
-        let connection = self.configured_connection().await?;
+        let connection = self
+            .write_connection("turso.replace_tenant_policies", WritePriority::High)
+            .await?;
         let transaction = connection.begin_immediate().await.map_err(storage_error)?;
         transaction
             .execute(

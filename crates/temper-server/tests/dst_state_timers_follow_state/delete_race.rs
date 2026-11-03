@@ -2,12 +2,13 @@
 //! landing when it was deleted.
 //!
 //! Workload, per seed: records in `alpha` start under a spec where `Poke`
-//! resets `Review`'s clock, and the process stops. It boots under the spec
-//! whose replay lands them in `Review`, and takes requests while the boot walk
+//! resets `Waiting`'s clock, and the process stops. It boots under the spec
+//! that gives `Waiting` another budget, and takes requests while the boot walk
 //! runs: after seeded waits each record is poked, then deleted. So a reconcile
-//! (the boot walk's or the record's rehydration) arms `Review`'s timer, the
-//! `Poke` arms a fresh one over it while the first one's row is being written,
-//! and the delete cancels the fresh one while rows may still be landing. Row
+//! (the boot walk's or the record's rehydration) replaces the row's timer with
+//! `Waiting`'s new one, the `Poke` arms a fresh one over it while the first
+//! one's row is being written, and the delete cancels the fresh one while
+//! rows may still be landing. Row
 //! writes take up to 47 scheduler turns, so they overlap all of this.
 //!
 //! Invariant: once every write has landed, no deleted record has a row.
@@ -20,7 +21,8 @@ use temper_runtime::scheduler::{DeterministicIdGen, DeterministicRng, install_si
 use temper_runtime::tenant::TenantId;
 use temper_store_sim::SimEventStore;
 
-use super::world::{ProcessClock, SimTimerRows};
+use super::process_clock::ProcessClock;
+use super::world::SimTimerRows;
 use super::{
     JOB_V1, Job, Process, Run, World, act, advance, check_seeds, job_untimed, job_v2, settle,
 };
@@ -30,11 +32,11 @@ fn dst_a_deleted_record_keeps_no_timer_row() {
     check_seeds(run_seed);
 }
 
-/// `spec` with `Poke` resetting `Review`'s clock.
-fn poke_resets_review(spec: &str) -> String {
+/// `spec` with `Poke` resetting `Waiting`'s clock.
+fn poke_resets_waiting(spec: &str) -> String {
     spec.replacen(
-        "on_timeout = \"Approve\"",
-        "on_timeout = \"Approve\"\nreset_on = [\"Poke\"]",
+        "on_timeout = \"Expire\"",
+        "on_timeout = \"Expire\"\nreset_on = [\"Poke\"]",
         1,
     )
 }
@@ -64,7 +66,7 @@ fn run_seed(seed: u64) -> Result<(), String> {
         .collect();
     let untimed = job_untimed();
 
-    let v1 = poke_resets_review(JOB_V1);
+    let v1 = poke_resets_waiting(JOB_V1);
     let first = Process::start(&world, &v1, &untimed, &format!("race-{seed}-a"));
     first.runtime.block_on(async {
         let state = &first.state;
@@ -73,7 +75,7 @@ fn run_seed(seed: u64) -> Result<(), String> {
             state
                 .get_or_create_tenant_entity(&job.tenant, "Job", &job.id, json!({}))
                 .await
-                .map_err(|error| run.fail("records are created", error))?;
+                .map_err(|error| run.fail("records are created", error.to_string()))?;
             if !act(state, job, "Start").await {
                 return Err(run.fail("records start", format!("{}/{}", job.tenant, job.id)));
             }
@@ -82,7 +84,7 @@ fn run_seed(seed: u64) -> Result<(), String> {
     })?;
     first.kill(&world, Duration::from_secs(rng.next_bound(60) as u64));
 
-    let v2 = poke_resets_review(&job_v2());
+    let v2 = poke_resets_waiting(&job_v2());
     let (second, walk) = Process::boot(&world, &v2, &untimed, &format!("race-{seed}-b"));
     second.runtime.block_on(async {
         let mut requests = Vec::new();

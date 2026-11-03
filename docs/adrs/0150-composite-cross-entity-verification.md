@@ -177,3 +177,28 @@ resolution concern.
 - **Seed only from sources with no incoming edges.** Rejected: cyclic components
   (reaction feedback loops, legal under `MAX_TRIGGER_DEPTH`) have no such source;
   weakly-connected-component roots always exist and always cover.
+
+## Amendment: one joint engine (2026-10-25)
+
+The drop check now walks the joint model that checks cross-entity invariants
+(`composite/joint`), and `CompositeTemperModel` is gone, so one model says how
+records, guards, reactions and the dispatch path behave. What the check claims
+is unchanged:
+
+- Scope is still the seed's weakly-connected component, one record of each
+  type, and every reference finds that record. The joint invariant check starts
+  from every way ids can be equal or differ; a component of a dozen types has
+  too many such ways to start from.
+- The dispatches a move sends land, in any order, before the next move from
+  outside. The old model applied a cascade depth first inside one step; the
+  joint walk tries every order of those dispatches. It does not walk an outside
+  move landing between a commit and its reaction, which the runtime allows
+  (each request and each reaction is its own task). A guard on the source that
+  reads the target's status, the fix shape in the tests, narrows that race
+  without closing it. Walking it is a separate decision: it would add findings
+  to apps that pass today.
+- A refusal on the dispatch path (a related record the target action's guard
+  reads) is a drop too, as a false cross-entity guard was.
+- The `joint_local_invariants` property is dropped: each entity's own cascade
+  already checks its invariants over a superset of the states the joint walk
+  reaches.

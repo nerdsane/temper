@@ -4,6 +4,7 @@ use super::{
 };
 use crate::entity_actor::EntityResponse;
 use crate::request_context::AgentContext;
+use crate::state::dispatch::owed_writes::OwedMove;
 use crate::state::pending_decisions::PendingDecision;
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
 use crate::state::wasm_invocation_log::WasmInvocationEntry;
@@ -133,6 +134,7 @@ impl crate::state::ServerState {
             return super::dispatch_wasm_callback_boxed(
                 self,
                 ctx.entity_ref,
+                integration_name,
                 cb,
                 params,
                 ctx.agent_ctx,
@@ -152,12 +154,18 @@ impl crate::state::ServerState {
     pub(super) async fn dispatch_wasm_callback(
         &self,
         entity_ref: WasmEntityRef<'_>,
+        integration: &str,
         callback_action: &str,
         callback_params: serde_json::Value,
         agent_ctx: &AgentContext,
         mode: WasmDispatchMode,
     ) -> Result<Option<EntityResponse>, String> {
-        let callback_ctx = match agent_ctx.for_callback() {
+        let callback_ctx = match agent_ctx.for_callback(
+            entity_ref.entity_type,
+            entity_ref.entity_id,
+            callback_action,
+            integration,
+        ) {
             Ok(context) => context,
             Err(error) => {
                 return self
@@ -165,7 +173,6 @@ impl crate::state::ServerState {
                     .await;
             }
         };
-        let agent_ctx = &callback_ctx;
         let callback_params = match self.prepare_generated_action_params(
             entity_ref.tenant,
             entity_ref.entity_type,
@@ -179,65 +186,15 @@ impl crate::state::ServerState {
                     .await;
             }
         };
-        match mode {
-            WasmDispatchMode::Inline => {
-                // Preserve inline semantics through nested WASM callbacks.
-                // A public action may dispatch a validation callback that has
-                // its own WASM trigger; returning before that nested trigger
-                // commits lets concurrent requests observe stale detailed
-                // fields while counters advance.
-                let resp = super::dispatch_callback_action_boxed(
-                    self,
-                    crate::state::dispatch::DispatchCommand {
-                        tenant: entity_ref.tenant,
-                        entity_type: entity_ref.entity_type,
-                        entity_id: entity_ref.entity_id,
-                        action: callback_action,
-                        params: callback_params,
-                        agent_ctx,
-                        await_integration: true,
-                        await_reactions: true,
-                    },
-                )
-                .await
-                .map_err(|e| e.to_string())?;
-                if !resp.success {
-                    self.record_generated_callback_refusal(
-                        entity_ref,
-                        callback_action,
-                        resp.error.as_deref().unwrap_or("callback rejected"),
-                    );
-                }
-                Ok(Some(resp))
-            }
-            WasmDispatchMode::Background => {
-                let callback_ctx = AgentContext::for_service_inheriting("wasm-runtime", agent_ctx);
-                let response = self
-                    .dispatch_tenant_action(
-                        entity_ref.tenant,
-                        entity_ref.entity_type,
-                        entity_ref.entity_id,
-                        callback_action,
-                        callback_params,
-                        &callback_ctx,
-                    )
-                    .await
-                    .map_err(|e| {
-                        let msg =
-                            format!("failed to dispatch WASM callback '{callback_action}': {e}");
-                        tracing::error!(callback = %callback_action, error = %e, "{msg}");
-                        msg
-                    })?;
-                if !response.success {
-                    self.record_generated_callback_refusal(
-                        entity_ref,
-                        callback_action,
-                        response.error.as_deref().unwrap_or("callback rejected"),
-                    );
-                }
-                Ok(None)
-            }
-        }
+        let sent = OwedMove {
+            tenant: entity_ref.tenant.clone(),
+            entity_type: entity_ref.entity_type.to_string(),
+            entity_id: entity_ref.entity_id.to_string(),
+            action: callback_action.to_string(),
+            params: callback_params,
+            agent_ctx: callback_ctx,
+        };
+        self.send_answer(sent, mode, "WASM").await
     }
 
     /// Record a WASM authorization denial: persist decision, create governance

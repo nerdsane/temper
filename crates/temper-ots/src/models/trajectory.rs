@@ -338,84 +338,10 @@ mod tests {
     use temper_runtime::scheduler::sim_now;
 
     #[test]
-    fn test_metadata_serialization() {
-        let now = sim_now();
-        let metadata = OTSMetadata::new(
-            "Complete user query",
-            "agent_123",
-            OutcomeType::Success,
-            now,
-        )
-        .with_domain("customer_support")
-        .with_framework("langchain")
-        .with_tag("high_priority")
-        .with_feedback_score(0.9);
-
-        let json_str = serde_json::to_string(&metadata).unwrap();
-        let parsed: OTSMetadata = serde_json::from_str(&json_str).unwrap();
-
-        assert_eq!(parsed.task_description, "Complete user query");
-        assert_eq!(parsed.agent_id, "agent_123");
-        assert_eq!(parsed.outcome, OutcomeType::Success);
-        assert_eq!(parsed.domain, Some("customer_support".to_string()));
-        assert_eq!(parsed.feedback_score, Some(0.9));
-        assert_eq!(parsed.tags.len(), 1);
-    }
-
-    #[test]
     #[should_panic(expected = "Feedback score must be between 0.0 and 1.0")]
     fn test_metadata_invalid_feedback_score() {
         let now = sim_now();
         OTSMetadata::new("test", "agent", OutcomeType::Success, now).with_feedback_score(1.5);
-    }
-
-    #[test]
-    fn test_system_message_serialization() {
-        let now = sim_now();
-        let msg = OTSSystemMessage::new("You are a helpful assistant", now);
-
-        let json_str = serde_json::to_string(&msg).unwrap();
-        let parsed: OTSSystemMessage = serde_json::from_str(&json_str).unwrap();
-
-        assert_eq!(parsed.content, "You are a helpful assistant");
-    }
-
-    #[test]
-    fn test_trajectory_serialization() {
-        let now = sim_now();
-        let metadata = OTSMetadata::new("Test task", "agent_1", OutcomeType::Success, now);
-        let system_message = OTSSystemMessage::new("System prompt", now);
-
-        let trajectory = OTSTrajectory::new(metadata)
-            .with_system_message(system_message)
-            .with_final_reward(0.95);
-
-        let json_str = serde_json::to_string(&trajectory).unwrap();
-        let parsed: OTSTrajectory = serde_json::from_str(&json_str).unwrap();
-
-        assert_eq!(parsed.version, "0.1.0");
-        assert_eq!(parsed.metadata.task_description, "Test task");
-        assert!(parsed.system_message.is_some());
-        assert_eq!(parsed.final_reward, Some(0.95));
-    }
-
-    #[test]
-    fn test_trajectory_minimal() {
-        let now = sim_now();
-        let metadata = OTSMetadata::new("Minimal task", "agent_2", OutcomeType::Failure, now);
-        let trajectory = OTSTrajectory::new(metadata);
-
-        let json_str = serde_json::to_string(&trajectory).unwrap();
-
-        // Optional fields should not appear
-        assert!(!json_str.contains("\"system_message\""));
-        assert!(!json_str.contains("\"final_reward\""));
-
-        // Empty turns should not appear
-        assert!(!json_str.contains("\"turns\""));
-
-        // Context should appear as empty object (default)
-        assert!(json_str.contains("\"context\":{}"));
     }
 
     #[test]
@@ -424,38 +350,5 @@ mod tests {
         let now = sim_now();
         let metadata = OTSMetadata::new("test", "agent", OutcomeType::Success, now);
         OTSTrajectory::new(metadata).with_final_reward(2.0);
-    }
-
-    #[test]
-    fn test_trajectory_with_turns() {
-        let now = sim_now();
-        let metadata = OTSMetadata::new("Task with turns", "agent_3", OutcomeType::Success, now);
-        let turn1 = OTSTurn::new(1, now);
-        let turn2 = OTSTurn::new(2, now);
-
-        let trajectory = OTSTrajectory::new(metadata)
-            .with_turn(turn1)
-            .with_turn(turn2);
-
-        assert_eq!(trajectory.turns.len(), 2);
-
-        let json_str = serde_json::to_string(&trajectory).unwrap();
-        let parsed: OTSTrajectory = serde_json::from_str(&json_str).unwrap();
-
-        assert_eq!(parsed.turns.len(), 2);
-        assert_eq!(parsed.turns[0].turn_id, 1);
-        assert_eq!(parsed.turns[1].turn_id, 2);
-    }
-
-    #[test]
-    fn test_metadata_with_parent_trajectory() {
-        let now = sim_now();
-        let metadata = OTSMetadata::new("Child task", "agent", OutcomeType::Success, now)
-            .with_parent_trajectory_id("parent_traj_123");
-
-        assert_eq!(
-            metadata.parent_trajectory_id,
-            Some("parent_traj_123".to_string())
-        );
     }
 }

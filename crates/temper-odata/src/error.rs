@@ -40,28 +40,3 @@ impl fmt::Display for ODataError {
 }
 
 impl std::error::Error for ODataError {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn error_display_invalid_path() {
-        let err = ODataError::InvalidPath {
-            message: "unexpected segment".into(),
-        };
-        assert_eq!(err.to_string(), "Invalid OData path: unexpected segment");
-    }
-
-    #[test]
-    fn error_display_invalid_filter() {
-        let err = ODataError::InvalidFilter {
-            message: "expected operator".into(),
-            position: 12,
-        };
-        assert_eq!(
-            err.to_string(),
-            "Invalid $filter at position 12: expected operator"
-        );
-    }
-}

@@ -42,7 +42,6 @@ tracing-subscriber = { workspace = true }
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 tracing-opentelemetry = { workspace = true }
 temper-wasm = { workspace = true, features = ["test-shared-compilation"] }
-temper-codegen = { workspace = true }
 # Deterministic fault injection for identity dependency-failure tests.
 temper-store-sim = { workspace = true }
 temper-server = { workspace = true, features = ["observe", "sim"] }

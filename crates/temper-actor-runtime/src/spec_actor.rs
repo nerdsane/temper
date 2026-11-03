@@ -335,18 +335,27 @@ impl Actor for SpecDrivenActor {
                         fields.remove(key);
                     }
                 }
-                let action_params = params.clone();
-                if !params.as_object().is_some_and(|object| object.is_empty()) {
-                    match (actor_state.fields.as_object_mut(), params.as_object()) {
-                        (Some(existing), Some(incoming)) => existing.extend(incoming.clone()),
-                        _ => actor_state.fields = params,
-                    }
+                // Legacy actions can pass through a non-object payload. Keep
+                // that behavior before effects materialize any string fields.
+                if !params.is_object() {
+                    actor_state.fields = params.clone();
                 }
                 let from_status = actor_state.status.clone();
 
                 // 3. Apply effects — may include SetState.
                 for effect in &r.effects {
-                    self.apply_effect(&mut actor_state, effect, &action_params);
+                    self.apply_effect(&mut actor_state, effect, &params);
+                }
+
+                // Project fields after effects, matching the server and model:
+                // a parameter wins when it writes the same string as an effect.
+                if let Some(incoming) = params.as_object()
+                    && !incoming.is_empty()
+                {
+                    match actor_state.fields.as_object_mut() {
+                        Some(existing) => existing.extend(incoming.clone()),
+                        None => actor_state.fields = params,
+                    }
                 }
 
                 // 4. Apply state transition fallback (if no SetState effect fired).
@@ -407,41 +416,64 @@ impl SpecDrivenActor {
         params: &serde_json::Value,
     ) {
         use temper_jit::table::Effect;
+        let declared = &self.table.initial_values;
         match effect {
             Effect::SetState(s) => {
                 state.status = s.clone();
             }
             Effect::SetCounter { var, value } => {
-                if let Some(value) = effect_args::count(value, &state.counters, params) {
+                if let Some(value) = effect_args::count(value, &state.counters, declared, params) {
                     state.counters.insert(var.clone(), value);
                 }
             }
             Effect::AddCounter { var, value } => {
-                let delta = effect_args::count(value, &state.counters, params).unwrap_or(0);
-                let c = state.counters.entry(var.clone()).or_default();
-                *c = c.saturating_add(delta);
+                let delta =
+                    effect_args::count(value, &state.counters, declared, params).unwrap_or(0);
+                let current = declared.counter(&state.counters, var).unwrap_or(0);
+                state
+                    .counters
+                    .insert(var.clone(), current.saturating_add(delta));
             }
             Effect::SubCounter { var, value } => {
-                let delta = effect_args::count(value, &state.counters, params).unwrap_or(0);
-                let c = state.counters.entry(var.clone()).or_default();
-                *c = c.saturating_sub(delta);
+                let delta =
+                    effect_args::count(value, &state.counters, declared, params).unwrap_or(0);
+                let current = declared.counter(&state.counters, var).unwrap_or(0);
+                state
+                    .counters
+                    .insert(var.clone(), current.saturating_sub(delta));
             }
             Effect::SetBool { var, value } => {
-                if let Some(value) = effect_args::boolean(value, &state.booleans, params) {
+                if let Some(value) = effect_args::boolean(value, &state.booleans, declared, params)
+                {
                     state.booleans.insert(var.clone(), value);
                 }
             }
+            Effect::SetString { var, value } => {
+                // Legacy non-strict actions accept non-object params and may
+                // replace `fields` with them before effects run.
+                if !state.fields.is_object() {
+                    state.fields = serde_json::json!({});
+                }
+                state.fields[var] = serde_json::Value::String(value.clone());
+            }
             Effect::ListAppend { var, value } => {
                 if let Some(element) = effect_args::string(value, params) {
-                    state.lists.entry(var.clone()).or_default().push(element);
+                    declared.list_mut(&mut state.lists, var).push(element);
                 }
             }
             Effect::ListRemoveAt { var, index } => {
-                if let Some(index) = effect_args::count(index, &state.counters, params) {
-                    let list = state.lists.entry(var.clone()).or_default();
+                if let Some(index) = effect_args::count(index, &state.counters, declared, params) {
+                    let list = declared.list_mut(&mut state.lists, var);
                     if index < list.len() {
                         list.remove(index);
                     }
+                }
+            }
+            Effect::ListRemove { var, value } => {
+                if let Some(element) = effect_args::string(value, params) {
+                    declared
+                        .list_mut(&mut state.lists, var)
+                        .retain(|item| *item != element);
                 }
             }
             _ => {
@@ -454,3 +486,7 @@ impl SpecDrivenActor {
 #[cfg(test)]
 #[path = "tests/spec_actor_strict.rs"]
 mod strict_tests;
+
+#[cfg(test)]
+#[path = "tests/spec_actor_string_effect.rs"]
+mod string_effect_tests;

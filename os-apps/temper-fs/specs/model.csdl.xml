@@ -14,6 +14,7 @@
       <Term Name="Agent.Hint" Type="Edm.String" AppliesTo="Action Function EntityType"/>
       <Term Name="ShardKey" Type="Edm.String" AppliesTo="EntityType"/>
       <Term Name="AuthZ.CedarPolicy" Type="Edm.String" AppliesTo="EntityType Action Function"/>
+      <Term Name="Relation.DeletePolicy" Type="Edm.String" AppliesTo="NavigationProperty"/>
     </Schema>
 
     <Schema Namespace="Temper.FS" xmlns="http://docs.oasis-open.org/odata/ns/edm">
@@ -115,8 +116,11 @@
         <NavigationProperty Name="Workspace" Type="Temper.FS.Workspace">
           <ReferentialConstraint Property="WorkspaceId" ReferencedProperty="Id"/>
         </NavigationProperty>
+        <!-- A pointer to the newest version, not ownership: deleting a version
+             leaves it as it is. -->
         <NavigationProperty Name="LastVersion" Type="Temper.FS.FileVersion">
           <ReferentialConstraint Property="LastVersionId" ReferencedProperty="Id"/>
+          <Annotation Term="Temper.Vocab.Relation.DeletePolicy" String="none"/>
         </NavigationProperty>
         <NavigationProperty Name="Versions" Type="Collection(Temper.FS.FileVersion)"/>
         <Annotation Term="Temper.Vocab.StateMachine.States">
@@ -134,7 +138,7 @@
       <EntityType Name="FileVersion">
         <Key><PropertyRef Name="Id"/></Key>
         <Property Name="Id" Type="Edm.Guid" Nullable="false"/>
-        <Property Name="FileId" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="file_id" Type="Edm.Guid" Nullable="false"/>
         <Property Name="Status" Type="Temper.FS.FileVersionStatus" Nullable="false"/>
         <Property Name="VersionNumber" Type="Edm.Int32" Nullable="false"/>
         <Property Name="ContentHash" Type="Edm.String" Nullable="false"/>
@@ -143,17 +147,23 @@
         <Property Name="PreviousVersionId" Type="Edm.Guid"/>
         <Property Name="CreatedBy" Type="Edm.String"/>
         <Property Name="CreatedAt" Type="Edm.DateTimeOffset" Nullable="false"/>
+        <!-- A version belongs to its File: deleting the File deletes its versions.
+             file_id is the field FileVersion stores. -->
         <NavigationProperty Name="File" Type="Temper.FS.File">
-          <ReferentialConstraint Property="FileId" ReferencedProperty="Id"/>
+          <ReferentialConstraint Property="file_id" ReferencedProperty="Id"/>
+          <Annotation Term="Temper.Vocab.Relation.DeletePolicy" String="cascade"/>
         </NavigationProperty>
+        <!-- The version before this one, in the same File. The versions are
+             deleted with their File, so this link needs no delete rule. -->
         <NavigationProperty Name="PreviousVersion" Type="Temper.FS.FileVersion">
           <ReferentialConstraint Property="PreviousVersionId" ReferencedProperty="Id"/>
+          <Annotation Term="Temper.Vocab.Relation.DeletePolicy" String="none"/>
         </NavigationProperty>
         <Annotation Term="Temper.Vocab.StateMachine.States">
           <Collection><String>Current</String><String>Superseded</String></Collection>
         </Annotation>
         <Annotation Term="Temper.Vocab.StateMachine.InitialState" String="Current"/>
-        <Annotation Term="Temper.Vocab.ShardKey" String="FileId"/>
+        <Annotation Term="Temper.Vocab.ShardKey" String="file_id"/>
         <Annotation Term="Temper.Vocab.AuthZ.CedarPolicy" String="policies/file_version.cedar"/>
       </EntityType>
 

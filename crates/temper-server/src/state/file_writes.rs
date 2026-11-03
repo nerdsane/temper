@@ -369,6 +369,7 @@ impl ServerState {
             workflow_root_entity_id: agent_ctx.workflow_root_entity_id.clone(),
             workflow_run_id: agent_ctx.workflow_run_id.clone(),
             http_request: None,
+            trigger_principal: None,
         };
 
         let security_ctx = agent_ctx.security_ctx.as_ref().ok_or_else(|| {
@@ -460,6 +461,8 @@ impl ServerState {
                         await_integration: options.await_integration,
                         await_reactions: options.await_reactions,
                     },
+                    // The file module's callback action, a kernel follow-on.
+                    crate::state::write_record::WriteCaller::Kernel,
                     expected,
                 )
                 .await

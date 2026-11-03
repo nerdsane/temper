@@ -32,7 +32,10 @@ pub trait Actor: Send + 'static {
     }
 
     /// Called before the actor starts processing messages.
-    /// Returns the initial state. If this fails, the actor won't start.
+    /// Returns the initial state. If this fails, the actor won't start: it is
+    /// restarted per its supervision strategy, except after
+    /// `ActorError::InitFailed`, a refusal a restart does not fix, when it
+    /// stops at once and the asks waiting on it are answered with that error.
     fn pre_start(
         &self,
         ctx: &mut ActorContext<Self>,

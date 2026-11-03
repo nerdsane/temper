@@ -16,8 +16,12 @@ state = [
   { name = "read_done", type = "bool", initial = false },
   { name = "finished", type = "bool", initial = false },
 ]
+# Now's guard is always true. The model check leaves out a field no guard or
+# rule reads, so without it the counters and flags would not multiply the states.
+# It is a guard, not an invariant, so L0 has nothing to prove across Stepped's
+# 3888 choices and the budget is spent in the model check.
 action = [
-  { name = "Now", kind = "input", from = ["Resting"], to = "Running", effect = ["offered = 0", "kept = 0", "calls = 0", "tokens = 0", "next = 0", "finished = false"] },
+  { name = "Now", kind = "input", from = ["Resting"], to = "Running", guard = "offered >= 0 && kept >= 0 && calls >= 0 && tokens >= 0 && next >= 0 && (has_pending || !has_pending) && (keep_it || !keep_it) && (read_done || !read_done) && (finished || !finished)", effect = ["offered = 0", "kept = 0", "calls = 0", "tokens = 0", "next = 0", "finished = false"] },
   { name = "Stepped", kind = "input", from = ["Running"], params = ["has_pending", "keep_it", "read_done", "finished", "offer", "keep", "call", "token", "advance"], effect = ["has_pending = params.has_pending", "keep_it = params.keep_it", "read_done = params.read_done", "finished = params.finished", "offered += params.offer", "kept += params.keep", "calls += params.call", "tokens += params.token", "next += params.advance"] },
   { name = "Rest", kind = "input", from = ["Running"], to = "Resting" },
 ]

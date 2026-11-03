@@ -5,3 +5,6 @@ edition = "2024"
 
 [lib]
 crate-type = ["cdylib"]
+
+# A workspace of its own. The root's exclude cannot keep it out: it sits inside temper-wasm, a member.
+[workspace]

@@ -95,7 +95,14 @@ async fn schemas_share_a_pool_without_sharing_data_or_changing_defaults() {
         store.commit_specs("tenant").await.unwrap();
         store.put_blob("same-key", value.as_bytes()).await.unwrap();
         store
-            .upsert_secret("tenant", "same-key", value.as_bytes(), b"nonce")
+            .write_secret(&temper_runtime::persistence::SecretWrite {
+                tenant: "tenant",
+                key_name: "same-key",
+                ciphertext: value.as_bytes(),
+                nonce: b"nonce",
+                version_id: value,
+                precondition: temper_runtime::persistence::SecretPrecondition::Any,
+            })
             .await
             .unwrap();
         store

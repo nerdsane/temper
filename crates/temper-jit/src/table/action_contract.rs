@@ -47,7 +47,7 @@ strict_action_params = true
     }
 
     #[test]
-    fn constraints_do_not_recreate_missing_persisted_fields_from_defaults() {
+    fn a_constraint_reads_a_missing_declared_value_as_its_initial_value() {
         let table = TransitionTable::from_ioa_source(
             r#"
 [automaton]
@@ -71,15 +71,28 @@ field = "sequence"
 "#,
         );
         let params = json!({"expected":7});
-        let mut fields = json!({});
+        // A record made before `sequence` was declared stores no value for it.
+        let fields = json!({});
         let mut counters = BTreeMap::new();
-        let mut booleans = BTreeMap::new();
+        let booleans = BTreeMap::new();
         assert!(
             table
                 .validate_action_params("Advance", &params, &fields, &counters, &booleans)
+                .is_ok()
+        );
+        assert!(
+            table
+                .validate_action_params(
+                    "Advance",
+                    &json!({"expected":0}),
+                    &fields,
+                    &counters,
+                    &booleans
+                )
                 .is_err()
         );
-        table.initialize_declared_fields(&mut fields, &mut counters, &mut booleans);
+        // A stored value wins over the declaration.
+        counters.insert("sequence".into(), 7);
         assert!(
             table
                 .validate_action_params("Advance", &params, &fields, &counters, &booleans)
@@ -156,6 +169,10 @@ pub struct ActionContract {
     /// Values resolved by authenticated dispatch, never accepted from the caller.
     #[serde(default)]
     pub param_sources: BTreeMap<String, temper_spec::automaton::ParameterSource>,
+    /// States in which this action brings an armed state timer forward.
+    /// Such a move needs a recorded event even when it changes no fields.
+    #[serde(default)]
+    pub fire_now_in: BTreeSet<String>,
     /// Preconditions checked before effects and field synchronization.
     pub constraints: Vec<ActionConstraint>,
 }
@@ -196,6 +213,56 @@ impl InitialValues {
             }
         }
         values
+    }
+
+    // A record made before a spec version declared a variable stores no
+    // value for it. Every reader of state goes through these, so a guard, a
+    // constraint and an effect read the declared initial value, as they
+    // would had the variable been declared when the record was made.
+
+    /// A counter's stored value, else its declared initial value.
+    pub fn counter(&self, stored: &BTreeMap<String, usize>, name: &str) -> Option<usize> {
+        stored
+            .get(name)
+            .or_else(|| self.counters.get(name))
+            .copied()
+    }
+
+    /// A boolean's stored value, else its declared initial value.
+    pub fn boolean(&self, stored: &BTreeMap<String, bool>, name: &str) -> Option<bool> {
+        stored
+            .get(name)
+            .or_else(|| self.booleans.get(name))
+            .copied()
+    }
+
+    /// A list's stored items, else its declared initial items.
+    pub fn list<'a>(
+        &'a self,
+        stored: &'a BTreeMap<String, Vec<String>>,
+        name: &str,
+    ) -> Option<&'a [String]> {
+        stored
+            .get(name)
+            .or_else(|| self.lists.get(name))
+            .map(Vec::as_slice)
+    }
+
+    /// A list to change in place, starting from its declared initial items
+    /// when the record stores none.
+    pub fn list_mut<'a>(
+        &self,
+        stored: &'a mut BTreeMap<String, Vec<String>>,
+        name: &str,
+    ) -> &'a mut Vec<String> {
+        stored
+            .entry(name.to_string())
+            .or_insert_with(|| self.lists.get(name).cloned().unwrap_or_default())
+    }
+
+    /// A field's stored value, if any, else its declared initial value.
+    pub fn field<'a>(&'a self, stored: Option<&'a Value>, name: &str) -> Option<&'a Value> {
+        stored.or_else(|| self.fields.get(name))
     }
 }
 
@@ -346,12 +413,13 @@ impl TransitionTable {
                     parameter: name.to_string(),
                 }),
             })?;
+            let declared = &self.initial_values;
             let field = constraint.field().and_then(|name| {
-                counters
-                    .get(name)
-                    .map(|value| Value::from(*value as u64))
-                    .or_else(|| booleans.get(name).map(|value| Value::from(*value)))
-                    .or_else(|| fields.get(name).cloned())
+                declared
+                    .counter(counters, name)
+                    .map(|value| Value::from(value as u64))
+                    .or_else(|| declared.boolean(booleans, name).map(Value::from))
+                    .or_else(|| declared.field(fields.get(name), name).cloned())
             });
             let counter = constraint.field().is_some_and(|name| {
                 self.initial_values.counters.contains_key(name) || counters.contains_key(name)

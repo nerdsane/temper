@@ -6,7 +6,7 @@
 
 use std::collections::BTreeSet;
 
-use temper_runtime::persistence::PersistenceError;
+use temper_runtime::persistence::{PersistenceError, catalog_state_from_storage};
 
 use crate::PostgresEventStore;
 use crate::platform::{PostgresEntityCatalogRow, storage_error};
@@ -21,6 +21,15 @@ use crate::platform::{PostgresEntityCatalogRow, storage_error};
 /// freed. 32 rows is a quarter of that concurrent payload.
 const CATALOG_READ_BATCH: usize = 32;
 
+type CatalogDocumentRow = (
+    String,
+    String,
+    serde_json::Value,
+    Option<serde_json::Value>,
+    i64,
+    Option<String>,
+);
+
 impl PostgresEventStore {
     /// Batch-load full entity catalog rows for a list of entity IDs.
     ///
@@ -28,7 +37,9 @@ impl PostgresEventStore {
     /// projection are silently omitted from the result, leaving the caller
     /// free to fall back to the actor path on a per-id basis.
     ///
-    /// Large id lists are read in batches of [`CATALOG_READ_BATCH`].
+    /// Large id lists are read in batches of [`CATALOG_READ_BATCH`]. Each
+    /// row's `state` comes back whole, its fields put back from the `fields`
+    /// column ([`catalog_state_from_storage`]).
     pub async fn load_entity_catalog_rows_pg(
         &self,
         tenant: &str,
@@ -55,15 +66,9 @@ impl PostgresEventStore {
         entity_type: &str,
         entity_ids: &[String],
     ) -> Result<Vec<PostgresEntityCatalogRow>, PersistenceError> {
-        let rows: Vec<(
-            String,
-            String,
-            serde_json::Value,
-            Option<serde_json::Value>,
-            i64,
-        )> = crate::dbm::postgres_query_as!(
+        let rows: Vec<CatalogDocumentRow> = crate::dbm::postgres_query_as!(
             &self.schema,
-            "SELECT entity_id, status, fields, state, sequence_nr \
+            "SELECT entity_id, status, fields, state, sequence_nr, first_event_at \
              FROM {schema}entity_catalog \
              WHERE tenant = $1 AND entity_type = $2 AND entity_id = ANY($3) \
              ORDER BY entity_id",
@@ -76,15 +81,29 @@ impl PostgresEventStore {
         .map_err(storage_error)?;
         Ok(rows
             .into_iter()
-            .map(
-                |(entity_id, status, fields, state, seq)| PostgresEntityCatalogRow {
+            .map(|(entity_id, status, fields, state, seq, first_event_at)| {
+                PostgresEntityCatalogRow {
                     entity_id,
                     status,
+                    state: {
+                        let mut stored =
+                            state.map(|stored| catalog_state_from_storage(&fields, stored));
+                        if stored.is_none() && first_event_at.is_some() {
+                            stored = Some(serde_json::json!({}));
+                        }
+                        if let Some(object) =
+                            stored.as_mut().and_then(serde_json::Value::as_object_mut)
+                            && (first_event_at.is_some() || object.contains_key("first_event_at"))
+                        {
+                            object
+                                .insert("first_event_at".into(), serde_json::json!(first_event_at));
+                        }
+                        stored
+                    },
                     fields,
-                    state,
                     sequence_nr: seq.max(0) as u64,
-                },
-            )
+                }
+            })
             .collect())
     }
 }
@@ -95,7 +114,9 @@ impl PostgresEventStore {
     /// This keeps safe OData `$select` list reads from pulling the full
     /// `entity_catalog.state` and `entity_catalog.fields` JSONB payloads over
     /// the database boundary. The selected values are returned in the row's
-    /// `fields` object and `state` is intentionally omitted.
+    /// `fields` object and `state` is intentionally omitted. Selecting `fields`
+    /// restores the complete stored object with the same state-over-column
+    /// precedence as [`catalog_state_from_storage`].
     pub async fn load_selected_entity_catalog_rows_pg(
         &self,
         tenant: &str,
@@ -145,11 +166,16 @@ impl PostgresEventStore {
                             SELECT jsonb_object_agg(k.field_name, selected.value) \
                             FROM unnest($4::text[]) AS k(field_name) \
                             CROSS JOIN LATERAL ( \
-                                SELECT COALESCE( \
+                                SELECT CASE WHEN k.field_name = 'fields' THEN \
+                                    CASE WHEN jsonb_typeof(c.fields) = 'object' \
+                                              AND jsonb_typeof(c.state -> 'fields') = 'object' \
+                                         THEN c.fields || (c.state -> 'fields') \
+                                         ELSE COALESCE(c.state -> 'fields', c.fields) END \
+                                ELSE COALESCE( \
                                     c.state -> k.field_name, \
                                     c.state -> 'fields' -> k.field_name, \
                                     c.fields -> k.field_name \
-                                ) AS value \
+                                ) END AS value \
                             ) selected \
                             WHERE selected.value IS NOT NULL \
                         ), \

@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use super::*;
 use crate::model::build_model_from_ioa;
 
@@ -253,7 +255,7 @@ fn states_contains_status(model: &TemperModel, status: &str) -> bool {
             return true;
         }
         for transition in &model.transitions {
-            for next in step(model, transition, &state) {
+            for next in step(model, transition, &state, &mut BTreeMap::new()) {
                 if visited.insert(next.clone()) {
                     queue.push_back(next);
                 }
@@ -302,9 +304,10 @@ guard = "empty(file_id) || File[file_id].status in ['Ready']"
 
 #[test]
 fn test_liveness_reaches_state_through_cross_entity_gate() {
-    // A liveness "eventually reaches Published" property can only be proven
-    // if the gated edge is explored. With the free-boolean treatment the
-    // ReachesTerminal property holds.
+    // The gated edge is explored (the free boolean), so Published is
+    // reachable. But a record whose file never becomes Ready waits in Draft
+    // forever, so "every path reaches Published" cannot be proved from this
+    // record alone: not proved, with no path named.
     let src = r#"
 [automaton]
 name = "DesignLanguage"
@@ -315,7 +318,7 @@ initial = "Draft"
 name = "Publish"
 from = ["Draft"]
 to = "Published"
-guard = "empty(file_id) || File[file_id].status in ['Ready']"
+guard = "File[file_id].status in ['Ready']"
 
 [[liveness]]
 name = "EventuallyPublished"
@@ -324,10 +327,52 @@ reaches = ["Published"]
 "#;
     let model = build_model_from_ioa(src, 2).unwrap();
     let result = check_model(&model);
+    assert!(states_contains_status(&model, "Published"));
+    assert!(result.is_complete, "{result:?}");
     assert!(
-        result.all_properties_hold,
-        "liveness toward a cross-entity gated state must be provable: {result:?}"
+        !result.all_properties_hold,
+        "a reaches rule that rests on a gate that may never open is not proved: {result:?}"
     );
+    assert!(result.counterexamples.is_empty(), "{result:?}");
+    assert!(
+        result
+            .unproved_can_reach
+            .iter()
+            .any(|why| why.contains("EventuallyPublished") && why.contains("Draft")),
+        "{:?}",
+        result.unproved_can_reach
+    );
+}
+
+#[test]
+fn test_liveness_reaches_state_beside_a_cross_entity_gate() {
+    // A record that may not wait in Draft (it can always withdraw) gets to
+    // one of the targets on every path, gate open or not.
+    let src = r#"
+[automaton]
+name = "DesignLanguage"
+states = ["Draft", "Published", "Withdrawn"]
+initial = "Draft"
+
+[[action]]
+name = "Publish"
+from = ["Draft"]
+to = "Published"
+guard = "File[file_id].status in ['Ready']"
+
+[[action]]
+name = "Withdraw"
+from = ["Draft"]
+to = "Withdrawn"
+
+[[liveness]]
+name = "Settles"
+from = ["Draft"]
+reaches = ["Published", "Withdrawn"]
+"#;
+    let model = build_model_from_ioa(src, 2).unwrap();
+    let result = check_model(&model);
+    assert!(result.all_properties_hold, "{result:?}");
 }
 
 #[test]
@@ -361,4 +406,93 @@ guard = "empty(other_id) || Other[other_id].status in ['Ok']"
         "a cross-entity transition out of an unreachable state must still be reported dead: {:?}",
         result.dead_transitions
     );
+}
+
+#[test]
+fn string_products_spend_the_per_record_budget() {
+    use crate::budget::{Budget, Clock, Spending};
+    use std::time::Duration;
+    for (parameters, budget) in [
+        (
+            4,
+            Budget {
+                states: 100,
+                time: Duration::from_secs(5),
+            },
+        ),
+        (
+            12,
+            Budget {
+                states: usize::MAX,
+                time: Duration::from_millis(5),
+            },
+        ),
+    ] {
+        let mut spec = "[automaton]\nname = 'Strings'\nstates = ['New', 'Done']\ninitial = 'New'\n"
+            .to_string();
+        for i in 0..parameters {
+            spec.push_str(&format!(
+                "[[state]]\nname = 's{i}'\ntype = 'string'\ninitial = ''\n"
+            ));
+        }
+        spec.push_str("[[action]]\nname = 'Write'\nfrom = ['New']\nto = 'Done'\nparams = [");
+        for i in 0..parameters {
+            spec.push_str(&format!("{{ name = 's{i}', type = 'string' }},"));
+        }
+        spec.push_str("]\n");
+        let assertion = (0..parameters)
+            .map(|i| format!("s{i} == s{i}"))
+            .collect::<Vec<_>>()
+            .join(" && ");
+        spec.push_str(&format!(
+            "[[invariant]]\nname = 'tracked'\nassert = \"{assertion}\"\n"
+        ));
+        // A clock that moves only when read: the 5 ms run out after the same
+        // work on any machine.
+        let clock = Clock::Steps(Duration::from_micros(1));
+        let model = Spending::start(budget, clock).limit(build_model_from_ioa(&spec, 2).unwrap());
+        let result = check_model(&model);
+        assert!(walk(&model).is_none());
+        assert!(!result.is_complete);
+        assert!(!result.all_properties_hold);
+        assert!(result.dead_transitions.is_empty());
+    }
+}
+
+#[test]
+fn exhausted_input_search_does_not_fabricate_a_deadlock() {
+    use crate::budget::{Budget, Clock, Spending};
+    use std::time::Duration;
+
+    let source = r#"
+[automaton]
+name = "Entry"
+states = ["Waiting", "Inside"]
+initial = "Waiting"
+[[action]]
+name = "Enter"
+from = ["Waiting"]
+to = "Inside"
+params = [{ name = "p", type = "string" }]
+guard = "params.p == 'Stocked'"
+[[entry_rule]]
+name = "entry"
+place = "Inside"
+assert = "true"
+[[liveness]]
+name = "can_enter"
+from = ["Waiting"]
+has_actions = true
+"#;
+    let model = Spending::start(
+        Budget {
+            states: 1,
+            time: Duration::from_secs(5),
+        },
+        Clock::Wall,
+    )
+    .limit(build_model_from_ioa(source, 2).unwrap());
+    let result = check_model(&model);
+    assert!(!result.is_complete, "{result:?}");
+    assert!(result.counterexamples.is_empty(), "{result:?}");
 }

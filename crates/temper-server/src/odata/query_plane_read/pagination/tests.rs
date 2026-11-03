@@ -172,3 +172,70 @@ fn keyset_handles_null_orderby_values() {
         );
     }
 }
+
+#[test]
+fn explicit_null_cursor_keys_are_absent_for_any_property() {
+    for property in ["first_event_at", "last_event_by", "Score"] {
+        let order = canonical_pagination_order(Some(&[OrderByClause {
+            property: property.into(),
+            direction: OrderDirection::Asc,
+        }]));
+        let explicit = row("en-a", serde_json::json!({ property: null }));
+        let missing = row("en-a", serde_json::json!({}));
+        let cursor = cursor_for_row(&explicit, &order);
+        assert!(!cursor.keys[0].present, "{property}: null is absent");
+        assert_eq!(cursor, cursor_for_row(&missing, &order));
+        // Continue tokens already issued by the old encoder, too.
+        let legacy = URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&serde_json::json!([[true, null], [true, "en-a"]])).unwrap(),
+        );
+        assert_eq!(decode_cursor(&legacy), Some(cursor.clone()));
+        assert_eq!(decode_cursor(&encode_cursor(&cursor)), Some(cursor));
+    }
+}
+
+#[test]
+fn metadata_continuation_partitions_every_null_and_known_boundary_both_directions() {
+    for property in [
+        "first_event_at",
+        "last_event_at",
+        "last_event_via",
+        "last_event_by",
+    ] {
+        let (low, high) = match property {
+            "first_event_at" | "last_event_at" => {
+                ("2026-01-01T00:00:00.100Z", "2026-01-01T00:00:00.200Z")
+            }
+            "last_event_via" => ("request", "timer"),
+            _ => ("ann", "zoe"),
+        };
+        let rows = vec![
+            row("en-a", serde_json::json!({property: null})),
+            row("en-b", serde_json::json!({property: high})),
+            row("en-c", serde_json::json!({property: low})),
+            row("en-d", serde_json::json!({property: null})),
+            row("en-e", serde_json::json!({property: low})),
+        ];
+        for direction in [OrderDirection::Asc, OrderDirection::Desc] {
+            let order = canonical_pagination_order(Some(&[OrderByClause {
+                property: property.into(),
+                direction,
+            }]));
+            let ordered = sorted(&rows, &order);
+            let expected = match direction {
+                OrderDirection::Asc => vec!["en-c", "en-e", "en-b", "en-a", "en-d"],
+                OrderDirection::Desc => vec!["en-a", "en-d", "en-b", "en-c", "en-e"],
+            };
+            assert_eq!(ids(&ordered), expected, "{property} {direction:?}");
+            for cut in 0..ordered.len() {
+                let cursor = cursor_for_row(&ordered[cut], &order);
+                let decoded = decode_cursor(&encode_cursor(&cursor)).unwrap();
+                assert_eq!(
+                    ids(&after(&rows, &decoded, &order)),
+                    ids(&ordered[cut + 1..]),
+                    "{property} {direction:?}: boundary {cut}"
+                );
+            }
+        }
+    }
+}

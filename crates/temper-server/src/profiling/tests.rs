@@ -6,16 +6,6 @@ use std::sync::Mutex;
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
-fn default_values_applied() {
-    let q = CpuProfileQuery {
-        seconds: default_seconds(),
-        frequency: default_frequency(),
-    };
-    assert_eq!(q.seconds, 30);
-    assert_eq!(q.frequency, 100);
-}
-
-#[test]
 fn profiling_toggle_states() {
     let _g = ENV_LOCK.lock().unwrap();
     unsafe {

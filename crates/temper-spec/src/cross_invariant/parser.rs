@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use super::types::{CrossInvariantSpec, DeletePolicy, InvariantKind};
+use super::types::{CrossInvariantSpec, InvariantKind};
 
 /// Operator used in a `RelatedFieldAssert`.
 ///
@@ -77,7 +77,7 @@ pub enum CrossInvariantParseError {
     #[error("invariant '{name}' has non-positive window_ms")]
     InvalidEventualWindow { name: String },
     #[error(
-        "unsupported delete policy '{policy}' in {location}; only 'restrict' is supported in v1"
+        "unsupported delete policy '{policy}' in {location}; the server carries out restrict, cascade and none"
     )]
     UnsupportedDeletePolicy { location: String, policy: String },
 }
@@ -88,14 +88,14 @@ pub fn parse_cross_invariants(
 ) -> Result<CrossInvariantSpec, CrossInvariantParseError> {
     let spec: CrossInvariantSpec = toml::from_str(source)?;
 
-    if spec.default_delete_policy != DeletePolicy::Restrict {
+    if !spec.default_delete_policy.is_implemented() {
         return Err(CrossInvariantParseError::UnsupportedDeletePolicy {
             location: "default_delete_policy".to_string(),
             policy: format!("{:?}", spec.default_delete_policy).to_ascii_lowercase(),
         });
     }
     for ov in &spec.relation_overrides {
-        if ov.delete_policy != DeletePolicy::Restrict {
+        if !ov.delete_policy.is_implemented() {
             return Err(CrossInvariantParseError::UnsupportedDeletePolicy {
                 location: format!(
                     "relation_override {}.{}",
@@ -408,9 +408,27 @@ assert = "related(Environment, EnvironmentId).ConfigType not in [\"Local\"]"
     }
 
     #[test]
-    fn parse_rejects_non_restrict_default_delete_policy() {
+    fn parse_accepts_every_delete_policy_the_server_carries_out() {
+        for policy in ["restrict", "cascade", "none"] {
+            let src = format!(
+                "default_delete_policy = \"{policy}\"\n\n\
+                 [[relation_override]]\n\
+                 from_entity = \"Order\"\n\
+                 navigation_property = \"Payment\"\n\
+                 delete_policy = \"{policy}\"\n"
+            );
+            let spec = parse_cross_invariants(&src).expect("should parse");
+            assert_eq!(
+                spec.relation_overrides[0].delete_policy,
+                spec.default_delete_policy
+            );
+        }
+    }
+
+    #[test]
+    fn parse_rejects_set_null_default_delete_policy() {
         let src = r#"
-default_delete_policy = "cascade"
+default_delete_policy = "setnull"
 
 [[invariant]]
 name = "ship_requires_capture"
@@ -425,7 +443,7 @@ assert = "related(Payment, payment_id).status in [\"Captured\"]"
     }
 
     #[test]
-    fn parse_rejects_non_restrict_relation_override_policy() {
+    fn parse_rejects_set_null_relation_override_policy() {
         let src = r#"
 [[relation_override]]
 from_entity = "Order"

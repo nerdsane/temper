@@ -35,7 +35,13 @@ async fn standard_server_keeps_schema_for_secrets_wasm_and_spec_restoration() {
     let vault = state.secrets_vault.as_ref().unwrap();
     let (ciphertext, nonce) = vault.encrypt(b"test-value").unwrap();
     state
-        .upsert_secret("tenant", "KEY", &ciphertext, &nonce)
+        .write_secret(
+            "tenant",
+            "KEY",
+            &ciphertext,
+            &nonce,
+            temper_runtime::persistence::SecretPrecondition::Any,
+        )
         .await
         .unwrap();
     assert_eq!(state.load_tenant_secrets("tenant").await.unwrap(), 1);
