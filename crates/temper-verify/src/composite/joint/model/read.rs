@@ -14,6 +14,7 @@ use temper_spec::predicate::{Arg, CmpOp, Expr, Literal, Name, Operand, Set, VarK
 use super::super::env::Records;
 use super::super::senders;
 use super::JOINT_MAX_COUNTER;
+use super::classes::Classes;
 use super::order::Order;
 use crate::model::{TemperModel, build_model_tracking};
 
@@ -48,6 +49,7 @@ pub(super) fn tracked(
     records: Records,
 ) -> (BTreeMap<String, TemperModel>, Vec<Reaction>) {
     let reactions = reactions_in(by_name, scope);
+    let classes = Classes::read(by_name, scope);
     loop {
         let mut models: BTreeMap<String, TemperModel> = scope
             .iter()
@@ -59,41 +61,13 @@ pub(super) fn tracked(
                 )
             })
             .collect();
-        let mut literals = BTreeSet::new();
-        for entity in scope {
-            let a = by_name[entity.as_str()];
-            for inv in &a.invariants {
-                collect_literals(&inv.assert, &mut literals);
-            }
-            for live in &a.liveness {
-                if let Some(goal) = &live.eventually {
-                    collect_literals(goal, &mut literals);
-                }
-            }
-            for action in &a.actions {
-                collect_literals(&action.guard, &mut literals);
-            }
-        }
-        for model in models.values() {
-            literals.extend(model.initial_strings.values().filter_map(|v| match v {
-                crate::model::ModelString::Literal(s) => Some(s.clone()),
-                _ => None,
-            }));
-        }
-        for reaction in &reactions {
-            for arg in reaction.args.values() {
-                if let Arg::Lit(temper_spec::predicate::Literal::Str(s)) = arg {
-                    literals.insert(s.clone());
-                }
-            }
-        }
-        for model in models.values_mut() {
+        for (entity, model) in &mut models {
             for field in &model.tracked_strings {
                 model
                     .string_literals
                     .entry(field.clone())
                     .or_default()
-                    .extend(literals.clone());
+                    .extend(classes.literals(entity, field));
             }
         }
         let mut grew = false;
@@ -518,45 +492,6 @@ fn literals_in(entity: &str, expr: &Expr, out: &mut BTreeMap<(String, String), B
                     }
                 }
             }
-        }
-        _ => {}
-    }
-}
-
-/// Literals must remain distinct even when compared with related operands.
-pub(super) fn collect_literals(expr: &Expr, out: &mut BTreeSet<String>) {
-    use temper_spec::predicate::{Literal, Operand, Set};
-    let mut operand = |o: &Operand| {
-        if let Operand::Lit(Literal::Str(s)) = o {
-            out.insert(s.clone());
-        }
-    };
-    match expr {
-        Expr::Compare { lhs, rhs, .. } => {
-            operand(lhs);
-            operand(rhs);
-        }
-        Expr::In {
-            value,
-            set: Set::List(items),
-            ..
-        } => {
-            operand(value);
-            for item in items {
-                if let Literal::Str(s) = item {
-                    out.insert(s.clone());
-                }
-            }
-        }
-        Expr::Not(e) => collect_literals(e, out),
-        Expr::And(parts) | Expr::Or(parts) => {
-            for e in parts {
-                collect_literals(e, out);
-            }
-        }
-        Expr::Implies(a, b) => {
-            collect_literals(a, out);
-            collect_literals(b, out);
         }
         _ => {}
     }

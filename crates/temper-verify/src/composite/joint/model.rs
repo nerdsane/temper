@@ -1,6 +1,7 @@
 //! The joint model: the records in scope, their reactions, the dispatches
 //! and module calls on their way, who may send what, and the walk.
 
+mod classes;
 mod commit;
 mod drops;
 mod held;
@@ -28,6 +29,7 @@ use super::{JointOutcome, JointState};
 use crate::model::semantics::{Expansion, rule_for, string_values};
 use crate::model::{ModelString, ParamValue, ResolvedTransition, TemperModel, TemperModelState};
 
+pub(super) use classes::Classes;
 pub use drops::DroppedReaction;
 pub(crate) use drops::dropped_reactions;
 use order::{Order, Specs};
@@ -103,7 +105,8 @@ pub(super) struct Walk {
 #[derive(Debug)]
 pub(super) struct JointModel {
     expansion: Expansion,
-    id_literals: BTreeSet<String>,
+    /// The literals each type's id can meet, by type.
+    id_literals: BTreeMap<String, BTreeSet<String>>,
     models: BTreeMap<String, TemperModel>,
     reactions: Vec<Reaction>,
     records: Records,
@@ -220,34 +223,11 @@ impl JointModel {
         sending: Sending<'_>,
         cut: bool,
     ) -> Self {
-        let mut id_literals = BTreeSet::new();
-        for entity in scope {
-            let a = by_name[entity.as_str()];
-            for inv in &a.invariants {
-                read::collect_literals(&inv.assert, &mut id_literals);
-            }
-            for live in &a.liveness {
-                if let Some(goal) = &live.eventually {
-                    read::collect_literals(goal, &mut id_literals);
-                }
-            }
-            for action in &a.actions {
-                read::collect_literals(&action.guard, &mut id_literals);
-                for trigger in &action.triggers {
-                    if let Some(guard) = &trigger.guard {
-                        read::collect_literals(guard, &mut id_literals);
-                    }
-                    for arg in trigger.args.values() {
-                        if let temper_spec::predicate::Arg::Lit(
-                            temper_spec::predicate::Literal::Str(s),
-                        ) = arg
-                        {
-                            id_literals.insert(s.clone());
-                        }
-                    }
-                }
-            }
-        }
+        let classes = Classes::read(by_name, scope);
+        let id_literals = scope
+            .iter()
+            .map(|entity| (entity.clone(), classes.literals(entity, ID)))
+            .collect();
         let kernel = if sending.kernel_moves {
             Kernel::read(by_name, scope)
         } else {
@@ -313,6 +293,8 @@ impl JointModel {
                 (!ways.is_empty()).then(|| (entity.clone(), ways))
             })
             .collect();
+        // Cedar is told which literals a made-up value may not be.
+        let senders = senders.meeting(&classes, &models);
         Self {
             expansion: Expansion::default(),
             id_literals,
