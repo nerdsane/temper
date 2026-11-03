@@ -423,5 +423,9 @@ mod sure_tests;
 mod outside_tests;
 
 #[cfg(test)]
+#[path = "outside_count_test.rs"]
+mod outside_count_tests;
+
+#[cfg(test)]
 #[path = "widen_test.rs"]
 mod widen_tests;

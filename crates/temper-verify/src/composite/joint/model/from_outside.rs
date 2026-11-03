@@ -41,9 +41,12 @@ pub(super) struct Outside {
 pub(super) const MAYBE_MADE: &str = "?";
 
 impl JointModel {
-    /// Whether a reaction from a type outside the scope sends a move here.
-    pub(in crate::composite::joint) fn has_outside(&self) -> bool {
-        !self.outside.is_empty()
+    /// The types outside the scope whose reactions send a move here.
+    pub(in crate::composite::joint) fn outside_types(&self) -> BTreeSet<String> {
+        self.outside
+            .values()
+            .flat_map(|outside| outside.from.iter().cloned())
+            .collect()
     }
 
     /// The types outside the scope whose reactions send `entity`'s

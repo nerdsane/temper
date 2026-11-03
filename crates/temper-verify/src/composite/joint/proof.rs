@@ -1,7 +1,6 @@
 //! One walk of the joint checks, and the digest its verdict is kept by.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 use temper_authz::SendAnalysis;
@@ -12,6 +11,9 @@ use super::liveness::{settle, settle_bytes};
 use super::model::{self, JointModel, Sending};
 use super::room::{Bound, Construction, MB, Room};
 use super::{JointInvariantResult, JointLivenessResult, JointOutcome, LivenessOutcome};
+
+mod widen;
+use widen::Wider;
 
 /// One walk of the joint checks: an entity's invariants that read related
 /// records, or one liveness property. It holds all its walk reads, so its
@@ -80,20 +82,11 @@ pub struct InvariantProof<'room> {
     /// The model, or why there is none: a type the invariants read that the
     /// app does not declare.
     model: Result<JointModel, String>,
-    /// The app and its Cedar, kept when a reaction from a type outside the
-    /// scope sends a move in the model, to walk once more with that type in.
-    widening: Option<Widening>,
+    /// The model with the types reactions from outside the scope come from
+    /// taken in too, built when there are any, to walk once more.
+    wider: Option<Box<Wider<'room>>>,
     // Declared last so the model releases its allocations before its room.
     _memory: Construction<'room>,
-}
-
-/// What a walk needs to take more of the app into its scope: every type's
-/// spec and the Cedar. It prints all of both, so the digest of a proof that
-/// may walk again covers whatever that walk reads.
-#[derive(Debug, Clone)]
-struct Widening {
-    app: Arc<Vec<Automaton>>,
-    policies: Option<Arc<SendAnalysis>>,
 }
 
 impl InvariantProof<'_> {
@@ -139,80 +132,12 @@ impl InvariantProof<'_> {
                 found
             })
             .collect();
-        let wanted: BTreeSet<String> = walk.outside.iter().flatten().cloned().collect();
-        if let (false, Some(widening)) = (wanted.is_empty(), &self.widening) {
-            self.widen(widening, &wanted, &walk.outside, &mut results, bound);
+        if let Some(wider) = &self.wider
+            && walk.outside.iter().any(|from| !from.is_empty())
+        {
+            wider.walk(self, &walk.outside, &mut results, bound);
         }
         results
-    }
-
-    /// Walk once more with the types in `wanted` in the scope, in the same
-    /// room, for each invariant false only where the walk went by a
-    /// reaction from types outside it (`outside`, one set per invariant).
-    /// The walk sent such a reaction with any parameters as any sender, so
-    /// it could not be sure of it. In the wider walk the reaction comes from
-    /// its own source: a break sure moves alone reach there is one the
-    /// runtime can reach, so it is broken. Anything else stays not checked,
-    /// naming the types: that walk holds one record of each type, and a
-    /// reaction from beyond it is again unsure.
-    fn widen(
-        &self,
-        widening: &Widening,
-        wanted: &BTreeSet<String>,
-        outside: &[BTreeSet<String>],
-        results: &mut [JointInvariantResult],
-        bound: Bound<'_>,
-    ) {
-        let by_name: BTreeMap<&str, &Automaton> = widening
-            .app
-            .iter()
-            .map(|a| (a.automaton.name.as_str(), a))
-            .collect();
-        let scope: BTreeSet<String> = self.scope.union(wanted).cloned().collect();
-        let memory = Construction::new(bound.room);
-        let wider = invariant_model(
-            &by_name,
-            &scope,
-            &self.entity,
-            &self.invariants,
-            widening.policies.as_deref(),
-            &memory,
-        );
-        let walked = wider.as_ref().map(|model| {
-            let exprs: Vec<&Expr> = self.invariants.iter().map(|inv| &inv.assert).collect();
-            model.walk(&self.entity, &exprs, bound)
-        });
-        for (i, found) in results.iter_mut().enumerate() {
-            if outside[i].is_empty() {
-                continue;
-            }
-            let JointOutcome::Incomplete { reason } = &found.outcome else {
-                continue;
-            };
-            let types = outside[i].iter().cloned().collect::<Vec<_>>().join(", ");
-            let why = match &walked {
-                Ok(walk) => match &walk.outcomes[i] {
-                    JointOutcome::Broken { path } => {
-                        found.scope = scope.iter().cloned().collect();
-                        found.states = walk.states;
-                        found.in_flight_bound = walk.held_back.then_some(model::MAX_IN_FLIGHT);
-                        found.outcome = JointOutcome::Broken { path: path.clone() };
-                        continue;
-                    }
-                    JointOutcome::Incomplete { reason } => {
-                        format!("{} joint states walked, not checked: {reason}", walk.states)
-                    }
-                    JointOutcome::Holds | JointOutcome::Vacuous { .. } => format!(
-                        "{} joint states walked, no break that sure moves alone reach",
-                        walk.states
-                    ),
-                },
-                Err(reason) => format!("no model: {reason}"),
-            };
-            found.outcome = JointOutcome::Incomplete {
-                reason: format!("{reason}; walked again with {types} in the scope too ({why})"),
-            };
-        }
     }
 }
 
@@ -271,8 +196,6 @@ pub fn invariant_proofs<'room>(
         .map(|a| (a.automaton.name.as_str(), *a))
         .collect();
     let mut proofs = Vec::new();
-    // One copy of the app for every proof that may walk again.
-    let mut shared: Option<Widening> = None;
     for (name, automaton) in &by_name {
         let invariants: Vec<Invariant> = automaton
             .invariants
@@ -303,16 +226,18 @@ pub fn invariant_proofs<'room>(
                 missing.join(", ")
             ))
         };
-        let widening = match &model {
-            Ok(model) if model.has_outside() => Some(
-                shared
-                    .get_or_insert_with(|| Widening {
-                        app: Arc::new(automatons.iter().map(|a| (*a).clone()).collect()),
-                        policies: policies.cloned().map(Arc::new),
-                    })
-                    .clone(),
-            ),
-            _ => None,
+        let wider = match &model {
+            Ok(model) => Wider::new(
+                &by_name,
+                &scope,
+                model.outside_types(),
+                name,
+                &invariants,
+                policies,
+                room,
+            )
+            .map(Box::new),
+            Err(_) => None,
         };
         proofs.push(InvariantProof {
             _memory: memory,
@@ -320,7 +245,7 @@ pub fn invariant_proofs<'room>(
             invariants,
             scope,
             model,
-            widening,
+            wider,
         });
     }
     proofs
