@@ -17,9 +17,7 @@ use tracing;
 use tracing::instrument;
 
 use super::owed_reactions::{Reaction, ReactionTry};
-use super::principal::{
-    ReactionMaker, effective_trigger_security_context, resolve_trigger_principal,
-};
+use super::principal::{effective_trigger_security_context, resolve_trigger_principal};
 use super::registry::ReactionRegistry;
 use super::repeat_stop::RepeatStop;
 use super::types::ReactionResult;
@@ -148,9 +146,9 @@ impl ReactionDispatcher {
         let mut results = Vec::new();
         // Guards and args read the source record as every guard does: a
         // variable it stores no value for reads as its declared initial value.
-        let reads_record = rules.iter().any(|rule| {
-            rule.when.guard.is_some() || !rule.then.args.is_empty() || rule.acts_for.is_some()
-        });
+        let reads_record = rules
+            .iter()
+            .any(|rule| rule.when.guard.is_some() || !rule.then.args.is_empty());
         let read = reads_record
             .then(|| ReadDefaults::for_entity(state, tenant, entity_type).fields_as_read(fields));
 
@@ -245,54 +243,15 @@ impl ReactionDispatcher {
             );
 
             // ADR-0046: resolve the dispatch principal. If the rule declares
-            // an explicit `principal`, build a synthetic service identity; if
-            // its `as` names a user on the source record, act for that user;
+            // an explicit `principal`, build a synthetic service identity;
             // otherwise inherit the invoking principal's exact
             // `SecurityContext` when available. Either way it carries how this
             // move comes about: this rule, set off by the invoking move. Cedar
             // sees it as `context.via` and the rest, so an app can tell a move
             // the spec makes follow another from a principal's own pick. The
             // principal itself stays the true one.
-            let maker = match (&rule.acts_for, rule.principal.as_deref()) {
-                (Some(field), _) => {
-                    let named = read
-                        .as_ref()
-                        .unwrap_or(fields)
-                        .get(field)
-                        .and_then(serde_json::Value::as_str)
-                        .filter(|user| !user.is_empty());
-                    let Some(user) = named else {
-                        // No one put their name on the record, so no one's
-                        // identity follows the move: the reaction is not
-                        // made, and never falls back to the source's maker.
-                        authz_denied_count += 1;
-                        let error = format!(
-                            "Reaction {} acts for the user its field '{field}' names, and the field is empty",
-                            rule.name
-                        );
-                        tracing::warn!(
-                            rule = rule.name,
-                            source_entity = %entity_type,
-                            source_id = %entity_id,
-                            field = field.as_str(),
-                            "reaction acts for no one; not made"
-                        );
-                        results.push(ReactionResult {
-                            rule_name: rule.name.clone(),
-                            success: false,
-                            target_status: None,
-                            error: Some(error),
-                            depth,
-                        });
-                        continue;
-                    };
-                    ReactionMaker::For(user)
-                }
-                (None, Some(service)) => ReactionMaker::Service(service),
-                (None, None) => ReactionMaker::Inherit,
-            };
             let (mut dispatch_ctx, cause) = resolve_trigger_principal(
-                maker,
+                rule.principal.as_deref(),
                 invoking_ctx,
                 &rule.name,
                 entity_type,

@@ -163,7 +163,6 @@ mod tests {
             },
             resolve_target: TargetResolver::SameId,
             principal: None,
-            acts_for: None,
         }
     }
 

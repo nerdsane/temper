@@ -117,15 +117,6 @@ pub struct ActionTrigger {
     /// registered in the tenant.
     #[serde(default)]
     pub principal: Option<String>,
-    /// `as`: a string field of the source record naming the user the
-    /// reaction is made for, read after the source move commits. Only that
-    /// user's own identity writes the field (an `authenticated_subject`
-    /// parameter), so whoever sets the source move off chooses no one: the
-    /// reaction acts for the user who put their name on the record, and
-    /// Cedar judges it, and the moves it sets off, as acting for them. An
-    /// empty field makes no reaction. Exclusive with `principal`.
-    #[serde(default, rename = "as", skip_serializing_if = "Option::is_none")]
-    pub acts_for: Option<String>,
     /// Firing predicate over the source entity's post-action status and
     /// fields. `None` fires on every commit of the source action.
     #[serde(default)]
@@ -211,20 +202,6 @@ pub struct ActionTrigger {
 }
 
 impl ActionTrigger {
-    /// When the kernel makes this trigger's reaction: its guard holds and,
-    /// with `as`, the source record names someone (the dispatcher makes no
-    /// reaction for an empty `as` field). `None` when it is made on every
-    /// commit of the source action.
-    pub fn made_when(&self) -> Option<Expr> {
-        let Some(field) = &self.acts_for else {
-            return self.guard.clone();
-        };
-        let names_someone = Expr::Not(Box::new(Expr::Empty(field.clone())));
-        Some(Expr::and(
-            self.guard.iter().cloned().chain([names_someone]).collect(),
-        ))
-    }
-
     /// The source statuses this trigger can fire in, read from its guard's
     /// `status == 'S'` / `status in [...]` conjuncts. `None` when the guard
     /// does not pin `status`.
@@ -236,9 +213,8 @@ impl ActionTrigger {
     /// Keys this trigger sets that its kind does not read.
     pub(crate) fn foreign_keys(&self) -> Vec<&'static str> {
         use TriggerKind::*;
-        let set: [(&'static str, bool, &[TriggerKind]); 18] = [
+        let set: [(&'static str, bool, &[TriggerKind]); 17] = [
             ("principal", self.principal.is_some(), &[Entity]),
-            ("as", self.acts_for.is_some(), &[Entity]),
             ("guard", self.guard.is_some(), &[Entity]),
             (
                 "liveness",

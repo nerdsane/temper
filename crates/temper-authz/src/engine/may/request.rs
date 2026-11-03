@@ -297,14 +297,12 @@ impl Request<'_> {
         }
     }
 
-    /// The service principal's attributes, as the engine builds them. One
-    /// acting for a user has no role.
-    fn service_attribute(name: &str, acting_for: bool, attr: &str) -> Option<Json> {
+    /// The service principal's attributes, as the engine builds them.
+    fn service_attribute(name: &str, attr: &str) -> Option<Json> {
         let id = format!("service:{name}");
         match attr {
             "id" | "accountId" => Some(Json::String(id)),
             "agent_type" => Some(Json::String(name.to_string())),
-            "role" if acting_for => None,
             "role" => Some(Json::String("service".to_string())),
             "agentTypeVerified" => Some(Json::Bool(false)),
             _ => None,
@@ -314,18 +312,11 @@ impl Request<'_> {
     /// A service's context: the engine's own keys, then the kernel's. A key
     /// it lacks may still come from the record's fields.
     fn service_context(&self, key: &str) -> Option<Attr> {
-        let Asker::Service {
-            name,
-            context,
-            acting_for,
-        } = self.asker
-        else {
+        let Asker::Service { name, context } = self.asker else {
             return None;
         };
         let id = format!("service:{name}");
         match key {
-            "role" if *acting_for => None,
-            "actingFor" if *acting_for => Some(Attr::Unknown),
             "role" => Some(Attr::Value(Json::String("service".to_string()))),
             "agentId" => Some(Attr::Value(Json::String(id))),
             "agentType" => Some(Attr::Value(Json::String(name.clone()))),
@@ -336,12 +327,9 @@ impl Request<'_> {
 
     fn attribute(&self, of: &Val, attr: &str) -> Val {
         match (of, self.asker) {
-            (
-                Val::Principal,
-                Asker::Service {
-                    name, acting_for, ..
-                },
-            ) => Self::service_attribute(name, *acting_for, attr).map_or(Val::Error, Val::Known),
+            (Val::Principal, Asker::Service { name, .. }) => {
+                Self::service_attribute(name, attr).map_or(Val::Error, Val::Known)
+            }
             (Val::Context, Asker::Service { .. }) => self
                 .service_context(attr)
                 .map_or(Val::Unknown, |a| self.known(a)),
@@ -381,12 +369,9 @@ impl Request<'_> {
 
     fn has(&self, of: &Val, attr: &str) -> Results {
         match (of, self.asker) {
-            (
-                Val::Principal,
-                Asker::Service {
-                    name, acting_for, ..
-                },
-            ) => Results::of(Self::service_attribute(name, *acting_for, attr).is_some()),
+            (Val::Principal, Asker::Service { name, .. }) => {
+                Results::of(Self::service_attribute(name, attr).is_some())
+            }
             (Val::Context, Asker::Service { .. }) => match self.service_context(attr) {
                 Some(_) => TRUE,
                 None => TRUE_OR_FALSE,

@@ -3,9 +3,7 @@
 //! - An action sent from outside: whoever sent it, someone outside the kernel.
 //! - A reaction with a declared principal: that service, with the trigger's
 //!   source in its context (`resolve_trigger_principal` in the trigger
-//!   dispatcher). With `as`: the kernel acting for the user the source
-//!   record names, someone the model does not know. Without either: whoever
-//!   sent its source action.
+//!   dispatcher). Without one: whoever sent its source action.
 //! - A module's answer, or its `on_failure`: whoever sent the move that
 //!   called the module, whether the call ran inline or in the background
 //!   (`dispatch_wasm_callback` in `invocation_artifacts.rs`).
@@ -230,21 +228,10 @@ impl Senders {
             })
             .collect();
         let asker = match (asker, source_id) {
-            (
-                Asker::Service {
-                    name,
-                    context,
-                    acting_for,
-                },
-                Some(id),
-            ) => {
+            (Asker::Service { name, context }, Some(id)) => {
                 let mut context = context.clone();
                 context.insert("triggerSourceEntityId".to_string(), symbol(id, &literals));
-                Asker::Service {
-                    name: name.clone(),
-                    context,
-                    acting_for: *acting_for,
-                }
+                service(name, context)
             }
             (asker, _) => asker.clone(),
         };
@@ -283,11 +270,6 @@ impl Senders {
     pub(super) fn name(&self, by: u32) -> String {
         match self.askers.get(by as usize) {
             Some(Asker::Outside) => "an outside caller".to_string(),
-            Some(Asker::Service {
-                name,
-                acting_for: true,
-                ..
-            }) => format!("service:{name}, acting for the user its record names"),
             Some(Asker::Service { name, .. }) => format!("service:{name}"),
             None => format!("sender {by}"),
         }
@@ -324,16 +306,6 @@ pub(super) fn declared(
 ) -> Option<Asker> {
     if trigger.kind != TriggerKind::Entity {
         return None;
-    }
-    // A reaction with `as` is the kernel acting for whoever the source
-    // record names (`ReactionMaker::For` in the trigger dispatcher): which
-    // user, the model does not know.
-    if trigger.acts_for.is_some() {
-        return Some(Asker::Service {
-            name: "reaction".to_string(),
-            context: BTreeMap::new(),
-            acting_for: true,
-        });
     }
     let name = trigger.principal.as_deref().filter(|p| !p.is_empty())?;
     let text = |value: &str| Attr::Value(Value::String(value.to_string()));
@@ -372,7 +344,6 @@ fn service(name: &str, context: BTreeMap<String, Attr>) -> Asker {
     Asker::Service {
         name: name.to_string(),
         context,
-        acting_for: false,
     }
 }
 
@@ -429,69 +400,5 @@ permit(principal == Agent::"service:chain", action, resource) when {
         // Same-ID chains preserve knowledge; a declaration starts fresh.
         assert_eq!(senders.reaction(None, b, true), b);
         assert_eq!(senders.reaction(Some(&principal), c, true), b);
-    }
-
-    /// A reaction with `as` is sent by the kernel acting for some user, not
-    /// by its source's sender: a policy that admits only a user's agents
-    /// leaves it to the request, and one that admits only services refuses it.
-    #[test]
-    fn a_reaction_with_as_is_sent_for_a_user_the_model_does_not_know() {
-        let a = parse_automaton(
-            r#"
-[automaton]
-name = "A"
-states = ["Ready", "Done"]
-initial = "Ready"
-strict_action_params = true
-[[state]]
-name = "person"
-type = "string"
-initial = ""
-[[action]]
-name = "Claim"
-kind = "input"
-from = ["Ready"]
-params = [{ name = "person", type = "string", source = "authenticated_subject" }]
-[[action]]
-name = "Start"
-kind = "input"
-from = ["Ready"]
-to = "Done"
-[[action.triggers]]
-name = "first"
-kind = "entity"
-target_entity = "A"
-target_action = "Start"
-as = "person"
-[action.triggers.resolve_target]
-kind = "same_id"
-"#,
-        )
-        .unwrap();
-        let asker = declared(&a.actions[1].triggers[0], "A", "Start").unwrap();
-        assert_eq!(
-            asker,
-            Asker::Service {
-                name: "reaction".to_string(),
-                context: BTreeMap::new(),
-                acting_for: true,
-            }
-        );
-        let for_ann = SendAnalysis::new(
-            r#"permit(principal, action, resource) when { context has actingFor && context.actingFor == "ann" };"#,
-        )
-        .unwrap();
-        let services = SendAnalysis::new(
-            r#"permit(principal, action, resource) when { principal has role && principal.role == "service" };"#,
-        )
-        .unwrap();
-        let entities = vec!["A".to_string()];
-        let by_name = BTreeMap::from([("A", &a)]);
-        let senders = Senders::new(&by_name, &entities, Some(&for_ann));
-        let sent = senders.reaction(Some(&asker), OUTSIDE, true);
-        assert_eq!(senders.may(sent, "A", "Start"), May::Maybe);
-        let senders = Senders::new(&by_name, &entities, Some(&services));
-        let sent = senders.reaction(Some(&asker), OUTSIDE, true);
-        assert_eq!(senders.may(sent, "A", "Start"), May::No);
     }
 }

@@ -133,7 +133,6 @@ pub(super) fn synthesize_action_trigger_reaction(
         },
         resolve_target: target_resolver_to_target_resolver(&resolve_target),
         principal: trigger.principal.clone(),
-        acts_for: trigger.acts_for.clone(),
     })
 }
 
@@ -177,7 +176,6 @@ mod tests {
             says: None,
             kind: TriggerKind::Entity,
             principal: Some("file-service".to_string()),
-            acts_for: None,
             guard: Some(temper_spec::predicate::parse("status == 'Ready'").unwrap()),
             liveness: temper_spec::automaton::TriggerLiveness::BestEffort,
             drop_ok: false,
@@ -224,7 +222,6 @@ mod tests {
             says: None,
             kind: TriggerKind::Wasm,
             principal: None,
-            acts_for: None,
             guard: None,
             liveness: temper_spec::automaton::TriggerLiveness::BestEffort,
             drop_ok: false,
@@ -254,7 +251,6 @@ mod tests {
             says: None,
             kind: TriggerKind::Webhook,
             principal: None,
-            acts_for: None,
             guard: None,
             liveness: temper_spec::automaton::TriggerLiveness::BestEffort,
             drop_ok: false,

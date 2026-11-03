@@ -36,38 +36,15 @@ fn reaction_cause(
     )
 }
 
-/// The service that makes a reaction for the user its rule's `as` field
-/// names: Cedar sees `Agent::"service:reaction"` acting for that user.
-const ACTS_FOR_SERVICE: &str = "reaction";
-
-/// Who a reaction is made as, from its rule.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ReactionMaker<'a> {
-    /// Whoever made the source move (the rule names no one).
-    Inherit,
-    /// The service the rule's `principal` declares (ADR-0046).
-    Service(&'a str),
-    /// The kernel acting for this user, whom the source record's `as` field
-    /// names: a field only that user's own identity writes.
-    For(&'a str),
-}
-
 /// ADR-0046: resolve the dispatch context for a reaction.
 ///
-/// - When the rule declares a principal (`Service(service_name)`), build a
+/// - When the rule declares a principal (`Some(service_name)`), build a
 ///   synthetic `AgentContext` identifying the named service. Cedar policies
 ///   can match on `principal.role`, `principal.agent_type`, or
 ///   `principal.id == Service::"<name>"` — whichever style the tenant
 ///   prefers. The `agent_type` slot carries the name so the Cedar request
 ///   sees it via `principal.agent_type == "<name>"`.
-/// - When the rule's `as` names a user (`For(user)`), the reaction is made by
-///   the kernel acting for that user: `Agent::"service:reaction"` with
-///   `actingFor` the user and no service role, so Cedar judges it, and the
-///   moves it sets off, as acting for them, and a parameter bound to the
-///   caller's identity binds theirs. Whoever made the source move chose only
-///   that the reaction happens, which Cedar let them; the user is the one who
-///   put their own name on the record.
-/// - When the rule names no one (`Inherit`), inherit the invoking context
+/// - When the rule has no principal (`None`), inherit the invoking context
 ///   directly — the trigger runs as whoever called the source action.
 ///
 /// Either way the reaction carries its own idempotency key, derived from the
@@ -78,7 +55,7 @@ pub(super) enum ReactionMaker<'a> {
 /// checked with one approximated from it, which must carry the same cause
 /// ([`effective_trigger_security_context`]).
 pub(super) fn resolve_trigger_principal(
-    maker: ReactionMaker<'_>,
+    declared_principal: Option<&str>,
     invoking_ctx: &AgentContext,
     rule_name: &str,
     source_entity_type: &str,
@@ -93,18 +70,8 @@ pub(super) fn resolve_trigger_principal(
         source_action,
         invoking_ctx,
     );
-    let mut ctx = match maker {
-        ReactionMaker::For(user) => {
-            let mut ctx = AgentContext::for_service_inheriting(ACTS_FOR_SERVICE, invoking_ctx);
-            if let Some(security_ctx) = ctx.security_ctx.as_mut() {
-                security_ctx.principal.acting_for = Some(user.to_string());
-                // Acting for a user, the service has a subject (as a carry's
-                // then move does), so it is no bare kernel identity.
-                security_ctx.principal.role = None;
-            }
-            ctx
-        }
-        ReactionMaker::Service(service_name) if !service_name.is_empty() => {
+    let mut ctx = match declared_principal {
+        Some(service_name) if !service_name.is_empty() => {
             let mut ctx = AgentContext::for_service_inheriting(service_name, invoking_ctx);
             if let Some(security_ctx) = ctx.security_ctx.as_mut() {
                 security_ctx.context_attrs.insert(

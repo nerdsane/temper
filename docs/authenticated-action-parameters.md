@@ -46,53 +46,6 @@ Trusted actor messages and replay events are internal runtime interfaces, not
 untrusted request entry points. Service reactions should inherit already-bound
 values using ordinary declared parameters, not attempt to impersonate a caller.
 
-## A reaction made for the user a record names
-
-An entity trigger's `as` names a field of the source record that a subject
-parameter writes. Its reaction is made for whoever that field names, after the
-source move commits:
-
-```toml
-[[action]]
-name = "Claim"
-params = [{ name = "person", type = "string", source = "authenticated_subject" }]
-
-[[action]]
-name = "Pushed"
-
-[[action.triggers]]
-name = "start"
-kind = "entity"
-target_entity = "Rollout"
-target_action = "Start"
-resolve_target = { kind = "create" }
-as = "person"
-```
-
-The reaction's principal is `Agent::"service:reaction"` acting for that user,
-with no service role: Cedar sees `context.actingFor` as the user, a subject
-parameter binds the user, and every move the reaction sets off goes on as them.
-An empty field makes no reaction; it never falls back to the source move's
-caller. Whoever made the source move chose only that the reaction happens,
-which Cedar let them.
-
-The field gets the rules a carry's `as` gets, so nobody else can choose the
-user: the spec needs `strict_action_params = true`; no action takes the field
-as a plain parameter; an effect writes it only from a subject parameter or
-clears it to `''`; and no `[[carry]]` sets it. `as` and `principal` cannot
-both be set.
-
-A subject parameter binds the user an agent acts for. A Katagami hook acts for
-its app's owner, so a hook that could make the claiming move would write the
-owner into the field: keep the claiming move away from hooks in Cedar (a hook's
-forbid narrowed to its own moves already does). A synthesized principal has no
-principal records attached, so `principal.actingFor<Type>` (an app's Member
-status) is absent on the reaction; policies that need it see the user only
-through `context.actingFor`.
-
-Regression tests: `cargo test -p temper-server --test reactions_act_for` and
-`cargo test -p temper-spec acts_for`.
-
 ## The agent's label
 
 `source = "authenticated_agent_label"` binds the name a trusted issuer gave the
