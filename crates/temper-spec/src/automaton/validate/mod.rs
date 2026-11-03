@@ -3,6 +3,7 @@
 //! the statechart labels.
 
 mod carries;
+mod fire_now;
 mod groups;
 mod triggers;
 mod webhooks;
@@ -153,6 +154,7 @@ pub(super) fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError>
                 )));
             }
         }
+        fire_now::validate_fire_now_on(automaton, st)?;
     }
 
     // 6. Validate allow_indefinite_states entries are declared states

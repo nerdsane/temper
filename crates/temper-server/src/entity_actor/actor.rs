@@ -1817,7 +1817,17 @@ impl EntityActor {
                         state,
                         &name,
                     );
-                    if super::unrecorded::made_by_machine(&event.origin)
+                    // Bringing a timer forward changes its due time through
+                    // this event's status clock, even if no fields changed.
+                    let brings_timer_forward = self
+                        .table
+                        .read()
+                        .expect("transition table poisoned")
+                        .action_contracts
+                        .get(&name)
+                        .is_some_and(|contract| contract.fire_now_in.contains(&state.status));
+                    if !brings_timer_forward
+                        && super::unrecorded::made_by_machine(&event.origin)
                         && super::unrecorded::leaves_record_unchanged(
                             &state_before,
                             state,

@@ -381,6 +381,7 @@ impl Pass<'_> {
                 "on_timeout",
                 "max_occurrences",
                 "reset_on",
+                "fire_now_on",
                 "args",
             ],
         );

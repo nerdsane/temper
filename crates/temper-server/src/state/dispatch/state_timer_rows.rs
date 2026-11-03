@@ -397,5 +397,7 @@ pub(super) fn armed_timer(
         arm_id: row.arm_id.clone(),
         sequence_nr: row.sequence_nr,
         started_at,
+        // The row does not keep it: whoever follows the record reads it there.
+        brought_forward_at: None,
     })
 }

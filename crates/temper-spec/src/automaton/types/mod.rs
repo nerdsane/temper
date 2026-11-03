@@ -364,6 +364,18 @@ pub struct StateTimeout {
     /// the current moment. Progress signals such as `Heartbeat` go here.
     #[serde(default)]
     pub reset_on: Vec<String>,
+    /// Actions that, taken while in `state` and staying there, make the
+    /// armed timer fire now instead of at its deadline. The fire is still
+    /// the timer's own: it runs as whoever armed it, with its standing
+    /// checked, and Cedar sees `via == "timer"`. The move that brings it
+    /// forward lends it no identity and picks no move: unlike `reset_on`, it
+    /// does not re-arm the timer as its own caller. Timers are deadlines:
+    /// this is for a deadline that stands in for news that may never come,
+    /// such as a webhook delivery the sender lost, so that news which does
+    /// arrive is acted on at once. A timer that fires once and already fired
+    /// is not fired again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fire_now_on: Vec<String>,
     /// Parameters passed to the `on_timeout` action, read when the timer is
     /// armed. Each value is a literal (`'text'`, an integer, `true`, `false`,
     /// `null`) or a declared state variable (`Id` is the entity's id).

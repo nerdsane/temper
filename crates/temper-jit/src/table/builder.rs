@@ -180,6 +180,12 @@ impl TransitionTable {
                                         .map(|source| (param.name().to_owned(), source))
                                 })
                                 .collect(),
+                            fire_now_in: automaton
+                                .state_timeouts
+                                .iter()
+                                .filter(|timeout| timeout.fire_now_on.contains(&action.name))
+                                .map(|timeout| timeout.state.clone())
+                                .collect(),
                             constraints: action.constraints.clone(),
                         },
                     )

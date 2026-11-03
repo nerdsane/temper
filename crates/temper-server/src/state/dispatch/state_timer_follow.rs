@@ -259,6 +259,7 @@ impl ServerState {
                         gate: gate.clone(),
                         arming,
                         woke_for: None,
+                        prior_arm: None,
                     };
                     let followed = self
                         .reconcile_stored_record(&tenant, &entity_type, entity_id, follow)
@@ -333,6 +334,7 @@ impl ServerState {
                         gate: gate.clone(),
                         arming,
                         woke_for: None,
+                        prior_arm: None,
                     };
                     let followed = server
                         .reconcile_stored_record(&tenant, &entity_type, &entity_id, follow)
