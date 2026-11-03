@@ -205,10 +205,10 @@ to = "Bringing"
 fn a_reaction_cedar_may_refuse_is_not_counted_on() {
     let bring = r#"principal == Agent::"service:place" && resource.owner == "someone""#;
     let result = check(r#"["Waiting", "Stuck"]"#, bring);
+    // Whether Cedar lets it through turns on a field no walk holds, so it
+    // is neither counted on nor said to refuse.
     assert!(
-        resting(&result)
-            .iter()
-            .any(|state| state.contains("Place=Unplaced")),
+        matches!(result.outcome, LivenessOutcome::Incomplete { .. }),
         "{result}"
     );
 }
@@ -464,3 +464,4 @@ fn oversized_parameter_expansion_is_incomplete() {
 mod cause;
 mod lost_call;
 mod sender;
+mod sure;

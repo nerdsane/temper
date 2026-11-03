@@ -40,9 +40,9 @@ pub use guided::{Candidate, Guide, GuidedSearch, STEPS as GUIDED_STEPS, guided_s
 use order::{Order, Specs};
 pub(super) use read::Timeout;
 use read::{Kernel, Reaction, Unchecked, named_literals, tracked, unchecked_constraints};
-pub(super) use step::Move;
+pub(super) use step::{Certainty, Move};
 pub(super) use walk::Keep;
-pub(super) use walk::{Explored, unwalked_reason};
+pub(super) use walk::{Explored, Made, unwalked_reason};
 
 /// Counter ceiling for the joint models, as for the composite plans.
 const JOINT_MAX_COUNTER: usize = 3;

@@ -83,15 +83,12 @@ const OUTBOUND_ERROR_KIND_MAX_CHARS: usize = 120;
 /// failure it was. It never logs the query, headers, body or the rest of the
 /// error, which can quote a response body.
 fn log_outbound_call_failure(host_fn: &'static str, method: &str, url: &str, error: &str) {
-    let target = crate::host_trait::telemetry_url(url);
-    let (host, path) = target.split_at(target.find('/').unwrap_or(target.len()));
     let phrase = error.split(": ").next().unwrap_or(error).trim();
     let error_kind: String = phrase.chars().take(OUTBOUND_ERROR_KIND_MAX_CHARS).collect();
     tracing::warn!(
         host_fn,
         http.method = %method.to_ascii_uppercase(),
-        url.host = %host,
-        url.path = %path,
+        url = %crate::host_trait::telemetry_url(url),
         error_kind = %error_kind,
         "WASM host outbound call failed; returning error to guest"
     );

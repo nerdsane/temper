@@ -45,6 +45,7 @@ mod evolution;
 pub mod field_index;
 mod field_index_rows;
 mod first_event;
+mod first_origin;
 mod instrumentation;
 mod migration_support;
 mod module_reviews;
@@ -165,6 +166,7 @@ impl TursoEventStore {
         };
         store.migrate().await?;
         store.start_first_event_backfill().await?;
+        store.start_first_origin_backfill().await?;
         Ok(store)
     }
 
@@ -557,6 +559,9 @@ impl TursoEventStore {
         )
         .await?;
         conn.execute(first_event::CREATE_BACKFILL_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(first_origin::CREATE_BACKFILL_TABLE, ())
             .await
             .map_err(storage_error)?;
         conn.execute(schema::CREATE_ENTITY_CATALOG_CHECKPOINT_INDEX, ())

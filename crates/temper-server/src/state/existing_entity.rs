@@ -63,10 +63,43 @@ impl ServerState {
             || (from_index && !self.entity_exists(tenant, entity_type, entity_id))
         {
             let _ = actor_ref.stop();
-            self.remove_entity(tenant, entity_type, entity_id);
+            self.forget_deleted_actor(tenant, entity_type, entity_id, &actor_ref);
             return Ok(None);
         }
         Ok(Some(response))
+    }
+
+    /// Forget a deleted entity whose actor `answered`, unless another actor has
+    /// taken its key: that is a new record using the id again, which keeps its
+    /// registration. The registry lock is held throughout, so a create that
+    /// spawns the key again is never undone.
+    fn forget_deleted_actor(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        answered: &ActorRef<EntityMsg>,
+    ) {
+        let key = format!("{tenant}:{entity_type}:{entity_id}");
+        let mut registry = self
+            .actor_registry
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        if registry
+            .get(&key)
+            .is_some_and(|actor| actor.id().uid != answered.id().uid)
+        {
+            return;
+        }
+        registry.remove(&key);
+        self.last_accessed
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&key);
+        let mut index = self.entity_index.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(ids) = index.get_mut(&format!("{tenant}:{entity_type}")) {
+            ids.remove(entity_id);
+        }
     }
 
     fn live_actor(

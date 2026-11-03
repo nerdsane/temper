@@ -12,7 +12,7 @@ use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::entity_actor::{EntityEvent, EntityMsg, EntityResponse, EntityState};
 use crate::state::ServerState;
 
-use super::entity_read::require_existing_entity_read;
+use super::entity_read::require_history_read;
 
 /// GET /observe/entities/{entity_type}/{entity_id}/history -- entity event history.
 ///
@@ -34,6 +34,8 @@ use super::entity_read::require_existing_entity_read;
 /// is not a whole number answers 400. A page reads only its own rows from the
 /// journal, plus one to learn whether older events exist.
 ///
+/// A deleted record's trail stays readable: see [`require_history_read`].
+///
 /// When the actor is loaded the response also carries its live
 /// `current_state`, `fields`, `counters`, `booleans` and `lists`.
 pub(crate) async fn handle_get_entity_history(
@@ -44,7 +46,7 @@ pub(crate) async fn handle_get_entity_history(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let authenticated = require_authenticated_context(authenticated.as_deref())?;
     let page = HistoryPage::parse(&params)?;
-    require_existing_entity_read(&state, authenticated, &entity_type, &entity_id).await?;
+    require_history_read(&state, authenticated, &entity_type, &entity_id).await?;
     let tenant = authenticated.tenant().clone();
     let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
 
@@ -85,7 +87,7 @@ pub(crate) async fn handle_get_entity_history(
     };
 
     // Decided again after the read, so the decision sees every event returned.
-    require_existing_entity_read(&state, authenticated, &entity_type, &entity_id).await?;
+    require_history_read(&state, authenticated, &entity_type, &entity_id).await?;
 
     let mut json = serde_json::json!({
         "entity_type": entity_type,

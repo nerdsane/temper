@@ -140,11 +140,12 @@ fn an_invariant_premise_no_settled_state_meets_proves_nothing() {
 }
 
 #[test]
-fn a_stuck_verdict_names_the_answers_the_walk_never_takes() {
+fn an_answer_the_walk_never_takes_leaves_a_stuck_rule_not_checked() {
+    // The answer may be the way out, so the rule is not said to be broken.
     let result = liveness("input", false, "status == 'Asked' => status == 'Done'");
     let text = result.to_string();
     assert!(
-        matches!(result.outcome, LivenessOutcome::Stuck { .. }),
+        matches!(result.outcome, LivenessOutcome::Incomplete { .. }),
         "{text}"
     );
     assert!(text.contains("Ask.Done (from Asked)"), "{text}");

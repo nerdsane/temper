@@ -40,9 +40,13 @@
 //! its own, is kept as a sequence number: the newest, or behind it
 //! (`model/order.rs`).
 //!
+//! A stuck verdict refuses the install, so it too says only what is known:
+//! sure moves alone lead to the state, and no move, sure or not, may lead on
+//! to the condition. Anything less is not checked, naming why.
+//!
 //! A pass that checked nothing is not one. Where a module may answer with an
-//! action the walk never takes, the property is not checked; a stuck verdict
-//! names those answers, since one may be the way out. And a condition written
+//! action the walk never takes, the property is not checked, since one may
+//! be the way out. And a condition written
 //! `premise => conclusion` whose premise no walked state meets proves nothing.
 
 use std::collections::{BTreeSet, VecDeque};
@@ -56,6 +60,10 @@ use super::JointStep;
 use super::model::{self, JointModel};
 use super::proof::liveness_proofs;
 use super::room::Bound;
+
+#[path = "liveness_stuck.rs"]
+mod stuck;
+use stuck::{may_reach, sure_path, unsure_reason};
 
 /// What the joint check found for one `eventually` property.
 #[derive(Debug, Clone)]
@@ -177,13 +185,6 @@ impl fmt::Display for JointLivenessResult {
                     self.eventually,
                     cases.len()
                 )?;
-                if !self.unwalked.is_empty() {
-                    writeln!(
-                        f,
-                        "  Some of them may not be stuck in the runtime: {}.",
-                        model::unwalked_reason(&self.unwalked)
-                    )?;
-                }
                 for (number, case) in cases.iter().enumerate() {
                     writeln!(
                         f,
@@ -254,21 +255,20 @@ pub(super) fn settle(
         failing[index] = truth != Truth::True;
         done[index] = truth == Truth::True && state.settled();
     }
-    let mut good = reach(explored, &done, &failing, false);
+    let good = reach(explored, &done, &failing, false);
     if good.iter().all(|&g| g) {
         return (LivenessOutcome::Holds, met);
     }
     // A reaction from a type outside the scope is a move the system makes,
     // but nothing the model holds says it comes. A state it may lead out of
-    // may not be stuck in the runtime, so only the states that cannot reach
-    // the goal even through those are.
+    // may not be stuck in the runtime.
     if explored.made.iter().any(|made| made.outside) {
         let maybe = reach(explored, &done, &failing, true);
-        let left: BTreeSet<String> = (0..count)
-            .filter(|&index| !good[index] && maybe[index])
-            .flat_map(|index| outside_moves(model, &explored.state(index)))
-            .collect();
         if maybe.iter().all(|&g| g) {
+            let left: BTreeSet<String> = (0..count)
+                .filter(|&index| !good[index])
+                .flat_map(|index| outside_moves(model, &explored.state(index)))
+                .collect();
             return (
                 LivenessOutcome::Incomplete {
                     reason: format!(
@@ -282,11 +282,23 @@ pub(super) fn settle(
                 met,
             );
         }
-        good = maybe;
     }
-    let stuck: Vec<usize> = (0..count).filter(|&index| !good[index]).collect();
+    // A stuck verdict refuses the install, so it says only what the runtime
+    // can do: sure moves alone lead to the state, and no move, sure or not,
+    // can lead on from it to the goal. Any other state the goal is not sure
+    // from is not known either way.
+    let out = may_reach(explored, &done, &failing);
+    let parents = explored.sure_parents();
+    let stuck: Vec<usize> = (0..count)
+        .filter(|&index| !out[index] && parents[index].is_some())
+        .collect();
     let Some(&first) = stuck.first() else {
-        return (LivenessOutcome::Holds, met);
+        return (
+            LivenessOutcome::Incomplete {
+                reason: unsure_reason(explored, &good, &out),
+            },
+            met,
+        );
     };
     let mut seen = BTreeSet::new();
     let mut resting: Vec<usize> = stuck
@@ -316,7 +328,7 @@ pub(super) fn settle(
                 }
             }
             StuckCase {
-                path: explored.path(index),
+                path: sure_path(model, explored, &parents, index),
                 moves: moves.into_iter().collect(),
             }
         })
@@ -417,11 +429,13 @@ fn outside_moves(model: &JointModel, state: &super::JointState) -> Vec<String> {
         .collect()
 }
 
-/// The bytes [`settle`] holds for `explored`: per state, its marks, its
-/// place in the queue and the stuck list, and its two lists of moves in; per
-/// move, its mark and count; per edge, its place in one of those lists.
+/// The bytes [`settle`] holds for `explored`: per state, its marks, its sure
+/// parent, its place in the queue and the stuck list, and its two lists of
+/// moves in; per move, its mark and count; per edge, its place in one of
+/// those lists.
 pub(super) fn settle_bytes(explored: &model::Explored<'_>) -> usize {
-    let per_state = 2 * size_of::<bool>()
+    let per_state = 3 * size_of::<bool>()
+        + size_of::<Option<u32>>()
         + 2 * size_of::<usize>()
         + 2 * (size_of::<Vec<u32>>() + super::room::block(4 * size_of::<u32>()));
     let per_move = size_of::<bool>() + size_of::<u32>();

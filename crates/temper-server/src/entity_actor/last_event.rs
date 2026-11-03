@@ -3,7 +3,11 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use temper_runtime::actor::ActorError;
+use temper_runtime::persistence::PersistenceEnvelope;
+
 use crate::request_context::AgentContext;
+use crate::storage::BoxedEventStore;
 
 /// The immediate source of an entity move, separate from its acting principal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,13 +136,32 @@ fn via_of(caller: &AgentContext) -> EventVia {
     EventVia::Request
 }
 
-/// Creation time and the newest applied event, retained independently of history.
-/// Flattened into each row using the kernel's top-level snake_case convention.
+/// Creation time and who made the record, and the newest applied event,
+/// retained independently of history. Flattened into each row using the
+/// kernel's top-level snake_case convention.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LastEvent {
     /// Timestamp at journal sequence one; unknown if that event is no longer held.
     #[serde(default, serialize_with = "serialize_first_event_at")]
     pub first_event_at: Option<DateTime<Utc>>,
+    /// Immediate source of the event at journal sequence one, the record's
+    /// creation. Null when that event is no longer held or predates
+    /// provenance; then its maker below is unknown too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_event_via: Option<EventVia>,
+    /// The principal the creation ran as, as `last_event_by` names the newest
+    /// move's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_event_by: Option<String>,
+    /// Whom that principal acted for, when it is an agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_event_for: Option<String>,
+    /// That agent's type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_event_agent_type: Option<String>,
+    /// The name of that agent instance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_event_label: Option<String>,
     /// Timestamp of the newest event, null when no event is known.
     pub last_event_at: Option<DateTime<Utc>>,
     /// Immediate source of that same event.
@@ -163,6 +186,21 @@ pub struct LastEvent {
 }
 
 impl LastEvent {
+    /// Keep who made the record, from its creation event's provenance.
+    pub(super) fn record_first(&mut self, origin: &EventOrigin) {
+        self.first_event_via = origin.via;
+        self.first_event_by = origin.by.clone();
+        self.first_event_for = origin.acting_for.clone();
+        self.first_event_agent_type = origin.agent_type.clone();
+        self.first_event_label = origin.label.clone();
+    }
+
+    /// Whether the creation's provenance is known. An event from before
+    /// provenance, or a creation no longer held, leaves it unknown.
+    pub(super) fn first_known(&self) -> bool {
+        self.first_event_via.is_some()
+    }
+
     pub(super) fn record(&mut self, event: &super::EntityEvent) {
         self.last_event_at = Some(event.timestamp);
         self.last_event_via = event.origin.via;
@@ -176,6 +214,62 @@ impl LastEvent {
             self.timer_needs_person = None;
         }
     }
+}
+
+/// The record's creation as replay finds it: when and who made it, each kept
+/// from the snapshot when known, else read from the event at sequence one, the
+/// replayed tail's first or, after a snapshot, through the journal index; never
+/// the oldest retained event. An event from before provenance names no one.
+pub(super) async fn creation(
+    store: &BoxedEventStore,
+    persistence_id: &str,
+    known: &LastEvent,
+    envelopes: &[PersistenceEnvelope],
+    loaded_snapshot: bool,
+) -> Result<(Option<DateTime<Utc>>, Option<EventOrigin>), ActorError> {
+    let lookup = |what: &str, error: &dyn std::fmt::Display| {
+        ActorError::custom(format!("creation {what} lookup failed: {error}"))
+    };
+    let origin_of = |event: &PersistenceEnvelope| {
+        EventOrigin::deserialize(&event.payload)
+            .ok()
+            .filter(|origin| origin.via.is_some())
+    };
+    let first = envelopes.first().filter(|event| event.sequence_nr == 1);
+    let at = if known.first_event_at.is_some() {
+        known.first_event_at
+    } else if let Some(event) = first {
+        Some(
+            event
+                .payload
+                .get("timestamp")
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+                .unwrap_or(event.metadata.timestamp),
+        )
+    } else if loaded_snapshot {
+        store
+            .first_event_at(persistence_id)
+            .await
+            .map_err(|error| lookup("time", &error))?
+    } else {
+        None
+    };
+    let origin = if known.first_known() {
+        None
+    } else if let Some(event) = first {
+        origin_of(event)
+    } else if loaded_snapshot {
+        store
+            .read_events_page(persistence_id, Some(2), 1)
+            .await
+            .map_err(|error| lookup("maker", &error))?
+            .first()
+            .filter(|event| event.sequence_nr == 1)
+            .and_then(origin_of)
+    } else {
+        None
+    };
+    Ok((at, origin))
 }
 
 fn serialize_first_event_at<S: serde::Serializer>(
@@ -462,6 +556,67 @@ mod tests {
         );
         last.record(&event("Nudge", ann(EventVia::Request), Value::Null));
         assert_eq!(last.timer_needs_person, None);
+    }
+
+    #[test]
+    fn the_record_keeps_who_made_it_while_later_moves_name_the_newest() {
+        let mut state = super::super::EntityState {
+            entity_type: "Note".into(),
+            entity_id: "n1".into(),
+            status: "Idle".into(),
+            item_count: 0,
+            counters: Default::default(),
+            booleans: Default::default(),
+            lists: Default::default(),
+            fields: serde_json::json!({}),
+            events: Default::default(),
+            total_event_count: 0,
+            events_since_snapshot: 0,
+            last_snapshot_sequence_nr: 0,
+            sequence_nr: 0,
+            processed_idempotency_keys: Default::default(),
+            last_event: Default::default(),
+            status_clock: Default::default(),
+            spawn_reservations: Default::default(),
+        };
+        let mut created = super::super::EntityEvent::bootstrap("Idle".into());
+        created.action = "Create".into();
+        created.origin = anns_agent(EventVia::Request);
+        state.push_event_bounded(created);
+        let mut moved = super::super::EntityEvent::bootstrap("Idle".into());
+        moved.action = "Edit".into();
+        moved.origin = EventOrigin {
+            via: Some(EventVia::Request),
+            by: Some("bo".into()),
+            ..EventOrigin::default()
+        };
+        state.push_event_bounded(moved);
+        let last = &state.last_event;
+        assert_eq!(last.first_event_via, Some(EventVia::Request));
+        assert_eq!(last.first_event_by.as_deref(), Some("hub-client"));
+        assert_eq!(last.first_event_for.as_deref(), Some("ann"));
+        assert_eq!(last.first_event_agent_type.as_deref(), Some("claude-code"));
+        assert_eq!(last.last_event_by.as_deref(), Some("bo"));
+        assert_eq!(last.last_event_for, None);
+        // The row carries them at its top level and reads them back.
+        let row = serde_json::to_value(last).unwrap();
+        assert_eq!(row["first_event_by"], "hub-client");
+        assert_eq!(row["first_event_for"], "ann");
+        assert_eq!(row["first_event_via"], "request");
+        let read: LastEvent = serde_json::from_value(row).unwrap();
+        assert_eq!(&read, last);
+    }
+
+    #[test]
+    fn a_row_saved_before_makers_were_kept_reads_as_unknown() {
+        let read: LastEvent = serde_json::from_value(serde_json::json!({
+            "first_event_at": "2026-01-01T00:00:00Z", "last_event_by": "bo"
+        }))
+        .unwrap();
+        assert!(!read.first_known());
+        assert_eq!(read.first_event_by, None);
+        let row = serde_json::to_value(&read).unwrap();
+        assert!(row.get("first_event_by").is_none(), "{row}");
     }
 
     #[test]

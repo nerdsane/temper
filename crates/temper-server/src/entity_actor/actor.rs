@@ -942,30 +942,14 @@ impl EntityActor {
                 if !loaded_snapshot && from_sequence == 0 && !envelopes.is_empty() {
                     super::bootstrap::clear_for_replay(state, &table.initial_state);
                 }
-                // An old snapshot may lack creation metadata. Read exactly sequence
-                // one through the journal index, never the oldest retained event.
-                let event_time = |event: &PersistenceEnvelope| {
-                    event
-                        .payload
-                        .get("timestamp")
-                        .and_then(|value| serde_json::from_value(value.clone()).ok())
-                        .unwrap_or(event.metadata.timestamp)
-                };
-                let first_event_at = if state.last_event.first_event_at.is_some() {
-                    state.last_event.first_event_at
-                } else if let Some(event) = envelopes.first().filter(|event| event.sequence_nr == 1)
-                {
-                    Some(event_time(event))
-                } else if loaded_snapshot {
-                    store
-                        .first_event_at(persistence_id)
-                        .await
-                        .map_err(|error| {
-                            ActorError::custom(format!("creation time lookup failed: {error}"))
-                        })?
-                } else {
-                    None
-                };
+                let (first_event_at, first_origin) = super::last_event::creation(
+                    store,
+                    persistence_id,
+                    &state.last_event,
+                    &envelopes,
+                    loaded_snapshot,
+                )
+                .await?;
                 let mut expected_sequence = from_sequence.saturating_add(1);
                 for (index, env) in envelopes.iter().enumerate() {
                     if replay_policy.strict_event_validation() {
@@ -1266,6 +1250,9 @@ impl EntityActor {
                     state.sequence_nr = env.sequence_nr;
                 }
                 state.last_event.first_event_at = first_event_at;
+                if let Some(origin) = &first_origin {
+                    state.last_event.record_first(origin);
+                }
                 if !envelopes.is_empty() {
                     let replayed_tail = state
                         .sequence_nr
