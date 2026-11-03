@@ -1,5 +1,6 @@
 //! Phase two: guided walks past where the breadth-first walk's room ends.
 
+use temper_authz::SendAnalysis;
 use temper_spec::automaton::{Automaton, parse_automaton};
 
 use super::room::{Bound, Bytes, Progress};
@@ -186,4 +187,60 @@ fn the_same_specs_give_the_same_verdict_and_trace() {
     let second = invariant_in(&[&deep, OTHER], SMALL).to_string();
     assert!(first.contains("BROKEN"), "{first}");
     assert_eq!(first, second);
+}
+
+/// A type outside the rule's scope whose move makes Deep fall.
+const PUSH: &str = r#"
+[automaton]
+name = "Push"
+states = ["Idle", "Sent"]
+initial = "Idle"
+
+[[action]]
+name = "Send"
+kind = "input"
+from = ["Idle"]
+to = "Sent"
+
+[[action.triggers]]
+name = "fall"
+kind = "entity"
+target_entity = "Deep"
+target_action = "Fall"
+
+[action.triggers.resolve_target]
+kind = "same_id"
+"#;
+
+/// Only a reaction may make Deep fall.
+const FALLS_BY_REACTION: &str = r#"
+permit(principal, action, resource is Deep);
+forbid(principal, action == Action::"Fall", resource is Deep)
+unless { context has via && context.via != "request" };
+permit(principal, action == Action::"Send", resource is Push);
+"#;
+
+#[test]
+fn a_stuck_state_past_the_room_only_an_unsure_move_reaches_stays_not_checked() {
+    let deep = deep(
+        DEPTH,
+        FLAGS,
+        "[[liveness]]\nname = 'rule'\neventually = \"status != 'Trap' && READ\"\n",
+    );
+    let automatons = parse(&[&deep, PUSH]);
+    let refs: Vec<&Automaton> = automatons.iter().collect();
+    let analysis = SendAnalysis::new(FALLS_BY_REACTION).expect("fixture policies parse");
+    let (room, progress) = (Bytes::new(SMALL), Progress::default());
+    let bound = Bound {
+        room: &room,
+        progress: &progress,
+    };
+    let result = verify_joint_liveness(&refs, Some(&analysis), bound).remove(0);
+    let LivenessOutcome::Incomplete { reason } = &result.outcome else {
+        panic!("only a reaction from outside reaches Trap, got {result}");
+    };
+    assert!(
+        reason.contains("a way the runtime may never take"),
+        "{reason}"
+    );
 }

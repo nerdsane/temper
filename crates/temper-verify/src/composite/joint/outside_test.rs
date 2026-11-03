@@ -292,16 +292,16 @@ permit(principal, action in [Action::"Ping", Action::"Hit", Action::"Mark"], res
 }
 
 #[test]
-fn a_stuck_state_a_reaction_from_outside_the_scope_reaches_is_stuck() {
-    // In the runtime Push's reaction takes Done, and nothing then leads
-    // anywhere: the walk takes it as a move from outside and finds Done
-    // stuck.
+fn a_stuck_state_only_a_reaction_from_outside_the_scope_reaches_is_not_checked() {
+    // The walk takes Push's reaction as a move from outside, with a sender
+    // it made up, and nothing leads on from Done. It cannot say the runtime
+    // gets there, so it does not say the rule is broken.
     let rule =
         "[[liveness]]\nname = \"rule\"\neventually = \"status == 'Done' => status == 'Idle'\"\n";
     let result = liveness(&[&ask(false, rule), &push(false)], POLICIES);
     let text = result.to_string();
     assert!(
-        matches!(result.outcome, LivenessOutcome::Stuck { .. }),
+        matches!(result.outcome, LivenessOutcome::Incomplete { .. }),
         "{text}"
     );
     assert!(
