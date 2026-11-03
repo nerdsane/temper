@@ -4,7 +4,6 @@
 //! The API is the **Temper Data API** at `/tdata`.
 
 use axum::Router;
-use axum::http::StatusCode;
 use axum::middleware;
 use axum::routing;
 
@@ -23,10 +22,24 @@ use crate::tenant_access::tenant_access_check;
 ///
 /// Tenant is extracted from the `X-Tenant-Id` header. Falls back to the
 /// first registered tenant in the SpecRegistry.
+///
+/// The request's span is outermost. An embedder that adds middleware of its
+/// own takes [`build_platform_routes`], adds it, and then puts
+/// [`temper_server::with_request_span`] on last, so that work is in the
+/// request's trace too.
 pub fn build_platform_router(state: PlatformState) -> Router {
+    temper_server::with_request_span(build_platform_routes(state))
+}
+
+/// The platform's routes and middleware, without the request's span.
+pub fn build_platform_routes(state: PlatformState) -> Router {
     let tenant_api = crate::tenant_api::tenant_api_router();
     let health = Router::new()
-        .route("/healthz", routing::get(|| async { StatusCode::OK }))
+        .route(
+            "/healthz",
+            routing::get(temper_server::write_health::healthz),
+        )
+        .with_state(state.server.clone())
         .route("/version", routing::get(version_info));
 
     // Platform observe routes — merged at /observe/* to avoid the /api double-nest
@@ -47,7 +60,10 @@ pub fn build_platform_router(state: PlatformState) -> Router {
         routing::post(temper_server::identity::endpoint::handle_identity_resolve),
     );
 
-    temper_server::build_router(state.server.clone())
+    // The request's span goes on after these (build_platform_router), so the
+    // credential lookups below happen inside it rather than starting traces of
+    // their own.
+    temper_server::build_routes(state.server.clone())
         .merge(health)
         .merge(identity_api.with_state(state.server.clone()))
         .merge(platform_observe.with_state(state.clone()))
@@ -292,8 +308,11 @@ permit(
         );
     }
 
+    /// The path's old contract, installing a catalog app into a tenant the
+    /// body names, is gone: the route now takes the app's files for the
+    /// credential's own tenant, under Cedar `install_app`.
     #[tokio::test]
-    async fn test_local_os_app_install_route_is_removed() {
+    async fn test_install_route_does_not_install_a_catalog_app_into_a_named_tenant() {
         let state = test_state();
         let request = authenticated_request(
             &state,
@@ -301,10 +320,22 @@ permit(
             "/api/os-apps/project-management/install",
             Body::from(r#"{"tenant":"test-install"}"#),
         );
-        let app = build_platform_router(state);
+        let app = build_platform_router(state.clone());
         let response = app.oneshot(request).await.unwrap();
 
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(
+            response.status().is_client_error(),
+            "got {}",
+            response.status()
+        );
+        assert!(
+            state
+                .registry
+                .read()
+                .unwrap()
+                .get_tenant(&TenantId::new("test-install"))
+                .is_none()
+        );
     }
 
     #[tokio::test]

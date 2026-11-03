@@ -893,12 +893,24 @@ async fn real_server_denials_keep_decision_identity_out_of_entity_names() {
         } else {
             "/tdata/Orders('PD-victim')"
         };
-        let response = ctx
+        let request = ctx
             .http
             .request(method, format!("{base}{path}"))
             .bearer_auth(TEST_OPERATOR_KEY)
             .header("X-Tenant-Id", TEST_TENANT)
-            .json(&json!({}))
+            .json(&json!({}));
+        // A raw request has no session unless it sends one. Its refusal
+        // cannot offer a decision that nobody is waiting to answer.
+        let response = request.try_clone().unwrap().send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+        let raw: Value = response.json().await.unwrap();
+        assert!(raw.get("decision_id").is_none(), "{raw}");
+        let parsed = format_authz_denied(&raw.to_string()).unwrap();
+        assert!(parsed["pending_decision"].is_null());
+        assert!(parsed.get("decision_id").is_none());
+
+        let response = request
+            .header("X-Session-Id", ctx.session_id.as_deref().unwrap())
             .send()
             .await
             .unwrap();

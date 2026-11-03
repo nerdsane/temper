@@ -9,12 +9,8 @@ async fn object_store_failure_creates_no_entity_and_cleans_staging() {
         .await;
     let (mut state, data_dir) = test_state();
     let vault = SecretsVault::new(&[7u8; 32]);
-    vault
-        .cache_secret("default", "blob_endpoint", server.uri())
-        .expect("cache endpoint");
-    vault
-        .cache_secret("default", "blob_bucket", "test-bucket".to_string())
-        .expect("cache bucket");
+    vault.cache_secret("default", "blob_endpoint", server.uri());
+    vault.cache_secret("default", "blob_bucket", "test-bucket".to_string());
     state.secrets_vault = Some(Arc::new(vault));
 
     let response = app(state.clone())

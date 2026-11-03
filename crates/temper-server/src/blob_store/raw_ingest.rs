@@ -23,6 +23,7 @@ pub(super) const BLOB_BACKEND_OPERATION_TIMEOUT: Duration = Duration::from_secs(
 pub(crate) const MAX_RAW_BLOB_BYTES: usize = 2 * 1024 * 1024 * 1024;
 
 mod admission;
+mod file_content;
 pub(crate) use admission::{
     BlobIngestAdmissionError, BlobIngestBudget, BlobIngestPermit, BlobIngestProgressPolicy,
     BlobStageError,
@@ -37,6 +38,8 @@ pub(crate) struct StagedBlob {
     path: tempfile::TempPath,
     declared_len: usize,
     canonical_sha1: String,
+    /// sha256 of the body alone (no canonical prefix), the key of a File's bytes.
+    content_sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,6 +96,7 @@ impl BlobStore {
         let mut file = tokio::fs::File::from_std(file);
         let mut canonical_hasher = sha1::Sha1::new();
         canonical_hasher.update(canonical_prefix);
+        let mut content_hasher = Sha256::new();
         let mut received = 0usize;
         let body_started = tokio::time::Instant::now(); // determinism-ok: production upload progress
         let mut last_progress = body_started;
@@ -146,6 +150,7 @@ impl BlobStore {
                     BlobStageError::Storage(format!("failed to write staged Blob body: {error}"))
                 })?;
             canonical_hasher.update(&chunk);
+            content_hasher.update(&chunk);
             last_progress = tokio::time::Instant::now(); // determinism-ok: production upload progress
         }
         if received != declared_len {
@@ -170,6 +175,7 @@ impl BlobStore {
             path,
             declared_len,
             canonical_sha1: hex_lower(&canonical_hasher.finalize()),
+            content_sha256: hex_lower(&content_hasher.finalize()),
         })
     }
 

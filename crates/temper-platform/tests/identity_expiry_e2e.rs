@@ -84,14 +84,14 @@ async fn resolver_denies_expired_and_malformed_credentials_but_accepts_future_ex
         resolver
             .resolve(&state.server, &tenant, "expired-token")
             .await
-            .is_none(),
+            .is_err(),
         "expired credential must not resolve"
     );
     assert!(
         resolver
             .resolve(&state.server, &tenant, "malformed-token")
             .await
-            .is_none(),
+            .is_err(),
         "malformed expiry must fail closed"
     );
     let future = resolver

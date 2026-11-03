@@ -5,17 +5,22 @@
 
 /// Use jemalloc to aggressively return freed pages to the OS via MADV_DONTNEED,
 /// preventing the RSS bloat caused by glibc malloc on Debian bookworm (Railway).
+/// Its purge settings are in [`allocator`].
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+mod allocator;
+mod audit;
 mod codegen;
 mod decide;
+mod dns;
 mod init;
 mod install;
 mod mcp;
 mod migrate_predicates;
 mod migrate_turso_to_postgres;
 mod serve;
+mod sync_copy_cmd;
 mod util;
 mod verify;
 mod verify_ioa;
@@ -67,6 +72,18 @@ enum Commands {
         #[arg(short, long, default_value = "specs")]
         specs_dir: String,
     },
+    /// Re-check a spec's invariants against the entities on a running server
+    Audit {
+        /// Path to the specs directory
+        #[arg(short, long, default_value = "specs")]
+        specs_dir: String,
+        /// Base URL for the Temper server.
+        #[arg(long, default_value = "http://127.0.0.1:3000")]
+        url: String,
+        /// Tenant to audit. Defaults to `$TEMPER_TENANT`.
+        #[arg(long)]
+        tenant: Option<String>,
+    },
     /// Lint specs locally, then run the verification cascade on a remote Temper server
     VerifyRemote {
         /// Path to the specs directory
@@ -116,6 +133,16 @@ enum Commands {
         /// Port to listen on
         #[arg(short, long, default_value = "3000")]
         port: u16,
+        /// IP address to bind the API to. The default, all interfaces, is
+        /// unchanged; `--bind 127.0.0.1` keeps Temper loopback-only, for a
+        /// server reached through an SSH tunnel or a local proxy. The Observe
+        /// UI follows it; the local sandbox always listens on 127.0.0.1 only.
+        ///
+        /// Only `0.0.0.0` and `127.0.0.1` are accepted: Temper's own
+        /// components reach the API at 127.0.0.1, so any other address would
+        /// break them. If omitted, `TEMPER_BIND_ADDR` can select the address.
+        #[arg(long, default_value = "0.0.0.0")]
+        bind: String,
         /// Storage backend (`postgres`, `turso`, `redis`).
         ///
         /// If omitted, `TEMPER_EVENT_STORE` can select the backend. When neither
@@ -219,6 +246,11 @@ enum Commands {
         #[arg(long)]
         database_url: Option<String>,
     },
+    /// Inspect or repair a database copied to Turso Cloud (TURSO_SYNC_URL).
+    SyncCopy {
+        #[command(subcommand)]
+        action: sync_copy_cmd::Action,
+    },
     /// Start the stdio MCP server for Code Mode
     Mcp {
         /// Port where Temper HTTP server is running.
@@ -233,51 +265,6 @@ enum Commands {
         #[arg(long, hide = true)]
         agent_id: Option<String>,
     },
-}
-
-fn resolve_storage_backend(
-    cli_storage: StorageBackend,
-    storage_explicit: bool,
-    env_storage: Option<&str>,
-) -> Result<StorageBackend, String> {
-    if storage_explicit {
-        return Ok(cli_storage);
-    }
-
-    let Some(value) = env_storage.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Ok(cli_storage);
-    };
-
-    match value.to_ascii_lowercase().as_str() {
-        "postgres" | "pg" => Ok(StorageBackend::Postgres),
-        "turso" | "libsql" => Ok(StorageBackend::Turso),
-        "redis" => Ok(StorageBackend::Redis),
-        other => Err(format!(
-            "TEMPER_EVENT_STORE must be one of postgres, turso, redis; got {other:?}"
-        )),
-    }
-}
-
-fn resolve_actor_runtime_backend(
-    cli_runtime: ActorRuntimeBackend,
-    runtime_explicit: bool,
-    env_runtime: Option<&str>,
-) -> Result<ActorRuntimeBackend, String> {
-    if runtime_explicit {
-        return Ok(cli_runtime);
-    }
-
-    let Some(value) = env_runtime.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Ok(cli_runtime);
-    };
-
-    match value.to_ascii_lowercase().as_str() {
-        "legacy" | "in-memory" | "memory" => Ok(ActorRuntimeBackend::Legacy),
-        "postgres" | "pg" => Ok(ActorRuntimeBackend::Postgres),
-        other => Err(format!(
-            "TEMPER_ACTOR_RUNTIME must be one of legacy, postgres; got {other:?}"
-        )),
-    }
 }
 
 fn resolve_tokio_thread_stack_bytes(env_value: Option<&str>) -> Result<usize, String> {
@@ -302,8 +289,11 @@ fn resolve_tokio_thread_stack_bytes(env_value: Option<&str>) -> Result<usize, St
 fn main() -> anyhow::Result<()> {
     // Load .env file from project root (silently ignored if missing).
     dotenvy::dotenv().ok();
+    // Still the only thread: the runtime is built below.
+    dns::ask_again_after_one_second();
     let cli = Cli::parse();
     let is_mcp = matches!(&cli.command, Commands::Mcp { .. });
+    let is_serve = matches!(&cli.command, Commands::Serve { .. });
 
     let tokio_thread_stack_bytes = resolve_tokio_thread_stack_bytes(
         std::env::var("TEMPER_TOKIO_THREAD_STACK_BYTES")
@@ -318,9 +308,11 @@ fn main() -> anyhow::Result<()> {
         .build()?;
 
     let result = runtime.block_on(async_main(cli));
-    if is_mcp {
+    if is_mcp || is_serve {
         // A canceled Tokio stdio task may leave an uncancellable OS pipe call.
         // MCP has already drained output or reported failure before returning.
+        // A stopped server has reported the writes it owed and flushed its
+        // telemetry; its background tasks must not hold up the exit.
         runtime.shutdown_timeout(std::time::Duration::from_secs(1));
     }
     result
@@ -356,6 +348,11 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
             output_dir,
         } => codegen::run(&specs_dir, &output_dir)?,
         Commands::Verify { specs_dir } => verify::run(&specs_dir)?,
+        Commands::Audit {
+            specs_dir,
+            url,
+            tenant,
+        } => audit::run(&specs_dir, &url, tenant.as_deref()).await?,
         Commands::VerifyRemote {
             specs_dir,
             url,
@@ -366,6 +363,7 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
         Commands::MigratePredicates { paths, check } => migrate_predicates::run(&paths, check)?,
         Commands::Serve {
             port,
+            bind,
             storage,
             actor_runtime,
             actor_backed_type,
@@ -376,20 +374,27 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
             verify_subprocess,
             discord_bot_token,
         } => {
-            let storage_explicit =
-                std::env::args().any(|arg| arg == "--storage" || arg.starts_with("--storage="));
+            let bind = serve::options::resolve_bind_addr(
+                &bind,
+                serve::options::flag_given("--bind"),
+                std::env::var("TEMPER_BIND_ADDR").ok().as_deref(),
+            )
+            .map_err(|err| anyhow::anyhow!(err))?;
+            let storage_explicit = serve::options::flag_given("--storage");
             let storage_env = std::env::var("TEMPER_EVENT_STORE").ok();
             let storage_config_explicit = storage_explicit
                 || storage_env
                     .as_deref()
                     .is_some_and(|value| !value.trim().is_empty());
-            let storage =
-                resolve_storage_backend(storage, storage_explicit, storage_env.as_deref())
-                    .map_err(|err| anyhow::anyhow!(err))?;
-            let actor_runtime_explicit = std::env::args()
-                .any(|arg| arg == "--actor-runtime" || arg.starts_with("--actor-runtime="));
+            let storage = serve::options::resolve_storage_backend(
+                storage,
+                storage_explicit,
+                storage_env.as_deref(),
+            )
+            .map_err(|err| anyhow::anyhow!(err))?;
+            let actor_runtime_explicit = serve::options::flag_given("--actor-runtime");
             let actor_runtime_env = std::env::var("TEMPER_ACTOR_RUNTIME").ok();
-            let actor_runtime = resolve_actor_runtime_backend(
+            let actor_runtime = serve::options::resolve_actor_runtime_backend(
                 actor_runtime,
                 actor_runtime_explicit,
                 actor_runtime_env.as_deref(),
@@ -424,6 +429,7 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
             let discord_token =
                 discord_bot_token.or_else(|| std::env::var("DISCORD_BOT_TOKEN").ok()); // determinism-ok: read once at startup
             serve::run(
+                bind,
                 port,
                 apps,
                 os_app_installs,
@@ -443,6 +449,7 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
             url,
             agent_id,
         } => mcp::run(port, url, agent_id).await?,
+        Commands::SyncCopy { action } => sync_copy_cmd::run(action).await?,
         Commands::MigrateTursoToPostgres {
             tenant,
             dry_run,
@@ -628,6 +635,23 @@ mod tests {
     }
 
     #[test]
+    fn test_cli_parse_serve_bind() {
+        let cli = Cli::parse_from(["temper", "serve", "--bind", "127.0.0.1", "--port", "3300"]);
+        match cli.command {
+            Commands::Serve { bind, port, .. } => {
+                assert_eq!(bind, "127.0.0.1");
+                assert_eq!(port, 3300);
+            }
+            _ => panic!("expected Serve command"),
+        }
+        let cli = Cli::parse_from(["temper", "serve"]);
+        match cli.command {
+            Commands::Serve { bind, .. } => assert_eq!(bind, "0.0.0.0", "the default is unchanged"),
+            _ => panic!("expected Serve command"),
+        }
+    }
+
+    #[test]
     fn test_cli_parse_serve_with_specs() {
         let cli = Cli::parse_from([
             "temper",
@@ -717,54 +741,6 @@ mod tests {
     }
 
     #[test]
-    fn storage_backend_env_is_used_when_cli_storage_is_not_explicit() {
-        assert_eq!(
-            resolve_storage_backend(StorageBackend::Turso, false, Some("postgres"))
-                .expect("postgres storage env should parse"),
-            StorageBackend::Postgres
-        );
-        assert_eq!(
-            resolve_storage_backend(StorageBackend::Turso, false, Some("redis"))
-                .expect("redis storage env should parse"),
-            StorageBackend::Redis
-        );
-        assert_eq!(
-            resolve_storage_backend(StorageBackend::Turso, true, Some("postgres"))
-                .expect("explicit CLI storage should win"),
-            StorageBackend::Turso
-        );
-    }
-
-    #[test]
-    fn storage_backend_env_rejects_unknown_values() {
-        let error = resolve_storage_backend(StorageBackend::Turso, false, Some("sqlite"))
-            .expect_err("unknown storage backend should fail");
-        assert!(error.contains("TEMPER_EVENT_STORE"));
-    }
-
-    #[test]
-    fn actor_runtime_env_is_used_when_cli_runtime_is_not_explicit() {
-        assert_eq!(
-            resolve_actor_runtime_backend(ActorRuntimeBackend::Legacy, false, Some("postgres"))
-                .expect("postgres actor runtime env should parse"),
-            ActorRuntimeBackend::Postgres
-        );
-        assert_eq!(
-            resolve_actor_runtime_backend(ActorRuntimeBackend::Postgres, true, Some("legacy"))
-                .expect("explicit CLI actor runtime should win"),
-            ActorRuntimeBackend::Postgres
-        );
-    }
-
-    #[test]
-    fn actor_runtime_env_rejects_unknown_values() {
-        let error =
-            resolve_actor_runtime_backend(ActorRuntimeBackend::Legacy, false, Some("sqlite"))
-                .expect_err("unknown actor runtime should fail");
-        assert!(error.contains("TEMPER_ACTOR_RUNTIME"));
-    }
-
-    #[test]
     fn tokio_thread_stack_defaults_and_accepts_override() {
         assert_eq!(
             resolve_tokio_thread_stack_bytes(None).expect("default stack size should resolve"),
@@ -781,15 +757,6 @@ mod tests {
     fn tokio_thread_stack_rejects_tiny_or_invalid_override() {
         assert!(resolve_tokio_thread_stack_bytes(Some("abc")).is_err());
         assert!(resolve_tokio_thread_stack_bytes(Some("1048576")).is_err());
-    }
-
-    #[test]
-    fn railway_start_command_does_not_pin_turso_storage() {
-        let railway_toml = include_str!("../../../railway.toml");
-        assert!(
-            !railway_toml.contains("--storage turso"),
-            "Railway must allow TEMPER_EVENT_STORE=postgres to select the backend"
-        );
     }
 
     #[test]

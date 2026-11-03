@@ -16,10 +16,17 @@ use crate::metrics::{
 
 mod evolution;
 mod inputs;
+mod module_reviews;
 mod policy_approval;
+mod policy_replace;
 mod rows;
+mod scheduled_actions;
+mod secrets;
+mod specs;
+mod state_timers;
 pub use inputs::{PostgresEvolutionRecordInsert, PostgresPolicyApprovalCommit};
 use rows::*;
+pub use secrets::{PostgresSecretRow, PostgresSecretVersionRow};
 
 const DISTINCT_RESOURCE_IDS_BUDGET: usize = 100;
 const BUNDLED_REPLACE_UPLOAD_SOURCE: &str = "bundled-replace-upload";
@@ -71,9 +78,11 @@ async fn update_query_projection_catalog_row(
              sequence_nr = $6, \
              projection_version = 2, \
              projection_hash = $7, \
+             first_event_at = COALESCE(first_event_at, $8->>'first_event_at'), \
              state = $8, \
              updated_at = now() \
-         WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3",
+         WHERE tenant = $1 AND entity_type = $2 AND entity_id = $3 \
+           AND (status, sequence_nr, projection_hash, state) IS DISTINCT FROM ($4, $6, $7, $8)",
     )
     .bind(update.tenant)
     .bind(update.entity_type)
@@ -89,13 +98,20 @@ async fn update_query_projection_catalog_row(
     Ok(())
 }
 
+/// Bring the entity's `entity_field_index` rows to `new_index`. Only a field
+/// the entity no longer indexes is deleted, and only a row whose value changed
+/// is written, so a move that sets three fields writes three rows.
+///
+/// A row holds one field's value and nothing else about the entity. Its
+/// `status` column is left NULL: filters read the status from the catalog row,
+/// so a status change writes no index rows. A row written before rows stopped
+/// carrying the status gets it cleared when its value next changes.
 async fn reconcile_query_projection_field_index(
     schema: &crate::PostgresSchema,
     tx: &mut Transaction<'_, Postgres>,
     tenant: &str,
     entity_type: &str,
     entity_id: &str,
-    status: &str,
     new_index: &ScalarFieldIndex,
 ) -> Result<(), PersistenceError> {
     let mut field_names = Vec::with_capacity(new_index.len());
@@ -111,20 +127,12 @@ async fn reconcile_query_projection_field_index(
          WHERE e.tenant = $1 \
            AND e.entity_type = $2 \
            AND e.entity_id = $3 \
-           AND NOT EXISTS ( \
-               SELECT 1 \
-               FROM unnest($4::text[], $5::text[]) AS incoming(field_name, field_value) \
-               WHERE incoming.field_name = e.field_name \
-                 AND incoming.field_value IS NOT DISTINCT FROM e.field_value \
-                 AND $6 IS NOT DISTINCT FROM e.status \
-           )",
+           AND e.field_name <> ALL($4::text[])",
     )
     .bind(tenant)
     .bind(entity_type)
     .bind(entity_id)
     .bind(&field_names)
-    .bind(&field_values)
-    .bind(status)
     .execute(&mut **tx)
     .await
     .map_err(storage_error)?;
@@ -133,21 +141,19 @@ async fn reconcile_query_projection_field_index(
         crate::dbm::postgres_query!(
             schema,
             "INSERT INTO {schema}entity_field_index \
-             (tenant, entity_type, entity_id, field_name, field_value, status) \
-             SELECT $1, $2, $3, incoming.field_name, incoming.field_value, $6 \
+             (tenant, entity_type, entity_id, field_name, field_value) \
+             SELECT $1, $2, $3, incoming.field_name, incoming.field_value \
              FROM unnest($4::text[], $5::text[]) AS incoming(field_name, field_value) \
              ON CONFLICT (tenant, entity_type, entity_id, field_name) DO UPDATE SET \
                  field_value = EXCLUDED.field_value, \
-                 status = EXCLUDED.status \
-             WHERE entity_field_index.field_value IS DISTINCT FROM EXCLUDED.field_value \
-                OR entity_field_index.status IS DISTINCT FROM EXCLUDED.status",
+                 status = NULL \
+             WHERE entity_field_index.field_value IS DISTINCT FROM EXCLUDED.field_value",
         )
         .bind(tenant)
         .bind(entity_type)
         .bind(entity_id)
         .bind(&field_names)
         .bind(&field_values)
-        .bind(status)
         .execute(&mut **tx)
         .await
         .map_err(storage_error)?;
@@ -292,8 +298,6 @@ pub struct PostgresEntityCatalogRow {
     pub state: Option<serde_json::Value>,
     pub sequence_nr: u64,
 }
-
-pub type PostgresSecretRow = (String, Vec<u8>, Vec<u8>);
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PostgresTrajectoryRow {
@@ -596,7 +600,47 @@ impl PostgresEventStore {
         state: &serde_json::Value,
         sequence_nr: u64,
     ) -> Result<(), PersistenceError> {
+        let row = [tenant, entity_type, entity_id, status];
+        self.write_query_projection(row, fields, state, sequence_nr, MissingCatalogRow::Insert)
+            .await
+    }
+
+    /// Rewrite an existing catalog row and its field index from `state`, as
+    /// [`Self::upsert_query_projection_with_state`] does, and leave a record
+    /// with no catalog row alone. While the server serves, only the record's
+    /// own commit creates its row (boot repair creates the missing ones before
+    /// serving): a commit locks the catalog row before it reads the field
+    /// index, so a row created by another writer while that commit runs is one
+    /// it cannot lock, and its field-index rows are ones it cannot see. A
+    /// record deleted after `state` was read stays deleted.
+    #[expect(clippy::too_many_arguments, reason = "projection upsert boundary")]
+    pub async fn refresh_query_projection_with_state(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+        fields: &serde_json::Value,
+        state: &serde_json::Value,
+        sequence_nr: u64,
+    ) -> Result<(), PersistenceError> {
+        let row = [tenant, entity_type, entity_id, status];
+        self.write_query_projection(row, fields, state, sequence_nr, MissingCatalogRow::Leave)
+            .await
+    }
+
+    async fn write_query_projection(
+        &self,
+        [tenant, entity_type, entity_id, status]: [&str; 4],
+        fields: &serde_json::Value,
+        state: &serde_json::Value,
+        sequence_nr: u64,
+        missing: MissingCatalogRow,
+    ) -> Result<(), PersistenceError> {
         let status = canonical_projection_status(status, state);
+        // The row holds each field once: in `fields`, not again in `state`.
+        let stored_state = temper_runtime::persistence::catalog_state_for_storage(fields, state);
+        let state = &stored_state;
         let projection_hash = json_hash(fields);
         let (new_index, indexed_fields, skipped_fields) = scalar_index_fields(fields);
         let mut transaction_timer =
@@ -703,11 +747,15 @@ impl PostgresEventStore {
             )
             .await?;
             previous_catalog
+        } else if missing == MissingCatalogRow::Leave {
+            tx.commit().await.map_err(storage_error)?;
+            transaction_timer.set_outcome("missing_left");
+            return Ok(());
         } else {
             let inserted: Option<i32> = crate::dbm::postgres_query_scalar!(&self.schema,
                 "INSERT INTO {schema}entity_catalog \
-                 (tenant, entity_type, entity_id, status, fields, state, sequence_nr, projection_version, projection_hash, updated_at) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, 2, $8, now()) \
+                 (tenant, entity_type, entity_id, status, fields, state, sequence_nr, projection_version, projection_hash, updated_at, first_event_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, 2, $8, now(), $6->>'first_event_at') \
                  ON CONFLICT (tenant, entity_type, entity_id) DO NOTHING \
                  RETURNING 1",
             )
@@ -790,12 +838,11 @@ impl PostgresEventStore {
             }
         };
 
-        let should_reconcile_index =
-            previous_catalog
-                .as_ref()
-                .is_none_or(|(old_status, old_hash, _)| {
-                    old_status.as_str() != status || old_hash.as_str() != projection_hash.as_str()
-                });
+        // The index holds field values only, so a move that changes only the
+        // status leaves it alone.
+        let should_reconcile_index = previous_catalog
+            .as_ref()
+            .is_none_or(|(_, old_hash, _)| old_hash.as_str() != projection_hash.as_str());
         let reconciliation_path = if should_reconcile_index {
             if previous_catalog.is_some() {
                 "diff"
@@ -813,11 +860,18 @@ impl PostgresEventStore {
                 tenant,
                 entity_type,
                 entity_id,
-                status,
                 &new_index,
             )
             .await?;
         }
+        crate::projection_delta::applied(
+            &self.schema,
+            &mut tx,
+            [tenant, entity_type, entity_id],
+            sequence_nr,
+            fields,
+        )
+        .await?;
 
         let commit_started = Instant::now();
         tx.commit().await.map_err(|e| {
@@ -909,6 +963,12 @@ impl PostgresEventStore {
             .execute(&mut *tx)
             .await
             .map_err(storage_error)?;
+        crate::projection_delta::mark_removed(
+            &self.schema,
+            &mut tx,
+            [tenant, entity_type, entity_id],
+        )
+        .await?;
         let commit_started = Instant::now();
         tx.commit().await.map_err(|e| {
             record_postgres_transaction_commit_duration(
@@ -1034,139 +1094,23 @@ impl PostgresEventStore {
             .collect())
     }
 
-    /// Batch-load full entity catalog rows for a list of entity IDs.
-    ///
-    /// Returns only rows that exist in the catalog. IDs without a row in the
-    /// projection are silently omitted from the result, leaving the caller
-    /// free to fall back to the actor path on a per-id basis.
-    pub async fn load_entity_catalog_rows_pg(
-        &self,
-        tenant: &str,
-        entity_type: &str,
-        entity_ids: &[String],
-    ) -> Result<Vec<crate::platform::PostgresEntityCatalogRow>, PersistenceError> {
-        if entity_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let rows: Vec<(
-            String,
-            String,
-            serde_json::Value,
-            Option<serde_json::Value>,
-            i64,
-        )> = crate::dbm::postgres_query_as!(
-            &self.schema,
-            "SELECT entity_id, status, fields, state, sequence_nr \
-             FROM {schema}entity_catalog \
-             WHERE tenant = $1 AND entity_type = $2 AND entity_id = ANY($3) \
-             ORDER BY entity_id",
-        )
-        .bind(tenant)
-        .bind(entity_type)
-        .bind(entity_ids)
-        .fetch_all(self.pool())
-        .await
-        .map_err(storage_error)?;
-        Ok(rows
-            .into_iter()
-            .map(|(entity_id, status, fields, state, seq)| {
-                crate::platform::PostgresEntityCatalogRow {
-                    entity_id,
-                    status,
-                    fields,
-                    state,
-                    sequence_nr: seq.max(0) as u64,
-                }
-            })
-            .collect())
-    }
-
-    pub async fn upsert_spec(
-        &self,
-        tenant: &str,
-        entity_type: &str,
-        ioa_source: &str,
-        csdl_xml: &str,
-        content_hash: &str,
-    ) -> Result<(), PersistenceError> {
-        crate::dbm::postgres_query!(&self.schema,
-            "INSERT INTO {schema}specs \
-             (tenant, entity_type, ioa_source, csdl_xml, content_hash, committed, version, verified, verification_status, updated_at) \
-             VALUES ($1, $2, $3, $4, $5, false, 1, false, 'pending', now()) \
-             ON CONFLICT (tenant, entity_type) DO UPDATE SET \
-                 ioa_source = CASE WHEN specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash OR specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml THEN EXCLUDED.ioa_source ELSE specs.ioa_source END, \
-                 csdl_xml = CASE WHEN specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash OR specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml THEN EXCLUDED.csdl_xml ELSE specs.csdl_xml END, \
-                 content_hash = CASE WHEN specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash OR specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml THEN EXCLUDED.content_hash ELSE specs.content_hash END, \
-                 committed = CASE WHEN specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash OR specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml THEN false ELSE specs.committed END, \
-                 version = CASE WHEN specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash OR specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml THEN specs.version + 1 ELSE specs.version END, \
-                 verified = CASE WHEN specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash OR specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml THEN false ELSE specs.verified END, \
-                 verification_status = CASE WHEN specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash OR specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml THEN 'pending' ELSE specs.verification_status END, \
-                 levels_passed = CASE WHEN specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash OR specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml THEN NULL ELSE specs.levels_passed END, \
-                 levels_total = CASE WHEN specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash OR specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml THEN NULL ELSE specs.levels_total END, \
-                 verification_result = CASE WHEN specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash OR specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml THEN NULL ELSE specs.verification_result END, \
-                 updated_at = CASE WHEN specs.content_hash IS DISTINCT FROM EXCLUDED.content_hash OR specs.csdl_xml IS DISTINCT FROM EXCLUDED.csdl_xml THEN now() ELSE specs.updated_at END",
-        )
-        .bind(tenant)
-        .bind(entity_type)
-        .bind(ioa_source)
-        .bind(csdl_xml)
-        .bind(content_hash)
-        .execute(self.pool())
-        .await
-        .map_err(storage_error)?;
-        Ok(())
-    }
-
     pub async fn load_specs(&self) -> Result<Vec<PostgresSpecRow>, PersistenceError> {
         let rows = crate::dbm::postgres_query!(&self.schema,
             "SELECT tenant, entity_type, ioa_source, csdl_xml, verification_status, verified, \
                     levels_passed, levels_total, verification_result, content_hash, updated_at, committed \
-             FROM {schema}specs WHERE committed = true ORDER BY tenant, entity_type",
+             FROM {schema}specs WHERE committed = true \
+             UNION ALL \
+             SELECT tenant, entity_type, ioa_source, csdl_xml, verification_status, verified, \
+                    levels_passed, levels_total, verification_result, content_hash, updated_at, true \
+             FROM {schema}spec_committed_versions AS b WHERE NOT EXISTS ( \
+                 SELECT 1 FROM {schema}specs AS s \
+                 WHERE s.tenant = b.tenant AND s.entity_type = b.entity_type AND s.committed = true) \
+             ORDER BY tenant, entity_type",
         )
         .fetch_all(self.pool())
         .await
         .map_err(storage_error)?;
         Ok(rows.into_iter().map(row_to_spec).collect())
-    }
-
-    pub async fn delete_spec(
-        &self,
-        tenant: &str,
-        entity_type: &str,
-    ) -> Result<(), PersistenceError> {
-        crate::dbm::postgres_query!(
-            &self.schema,
-            "DELETE FROM {schema}specs WHERE tenant = $1 AND entity_type = $2"
-        )
-        .bind(tenant)
-        .bind(entity_type)
-        .execute(self.pool())
-        .await
-        .map_err(storage_error)?;
-        Ok(())
-    }
-
-    pub async fn commit_specs(&self, tenant: &str) -> Result<(), PersistenceError> {
-        crate::dbm::postgres_query!(
-            &self.schema,
-            "UPDATE {schema}specs SET committed = true, updated_at = now() WHERE tenant = $1"
-        )
-        .bind(tenant)
-        .execute(self.pool())
-        .await
-        .map_err(storage_error)?;
-        Ok(())
-    }
-
-    pub async fn delete_uncommitted_specs(&self) -> Result<usize, PersistenceError> {
-        let result = crate::dbm::postgres_query!(
-            &self.schema,
-            "DELETE FROM {schema}specs WHERE committed = false"
-        )
-        .execute(self.pool())
-        .await
-        .map_err(storage_error)?;
-        Ok(result.rows_affected() as usize)
     }
 
     pub async fn load_verification_cache(
@@ -2250,6 +2194,32 @@ impl PostgresEventStore {
         .map_err(|e| format!("blob get failed: {e}"))
     }
 
+    /// Read a bounded byte slice of a legacy blob with its actual total length.
+    pub async fn get_blob_chunk(
+        &self,
+        key: &str,
+        offset: u64,
+        max_bytes: usize,
+    ) -> Result<Option<(u64, Vec<u8>)>, String> {
+        let start = i32::try_from(offset)
+            .ok()
+            .and_then(|n| n.checked_add(1))
+            .ok_or_else(|| "blob offset exceeds Postgres bytea range".to_string())?;
+        let count = i32::try_from(max_bytes).map_err(|_| "blob chunk exceeds i32".to_string())?;
+        let row = crate::dbm::postgres_query!(
+            &self.schema,
+            "SELECT octet_length(data) AS length, substring(data FROM $2 FOR $3) AS chunk \
+             FROM {schema}blobs WHERE blob_key = $1"
+        )
+        .bind(key)
+        .bind(start)
+        .bind(count)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|e| format!("blob chunk read failed: {e}"))?;
+        Ok(row.map(|row| (row.get::<i32, _>("length") as u64, row.get("chunk"))))
+    }
+
     /// Retrieve a blob only when its durable size metadata is within the
     /// caller's allocation budget. `None` means missing or over budget.
     pub async fn get_blob_if_size_at_most(
@@ -2354,59 +2324,6 @@ impl PostgresEventStore {
         .await
         .map_err(storage_error)?;
         Ok(row.map(row_to_published_artifact))
-    }
-
-    pub async fn upsert_secret(
-        &self,
-        tenant: &str,
-        key_name: &str,
-        ciphertext: &[u8],
-        nonce: &[u8],
-    ) -> Result<(), PersistenceError> {
-        crate::dbm::postgres_query!(&self.schema,
-            "INSERT INTO {schema}tenant_secrets (tenant, key_name, ciphertext, nonce, created_at, updated_at) \
-             VALUES ($1, $2, $3, $4, now(), now()) \
-             ON CONFLICT (tenant, key_name) DO UPDATE SET ciphertext = EXCLUDED.ciphertext, nonce = EXCLUDED.nonce, updated_at = now()",
-        )
-        .bind(tenant)
-        .bind(key_name)
-        .bind(ciphertext)
-        .bind(nonce)
-        .execute(self.pool())
-        .await
-        .map_err(storage_error)?;
-        Ok(())
-    }
-
-    pub async fn delete_secret(
-        &self,
-        tenant: &str,
-        key_name: &str,
-    ) -> Result<bool, PersistenceError> {
-        let result = crate::dbm::postgres_query!(
-            &self.schema,
-            "DELETE FROM {schema}tenant_secrets WHERE tenant = $1 AND key_name = $2"
-        )
-        .bind(tenant)
-        .bind(key_name)
-        .execute(self.pool())
-        .await
-        .map_err(storage_error)?;
-        Ok(result.rows_affected() > 0)
-    }
-
-    pub async fn load_secrets_for_tenant(
-        &self,
-        tenant: &str,
-    ) -> Result<Vec<PostgresSecretRow>, PersistenceError> {
-        crate::dbm::postgres_query_as!(
-            &self.schema,
-            "SELECT key_name, ciphertext, nonce FROM {schema}tenant_secrets WHERE tenant = $1"
-        )
-        .bind(tenant)
-        .fetch_all(self.pool())
-        .await
-        .map_err(storage_error)
     }
 
     pub async fn upsert_policy_denial_pattern(
@@ -2606,6 +2523,19 @@ impl PostgresEventStore {
         .execute(self.pool())
         .await
         .map_err(storage_error)?;
+        // Prune the inserting tenant every time: a global id cadence can
+        // indefinitely skip a tenant when writes from tenants interleave.
+        crate::dbm::postgres_query!(
+            &self.schema,
+            "DELETE FROM {schema}wasm_invocation_logs WHERE tenant = $1 AND id <= ( \
+                 SELECT id FROM {schema}wasm_invocation_logs WHERE tenant = $1 \
+                 ORDER BY id DESC OFFSET $2 LIMIT 1)",
+        )
+        .bind(entry.tenant)
+        .bind(temper_runtime::persistence::WASM_INVOCATIONS_KEPT_PER_TENANT)
+        .execute(self.pool())
+        .await
+        .map_err(storage_error)?;
         Ok(())
     }
 
@@ -2719,4 +2649,13 @@ pub(crate) fn postgres_placeholders(sql: &str, max_index: usize) -> String {
         out = out.replace(&format!("?{index}"), &format!("${index}"));
     }
     out
+}
+
+/// What a projection write does for a record with no catalog row.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MissingCatalogRow {
+    /// Create it: boot repair, before the server serves.
+    Insert,
+    /// Leave it missing: a background refresh while the server serves.
+    Leave,
 }

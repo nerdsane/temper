@@ -1,0 +1,876 @@
+# Getaway v4: you and three friends (Mia, Leo and Kai), one trip, one shared pot. A UniKon app written for this
+# check; it is installed nowhere.
+#
+# Each of you has your own agent, and every move below comes from one of those agents through the app. The trip's
+# card belongs to the app, so an agent can only spend from the pot by making the app's move.
+#
+# You plan the trip. Each friend's agent joins (or drops out) and pays its friend's share by bank transfer, which
+# clears a while later or bounces. Once everyone going has paid, you book, and three agents book at once: Mia's
+# agent the flights there and back, Leo's agent the hotel, Kai's agent the travel insurance. Any of them can fail,
+# and you ask it to try again. On the day, the trip starts.
+#
+# While the group is away, Mia's agent reads the airline's emails, because Mia booked the flights. When the flight
+# home is cancelled, Leo's agent books one more night, Mia's agent claims the refund, and the app gives the airline
+# 30 minutes to move the group by itself. Then your agent looks for new seats. Seats under your limit it buys at once;
+# dearer ones it asks you about first, and a no sends it to look again. When the airline's email says it moved the
+# group, Mia's agent tells the app, and the search stops; if new seats were already bought, the airline's go back and
+# Mia's agent claims their money. The trip ends when everyone flies home.
+#
+# While away, anyone's agent can suggest an activity: Kai's agent books it from the pot, or asks you first when it
+# costs more than your limit. Anyone's agent can log a shared expense; at home Kai's agent splits them and each
+# friend's agent pays back its friend's part. Mia's agent checks everyone in and Leo's agent books a car to the
+# airport; a cancelled flight undoes both.
+[automaton]
+name = 'Trip'
+states = ['Planning', 'Booking', 'Booked', 'Away', 'Disrupted', 'Home', 'CalledOff']
+initial = 'Planning'
+allow_indefinite_states = ['Planning', 'Booking', 'Booked', 'Away', 'Disrupted', 'Home', 'CalledOff']
+strict_action_params = true
+
+[[state]]
+name = 'created_by'
+type = 'string'
+initial = ''
+
+[[state]]
+name = 'destination'
+type = 'string'
+initial = ''
+
+[[state]]
+name = 'dates'
+type = 'string'
+initial = ''
+
+[[state]]
+name = 'note'
+type = 'string'
+initial = ''
+
+[[state]]
+name = 'flights_ref'
+type = 'string'
+initial = ''
+
+[[state]]
+name = 'hotel_ref'
+type = 'string'
+initial = ''
+
+[[state]]
+name = 'new_flight'
+type = 'string'
+initial = ''
+
+[[state]]
+name = 'price'
+type = 'string'
+initial = ''
+
+[[state]]
+name = 'yes_by'
+type = 'string'
+initial = ''
+
+[[state]]
+name = 'moved_via'
+type = 'string'
+initial = ''
+
+[[state]]
+name = 'moved_at'
+type = 'string'
+initial = ''
+
+# Friend A: joined, a bank transfer of their share on its way, their share in the pot, and (after the
+# trip) their part of the shared expenses paid back.
+[[state]]
+name = 'a_in'
+type = 'bool'
+initial = false
+
+[[state]]
+name = 'a_paying'
+type = 'bool'
+initial = false
+
+[[state]]
+name = 'a_paid'
+type = 'bool'
+initial = false
+
+[[state]]
+name = 'a_back'
+type = 'bool'
+initial = false
+
+# Friend B: joined, a bank transfer of their share on its way, their share in the pot, and (after the
+# trip) their part of the shared expenses paid back.
+[[state]]
+name = 'b_in'
+type = 'bool'
+initial = false
+
+[[state]]
+name = 'b_paying'
+type = 'bool'
+initial = false
+
+[[state]]
+name = 'b_paid'
+type = 'bool'
+initial = false
+
+[[state]]
+name = 'b_back'
+type = 'bool'
+initial = false
+
+# Friend C: joined, a bank transfer of their share on its way, their share in the pot, and (after the
+# trip) their part of the shared expenses paid back.
+[[state]]
+name = 'c_in'
+type = 'bool'
+initial = false
+
+[[state]]
+name = 'c_paying'
+type = 'bool'
+initial = false
+
+[[state]]
+name = 'c_paid'
+type = 'bool'
+initial = false
+
+[[state]]
+name = 'c_back'
+type = 'bool'
+initial = false
+
+# The money agent has split the shared expenses and sent each friend who went what they owe.
+[[state]]
+name = 'split'
+type = 'bool'
+initial = false
+
+# The booking agents' runs that are out, and what they brought back.
+[[state]]
+name = 'flights_out'
+type = 'bool'
+initial = false
+
+[[state]]
+name = 'hotel_out'
+type = 'bool'
+initial = false
+
+[[state]]
+name = 'flights_booked'
+type = 'bool'
+initial = false
+
+[[state]]
+name = 'hotel_booked'
+type = 'bool'
+initial = false
+
+# Tickets home the group has paid for and can still fly on.
+[[state]]
+name = 'tickets_home'
+type = 'counter'
+initial = 0
+
+# The flight home was cancelled: the extra hotel night, the refund claim and the search for new seats.
+[[state]]
+name = 'night_out'
+type = 'bool'
+initial = false
+
+[[state]]
+name = 'refund_out'
+type = 'bool'
+initial = false
+
+[[state]]
+name = 'refunded'
+type = 'bool'
+initial = false
+
+[[state]]
+name = 'searching'
+type = 'bool'
+initial = false
+
+[[state]]
+name = 'yes_wanted'
+type = 'bool'
+initial = false
+
+[[state]]
+name = 'buying'
+type = 'bool'
+initial = false
+
+# The airline moved the group to another flight by itself.
+[[state]]
+name = 'moved'
+type = 'bool'
+initial = false
+
+# Activities booked from the pot, and the one being booked or waiting for the organiser's yes.
+[[state]]
+name = 'activities'
+type = 'counter'
+initial = 0
+
+[[state]]
+name = 'activity_out'
+type = 'bool'
+initial = false
+
+[[state]]
+name = 'activity_yes'
+type = 'bool'
+initial = false
+
+# Shared expenses not yet split.
+[[state]]
+name = 'expenses'
+type = 'counter'
+initial = 0
+
+[[state]]
+name = 'settling'
+type = 'bool'
+initial = false
+
+# Check-in and the car to the airport, for the flight home.
+[[state]]
+name = 'checkin_out'
+type = 'bool'
+initial = false
+
+[[state]]
+name = 'checked_in'
+type = 'bool'
+initial = false
+
+[[state]]
+name = 'ride_out'
+type = 'bool'
+initial = false
+
+[[state]]
+name = 'ride_booked'
+type = 'bool'
+initial = false
+
+[[state]]
+name = 'insurance_out'
+type = 'bool'
+initial = false
+
+[[state]]
+name = 'insured'
+type = 'bool'
+initial = false
+
+# ---------- planning ----------
+# made by you, through your agent
+[[action]]
+name = 'Plan'
+kind = 'input'
+from = ['Planning']
+params = [{ name = 'created_by', type = 'string', source = 'authenticated_subject' }, 'destination', 'dates', 'moved_via', 'moved_at']
+
+# made by Mia's agent
+[[action]]
+name = 'JoinA'
+kind = 'input'
+from = ['Planning']
+guard = '!a_in'
+params = ['moved_via', 'moved_at']
+effect = ['a_in = true']
+
+# made by Mia's agent
+[[action]]
+name = 'DropOutA'
+kind = 'input'
+from = ['Planning']
+guard = 'a_in && !a_paying && !a_paid'
+params = ['moved_via', 'moved_at']
+effect = ['a_in = false']
+
+# made by Mia's agent
+[[action]]
+name = 'PayA'
+kind = 'input'
+from = ['Planning']
+guard = 'a_in && !a_paying && !a_paid'
+params = ['moved_via', 'moved_at']
+effect = ['a_paying = true']
+
+# made by Mia's agent
+[[action]]
+name = 'ClearedA'
+kind = 'input'
+from = ['Planning']
+guard = 'a_paying'
+params = ['moved_via', 'moved_at']
+effect = ['a_paying = false', 'a_paid = true']
+
+# made by Mia's agent
+[[action]]
+name = 'BouncedA'
+kind = 'input'
+from = ['Planning']
+guard = 'a_paying'
+params = ['note', 'moved_via', 'moved_at']
+effect = ['a_paying = false']
+
+# made by Leo's agent
+[[action]]
+name = 'JoinB'
+kind = 'input'
+from = ['Planning']
+guard = '!b_in'
+params = ['moved_via', 'moved_at']
+effect = ['b_in = true']
+
+# made by Leo's agent
+[[action]]
+name = 'DropOutB'
+kind = 'input'
+from = ['Planning']
+guard = 'b_in && !b_paying && !b_paid'
+params = ['moved_via', 'moved_at']
+effect = ['b_in = false']
+
+# made by Leo's agent
+[[action]]
+name = 'PayB'
+kind = 'input'
+from = ['Planning']
+guard = 'b_in && !b_paying && !b_paid'
+params = ['moved_via', 'moved_at']
+effect = ['b_paying = true']
+
+# made by Leo's agent
+[[action]]
+name = 'ClearedB'
+kind = 'input'
+from = ['Planning']
+guard = 'b_paying'
+params = ['moved_via', 'moved_at']
+effect = ['b_paying = false', 'b_paid = true']
+
+# made by Leo's agent
+[[action]]
+name = 'BouncedB'
+kind = 'input'
+from = ['Planning']
+guard = 'b_paying'
+params = ['note', 'moved_via', 'moved_at']
+effect = ['b_paying = false']
+
+# made by Kai's agent
+[[action]]
+name = 'JoinC'
+kind = 'input'
+from = ['Planning']
+guard = '!c_in'
+params = ['moved_via', 'moved_at']
+effect = ['c_in = true']
+
+# made by Kai's agent
+[[action]]
+name = 'DropOutC'
+kind = 'input'
+from = ['Planning']
+guard = 'c_in && !c_paying && !c_paid'
+params = ['moved_via', 'moved_at']
+effect = ['c_in = false']
+
+# made by Kai's agent
+[[action]]
+name = 'PayC'
+kind = 'input'
+from = ['Planning']
+guard = 'c_in && !c_paying && !c_paid'
+params = ['moved_via', 'moved_at']
+effect = ['c_paying = true']
+
+# made by Kai's agent
+[[action]]
+name = 'ClearedC'
+kind = 'input'
+from = ['Planning']
+guard = 'c_paying'
+params = ['moved_via', 'moved_at']
+effect = ['c_paying = false', 'c_paid = true']
+
+# made by Kai's agent
+[[action]]
+name = 'BouncedC'
+kind = 'input'
+from = ['Planning']
+guard = 'c_paying'
+params = ['note', 'moved_via', 'moved_at']
+effect = ['c_paying = false']
+
+# made by you, through your agent
+[[action]]
+name = 'Book'
+kind = 'input'
+from = ['Planning']
+guard = '(a_in || b_in || c_in) && (!a_in || a_paid) && (!b_in || b_paid) && (!c_in || c_paid)'
+to = 'Booking'
+params = ['moved_via', 'moved_at']
+effect = ['flights_out = true', 'hotel_out = true', 'insurance_out = true']
+
+# ---------- booking: two agents at once ----------
+# made by Mia's agent
+[[action]]
+name = 'FlightsBooked'
+kind = 'input'
+from = ['Booking']
+guard = 'flights_out'
+params = ['flights_ref', 'moved_via', 'moved_at']
+effect = ['flights_out = false', 'flights_booked = true', 'tickets_home = 1']
+
+# made by Mia's agent
+[[action]]
+name = 'FlightsFailed'
+kind = 'input'
+from = ['Booking']
+guard = 'flights_out'
+params = ['note', 'moved_via', 'moved_at']
+effect = ['flights_out = false']
+
+# made by you, through your agent
+[[action]]
+name = 'TryFlightsAgain'
+kind = 'input'
+from = ['Booking']
+guard = '!flights_out && !flights_booked'
+params = ['moved_via', 'moved_at']
+effect = ['flights_out = true']
+
+# made by Leo's agent
+[[action]]
+name = 'HotelBooked'
+kind = 'input'
+from = ['Booking']
+guard = 'hotel_out'
+params = ['hotel_ref', 'moved_via', 'moved_at']
+effect = ['hotel_out = false', 'hotel_booked = true']
+
+# made by Leo's agent
+[[action]]
+name = 'HotelFailed'
+kind = 'input'
+from = ['Booking']
+guard = 'hotel_out'
+params = ['note', 'moved_via', 'moved_at']
+effect = ['hotel_out = false']
+
+# made by you, through your agent
+[[action]]
+name = 'TryHotelAgain'
+kind = 'input'
+from = ['Booking']
+guard = '!hotel_out && !hotel_booked'
+params = ['moved_via', 'moved_at']
+effect = ['hotel_out = true']
+
+# made by your agent
+[[action]]
+name = 'AllBooked'
+kind = 'input'
+from = ['Booking']
+guard = 'flights_booked && hotel_booked'
+to = 'Booked'
+params = ['moved_via', 'moved_at']
+
+# On the day, the trip starts.
+# made by your agent
+[[action]]
+name = 'Leave'
+kind = 'input'
+from = ['Booked']
+to = 'Away'
+params = ['moved_via', 'moved_at']
+
+# ---------- away: the flight home is cancelled ----------
+# made by Mia's agent
+[[action]]
+name = 'FlightHomeCancelled'
+kind = 'input'
+from = ['Away']
+to = 'Disrupted'
+params = ['note', 'moved_via', 'moved_at']
+effect = ['tickets_home -= 1', 'night_out = true', 'refund_out = true', 'checked_in = false', 'ride_booked = false']
+
+# made by Leo's agent
+[[action]]
+name = 'NightBooked'
+kind = 'input'
+from = ['Disrupted']
+guard = 'night_out'
+params = ['hotel_ref', 'moved_via', 'moved_at']
+effect = ['night_out = false']
+
+# made by Leo's agent
+[[action]]
+name = 'NightFailed'
+kind = 'input'
+from = ['Disrupted']
+guard = 'night_out'
+params = ['note', 'moved_via', 'moved_at']
+effect = ['night_out = false']
+
+# made by Mia's agent
+[[action]]
+name = 'Refunded'
+kind = 'input'
+from = ['Disrupted', 'Home']
+guard = 'refund_out'
+params = ['note', 'moved_via', 'moved_at']
+effect = ['refund_out = false', 'refunded = true']
+
+# made by Mia's agent
+[[action]]
+name = 'RefundRefused'
+kind = 'input'
+from = ['Disrupted', 'Home']
+guard = 'refund_out'
+params = ['note', 'moved_via', 'moved_at']
+effect = ['refund_out = false']
+
+# The airline gets 30 minutes to move the group by itself; then the rebooking agent looks.
+[[state_timeout]]
+state = 'Disrupted'
+after_seconds = 1800
+on_timeout = 'Search'
+max_occurrences = 1
+
+# made by your agent
+[[action]]
+name = 'Search'
+kind = 'input'
+from = ['Disrupted']
+guard = '!moved && !searching && !yes_wanted && !buying && tickets_home == 0'
+params = ['moved_via', 'moved_at']
+effect = ['searching = true']
+
+# made by your agent
+[[action]]
+name = 'NoSeats'
+kind = 'input'
+from = ['Disrupted']
+guard = 'searching'
+params = ['note', 'moved_via', 'moved_at']
+effect = ['searching = false']
+
+# Under the organiser's limit: bought straight away.
+# made by your agent
+[[action]]
+name = 'SeatsFound'
+kind = 'input'
+from = ['Disrupted']
+guard = 'searching'
+params = ['new_flight', 'price', 'moved_via', 'moved_at']
+effect = ['searching = false', 'buying = true']
+
+# Over the limit: the organiser decides.
+# made by your agent
+[[action]]
+name = 'SeatsOverLimit'
+kind = 'input'
+from = ['Disrupted']
+guard = 'searching'
+params = ['new_flight', 'price', 'moved_via', 'moved_at']
+effect = ['searching = false', 'yes_wanted = true']
+
+# made by you, through your agent
+[[action]]
+name = 'Approve'
+kind = 'input'
+from = ['Disrupted']
+guard = 'yes_wanted'
+params = [{ name = 'yes_by', type = 'string', source = 'authenticated_subject' }, 'moved_via', 'moved_at']
+effect = ['yes_wanted = false', 'buying = true']
+
+# made by you, through your agent
+[[action]]
+name = 'LookAgain'
+kind = 'input'
+from = ['Disrupted']
+guard = 'yes_wanted'
+params = [{ name = 'yes_by', type = 'string', source = 'authenticated_subject' }, 'note', 'moved_via', 'moved_at']
+effect = ['yes_wanted = false', 'searching = true']
+
+# made by your agent
+[[action]]
+name = 'Bought'
+kind = 'input'
+from = ['Disrupted']
+guard = 'buying'
+params = ['flights_ref', 'moved_via', 'moved_at']
+effect = ['buying = false', 'tickets_home += 1']
+
+# made by your agent
+[[action]]
+name = 'BuyFailed'
+kind = 'input'
+from = ['Disrupted']
+guard = 'buying'
+params = ['note', 'moved_via', 'moved_at']
+effect = ['buying = false']
+
+# The airline's own email: it moved the group to another flight. The search stops; seats already bought (or being
+# bought) win, and the airline's seats go back with the refund agent claiming their money.
+# made by Mia's agent
+[[action]]
+name = 'AirlineMoved'
+kind = 'input'
+from = ['Disrupted']
+guard = '!moved && !refunded && !buying && tickets_home == 0'
+params = ['note', 'moved_via', 'moved_at']
+effect = ['moved = true', 'searching = false', 'tickets_home += 1']
+
+# made by Mia's agent
+[[action]]
+name = 'AirlineMovedTooLate'
+kind = 'input'
+from = ['Disrupted']
+guard = '!moved && !refunded && (buying || tickets_home > 0)'
+params = ['note', 'moved_via', 'moved_at']
+effect = ['moved = true', 'refund_out = true']
+
+# ---------- while away: activities ----------
+# made by anyone's agent
+[[action]]
+name = 'Suggest'
+kind = 'input'
+from = ['Away', 'Disrupted']
+guard = '!activity_out && !activity_yes && activities < 2'
+params = ['note', 'moved_via', 'moved_at']
+effect = ['activity_out = true']
+
+# made by Kai's agent
+[[action]]
+name = 'ActivityBooked'
+kind = 'input'
+from = ['Away', 'Disrupted', 'Home']
+guard = 'activity_out'
+params = ['note', 'moved_via', 'moved_at']
+effect = ['activity_out = false', 'activities += 1']
+
+# made by Kai's agent
+[[action]]
+name = 'ActivityFull'
+kind = 'input'
+from = ['Away', 'Disrupted', 'Home']
+guard = 'activity_out'
+params = ['note', 'moved_via', 'moved_at']
+effect = ['activity_out = false']
+
+# made by Kai's agent
+[[action]]
+name = 'ActivityOverLimit'
+kind = 'input'
+from = ['Away', 'Disrupted', 'Home']
+guard = 'activity_out'
+params = ['price', 'moved_via', 'moved_at']
+effect = ['activity_out = false', 'activity_yes = true']
+
+# made by you, through your agent
+[[action]]
+name = 'ApproveActivity'
+kind = 'input'
+from = ['Away', 'Disrupted']
+guard = 'activity_yes'
+params = [{ name = 'yes_by', type = 'string', source = 'authenticated_subject' }, 'moved_via', 'moved_at']
+effect = ['activity_yes = false', 'activity_out = true']
+
+# made by you, through your agent
+[[action]]
+name = 'SkipActivity'
+kind = 'input'
+from = ['Away', 'Disrupted', 'Home']
+guard = 'activity_yes'
+params = [{ name = 'yes_by', type = 'string', source = 'authenticated_subject' }, 'moved_via', 'moved_at']
+effect = ['activity_yes = false']
+
+# ---------- shared expenses ----------
+# made by anyone's agent
+[[action]]
+name = 'AddExpense'
+kind = 'input'
+from = ['Away', 'Disrupted']
+guard = 'expenses < 2'
+params = ['note', 'price', 'moved_via', 'moved_at']
+effect = ['expenses += 1']
+
+# made by Kai's agent
+[[action]]
+name = 'SettleUp'
+kind = 'input'
+from = ['Home']
+guard = 'expenses > 0 && !settling'
+params = ['moved_via', 'moved_at']
+effect = ['settling = true']
+
+# made by Kai's agent
+[[action]]
+name = 'Settled'
+kind = 'input'
+from = ['Home']
+guard = 'settling'
+params = ['note', 'moved_via', 'moved_at']
+effect = ['settling = false', 'expenses = 0', 'split = true']
+
+# made by Kai's agent
+[[action]]
+name = 'SettleFailed'
+kind = 'input'
+from = ['Home']
+guard = 'settling'
+params = ['note', 'moved_via', 'moved_at']
+effect = ['settling = false']
+
+# made by Mia's agent
+[[action]]
+name = 'PaidBackA'
+kind = 'input'
+from = ['Home']
+guard = 'split && a_in && !a_back'
+params = ['moved_via', 'moved_at']
+effect = ['a_back = true']
+
+# made by Leo's agent
+[[action]]
+name = 'PaidBackB'
+kind = 'input'
+from = ['Home']
+guard = 'split && b_in && !b_back'
+params = ['moved_via', 'moved_at']
+effect = ['b_back = true']
+
+# made by Kai's agent
+[[action]]
+name = 'PaidBackC'
+kind = 'input'
+from = ['Home']
+guard = 'split && c_in && !c_back'
+params = ['moved_via', 'moved_at']
+effect = ['c_back = true']
+
+# ---------- the day before the flight home: check-in and the car ----------
+# made by Mia's agent
+[[action]]
+name = 'CheckIn'
+kind = 'input'
+from = ['Away', 'Disrupted']
+guard = 'tickets_home > 0 && !checkin_out && !checked_in'
+params = ['moved_via', 'moved_at']
+effect = ['checkin_out = true']
+
+# made by Mia's agent
+[[action]]
+name = 'CheckedIn'
+kind = 'input'
+from = ['Away', 'Disrupted']
+guard = 'checkin_out'
+params = ['note', 'moved_via', 'moved_at']
+effect = ['checkin_out = false', 'checked_in = true']
+
+# made by Mia's agent
+[[action]]
+name = 'CheckInFailed'
+kind = 'input'
+from = ['Away', 'Disrupted']
+guard = 'checkin_out'
+params = ['note', 'moved_via', 'moved_at']
+effect = ['checkin_out = false']
+
+# made by Leo's agent
+[[action]]
+name = 'BookRide'
+kind = 'input'
+from = ['Away', 'Disrupted']
+guard = 'tickets_home > 0 && !ride_out && !ride_booked'
+params = ['moved_via', 'moved_at']
+effect = ['ride_out = true']
+
+# made by Leo's agent
+[[action]]
+name = 'RideBooked'
+kind = 'input'
+from = ['Away', 'Disrupted']
+guard = 'ride_out'
+params = ['note', 'moved_via', 'moved_at']
+effect = ['ride_out = false', 'ride_booked = true']
+
+# made by Leo's agent
+[[action]]
+name = 'RideFailed'
+kind = 'input'
+from = ['Away', 'Disrupted']
+guard = 'ride_out'
+params = ['note', 'moved_via', 'moved_at']
+effect = ['ride_out = false']
+
+# ---------- booking: insurance alongside ----------
+# made by Kai's agent
+[[action]]
+name = 'Insured'
+kind = 'input'
+from = ['Booking', 'Booked']
+guard = 'insurance_out'
+params = ['note', 'moved_via', 'moved_at']
+effect = ['insurance_out = false', 'insured = true']
+
+# made by Kai's agent
+[[action]]
+name = 'InsuranceFailed'
+kind = 'input'
+from = ['Booking', 'Booked']
+guard = 'insurance_out'
+params = ['note', 'moved_via', 'moved_at']
+effect = ['insurance_out = false']
+
+# made by you, through your agent
+[[action]]
+name = 'TryInsuranceAgain'
+kind = 'input'
+from = ['Booking', 'Booked']
+guard = '!insurance_out && !insured'
+params = ['moved_via', 'moved_at']
+effect = ['insurance_out = true']
+
+# ---------- home ----------
+# made by your agent
+[[action]]
+name = 'FlyHome'
+kind = 'input'
+from = ['Away', 'Disrupted']
+guard = 'tickets_home > 0'
+to = 'Home'
+params = ['moved_via', 'moved_at']
+
+# ---------- calling it off ----------
+# made by you, through your agent
+[[action]]
+name = 'CallOff'
+kind = 'input'
+from = ['Planning', 'Booking', 'Booked']
+to = 'CalledOff'
+params = ['note', 'moved_via', 'moved_at']
+
+# The group never pays for two flights home.
+[[invariant]]
+name = 'NeverPaysForTwoFlightsHome'
+assert = 'tickets_home <= 1'

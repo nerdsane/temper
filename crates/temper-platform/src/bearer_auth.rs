@@ -58,6 +58,14 @@ pub async fn bearer_auth_check(
         return Ok(next.run(req).await);
     }
 
+    // A tenant startup could not restore has no credential records loaded, so
+    // a lookup would answer 401 for a valid credential. Name its state instead.
+    if let Some(response) =
+        temper_server::odata::unavailable_tenant_response(&state.server, &tenant)
+    {
+        return Ok(response);
+    }
+
     let matched_endpoint = match state.server.http_endpoint_tables.get(&tenant).await {
         Some(table) => {
             table
@@ -69,11 +77,31 @@ pub async fn bearer_auth_check(
     let request_method = req.method().as_str().to_string();
     let request_path = req.uri().path().to_string();
 
-    if let Some(token) = request_credential(&req)
-        && let Some(identity) = temper_server::identity::IdentityResolver::new()
+    let resolved_identity = match request_credential(&req) {
+        Some(token) => match temper_server::identity::IdentityResolver::new()
             .resolve(&state.server, &tenant, &token)
             .await
-    {
+        {
+            Ok(identity) => Some(identity),
+            // The identity authority could not be read — the credential was
+            // never shown to be bad. Fail closed as a dependency failure
+            // (503), never as 401/anonymous/protocol-forwarded, and never
+            // reach `next.run` with a mutated request.
+            Err(temper_server::identity::IdentityError::Unavailable(reason)) => {
+                tracing::warn!(
+                    tenant = %tenant,
+                    path = %req.uri().path(),
+                    reason,
+                    "identity authority unavailable; failing closed with 503"
+                );
+                return Err(StatusCode::SERVICE_UNAVAILABLE);
+            }
+            Err(temper_server::identity::IdentityError::Invalid) => None,
+        },
+        None => None,
+    };
+
+    if let Some(identity) = resolved_identity {
         let session_id = temper_server::request_context::session_id_from_headers(req.headers());
         let intent = temper_server::request_context::intent_from_headers(req.headers());
         let verified_session = match session_id.as_deref() {
@@ -86,7 +114,9 @@ pub async fn bearer_auth_check(
         };
         // A trusted-issuer JWT resolves to an agent acting for a human (or the
         // human themselves, a Customer) and carries a verified acting_for/role
-        // that from_resolved_identity cannot express (ARN-255, RFC-0002). The
+        // that from_resolved_identity cannot express (ARN-255, RFC-0002). An
+        // agent's context also keeps what its token was issued under, so a
+        // timer it sets stops when the token would be refused. The
         // AgentCredential path stays exactly as before.
         let security_context = if identity.from_jwt {
             let kind = if identity.is_human {
@@ -107,6 +137,9 @@ pub async fn bearer_auth_check(
                 identity.role.as_deref(),
                 verified_session,
             )
+            .with_principal_records(&identity.principal_records)
+            .with_credential(identity.credential.clone())
+            .with_label(identity.label.as_deref())
         } else {
             temper_authz::SecurityContext::from_resolved_identity(
                 &identity.agent_instance_id,
@@ -267,6 +300,9 @@ fn request_credential(req: &Request) -> Option<String> {
 
 fn is_public_request(req: &Request) -> bool {
     temper_server::authz::is_public_kernel_request(req.method(), req.uri().path())
+        // A browser asking whether it may send a request (a page putting a file straight into an app's Temper) sends
+        // no credential; the kernel router's CORS layer answers it and no route runs.
+        || temper_server::authz::is_cors_preflight(req)
         || matches!(
             (req.method(), req.uri().path()),
             (&Method::GET, "/healthz")

@@ -26,6 +26,7 @@ use super::DispatchError;
 
 mod helpers;
 mod projection;
+mod timers;
 use helpers::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -60,6 +61,7 @@ struct AtomicCompositeParent<'a> {
     action: &'a str,
     idempotency: &'a str,
     record_event: bool,
+    agent_ctx: &'a AgentContext,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +78,7 @@ struct AtomicCompositeStream {
     state: EntityState,
     expected_sequence: u64,
     events: Vec<PersistenceEnvelope>,
+    state_timer: Option<temper_runtime::persistence::AppendStateTimer>,
 }
 
 #[derive(Debug, Clone)]
@@ -148,7 +151,9 @@ impl crate::state::ServerState {
                 .security_ctx
                 .clone()
                 .unwrap_or_else(SecurityContext::anonymous)
-                .with_action_context(composite_action_context),
+                .with_action_context(composite_action_context)
+                // The module picked these writes: each is its request.
+                .as_request(),
         );
 
         let prepared_sub_writes = self
@@ -173,6 +178,7 @@ impl crate::state::ServerState {
                     action,
                     idempotency: &parent_idempotency,
                     record_event: metadata.record_parent_event,
+                    agent_ctx: &composite_agent_ctx,
                 },
                 &prepared_sub_writes,
             )
@@ -182,8 +188,7 @@ impl crate::state::ServerState {
         }
 
         for prepared in prepared_sub_writes {
-            let mut sub_agent_ctx = composite_agent_ctx.clone();
-            sub_agent_ctx.idempotency_key = Some(prepared.idempotency_key);
+            let sub_agent_ctx = timers::composite_sub_write_agent(&composite_agent_ctx, &prepared);
 
             let response = self
                 .dispatch_tenant_action_core(
@@ -194,19 +199,19 @@ impl crate::state::ServerState {
                     prepared.unresolved_params,
                     &sub_agent_ctx,
                     false,
+                    crate::state::write_record::WriteCaller::Kernel,
                     None,
                 )
                 .await?;
 
             if !response.success {
-                return Err(DispatchError::Internal(response.error.unwrap_or_else(
-                    || {
-                        format!(
-                            "composite {entity_type}.{action} sub-write {} failed",
-                            prepared.idx
-                        )
-                    },
-                )));
+                let error = response.error.clone().unwrap_or_else(|| {
+                    format!(
+                        "composite {entity_type}.{action} sub-write {} failed",
+                        prepared.idx
+                    )
+                });
+                return Err(sub_write_failure(&response, error));
             }
         }
 
@@ -240,6 +245,7 @@ impl crate::state::ServerState {
         };
         let mut overflow_blobs = Vec::new();
         let mut streams: BTreeMap<String, AtomicCompositeStream> = BTreeMap::new();
+        let mut timed = Vec::new();
         let parent_persistence_id = format!("{tenant}:{parent_entity_type}:{parent_entity_id}");
         let timing_enabled = prepared_sub_writes.len() >= 10;
         let total_started_at = timing_enabled.then(std::time::Instant::now);
@@ -295,8 +301,8 @@ impl crate::state::ServerState {
             .await?;
 
             let table = self.transition_table_for_dispatch(tenant, &write.entity_type)?;
-            let related = if table_has_cross_entity_guards_for_action(&table, &write.action) {
-                self.resolve_cross_entity_guards(
+            let related = if table_reads_related_records(&table, &write.action) {
+                self.resolve_related_statuses(
                     tenant,
                     &write.entity_type,
                     &write.entity_id,
@@ -373,24 +379,28 @@ impl crate::state::ServerState {
                 .push(composite_envelope(&persistence_id, &event, &stream.state)?);
             stream.state.sequence_nr = stream.state.sequence_nr.saturating_add(1);
             stream.state.push_event_bounded(event);
+            if let Some(transition) = self.timed_transition(&parent, write, &stream.state) {
+                // Keep the latest mutation, even if subsequent sub-writes
+                // leave this timer's clock and captured arguments unchanged.
+                if let Some(row) = transition.timer_row(self, tenant) {
+                    stream.state_timer = Some(row);
+                }
+                timed.push(transition);
+            }
         }
         let stage_ms = stage_started_at.map(|started| started.elapsed().as_millis() as u64);
 
-        let appends = streams
-            .iter()
-            .filter(|(_, stream)| !stream.events.is_empty())
-            .map(|(persistence_id, stream)| PersistenceAppend {
-                persistence_id: persistence_id.clone(),
-                expected_sequence: stream.expected_sequence,
-                events: stream.events.clone(),
-            })
-            .collect::<Vec<_>>();
+        let appends = self.composite_appends(tenant, store.commits_entity_rows(), &streams);
         if appends.is_empty() {
             return Ok(true);
         }
 
-        // No object-store write occurs until every sub-write has staged successfully.
+        // No object-store write occurs until every sub-write has staged successfully,
+        // and none for a batch whose events are too large to be written.
         if !overflow_blobs.is_empty() {
+            store
+                .refuse_oversized(&appends)
+                .map_err(composite_batch_persistence_error)?;
             let blob_store = blob_store.as_ref().ok_or_else(|| {
                 DispatchError::Internal(
                     "field-overflow blobs require a configured object blob store".to_string(),
@@ -406,15 +416,28 @@ impl crate::state::ServerState {
         }
 
         let append_started_at = timing_enabled.then(std::time::Instant::now);
-        store
-            .append_batch(&appends)
-            .await
-            .map_err(composite_batch_persistence_error)?;
+        if let Err(error) = store.append_batch(&appends).await {
+            // A batch that landed behind a concurrency violation has committed;
+            // everything after the commit still runs.
+            if !(matches!(error, PersistenceError::ConcurrencyViolation { .. })
+                && composite_batch_landed(&store, &appends).await?)
+            {
+                return Err(composite_batch_persistence_error(error));
+            }
+            tracing::warn!(
+                tenant = %tenant,
+                parent_entity_type,
+                parent_entity_id,
+                parent_action,
+                %error,
+                "composite batch landed although its append answered with a concurrency violation"
+            );
+        }
         let append_ms = append_started_at.map(|started| started.elapsed().as_millis() as u64);
+        self.invalidate_batch_state_timeouts(tenant, &timed);
 
         let projection_collect_started_at = timing_enabled.then(std::time::Instant::now);
-        self.update_composite_query_projections(tenant, &streams)
-            .await?;
+        self.index_composite_streams(tenant, &streams)?;
         let projection_collect_ms =
             projection_collect_started_at.map(|started| started.elapsed().as_millis() as u64);
 
@@ -431,7 +454,7 @@ impl crate::state::ServerState {
                 continue;
             }
             self.stop_and_remove_entity(tenant, &stream.entity_type, &stream.entity_id);
-            if stream.state.status == "Deleted" {
+            if stream.state.is_tombstoned() {
                 continue;
             }
             if !self
@@ -445,6 +468,7 @@ impl crate::state::ServerState {
             }
         }
         let reload_ms = reload_started_at.map(|started| started.elapsed().as_millis() as u64);
+        self.arm_batch_state_timeouts(tenant, &timed).await;
         if let Some(started) = total_started_at {
             tracing::info!(
                 tenant = %tenant,
@@ -509,14 +533,7 @@ impl crate::state::ServerState {
             && expected_sequence == 0
             && state.total_event_count == 0
         {
-            let bootstrap = crate::entity_actor::EntityEvent {
-                action: "Created".to_string(),
-                from_status: String::new(),
-                to_status: state.status.clone(),
-                timestamp: sim_now(),
-                params: serde_json::json!({}),
-                idempotency_key: None,
-            };
+            let bootstrap = crate::entity_actor::EntityEvent::bootstrap(state.status.clone());
             events.push(composite_envelope(&persistence_id, &bootstrap, &state)?);
             state.sequence_nr = state.sequence_nr.saturating_add(1);
             state.push_event_bounded(bootstrap);
@@ -530,6 +547,7 @@ impl crate::state::ServerState {
                 state,
                 expected_sequence,
                 events,
+                state_timer: None,
             },
         );
         Ok(())
@@ -646,6 +664,7 @@ impl crate::state::ServerState {
             action,
             idempotency: parent_idempotency,
             record_event: metadata.record_parent_event,
+            agent_ctx: composite_agent_ctx,
         };
         let mut virtual_targets = BTreeMap::new();
         let mut pending_overflow_blobs = Vec::new();
@@ -824,6 +843,7 @@ impl crate::state::ServerState {
             state: before.state.clone(),
             expected_sequence: before.state.sequence_nr,
             events: Vec::new(),
+            state_timer: None,
         };
         if should_skip_existing_pack_object_create(write, &stream)
             || (!is_incomplete_existing_pack_object_create(write, &stream)
@@ -845,19 +865,12 @@ impl crate::state::ServerState {
             && (!(write.uses_parent_gate && write.action == "Create")
                 || table.has_input_contracts())
         {
-            let created = crate::entity_actor::EntityEvent {
-                action: "Created".into(),
-                from_status: String::new(),
-                to_status: stream.state.status.clone(),
-                timestamp: sim_now(),
-                params: serde_json::json!({}),
-                idempotency_key: None,
-            };
+            let created = crate::entity_actor::EntityEvent::bootstrap(stream.state.status.clone());
             stream.state.sequence_nr += 1;
             stream.state.push_event_bounded(created);
         }
-        let related = if table_has_cross_entity_guards_for_action(&table, &write.action) {
-            self.resolve_cross_entity_guards(
+        let related = if table_reads_related_records(&table, &write.action) {
+            self.resolve_related_statuses(
                 tenant,
                 &write.entity_type,
                 &write.entity_id,
@@ -964,7 +977,7 @@ impl crate::state::ServerState {
             .await
             .map_err(DispatchError::Internal)?;
         let related = self
-            .resolve_cross_entity_guards(tenant, entity_type, entity_id, action)
+            .resolve_related_statuses(tenant, entity_type, entity_id, action)
             .await;
         let eval_ctx = build_eval_context_with_xref(&current.state, &related, &table, Some(action));
 

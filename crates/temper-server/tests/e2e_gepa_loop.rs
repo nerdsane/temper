@@ -79,10 +79,10 @@ fn load_gepa_wasm_modules() -> Option<Vec<(&'static str, Vec<u8>)>> {
         match std::fs::read(&path) {
             Ok(bytes) => modules.push((name, bytes)),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                eprintln!(
-                    "skipping GEPA WASM integration test because {} is missing",
+                temper_test_resource::missing(&format!(
+                    "GEPA WASM module {} is not built",
                     path.display()
-                );
+                ));
                 return None;
             }
             Err(err) => panic!("failed to read {}: {err}", path.display()),

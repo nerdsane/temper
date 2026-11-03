@@ -15,16 +15,21 @@ use crate::blob_transport_observability::{
     BlobTransportError, BlobTransportFinish, blob_transport_span, finish_blob_transport,
 };
 mod endpoint;
+mod http_client;
 mod keys;
 mod limits;
 mod local;
+mod presign;
 mod raw_ingest;
+mod s3_buffered_get;
 mod state;
 mod streaming;
 pub(crate) use endpoint::{LocalInternalBlobEndpoint, is_local_internal_blob_endpoint};
-pub(crate) use keys::{DEFAULT_BLOB_BUCKET, hex_lower, wasm_artifact_key};
+pub use keys::KERNEL_BLOB_PREFIX;
+pub(crate) use keys::{DEFAULT_BLOB_BUCKET, hex_lower, kernel_owns, wasm_artifact_key};
 use limits::{BLOB_BUFFERED_OPERATION_TIMEOUT, BLOB_IO_QUEUE_TIMEOUT, blob_io_semaphore};
 use local::{get_local_blob_observed, local_blob_path, put_local_blob_observed};
+pub(crate) use presign::{MAX_PRESIGN_SECS, PresignedResponse};
 pub use raw_ingest::BlobByteStream;
 #[cfg(test)]
 pub(crate) use raw_ingest::BlobIngestProgressPolicy;
@@ -38,6 +43,9 @@ pub use streaming::{BlobObjectStream, BlobStreamRead, decode_json_base64_stream}
 pub(crate) struct BlobStore {
     backend: BlobStoreBackend,
     staging_root: PathBuf,
+    /// Per-store I/O fault point for paused-clock actor tests.
+    #[cfg(all(test, feature = "sim"))]
+    pub(crate) io_pause: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
 #[derive(Clone, Debug)]
@@ -53,13 +61,35 @@ struct S3BlobStore {
     key_prefix: Option<String>,
     access_key: Option<String>,
     secret_key: Option<String>,
+    /// The session token of temporary credentials (`x-amz-security-token`), signed with every request.
+    session_token: Option<String>,
+    /// Read-only credentials that sign links (presign.rs), when the store's own are temporary ones.
+    link: Option<LinkCredentials>,
     client: reqwest::Client,
 }
 
+/// Credentials that only read objects, used to sign links handed to readers: a link carries its session token, from
+/// which temporary credentials can be rebuilt, so the store's own (which write) never go into one.
+#[derive(Clone, Debug)]
+pub(crate) struct LinkCredentials {
+    pub access_key: String,
+    pub secret_key: String,
+    pub session_token: Option<String>,
+}
+
 impl BlobStore {
+    #[cfg(all(test, feature = "sim"))]
+    async fn pause_io_if_set(&self) {
+        if let Some(mut held) = self.io_pause.clone() {
+            let _ = held.wait_for(|held| !held).await;
+        }
+    }
+
     pub(crate) fn local_fs(root: impl Into<PathBuf>) -> Self {
         let root = root.into();
         Self {
+            #[cfg(all(test, feature = "sim"))]
+            io_pause: None,
             staging_root: root.join(".ingest-staging"),
             backend: BlobStoreBackend::LocalFs { root },
         }
@@ -74,6 +104,8 @@ impl BlobStore {
         key_prefix: Option<String>,
     ) -> Self {
         Self {
+            #[cfg(all(test, feature = "sim"))]
+            io_pause: None,
             staging_root: staging_root.into(),
             backend: BlobStoreBackend::S3(S3BlobStore {
                 endpoint: endpoint.into().trim_end_matches('/').to_string(),
@@ -81,12 +113,33 @@ impl BlobStore {
                 key_prefix,
                 access_key,
                 secret_key,
-                client: reqwest::Client::builder()
-                    .connect_timeout(std::time::Duration::from_secs(10))
-                    .build()
-                    .expect("static blob HTTP client configuration must be valid"), // ci-ok: static reqwest builder options
+                session_token: None,
+                link: None,
+                client: http_client::shared_client(),
             }),
         }
+    }
+
+    /// Sign every object-store request with the session token of temporary credentials (R2 and S3 issue them with
+    /// their own access key and secret). No effect on a local store.
+    pub(crate) fn with_session_token(mut self, token: Option<String>) -> Self {
+        if let BlobStoreBackend::S3(store) = &mut self.backend {
+            store.session_token = token.filter(|token| !token.trim().is_empty());
+        }
+        self
+    }
+
+    /// Sign links with these read-only credentials rather than the store's own (presign.rs).
+    pub(crate) fn with_link_credentials(mut self, link: Option<LinkCredentials>) -> Self {
+        if let BlobStoreBackend::S3(store) = &mut self.backend {
+            store.link = link.filter(|l| !l.access_key.is_empty() && !l.secret_key.is_empty());
+        }
+        self
+    }
+
+    /// Whether the bytes live in a remote object store (R2/S3) rather than on this server's disk.
+    pub(crate) fn is_object_store(&self) -> bool {
+        matches!(self.backend, BlobStoreBackend::S3(_))
     }
 
     pub(crate) async fn put_if_absent(
@@ -95,6 +148,8 @@ impl BlobStore {
         body: &[u8],
         ttl: Option<Duration>,
     ) -> Result<(), String> {
+        #[cfg(all(test, feature = "sim"))]
+        self.pause_io_if_set().await;
         let queued_at = Instant::now(); // determinism-ok: production blob I/O queue metric only
         let _permit =
             tokio::time::timeout(BLOB_IO_QUEUE_TIMEOUT, blob_io_semaphore().acquire_owned())
@@ -338,73 +393,6 @@ impl S3BlobStore {
         }
     }
 
-    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
-        let started_at = Instant::now(); // determinism-ok: production blob transport metric only
-        let span = blob_transport_span("get", "s3", 0);
-        let result = async {
-            let url = self.object_url(key);
-            let mut request = self.client.get(&url);
-            let headers = self
-                .signed_headers(Method::GET, &url)
-                .map_err(BlobTransportError::message)?;
-            for (header_name, header_value) in &headers {
-                request = request.header(header_name, header_value);
-            }
-
-            let response = request.send().await.map_err(|e| {
-                BlobTransportError::message(format!("blob GET request failed for '{key}': {e}"))
-            })?;
-            let status = response.status();
-            if status == StatusCode::NOT_FOUND {
-                return Ok((status, None));
-            }
-            if !status.is_success() {
-                return Err(BlobTransportError::status(
-                    format!("blob GET failed for '{key}' with HTTP {status}"),
-                    status,
-                ));
-            }
-
-            let bytes = response.bytes().await.map_err(|e| {
-                BlobTransportError::message(format!("blob GET body read failed for '{key}': {e}"))
-            })?;
-            Ok((status, Some(bytes.to_vec())))
-        }
-        .instrument(span.clone())
-        .await;
-
-        match result {
-            Ok((status, bytes)) => {
-                let response_bytes = bytes.as_ref().map_or(0, |bytes| bytes.len() as u64);
-                let outcome = if bytes.is_some() { "ok" } else { "not_found" };
-                finish_blob_transport(BlobTransportFinish {
-                    started_at,
-                    span: &span,
-                    operation: "get",
-                    backend: "s3",
-                    outcome,
-                    status: Some(status),
-                    request_bytes: 0,
-                    response_bytes,
-                });
-                Ok(bytes)
-            }
-            Err(error) => {
-                finish_blob_transport(BlobTransportFinish {
-                    started_at,
-                    span: &span,
-                    operation: "get",
-                    backend: "s3",
-                    outcome: "error",
-                    status: error.status,
-                    request_bytes: 0,
-                    response_bytes: 0,
-                });
-                Err(error.message)
-            }
-        }
-    }
-
     async fn exists(&self, key: &str) -> Result<bool, String> {
         let started_at = Instant::now(); // determinism-ok: production blob transport metric only
         let span = blob_transport_span("head", "s3", 0);
@@ -484,7 +472,12 @@ impl S3BlobStore {
         };
 
         let amz_date = aws_sigv4::amz_date_now();
-        aws_sigv4::build_signed_headers(&aws_sigv4::SignedHeaderRequest {
+        let token = self.session_token.as_deref();
+        let extra: Vec<(&str, &str)> = token
+            .map(|token| ("x-amz-security-token", token))
+            .into_iter()
+            .collect();
+        let mut headers = aws_sigv4::build_signed_headers(&aws_sigv4::SignedHeaderRequest {
             method: method.as_str(),
             url,
             payload_hash: "UNSIGNED-PAYLOAD",
@@ -493,8 +486,16 @@ impl S3BlobStore {
             access_key,
             secret_key,
             amz_date: &amz_date,
-            extra_signed_headers: &[],
+            extra_signed_headers: &extra,
             error_context: "blob",
-        })
+        })?;
+        if let Some(token) = token {
+            headers.insert(
+                "x-amz-security-token",
+                reqwest::header::HeaderValue::from_str(token)
+                    .map_err(|e| format!("invalid blob session token header: {e}"))?,
+            );
+        }
+        Ok(headers)
     }
 }

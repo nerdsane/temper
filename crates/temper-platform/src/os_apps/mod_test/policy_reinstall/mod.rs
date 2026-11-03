@@ -39,7 +39,7 @@ impl Fixture {
         let apps_root = std::env::temp_dir().join(format!("temper-policy-reinstall-{label}-{id}"));
         let turso = TursoEventStore::new(&db_url, None)
             .await
-            .expect("open test Turso store");
+            .expect("open the policy reinstall database");
         let mut stack = temper_server::StorageStack::from_turso(turso);
         stack.policies = stack.policies.map(wrap);
         let mut state = PlatformState::new(None);
@@ -57,7 +57,7 @@ impl Fixture {
         let app_dir = self.apps_root.join(app);
         let policy_dir = app_dir.join("policies");
         let _ = fs::remove_dir_all(&policy_dir);
-        fs::create_dir_all(&policy_dir).expect("create policy dir");
+        fs::create_dir_all(&policy_dir).expect("create the policy directory");
         fs::write(
             app_dir.join("app.toml"),
             format!("name = \"{app}\"\ndescription = \"Policy reinstall test app\"\nversion = \"0.1.0\"\n"),
@@ -124,7 +124,7 @@ impl Fixture {
             .state
             .server
             .platform_turso_store()
-            .expect("platform Turso store");
+            .expect("platform turso store");
         store
             .load_tenant_policies()
             .await
@@ -153,7 +153,7 @@ impl Fixture {
             .server
             .tenant_policies
             .write()
-            .expect("tenant policy lock poisoned")
+            .expect("tenant policy map lock")
             .insert(self.tenant.clone(), live_text.to_string());
     }
 
@@ -161,7 +161,7 @@ impl Fixture {
     async fn restart(&self) -> PlatformState {
         let store = TursoEventStore::new(&self.db_url, None)
             .await
-            .expect("reopen test Turso store");
+            .expect("reopen the policy reinstall database");
         let state = PlatformState::new(None);
         crate::recovery::recover_cedar_policies(&state, &store).await;
         state
@@ -243,6 +243,36 @@ async fn approvals_and_primary_survive_reinstall_and_restart() {
     assert!(primary.cedar_text.contains(HAND_ADDED_POKE));
     assert!(primary.cedar_text.contains(APPROVED_PING));
     assert!(rows.iter().any(|row| row.policy_id == "decision:d-1"));
+}
+
+#[tokio::test]
+async fn an_upgrade_after_a_whole_set_replacement_loads_at_restart() {
+    let fx = Fixture::new("after-put").await;
+    let app = format!("reinstall-after-put-{}", uuid::Uuid::new_v4().simple());
+    fx.write_app(&app, &[("thing.cedar", &thing_policies(FORBID_WITHDRAW))]);
+    fx.install(&app).await;
+    // PUT stores the live text as the only enabled row, the app's rows disabled.
+    let store = fx.state.server.policy_store().expect("policy store");
+    store
+        .replace_tenant_policies(&fx.tenant, "primary", &fx.live_text(), "rita")
+        .await
+        .expect("replace the whole set");
+
+    fx.write_app(&app, &[("thing.cedar", &thing_policies(FORBID_DELETE))]);
+    fx.install(&app).await;
+
+    for state in [&fx.state, &fx.restart().await] {
+        assert!(
+            fx.allowed(state, "Withdraw", "Thing"),
+            "old forbid survived"
+        );
+        assert!(
+            !fx.allowed(state, "Delete", "Thing"),
+            "new forbid not loaded"
+        );
+    }
+    let rows = fx.rows().await;
+    assert!(rows.iter().all(|row| row.enabled), "{rows:?}");
 }
 
 #[tokio::test]
@@ -329,3 +359,32 @@ async fn reinstall_drops_a_removed_policy_file() {
 }
 
 mod faults;
+
+#[tokio::test]
+async fn a_moved_statement_is_live_once_under_its_new_label() {
+    let fx = Fixture::new("relabel").await;
+    let app = format!("reinstall-relabel-{}", uuid::Uuid::new_v4().simple());
+    fx.write_app(&app, &[("thing.cedar", &thing_policies(FORBID_WITHDRAW))]);
+    fx.install(&app).await;
+    // A new first statement moves the forbid from #2 to #3.
+    let moved = format!("{FORBID_DELETE}\n{}", thing_policies(FORBID_WITHDRAW));
+    fx.write_app(&app, &[("thing.cedar", &moved)]);
+    fx.install(&app).await;
+
+    let live = fx.live_text();
+    assert_eq!(live.matches("Action::\"Withdraw\"").count(), 1, "{live}");
+    assert!(
+        live.contains(&format!(
+            "@source(\"{app}/thing.cedar#3\")\n{FORBID_WITHDRAW}"
+        )),
+        "{live}"
+    );
+    assert!(
+        !live.contains(&format!("{app}/thing.cedar#2\")\n{FORBID_WITHDRAW}")),
+        "{live}"
+    );
+    for state in [&fx.state, &fx.restart().await] {
+        assert!(!fx.allowed(state, "Withdraw", "Thing"));
+        assert!(!fx.allowed(state, "Delete", "Thing"));
+    }
+}

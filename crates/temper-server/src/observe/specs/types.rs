@@ -44,4 +44,8 @@ pub(crate) struct ValidateIoaRequest {
     /// Optional property-test case budget. Defaults to the server quick-check budget.
     #[serde(default)]
     pub(crate) prop_test_cases: Option<u32>,
+    /// Optional time budget for the whole check, in milliseconds. Defaults to
+    /// 30 s; a caller with less time left asks for less.
+    #[serde(default)]
+    pub(crate) budget_ms: Option<u64>,
 }

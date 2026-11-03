@@ -1,6 +1,6 @@
 # ADR-0084: Long-Lived Workflow Root Spans
 
-- Status: Accepted
+- Status: Superseded by ADR-0183
 - Date: 2026-05-12
 - Deciders: Temper core maintainers
 - Related:

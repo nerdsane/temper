@@ -769,3 +769,63 @@ async fn the_bundle_route_still_resolves_a_credential_when_one_is_presented() {
         "a presented credential must still reach the handler as typed authority"
     );
 }
+
+#[tokio::test]
+async fn a_cors_preflight_is_answered_without_a_credential_and_nothing_else_is() {
+    use tower_http::cors::{Any, CorsLayer};
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([axum::http::Method::PUT])
+        .allow_headers([
+            axum::http::header::AUTHORIZATION,
+            axum::http::header::CONTENT_TYPE,
+        ]);
+    let state = PlatformState::new(None);
+    let app = Router::new()
+        .route("/tdata/{*path}", axum::routing::put(ok_handler))
+        .layer(cors)
+        .layer(middleware::from_fn(
+            temper_server::authz::require_authenticated_request_context,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            bearer_auth_check,
+        ))
+        .with_state(state);
+    let preflight = app
+        .clone()
+        .oneshot(
+            HttpRequest::options("/tdata/Files('af-x')/$value")
+                .header("origin", "https://unikon.dev")
+                .header("access-control-request-method", "PUT")
+                .header(
+                    "access-control-request-headers",
+                    "authorization,content-type",
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(preflight.status(), StatusCode::OK);
+    assert_eq!(
+        preflight
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|v| v.to_str().ok()),
+        Some("*")
+    );
+    // An OPTIONS that is not a preflight, and the PUT itself, still need a credential.
+    for request in [
+        HttpRequest::options("/tdata/Files('af-x')/$value")
+            .body(Body::empty())
+            .unwrap(),
+        HttpRequest::put("/tdata/Files('af-x')/$value")
+            .header("origin", "https://unikon.dev")
+            .body(Body::empty())
+            .unwrap(),
+    ] {
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+}

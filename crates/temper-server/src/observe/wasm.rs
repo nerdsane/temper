@@ -179,10 +179,7 @@ pub async fn handle_upload_wasm_module(
     }
 
     // Register in module registry after durability is confirmed.
-    {
-        let mut wasm_reg = state.wasm_module_registry.write().unwrap();
-        wasm_reg.register(&tenant, &module_name, &hash);
-    }
+    state.register_wasm_module(&tenant, &module_name, &hash);
 
     let size_bytes = module_bytes.len();
     tracing::info!(
@@ -303,15 +300,12 @@ pub async fn handle_delete_wasm_module(
         return Err(resp);
     }
 
-    // Get hash before removing from registry (for cache eviction)
-    let hash = {
+    let registered = {
         let wasm_reg = state.wasm_module_registry.read().unwrap();
-        wasm_reg
-            .get_hash(&tenant, &module_name)
-            .map(|s| s.to_string())
+        wasm_reg.get_hash(&tenant, &module_name).is_some()
     };
 
-    if hash.is_none() {
+    if !registered {
         tracing::warn!("WASM module not found for deletion");
         return Err((
             StatusCode::NOT_FOUND,
@@ -332,15 +326,15 @@ pub async fn handle_delete_wasm_module(
         ));
     }
 
-    // Remove from in-memory registry after durability is confirmed.
+    // Remove from in-memory registry after durability is confirmed, then drop
+    // the compiled module unless another tenant still runs the same bytes.
     {
         let mut wasm_reg = state.wasm_module_registry.write().unwrap();
-        wasm_reg.remove(&tenant, &module_name);
-    }
-
-    // Evict from engine cache last.
-    if let Some(ref hash) = hash {
-        state.wasm_engine.evict(hash);
+        if let Some(hash) = wasm_reg.remove(&tenant, &module_name)
+            && !wasm_reg.names_hash(&hash)
+        {
+            state.wasm_engine.evict(&hash);
+        }
     }
 
     tracing::info!(
@@ -373,7 +367,12 @@ pub async fn handle_list_wasm_modules(
             .metadata_store_for_tenant(authenticated.tenant().as_str())
             .await;
         for store in store.iter() {
-            if let Ok(rows) = store.load_recent_wasm_invocations(10_000).await {
+            if let Ok(rows) = store
+                .load_recent_wasm_invocations(
+                    temper_runtime::persistence::WASM_INVOCATIONS_KEPT_PER_TENANT,
+                )
+                .await
+            {
                 for row in rows {
                     let module = row.module_name.clone();
                     let success = row.success;
@@ -447,7 +446,10 @@ pub async fn handle_list_wasm_invocations(
 ) -> Result<Json<WasmInvocationResponse>, StatusCode> {
     let authenticated = require_authenticated_context(authenticated.as_deref())?;
     require_observe_auth(&state, authenticated, "read_wasm", "WasmModule")?;
-    let limit = params.limit.unwrap_or(100).min(10_000);
+    let limit = params
+        .limit
+        .unwrap_or(100)
+        .min(temper_runtime::persistence::WASM_INVOCATIONS_KEPT_PER_TENANT as usize);
 
     let mut all_filtered: Vec<serde_json::Value> = Vec::new();
     let store = state

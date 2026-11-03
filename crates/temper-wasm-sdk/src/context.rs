@@ -1,6 +1,6 @@
 //! Typed context and host function wrappers for Temper WASM modules.
 
-use core::ptr::addr_of;
+use core::ptr::{addr_of, addr_of_mut};
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -127,6 +127,27 @@ pub struct Context {
     /// unwrap this then drive the inbound exchange via
     /// `temper_wasm_sdk::http_stream::InboundHttp`.
     pub http_request: Option<Value>,
+    /// Who the move that set this integration off was made as: the
+    /// principal Cedar saw for that move. A timer's move is its setter's,
+    /// and a reaction's is the move it reacts to's. `None` when the kernel
+    /// made the move itself (a system or service move), when it was made
+    /// anonymously, and on a host that predates the field.
+    pub trigger_principal: Option<TriggerPrincipal>,
+}
+
+/// The principal a triggering move was made as.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TriggerPrincipal {
+    /// The principal's id: the person, or the agent instance.
+    pub id: String,
+    /// `Customer` (a person), `Agent` or `Admin`.
+    pub kind: String,
+    /// For an agent, the person it acts for.
+    #[serde(default)]
+    pub acting_for: Option<String>,
+    /// For an agent, its type.
+    #[serde(default)]
+    pub agent_type: Option<String>,
 }
 
 pub struct WideEventInput<'a> {
@@ -222,32 +243,18 @@ impl Context {
     ///
     /// Reads the context JSON via `host_get_context` and deserializes it.
     pub fn from_host() -> Result<Self, String> {
-        let ctx_json = unsafe {
-            let ptr = addr_of!(host::CTX_BUF) as *const u8;
-            let len = host::host_get_context(ptr as i32, host::CTX_BUF_LEN as i32);
-            if len <= 0 {
-                return Err("failed to read invocation context".to_string());
-            }
-
-            if len as usize <= host::CTX_BUF_LEN {
-                let slice = core::slice::from_raw_parts(ptr, len as usize);
-                String::from_utf8_lossy(slice).to_string()
-            } else {
-                let needed = len as usize;
-                if needed > i32::MAX as usize {
-                    return Err("failed to read invocation context".to_string());
-                }
-
-                let mut buf = vec![0u8; needed];
-                let actual = host::host_get_context(buf.as_mut_ptr() as i32, needed as i32);
-                if actual <= 0 || actual as usize > buf.len() {
-                    return Err("failed to read invocation context".to_string());
-                }
-
-                let slice = core::slice::from_raw_parts(buf.as_ptr(), actual as usize);
-                String::from_utf8_lossy(slice).to_string()
-            }
-        };
+        // SAFETY: CTX_BUF is CTX_BUF_LEN bytes, and a guest runs one
+        // invocation at a time, so nothing else uses it while this reads.
+        let ctx_bytes = unsafe {
+            read_whole(
+                addr_of_mut!(host::CTX_BUF) as *mut u8,
+                host::CTX_BUF_LEN,
+                |ptr, len| host::host_get_context(ptr as i32, len as i32),
+            )
+        }
+        .filter(|bytes| !bytes.is_empty())
+        .ok_or_else(|| "failed to read invocation context".to_string())?;
+        let ctx_json = String::from_utf8_lossy(&ctx_bytes);
 
         let parsed: Value = serde_json::from_str(&ctx_json)
             .map_err(|e| format!("failed to parse context JSON: {e}"))?;
@@ -297,6 +304,9 @@ impl Context {
             .to_string();
 
         let http_request = parsed.get("http_request").cloned();
+        let trigger_principal = parsed
+            .get("trigger_principal")
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
 
         Ok(Self {
             config,
@@ -308,6 +318,7 @@ impl Context {
             trigger_action,
             wasm_module,
             http_request,
+            trigger_principal,
         })
     }
 
@@ -481,31 +492,26 @@ impl Context {
             .map_err(|e| format!("failed to parse Connect response frames: {e}"))
     }
 
-    /// Read a secret value by key from the host.
+    /// Read a secret value by key from the host, whole, whatever its length.
     pub fn get_secret(&self, key: &str) -> Result<String, String> {
-        unsafe {
-            let ptr = addr_of!(host::SECRET_BUF) as *const u8;
-            let len = host::host_get_secret(
-                key.as_ptr() as i32,
-                key.len() as i32,
-                ptr as i32,
-                host::SECRET_BUF_LEN as i32,
-            );
-            if len < 0 {
-                return Err(format!("failed to read secret '{key}'"));
-            }
-            // The host returns the secret's full length even when it exceeds
-            // the buffer (nothing was written in that case). Reading `len`
-            // bytes unconditionally would over-read the fixed SECRET_BUF.
-            if len as usize > host::SECRET_BUF_LEN {
-                return Err(format!(
-                    "secret '{key}' is {len} bytes, exceeds buffer of {}",
-                    host::SECRET_BUF_LEN
-                ));
-            }
-            let slice = core::slice::from_raw_parts(ptr, len as usize);
-            Ok(String::from_utf8_lossy(slice).to_string())
+        // SAFETY: SECRET_BUF is SECRET_BUF_LEN bytes, and a guest runs one
+        // invocation at a time, so nothing else uses it while this reads.
+        let bytes = unsafe {
+            read_whole(
+                addr_of_mut!(host::SECRET_BUF) as *mut u8,
+                host::SECRET_BUF_LEN,
+                |ptr, len| {
+                    host::host_get_secret(
+                        key.as_ptr() as i32,
+                        key.len() as i32,
+                        ptr as i32,
+                        len as i32,
+                    )
+                },
+            )
         }
+        .ok_or_else(|| format!("failed to read secret '{key}'"))?;
+        Ok(String::from_utf8_lossy(&bytes).to_string())
     }
 
     /// Emit a replayable progress event for the current entity.
@@ -801,6 +807,37 @@ fn call_host_span_attributes(span_id: i64, payload: &str) -> Result<(), String> 
     }
 }
 
+/// Read a value through a host call that returns the value's full length and
+/// writes it only when it fits (`host_get_context`, `host_get_secret`).
+///
+/// `call(ptr, len)` makes the call into the `len` bytes at `ptr`. The value is
+/// read into `buf` first; one longer than `buf` is read again into a buffer of
+/// its own length, so it is never cut to the static buffer's size. `None` when
+/// the host reports an error, or when the value grew between the two reads.
+///
+/// # Safety
+///
+/// `buf` must point to `buf_len` bytes the guest may write and nothing else
+/// reads or writes while this runs.
+unsafe fn read_whole(
+    buf: *mut u8,
+    buf_len: usize,
+    mut call: impl FnMut(*mut u8, usize) -> i32,
+) -> Option<Vec<u8>> {
+    let len = usize::try_from(call(buf, buf_len)).ok()?;
+    if len <= buf_len {
+        // SAFETY: the host wrote `len` bytes, at most `buf_len`, at `buf`.
+        return Some(unsafe { core::slice::from_raw_parts(buf, len) }.to_vec());
+    }
+    let mut owned = vec![0u8; len];
+    let written = usize::try_from(call(owned.as_mut_ptr(), len)).ok()?;
+    if written > len {
+        return None;
+    }
+    owned.truncate(written);
+    Some(owned)
+}
+
 fn call_host_span_end(span_id: i64, payload: &str) -> Result<(), String> {
     let rc = unsafe { host::host_end_span(span_id, payload.as_ptr() as i32, payload.len() as i32) };
     if rc == 0 {
@@ -852,6 +889,51 @@ mod tests {
         assert_eq!(end["status"], "error");
         assert_eq!(end["error.type"], "llm_error");
         assert_eq!(end["error.message"], "provider failed");
+    }
+
+    /// A host call as `host_get_secret` behaves: the value's full length,
+    /// written only when it fits.
+    fn fake_host(value: &[u8]) -> impl FnMut(*mut u8, usize) -> i32 + '_ {
+        move |ptr, len| {
+            if value.len() <= len {
+                // SAFETY: the caller hands `len` writable bytes at `ptr`.
+                unsafe { core::ptr::copy_nonoverlapping(value.as_ptr(), ptr, value.len()) };
+            }
+            value.len() as i32
+        }
+    }
+
+    #[test]
+    fn a_value_longer_than_the_static_buffer_reads_whole() {
+        // A 6 KB secret, longer than SECRET_BUF_LEN: the vault stores up to
+        // 8 KB, and this used to fail with "exceeds buffer of 4096".
+        let secret: Vec<u8> = (0..6 * 1024).map(|i| b'a' + (i % 26) as u8).collect();
+        assert!(secret.len() > crate::host::SECRET_BUF_LEN);
+        let mut buf = [0u8; crate::host::SECRET_BUF_LEN];
+        let read = unsafe { read_whole(buf.as_mut_ptr(), buf.len(), fake_host(&secret)) };
+        assert_eq!(read.as_deref(), Some(secret.as_slice()));
+    }
+
+    #[test]
+    fn a_value_that_fits_reads_from_the_static_buffer() {
+        let mut buf = [0u8; 16];
+        let read = unsafe { read_whole(buf.as_mut_ptr(), buf.len(), fake_host(b"short")) };
+        assert_eq!(read.as_deref(), Some(&b"short"[..]));
+    }
+
+    #[test]
+    fn a_host_error_or_a_value_that_grew_is_no_value() {
+        let mut buf = [0u8; 4];
+        let failed = unsafe { read_whole(buf.as_mut_ptr(), buf.len(), |_, _| -1) };
+        assert_eq!(failed, None);
+        let mut grows = 8;
+        let grew = unsafe {
+            read_whole(buf.as_mut_ptr(), buf.len(), |_, _| {
+                grows += 1;
+                grows
+            })
+        };
+        assert_eq!(grew, None);
     }
 
     #[test]

@@ -7,33 +7,51 @@
 //! Install reuses [`crate::bootstrap::bootstrap_tenant_specs`] so every app goes through the same verification cascade as system specs.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::ops::ControlFlow;
+use std::path::Path;
 
-use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::Serialize;
 use temper_runtime::tenant::TenantId;
-use temper_server::state::WasmModuleSource;
 use temper_spec::automaton;
-use temper_spec::csdl::{emit_csdl_xml, merge_csdl, parse_csdl};
+use temper_spec::csdl::emit_csdl_xml;
 
 use crate::bootstrap;
 use crate::state::PlatformState;
 
 mod agent_bootstrap;
 mod app_catalog;
+mod app_files;
+mod apps_dir;
+mod bundle_files;
+mod bundle_modules;
 mod closure_bootstrap;
 mod entity_aliases;
+mod entity_owners;
+mod file_source;
+mod install_checks;
+pub(crate) mod install_guard;
+mod install_lines;
+mod materialized_closure;
+mod module_review_step;
+mod own_schema;
 mod policy_rows;
+mod proofs;
 mod reconcile;
 mod runtime_heal;
 mod system_files;
 mod types;
+mod wasm_replacement;
 pub(super) use app_catalog::catalog;
 pub use app_catalog::{
-    add_os_apps_dir, add_os_apps_dir_preferred, list_startup_os_apps, reload_os_apps,
-    set_os_apps_dir,
+    add_os_apps_dir, add_tenant_written_apps, add_written_apps_preferred, get_os_app, list_os_apps,
+    list_startup_os_apps, list_tenant_os_apps, reload_os_apps, set_os_apps_dir, tenant_app_guide,
+    tenant_os_app,
 };
+pub(crate) use app_catalog::{load_tenant_os_app, tenant_os_app_dir};
+pub use app_files::{AppFiles, Shadowed, app_dir_of};
+pub(crate) use bundle_files::find_ioa_files;
+use bundle_files::{find_adrs, find_agents, find_app_skills, find_seed_data, find_wasm_modules};
+use bundle_modules::{BundleModules, register_bundle_modules};
 pub use closure_bootstrap::{
     ClosureBootstrapResult, OS_APP_CLOSURE_RESOLVER_VERSION, OsAppClosure,
     bootstrap_closure_manifest, os_app_closure_for_roots, parse_bootstrap_manifest_str,
@@ -43,18 +61,31 @@ use entity_aliases::{
     content_sha256, ensure_created_file_initialized, ensure_entity_field_aliases,
     file_already_contains, slug_fragment,
 };
+pub use entity_owners::unspecified_entity_types;
+#[cfg(test)]
+pub(crate) use file_source::seam as app_files_seam;
+pub use file_source::{AppFileSource, list_install_dir};
+pub use install_lines::{installed_line, stored_line, waiting_line};
+pub(crate) use materialized_closure::resolve_materialized_app_closure;
+pub use module_review_step::ReviewAsked;
+pub(crate) use own_schema::converge_installed_schemas;
 #[cfg(test)]
 pub(super) use policy_rows::os_app_policy_row_id;
-pub use reconcile::{os_app_bundle_digest, reconcile_os_app, resolve_os_app_install_order};
 pub(crate) use reconcile::{
-    tenant_has_active_policies_for_bundle, tenant_has_registered_wasm_for_bundle,
+    InstallOrigin, reconcile_os_app_swapping, tenant_has_active_policies_for_bundle,
+    tenant_has_registered_wasm_for_bundle,
+};
+pub use reconcile::{
+    os_app_bundle_digest, reconcile_os_app, resolve_os_app_install_order,
+    resolve_tenant_os_app_install_order, tenant_os_app_bundle_digest, written_apps_bundle_digests,
 };
 pub(crate) use runtime_heal::{
     restore_app_specs_from_matching_digest, tenant_has_ready_app_specs_for_bundle,
 };
 pub use types::*;
+use wasm_replacement::{UploadedWasmReplacementContext, uploaded_wasm_replacement_context};
 
-fn read_app_manifest(app_dir: &Path) -> Option<AppManifest> {
+pub(crate) fn read_app_manifest(app_dir: &Path) -> Option<AppManifest> {
     let path = app_dir.join("app.toml");
     let content = std::fs::read_to_string(&path).ok()?;
     toml::from_str(&content).ok()
@@ -201,122 +232,6 @@ struct SeedFile {
 pub type OsAppEntry = AppEntry;
 pub type OsAppBundle = AppBundle;
 
-/// Find all IOA spec files in an app directory.
-///
-/// Handles both layouts:
-/// - Root-level: `app-name/*.ioa.toml` + `app-name/model.csdl.xml`
-/// - Specs subdir: `app-name/specs/*.ioa.toml` + `app-name/specs/model.csdl.xml`
-///
-/// Returns `(entity_type_hint, path)` pairs. The entity type is extracted
-/// from the IOA file's `[automaton] name` field, not the filename.
-fn find_ioa_files(app_dir: &Path) -> Vec<(String, PathBuf)> {
-    let mut results = Vec::new();
-    let mut seen_names = std::collections::HashSet::new();
-
-    // Scan root first (takes priority for dedup).
-    scan_dir_for_ioa(app_dir, &mut results, &mut seen_names);
-
-    // Then scan specs/ subdirectory.
-    let specs_dir = app_dir.join("specs");
-    if specs_dir.is_dir() {
-        scan_dir_for_ioa(&specs_dir, &mut results, &mut seen_names);
-    }
-
-    results
-}
-
-/// Scan a single directory for `*.ioa.toml` files.
-fn scan_dir_for_ioa(
-    dir: &Path,
-    results: &mut Vec<(String, PathBuf)>,
-    seen: &mut std::collections::HashSet<String>,
-) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut files: Vec<_> = entries
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().ends_with(".ioa.toml"))
-        .collect();
-    files.sort_by_key(|e| e.file_name());
-
-    for entry in files {
-        let path = entry.path();
-        let fname = entry.file_name().to_string_lossy().to_string();
-        // Use filename as dedup key.
-        if !seen.insert(fname) {
-            continue;
-        }
-        results.push((String::new(), path));
-    }
-}
-
-/// Find the CSDL model file in an app directory.
-fn find_csdl(app_dir: &Path) -> Option<PathBuf> {
-    // Root-level first.
-    let root = app_dir.join("model.csdl.xml");
-    if root.exists() {
-        return Some(root);
-    }
-    // Then specs/.
-    let specs = app_dir.join("specs").join("model.csdl.xml");
-    if specs.exists() {
-        return Some(specs);
-    }
-    // Then a dedicated csdl/ directory.
-    let csdl_dir = app_dir.join("csdl");
-    if csdl_dir.is_dir() {
-        let Ok(entries) = std::fs::read_dir(&csdl_dir) else {
-            return None;
-        };
-        let mut files: Vec<PathBuf> = entries
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().ends_with(".csdl.xml"))
-            .map(|e| e.path())
-            .collect();
-        files.sort();
-        if let Some(first) = files.into_iter().next() {
-            return Some(first);
-        }
-    }
-    None
-}
-
-/// Find all Cedar policy files in an app directory.
-fn find_cedar_policies(app_dir: &Path) -> Vec<PathBuf> {
-    let policies_dir = app_dir.join("policies");
-    if !policies_dir.is_dir() {
-        return Vec::new();
-    }
-    let Ok(entries) = std::fs::read_dir(&policies_dir) else {
-        return Vec::new();
-    };
-    let mut files: Vec<PathBuf> = entries
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().ends_with(".cedar"))
-        .map(|e| e.path())
-        .collect();
-    files.sort();
-    files
-}
-
-fn find_commons_cedar_policies(app_dir: &Path) -> Vec<PathBuf> {
-    let policies_dir = app_dir.join("policies").join("commons");
-    if !policies_dir.is_dir() {
-        return Vec::new();
-    }
-    let Ok(entries) = std::fs::read_dir(&policies_dir) else {
-        return Vec::new();
-    };
-    let mut files: Vec<PathBuf> = entries
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().ends_with(".cedar"))
-        .map(|e| e.path())
-        .collect();
-    files.sort();
-    files
-}
-
 fn app_relative_path(app_dir: &Path, path: &Path) -> String {
     path.strip_prefix(app_dir)
         .unwrap_or(path)
@@ -346,347 +261,6 @@ fn effective_app_deployment_mode(manifest: &AppManifest) -> AppDeploymentMode {
         Some("operator") | Some("Operator") | Some("OPERATOR") => AppDeploymentMode::Operator,
         _ => manifest.mode,
     }
-}
-
-/// Find compiled WASM module binaries in an app directory.
-///
-/// Scans packaged artifacts copied next to the module first, then falls back
-/// to manifest-selected target outputs and common WASM release outputs.
-fn find_wasm_modules(
-    app_dir: &Path,
-    module_configs: &BTreeMap<String, WasmModuleManifest>,
-) -> BTreeMap<String, Vec<u8>> {
-    let mut modules = BTreeMap::new();
-    let wasm_dir = app_dir.join("wasm");
-    if !wasm_dir.is_dir() {
-        return modules;
-    }
-
-    let declared: Vec<_> = module_configs.keys().cloned().collect();
-    if declared.is_empty() {
-        warn_undeclared_wasm_artifacts(&wasm_dir, module_configs);
-        return modules;
-    }
-
-    for module_name in declared {
-        let module_dir = wasm_dir.join(&module_name);
-        if !module_dir.is_dir() {
-            continue;
-        }
-        // Prefer packaged sibling artifacts because they are the deployable
-        // copy left after Docker target pruning. Target output remains a local
-        // development fallback.
-        let dashed_name = module_name.replace('_', "-");
-        let candidates: Vec<PathBuf> = if let Some(config) = module_configs.get(&module_name)
-            && let Some(ref target) = config.target
-        {
-            vec![
-                module_dir.join(format!("{module_name}.wasm")),
-                module_dir.join(format!("{dashed_name}.wasm")),
-                wasm_dir.join(format!("{module_name}.wasm")),
-                wasm_dir.join(format!("{dashed_name}.wasm")),
-                module_dir
-                    .join("target")
-                    .join(target)
-                    .join("release")
-                    .join(format!("{module_name}.wasm")),
-                module_dir
-                    .join("target")
-                    .join(target)
-                    .join("release")
-                    .join(format!("{dashed_name}.wasm")),
-            ]
-        } else {
-            vec![
-                module_dir.join(format!("{module_name}.wasm")),
-                module_dir.join(format!("{dashed_name}.wasm")),
-                wasm_dir.join(format!("{module_name}.wasm")),
-                wasm_dir.join(format!("{dashed_name}.wasm")),
-                module_dir
-                    .join("target")
-                    .join("wasm32-unknown-unknown")
-                    .join("release")
-                    .join(format!("{module_name}.wasm")),
-                module_dir
-                    .join("target")
-                    .join("wasm32-wasip1")
-                    .join("release")
-                    .join(format!("{module_name}.wasm")),
-                module_dir
-                    .join("target")
-                    .join("wasm32-unknown-unknown")
-                    .join("release")
-                    .join(format!("{dashed_name}.wasm")),
-                module_dir
-                    .join("target")
-                    .join("wasm32-wasip1")
-                    .join("release")
-                    .join(format!("{dashed_name}.wasm")),
-            ]
-        };
-
-        for wasm_path in candidates {
-            if !wasm_path.exists() {
-                continue;
-            }
-            match std::fs::read(&wasm_path) {
-                Ok(bytes) => {
-                    tracing::debug!(
-                        module = %module_name,
-                        path = %wasm_path.display(),
-                        size = bytes.len(),
-                        "Found WASM module in OS app"
-                    );
-                    modules.insert(module_name.clone(), bytes);
-                    break;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        module = %module_name,
-                        path = %wasm_path.display(),
-                        error = %e,
-                        "Failed to read WASM module binary"
-                    );
-                }
-            }
-        }
-    }
-
-    warn_undeclared_wasm_artifacts(&wasm_dir, module_configs);
-    modules
-}
-
-fn warn_undeclared_wasm_artifacts(
-    wasm_dir: &Path,
-    module_configs: &BTreeMap<String, WasmModuleManifest>,
-) {
-    let Ok(entries) = std::fs::read_dir(wasm_dir) else {
-        return;
-    };
-    for entry in entries.filter_map(|entry| entry.ok()) {
-        if !entry.path().is_dir() {
-            continue;
-        }
-        let module_name = entry.file_name().to_string_lossy().to_string();
-        if module_name == "target" || module_configs.contains_key(&module_name) {
-            continue;
-        }
-        let sibling = entry.path().join(format!("{module_name}.wasm"));
-        if sibling.exists() {
-            tracing::warn!(
-                module = %module_name,
-                path = %sibling.display(),
-                "Ignoring undeclared bundled WASM artifact; declare it in app.toml [[wasm_modules]] to install it"
-            );
-        }
-    }
-}
-
-// ── Agent / Skill / Seed Data discovery ─────────────────────────────
-
-/// Discover agent definitions from `agents/{name}/` subdirectories.
-///
-/// Each subdirectory is one agent. All `.md` files within it are collected,
-/// sorted alphabetically, and concatenated. The platform is filename-agnostic —
-/// conventions like SOUL.md, STYLE.md, AGENT.md are for humans.
-fn find_agents(app_dir: &Path) -> Vec<AgentDefinition> {
-    let agents_dir = app_dir.join("agents");
-    if !agents_dir.is_dir() {
-        return Vec::new();
-    }
-    let Ok(entries) = std::fs::read_dir(&agents_dir) else {
-        return Vec::new();
-    };
-
-    let mut dirs: Vec<_> = entries
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_dir())
-        .collect();
-    dirs.sort_by_key(|e| e.file_name());
-
-    let mut results = Vec::new();
-    for dir_entry in dirs {
-        let agent_name = dir_entry.file_name().to_string_lossy().to_string();
-        let agent_dir = dir_entry.path();
-
-        // Collect all .md files, sorted alphabetically.
-        let mut md_files: Vec<PathBuf> = std::fs::read_dir(&agent_dir)
-            .ok()
-            .into_iter()
-            .flatten()
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .to_lowercase()
-                    .ends_with(".md")
-            })
-            .map(|e| e.path())
-            .collect();
-        md_files.sort();
-
-        if md_files.is_empty() {
-            continue;
-        }
-
-        let has_soul = md_files
-            .iter()
-            .any(|p| p.file_name().map(|f| f == "SOUL.md").unwrap_or(false));
-
-        let mut content = String::new();
-        for path in &md_files {
-            if !content.is_empty() {
-                content.push_str("\n\n");
-            }
-            if let Ok(text) = std::fs::read_to_string(path) {
-                content.push_str(&text);
-            }
-        }
-
-        let description =
-            extract_description(&content).unwrap_or_else(|| format!("Agent: {agent_name}"));
-
-        results.push(AgentDefinition {
-            name: agent_name,
-            content,
-            has_soul,
-            description,
-        });
-    }
-    results
-}
-
-/// Discover skill definitions from the app's directory tree.
-///
-/// Scans two locations:
-/// - `system/skills/{name}/` → system-level skills (agent_name = None)
-/// - `agents/{agent}/skills/{name}/` → agent-scoped skills (agent_name = Some)
-///
-/// Each subdirectory must contain a `SKILL.md` file as the main document.
-/// All other files are collected as companion files.
-fn find_app_skills(app_dir: &Path) -> Vec<AppSkillDefinition> {
-    let mut results = Vec::new();
-
-    // 1. System skills: system/skills/{name}/
-    let system_skills_dir = app_dir.join("system").join("skills");
-    if system_skills_dir.is_dir() {
-        scan_skill_dirs(&system_skills_dir, None, &mut results);
-    }
-
-    // 2. Agent-scoped skills: agents/{agent}/skills/{name}/
-    let agents_dir = app_dir.join("agents");
-    if agents_dir.is_dir()
-        && let Ok(entries) = std::fs::read_dir(&agents_dir)
-    {
-        let mut dirs: Vec<_> = entries
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().is_dir())
-            .collect();
-        dirs.sort_by_key(|e| e.file_name());
-
-        for agent_entry in dirs {
-            let agent_name = agent_entry.file_name().to_string_lossy().to_string();
-            let agent_skills_dir = agent_entry.path().join("skills");
-            if agent_skills_dir.is_dir() {
-                scan_skill_dirs(&agent_skills_dir, Some(&agent_name), &mut results);
-            }
-        }
-    }
-
-    results
-}
-
-/// Scan a directory of skill subdirectories and collect definitions.
-fn scan_skill_dirs(
-    skills_dir: &Path,
-    agent_name: Option<&str>,
-    results: &mut Vec<AppSkillDefinition>,
-) {
-    let Ok(entries) = std::fs::read_dir(skills_dir) else {
-        return;
-    };
-
-    let mut dirs: Vec<_> = entries
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_dir())
-        .collect();
-    dirs.sort_by_key(|e| e.file_name());
-
-    for dir_entry in dirs {
-        let skill_name = dir_entry.file_name().to_string_lossy().to_string();
-        let skill_dir = dir_entry.path();
-
-        // Main skill document.
-        let skill_path = skill_dir.join("SKILL.md");
-        let content = match std::fs::read_to_string(&skill_path) {
-            Ok(c) => c,
-            Err(_) => continue, // Skip directories without SKILL.md
-        };
-
-        // Extract frontmatter (YAML or TOML).
-        let frontmatter = extract_frontmatter(&content);
-
-        let description = frontmatter
-            .description
-            .or_else(|| extract_description(&content))
-            .unwrap_or_else(|| format!("Skill: {skill_name}"));
-
-        // Collect companion files (everything except SKILL.md).
-        let companion_files = collect_companion_files(&skill_dir);
-
-        results.push(AppSkillDefinition {
-            name: skill_name,
-            content,
-            description,
-            agent_name: agent_name.map(String::from),
-            companion_files,
-        });
-    }
-}
-
-/// Discover app-local ADR markdown files from `adrs/*.md`.
-fn find_adrs(app_dir: &Path) -> Vec<AdrEntry> {
-    let adrs_dir = app_dir.join("adrs");
-    if !adrs_dir.is_dir() {
-        return Vec::new();
-    }
-    let Ok(entries) = std::fs::read_dir(&adrs_dir) else {
-        return Vec::new();
-    };
-
-    let mut files: Vec<PathBuf> = entries
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|path| {
-            path.is_file()
-                && path
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
-        })
-        .collect();
-    files.sort();
-
-    let mut results = Vec::new();
-    for path in files {
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        let name = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or(file_name)
-            .to_string();
-        results.push(AdrEntry {
-            name,
-            file_name: file_name.to_string(),
-            content,
-        });
-    }
-    results
 }
 
 /// Parsed frontmatter from a SKILL.md file.
@@ -753,46 +327,6 @@ fn extract_frontmatter(content: &str) -> SkillFrontmatter {
     }
 }
 
-/// Recursively collect companion files from a skill directory (excluding SKILL.md).
-fn collect_companion_files(skill_dir: &Path) -> Vec<CompanionFile> {
-    let mut files = Vec::new();
-    collect_companions_recursive(skill_dir, skill_dir, &mut files);
-    files
-}
-
-fn collect_companions_recursive(
-    base_dir: &Path,
-    current_dir: &Path,
-    results: &mut Vec<CompanionFile>,
-) {
-    let Ok(entries) = std::fs::read_dir(current_dir) else {
-        return;
-    };
-    let mut sorted: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-    sorted.sort_by_key(|e| e.file_name());
-
-    for entry in sorted {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_companions_recursive(base_dir, &path, results);
-        } else if path.file_name().map(|f| f != "SKILL.md").unwrap_or(true)
-            && let Ok(content) = std::fs::read(&path)
-        {
-            let rel_path = path
-                .strip_prefix(base_dir)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .to_string();
-            let mime_type = mime_from_extension(&path);
-            results.push(CompanionFile {
-                name: rel_path,
-                content,
-                mime_type,
-            });
-        }
-    }
-}
-
 /// Infer MIME type from file extension.
 fn mime_from_extension(path: &Path) -> String {
     match path.extension().and_then(|e| e.to_str()) {
@@ -808,53 +342,8 @@ fn mime_from_extension(path: &Path) -> String {
     }
 }
 
-/// Discover seed data instances from `seed-data/*.toml` files.
-///
-/// Each TOML file contains `[[instance]]` blocks that declare entities
-/// to create on first install.
-fn find_seed_data(app_dir: &Path) -> Vec<SeedInstance> {
-    let seed_dir = app_dir.join("seed-data");
-    if !seed_dir.is_dir() {
-        return Vec::new();
-    }
-    let Ok(entries) = std::fs::read_dir(&seed_dir) else {
-        return Vec::new();
-    };
-
-    let mut files: Vec<PathBuf> = entries
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().ends_with(".toml"))
-        .map(|e| e.path())
-        .collect();
-    files.sort();
-
-    let mut all_instances = Vec::new();
-    for path in &files {
-        match std::fs::read_to_string(path) {
-            Ok(content) => match toml::from_str::<SeedFile>(&content) {
-                Ok(seed_file) => all_instances.extend(seed_file.instances),
-                Err(e) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %e,
-                        "Failed to parse seed data file"
-                    );
-                }
-            },
-            Err(e) => {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %e,
-                    "Failed to read seed data file"
-                );
-            }
-        }
-    }
-    all_instances
-}
-
 /// Read the app guide markdown (APP.md/app.md first, then skill.md/SKILL.md fallback).
-fn read_app_guide(app_dir: &Path) -> Option<String> {
+pub(crate) fn read_app_guide(app_dir: &Path) -> Option<String> {
     for name in &["APP.md", "app.md", "skill.md", "SKILL.md"] {
         let path = app_dir.join(name);
         if let Ok(content) = std::fs::read_to_string(&path) {
@@ -899,76 +388,56 @@ fn extract_description(guide: &str) -> Option<String> {
 
 // ── Public API ──────────────────────────────────────────────────────
 
-/// List all available OS apps.
-pub fn list_os_apps() -> Vec<AppEntry> {
-    let cat = catalog().read().unwrap(); // ci-ok: infallible lock
-    cat.entries.clone()
-}
-
-/// Get the full spec bundle for an OS app by name.
-///
-/// Reads IOA, CSDL, and Cedar files from disk on each call so changes
-/// are picked up without a rebuild.
-pub fn get_os_app(name: &str) -> Option<AppBundle> {
-    let cat = catalog().read().unwrap(); // ci-ok: infallible lock
-    let app_dir = cat.paths.get(name)?;
-    load_app_bundle(app_dir)
-}
-
-/// Get the full app guide markdown for an app by name.
-pub fn get_app_guide(name: &str) -> Option<String> {
-    let cat = catalog().read().unwrap(); // ci-ok: infallible lock
-    cat.entries
-        .iter()
-        .find(|e| e.name == name)
-        .and_then(|e| e.app_guide.clone())
-}
-
-/// Load a complete app bundle from a directory on disk.
-fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
-    let manifest = read_app_manifest(app_dir)?;
+/// Load a complete app bundle from its files, or say why not. A file the
+/// app has that cannot be read is an error naming it.
+fn load_app_bundle(files: &AppFileSource) -> Result<AppBundle, String> {
+    let app_dir = files.dir();
+    let manifest = read_app_manifest(app_dir).ok_or("its app.toml is missing or invalid")?;
     let deployment_mode = effective_app_deployment_mode(&manifest);
-    let legacy_reaction_paths = [
-        app_dir.join("reactions").join("reactions.toml"),
-        app_dir.join("specs").join("reactions.toml"),
-    ];
-    if let Some(path) = legacy_reaction_paths.iter().find(|path| path.exists()) {
+    let legacy_reaction_paths = ["reactions/reactions.toml", "specs/reactions.toml"];
+    if let Some(path) = legacy_reaction_paths.iter().find(|path| files.has(path)) {
         tracing::error!(
-            path = %path.display(),
+            path = %app_dir.join(path).display(),
             "legacy reactions.toml is no longer supported; migrate this app to inline [[action.triggers]]"
         );
-        return None;
+        return Err("legacy reactions.toml is no longer supported".to_string());
     }
-    let ioa_files = find_ioa_files(app_dir);
+
+    let selected = AppFiles::from_source(files);
 
     // Read IOA specs, extracting entity type from the parsed automaton name.
     let mut specs = Vec::new();
-    for (_hint, path) in &ioa_files {
-        let source = std::fs::read_to_string(path).ok()?;
-        let parsed = automaton::parse_automaton(&source).ok()?;
+    for path in &selected.ioa {
+        let path = app_relative_path(app_dir, path);
+        let source = files.read_text(&path)?;
+        let parsed = automaton::parse_automaton(&source)
+            .map_err(|error| format!("{path} is refused: {error}"))?;
         specs.push((parsed.automaton.name, source));
     }
 
-    // Read CSDL (optional — apps without specs won't have CSDL).
-    let csdl = find_csdl(app_dir).and_then(|p| std::fs::read_to_string(&p).ok());
-    let cross_invariants_toml =
-        std::fs::read_to_string(app_dir.join("specs").join("cross-invariants.toml")).ok();
+    // Read CSDL (optional: apps without specs won't have CSDL).
+    let csdl = selected
+        .csdl
+        .as_ref()
+        .map(|path| files.read_text(&app_relative_path(app_dir, path)))
+        .transpose()?;
+    let cross_invariants = "specs/cross-invariants.toml";
+    let cross_invariants_toml = if files.has(cross_invariants) {
+        Some(files.read_text(cross_invariants)?)
+    } else {
+        None
+    };
 
     // Read Cedar policies.
-    let mut cedar_policy_files = find_cedar_policies(app_dir);
-    if deployment_mode == AppDeploymentMode::Commons {
-        cedar_policy_files.extend(find_commons_cedar_policies(app_dir));
+    let mut cedar_policy_sources = Vec::new();
+    for path in &selected.policies {
+        let relative_path = app_relative_path(app_dir, path);
+        let text = files.read_text(&relative_path)?;
+        cedar_policy_sources.push(CedarPolicySource {
+            text: policy_rows::labelled_policy_text(&manifest.name, &relative_path, text),
+            relative_path,
+        });
     }
-    let cedar_policy_sources: Vec<CedarPolicySource> = cedar_policy_files
-        .into_iter()
-        .filter_map(|path| {
-            let text = std::fs::read_to_string(&path).ok()?;
-            Some(CedarPolicySource {
-                relative_path: app_relative_path(app_dir, &path),
-                text,
-            })
-        })
-        .collect();
     let cedar_policies: Vec<String> = cedar_policy_sources
         .iter()
         .map(|source| source.text.clone())
@@ -982,14 +451,14 @@ fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
         .collect();
 
     // Read WASM module binaries, respecting declared targets from app.toml.
-    let wasm_modules = find_wasm_modules(app_dir, &wasm_module_configs);
+    let wasm_modules = find_wasm_modules(files, &wasm_module_configs)?;
 
     // Discover agents, skills, and seed data.
-    let agents = find_agents(app_dir);
-    let skills = find_app_skills(app_dir);
-    let adrs = find_adrs(app_dir);
-    let system_files = system_files::find_system_files(app_dir);
-    let seed_instances = find_seed_data(app_dir);
+    let agents = find_agents(files)?;
+    let skills = find_app_skills(files)?;
+    let adrs = find_adrs(files)?;
+    let system_files = system_files::find_system_files(files)?;
+    let seed_instances = find_seed_data(files)?;
 
     // Read app guide to check if there's anything at all.
     let app_guide = read_app_guide(app_dir);
@@ -1008,10 +477,10 @@ fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
         && csdl.is_none()
         && cross_invariants_toml.is_none()
     {
-        return None;
+        return Err("it holds nothing to install".to_string());
     }
 
-    Some(AppBundle {
+    Ok(AppBundle {
         deployment_mode,
         specs,
         csdl,
@@ -1028,10 +497,14 @@ fn load_app_bundle(app_dir: &Path) -> Option<AppBundle> {
     })
 }
 
-fn os_app_dependencies(name: &str) -> Vec<String> {
+fn os_app_dependencies(tenant: Option<&str>, name: &str) -> Vec<String> {
     // Check manifest first.
     let cat = catalog().read().unwrap(); // ci-ok: infallible lock
-    if let Some(entry) = cat.entries.iter().find(|e| e.name == name)
+    dependencies_for_entry(name, cat.app_entry(tenant, name))
+}
+
+fn dependencies_for_entry(name: &str, entry: Option<&AppEntry>) -> Vec<String> {
+    if let Some(entry) = entry
         && !entry.dependencies.is_empty()
     {
         return entry
@@ -1048,7 +521,7 @@ fn os_app_dependencies(name: &str) -> Vec<String> {
     }
 }
 
-fn local_os_app_dependency_name(dependency: &str) -> Option<String> {
+pub(super) fn local_os_app_dependency_name(dependency: &str) -> Option<String> {
     let unpinned = dependency
         .trim()
         .split_once('@')
@@ -1078,11 +551,35 @@ pub async fn install_os_app(
     tenant: &str,
     app_name: &str,
 ) -> Result<InstallResult, String> {
-    let order = resolve_os_app_install_order(&[app_name.to_string()])?;
+    install_os_app_and_dependencies(state, tenant, app_name, InstallOrigin::Request).await
+}
+
+/// Replay a stored install of `app_name` and its dependencies at boot.
+///
+/// It runs the same installer as [`install_os_app`], but a replay is not a new
+/// install: it leaves the stored record's origin (Genesis registry and version,
+/// or local) as recorded, so any number of restarts converge on the same record.
+pub async fn restore_os_app(
+    state: &PlatformState,
+    tenant: &str,
+    app_name: &str,
+) -> Result<InstallResult, String> {
+    install_os_app_and_dependencies(state, tenant, app_name, InstallOrigin::Replay).await
+}
+
+async fn install_os_app_and_dependencies(
+    state: &PlatformState,
+    tenant: &str,
+    app_name: &str,
+    origin: InstallOrigin,
+) -> Result<InstallResult, String> {
+    let order = resolve_tenant_os_app_install_order(tenant, &[app_name.to_string()])?;
 
     let mut final_result = None;
     for app in order {
-        let result = install_os_app_without_dependencies(state, tenant, &app).await?;
+        let result =
+            install_os_app_with_plan(state, tenant, &app, OsAppInstallPlan::all(), origin).await?;
+        result.publish_reviews();
         if app == app_name {
             final_result = Some(result);
         }
@@ -1090,33 +587,140 @@ pub async fn install_os_app(
     final_result.ok_or_else(|| format!("OS app '{app_name}' produced no install result"))
 }
 
-async fn install_os_app_without_dependencies(
-    state: &PlatformState,
-    tenant: &str,
-    app_name: &str,
-) -> Result<InstallResult, String> {
-    install_os_app_with_plan(state, tenant, app_name, OsAppInstallPlan::all()).await
-}
-
 pub(super) async fn install_os_app_with_plan(
     state: &PlatformState,
     tenant: &str,
     app_name: &str,
     plan: OsAppInstallPlan,
+    origin: InstallOrigin,
 ) -> Result<InstallResult, String> {
-    let app_dir = {
+    install_os_app_swapping(
+        state,
+        tenant,
+        app_name,
+        plan,
+        origin,
+        Swap::for_origin(origin),
+    )
+    .await
+}
+
+/// Which half of a new app version goes in first: its WASM modules or its
+/// specs. An integration's call is fixed by the spec its action ran under,
+/// and its module is looked up by name only when the call runs, so the newer
+/// module must be in place whenever the newer spec can run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Swap {
+    /// A new version: its modules go in, then its specs. Until the specs go
+    /// live, the old spec's calls reach the new module.
+    ModulesFirst,
+    /// An older version put back, after a failed install or at boot: its
+    /// specs go back, then its modules, so the newer module answers both
+    /// specs meanwhile. A call the newer spec had already started when the
+    /// modules go back still reaches the older module.
+    SpecsFirst,
+}
+
+impl Swap {
+    /// A request installs a new version; a replay puts a recorded one back.
+    pub(crate) fn for_origin(origin: InstallOrigin) -> Self {
+        match origin {
+            InstallOrigin::Request => Self::ModulesFirst,
+            InstallOrigin::Replay => Self::SpecsFirst,
+        }
+    }
+}
+
+/// [`install_os_app_with_plan`] with the order its modules and specs go in.
+pub(super) async fn install_os_app_swapping(
+    state: &PlatformState,
+    tenant: &str,
+    app_name: &str,
+    plan: OsAppInstallPlan,
+    origin: InstallOrigin,
+    swap: Swap,
+) -> Result<InstallResult, String> {
+    // A proof that is still walking is waited for without the tenant's
+    // install lock; the install then starts again under it and finds the
+    // verdict in `attempt`, or a new walk when the tenant changed meanwhile.
+    let mut attempt = proofs::Attempt::default();
+    loop {
+        match install_once(state, tenant, app_name, plan, origin, swap, &attempt).await? {
+            ControlFlow::Break(result) => return Ok(result),
+            ControlFlow::Continue(proof) => proof.ended(&mut attempt).await?,
+        }
+    }
+}
+
+/// One try at an install: done, or the proof it must wait for. Everything
+/// before the proof only reads, so a try that waits leaves nothing behind.
+async fn install_once(
+    state: &PlatformState,
+    tenant: &str,
+    app_name: &str,
+    plan: OsAppInstallPlan,
+    origin: InstallOrigin,
+    swap: Swap,
+    attempt: &proofs::Attempt,
+) -> Result<ControlFlow<InstallResult, proofs::Wait>, String> {
+    install_checks::refuse_unavailable_tenant(state, tenant, app_name)?;
+    let mut install = install_guard::tenant(&state.server, tenant).await;
+    let app_files = {
         let cat = catalog().read().unwrap(); // ci-ok: infallible lock
-        cat.paths.get(app_name).cloned().ok_or_else(|| {
-            let known: Vec<String> = cat.paths.keys().cloned().collect();
-            format!("OS app '{app_name}' not found in catalog (known path keys: {known:?})")
-        })?
+        cat.app_files(Some(tenant), app_name)
+            .cloned()
+            .ok_or_else(|| {
+                format!("OS app '{app_name}' not found in catalog for tenant '{tenant}'")
+            })?
     };
-    let bundle = load_app_bundle(&app_dir).ok_or_else(|| {
+    let app_dir = app_files.dir();
+    let bundle = load_app_bundle(&app_files).map_err(|why| {
         format!(
-            "OS app '{app_name}' is registered at '{}' but its bundle failed to load",
+            "OS app '{app_name}' is registered at '{}' but its bundle failed to load: {why}",
             app_dir.display()
         )
     })?;
+    if plan.specs && origin == InstallOrigin::Request {
+        install_checks::trigger_target_args(app_name, &bundle.specs)?;
+    }
+    if origin == InstallOrigin::Replay {
+        reconcile::ensure_replay_bundle_is_recorded(state, tenant, app_name, &bundle).await?;
+    }
+    // A bundle without the binary of a required module is refused before any
+    // spec, policy or install row is written, rather than installing an app
+    // that answers 503 at request time (ARN-61/ARN-273).
+    let missing = reconcile::missing_required_wasm_modules(&bundle);
+    if plan.wasm && !missing.is_empty() {
+        return Err(format!(
+            "Refusing to activate os-app '{app_name}' for tenant '{tenant}': \
+             required WASM module artifact(s) missing from the app bundle: {}. \
+             The published bundle must include a compiled binary for every module \
+             declared platform-required/app-required in app.toml.",
+            missing.join(", ")
+        ));
+    }
+    // A spec its own app does not declare, or an entity set another app
+    // already declares, serves one app's records under the other's schema.
+    // A request that would newly do so is refused before any write. A pair
+    // the tenant holds from before goes ahead with a warning, and a boot
+    // replay only logs, since refusing either would take a running app away.
+    let ownership = if plan.specs {
+        entity_owners::ownership(state, tenant, app_name, &bundle).await?
+    } else {
+        entity_owners::Ownership::default()
+    };
+    if !ownership.refused.is_empty() {
+        let problems = ownership.refused.join("; ");
+        if origin == InstallOrigin::Request {
+            return Err(format!(
+                "Refusing to install os-app '{app_name}' for tenant '{tenant}': {problems}"
+            ));
+        }
+        tracing::warn!(tenant, app = %app_name, problems, "replayed app has entity ownership problems");
+    }
+    for standing in &ownership.standing {
+        tracing::warn!(tenant, app = %app_name, "{standing}");
+    }
     if bundle.deployment_mode == AppDeploymentMode::Commons {
         state.server.enable_commons_guardrails(tenant);
     }
@@ -1135,6 +739,14 @@ pub(super) async fn install_os_app_with_plan(
         );
     }
 
+    // The tenant's schema once this app's own contribution is replaced; only
+    // when the reconcile plan needs spec work.
+    let own = match bundle.csdl.as_deref() {
+        Some(csdl) if plan.specs => {
+            Some(own_schema::for_install(state, tenant, app_name, csdl).await?)
+        }
+        _ => None,
+    };
     // Classify each bundle spec as added / updated / skipped, and compute the
     // merged CSDL only when the reconcile plan needs spec work.
     let (mut added, mut updated, mut skipped, merged_csdl) = if plan.specs {
@@ -1162,20 +774,15 @@ pub(super) async fn install_os_app_with_plan(
                 }
             }
         }
-        // App installs must preserve existing tenant types.
-        let merged_csdl = if let Some(ref csdl) = bundle.csdl {
-            if let Some(existing) = registry.get_tenant(&tenant_id) {
-                let incoming = parse_csdl(csdl)
-                    .map_err(|e| format!("Failed to parse CSDL for os-app '{app_name}': {e}"))?;
-                Some(emit_csdl_xml(&merge_csdl(&existing.csdl, &incoming)))
-            } else {
-                Some(csdl.clone())
-            }
-        } else {
+        // Parsed before any write, with the CSDL below (see `install_checks`).
+        install_checks::parse_cross_invariants(bundle.cross_invariants_toml.as_deref(), app_name)?;
+        // The tenant's whole schema, computed above from every installed app.
+        let merged_csdl = match &own {
+            Some(own) => Some(own.csdl_xml.clone()),
             // No CSDL in bundle; keep existing if any.
-            registry
+            None => registry
                 .get_tenant(&tenant_id)
-                .map(|t| emit_csdl_xml(&t.csdl))
+                .map(|t| emit_csdl_xml(&t.csdl)),
         };
         (added, updated, skipped, merged_csdl)
     } else {
@@ -1185,6 +792,7 @@ pub(super) async fn install_os_app_with_plan(
     added.sort();
     updated.sort();
     skipped.sort();
+    let new_specs = plan.specs && !(added.is_empty() && updated.is_empty());
 
     // Build the full Cedar policy text for this tenant: the live text without
     // what this app's previous install wrote, plus the bundle's policies.
@@ -1200,6 +808,48 @@ pub(super) async fn install_os_app_with_plan(
         } else {
             None
         };
+    install_guard::refuse_uncompilable(
+        &state.server.authz,
+        app_name,
+        tenant,
+        combined_policy.as_deref(),
+    )?;
+    let policies = combined_policy.as_deref();
+    // A carry's then move is asked of the policies the install serves with.
+    let mut warnings = install_checks::check_spec_changes(
+        state,
+        &tenant_id,
+        app_name,
+        &bundle.specs,
+        plan.specs,
+        policies,
+    )
+    .await?;
+    if plan.specs {
+        warnings.extend(entity_owners::unrun_declarations(
+            &app_files, app_name, &bundle,
+        )?);
+    }
+    warnings.extend(own.into_iter().flat_map(|own| own.warnings));
+    warnings.extend(
+        ownership
+            .standing
+            .into_iter()
+            .map(InstallWarning::entity_ownership),
+    );
+    let specs = &bundle.specs;
+    let checked = install_checks::model_warnings(
+        state, tenant, app_name, specs, new_specs, policies, attempt,
+    );
+    match checked.await? {
+        ControlFlow::Continue(proof) => return Ok(ControlFlow::Continue(proof)),
+        ControlFlow::Break(found) => warnings.extend(found),
+    }
+    // Jev reads the changed modules beside the install's writes, and goes on
+    // after it answers. It starts once no proof is left to wait for, since a
+    // try that waits drops it, and its paid calls with it.
+    let review =
+        module_review_step::start(state, tenant, app_name, app_dir, &bundle, plan.wasm).await;
     if plan.policies {
         policy_rows::rewrite_primary_snapshot(state, tenant, &superseded).await?;
     }
@@ -1284,18 +934,45 @@ pub(super) async fn install_os_app_with_plan(
         ps.record_installed_app(tenant, app_name)
             .await
             .map_err(|e| format!("Failed to record os-app installation: {e}"))?;
-        if plan.specs {
-            // Commit only when this path used individual spec writes.
-            ps.commit_specs(tenant)
+        if plan.specs
+            && let Some(ref merged) = merged_csdl
+        {
+            // Commit exactly this app's rows, not another install's.
+            let hashes: Vec<(&str, String)> = bundle
+                .specs
+                .iter()
+                .map(|(et, ioa)| (et.as_str(), temper_store_turso::spec_content_hash(ioa)))
+                .collect();
+            let versions: Vec<(&str, &str, &str)> = hashes
+                .iter()
+                .map(|(et, hash)| (*et, hash.as_str(), merged.as_str()))
+                .collect();
+            if !ps
+                .commit_spec_versions(tenant, &versions, &[])
                 .await
-                .map_err(|e| format!("Failed to commit specs: {e}"))?;
+                .map_err(|e| format!("Failed to commit specs: {e}"))?
+            {
+                return Err("Failed to commit specs: another install replaced them".to_string());
+            }
         }
     }
 
     if plan.policies {
-        policy_rows::persist_bundle_policy_rows(state, tenant, app_name, &bundle).await?;
+        policy_rows::persist_bundle_policy_rows(state, tenant, app_name, &bundle, &superseded)
+            .await?;
         policy_rows::delete_dropped_rows(state, tenant, &superseded).await?;
     }
+
+    // ── Modules first, unless the specs go first (see Swap). ───────
+    // An integration's call is fixed by the spec its action ran under, and its
+    // module is looked up by name only when the call runs: a new version's
+    // spec live before its module calls the old binary with what only the new
+    // one understands, and the record it moved breaks.
+    let modules = if plan.wasm && swap == Swap::ModulesFirst {
+        Some(register_bundle_modules(state, tenant, &tenant_id, &bundle, &upload_replacement).await)
+    } else {
+        None
+    };
 
     // ── Step 2: Bootstrap into memory (verification + registry). ────
     // Only process specs whose content has changed (added or updated);
@@ -1306,27 +983,7 @@ pub(super) async fn install_os_app_with_plan(
             .iter()
             .map(|(et, src)| (et.as_str(), src.as_str()))
             .collect();
-        let verified_cache = if let Some(turso) = state
-            .server
-            .storage_stack
-            .as_ref()
-            .and_then(|stack| stack.turso.as_ref())
-            .and_then(|provider| provider.platform_store())
-        {
-            turso
-                .load_verification_cache(tenant)
-                .await
-                .unwrap_or_default()
-        } else if let Some(ps) = state
-            .server
-            .storage_stack
-            .as_ref()
-            .and_then(|stack| stack.platform.clone())
-        {
-            ps.load_verification_cache(tenant).await.unwrap_or_default()
-        } else {
-            std::collections::BTreeMap::new()
-        };
+        let verified_cache = bootstrap::load_verification_cache(state, tenant).await;
 
         if let Some(ref merged) = merged_csdl {
             // Even when every spec is byte-for-byte unchanged, we still need to
@@ -1341,12 +998,14 @@ pub(super) async fn install_os_app_with_plan(
                 &specs_to_bootstrap,
                 bootstrap::BootstrapTenantSpecsOptions {
                     merge: true,
+                    // `merged` is the tenant's whole schema, app by app.
+                    csdl_mode: bootstrap::CsdlMode::Whole,
                     label: &format!("OsApp({app_name})"),
                     verified_cache: &verified_cache,
                     cross_invariants_source: bundle.cross_invariants_toml.as_deref(),
                     verification_mode: bootstrap::BootstrapSpecVerificationMode::TrustBundle,
                 },
-            );
+            )?;
 
             if let Some(ps) = state
                 .server
@@ -1365,15 +1024,9 @@ pub(super) async fn install_os_app_with_plan(
                 .await;
             }
         }
-        // App installs can introduce or update inline entity triggers.
-        // Refresh the live dispatcher after the registry mutation so the
-        // newly bootstrapped trigger graph is active for subsequent traffic.
-        state.server.rebuild_reaction_dispatcher();
     }
 
-    // App installs can add or change cross-entity reactions. Refresh the live
-    // dispatcher immediately so the newly registered tenant config takes effect
-    // without requiring a process restart or a separate specs reload.
+    // Installed specs can change triggers and cross-entity reactions: refresh the dispatcher.
     if plan.specs {
         state.server.rebuild_reaction_dispatcher();
     }
@@ -1385,156 +1038,29 @@ pub(super) async fn install_os_app_with_plan(
             .authz
             .reload_tenant_policies(tenant, policy_text)
         {
-            tracing::warn!(
-                tenant,
-                error = %e,
-                "Failed to reload tenant Cedar policies after os-app install"
-            );
+            return Err(format!("os-app '{app_name}' Cedar did not load: {e}"));
         } else {
             let mut policies = state.server.tenant_policies.write().unwrap(); // ci-ok: infallible lock
             policies.insert(tenant.to_string(), policy_text.clone());
         }
     }
 
-    // ── Step 4: Persist/register WASM modules, warming only eager modules. ──
-    //
-    // Source-aware preservation: if a (tenant, module) row in the durable store
-    // has source='upload' (i.e., a hot upload from `POST /api/wasm/modules/{name}`),
-    // preserve uploads newer than the installed app record. Replace uploads when
-    // the bundle digest changed or durable metadata predates the app record.
-    let mut wasm_registered = Vec::new();
-    let mut wasm_skipped = Vec::new();
-    let mut wasm_failures = Vec::new();
-    if plan.wasm {
-        let existing_sources = match state.server.load_wasm_module_sources(tenant).await {
-            Ok(map) => map,
-            Err(e) => {
-                tracing::warn!(
-                    tenant,
-                    error = %e,
-                    "Failed to load existing WASM modules; install pipeline will not honor hot-upload preservation this cycle"
-                );
-                std::collections::BTreeMap::new()
-            }
-        };
-
-        for (module_name, wasm_bytes) in &bundle.wasm_modules {
-            let module_started = Instant::now();
-            let module_config = bundle.wasm_module_configs.get(module_name);
-            let hash = temper_wasm::WasmEngine::hash_module(wasm_bytes);
-            let required = module_config.is_some_and(WasmModuleManifest::is_required);
-            let replace_uploaded_module =
-                existing_sources.get(module_name).is_some_and(|existing| {
-                    upload_replacement.should_replace(existing)
-                        || (required && existing.source == "upload" && existing.sha256_hash != hash)
-                });
-            if let Some(existing) = existing_sources.get(module_name)
-                && existing.source == "upload"
-                && existing.sha256_hash != hash
-            {
-                if replace_uploaded_module {
-                    tracing::info!(
-                        tenant,
-                        module = %module_name,
-                        bundled_hash = %hash,
-                        upload_hash = %existing.sha256_hash,
-                        "Replacing stale hot-uploaded WASM module during os-app reconcile"
-                    );
-                } else {
-                    tracing::info!(
-                        tenant,
-                        module = %module_name,
-                        bundled_hash = %hash,
-                        upload_hash = %existing.sha256_hash,
-                        "Skipping bundled install: hot-uploaded module preserved"
-                    );
-                    wasm_skipped.push(module_name.clone());
-                    continue;
-                }
-            }
-
-            let upsert_result = if replace_uploaded_module {
-                state
-                    .server
-                    .upsert_bundled_wasm_module_replacing_upload(
-                        tenant,
-                        module_name,
-                        wasm_bytes,
-                        &hash,
-                    )
-                    .await
-            } else {
-                state
-                    .server
-                    .upsert_wasm_module(tenant, module_name, wasm_bytes, &hash, "bundled")
-                    .await
-            };
-            if let Err(e) = upsert_result {
-                tracing::warn!(
-                    tenant,
-                    module = %module_name,
-                    error = %e,
-                    "Failed to persist WASM module to durable store (continuing in-memory only)"
-                );
-            }
-            {
-                let mut wasm_reg = state.server.wasm_module_registry.write().unwrap(); // ci-ok: infallible lock
-                wasm_reg.register(&tenant_id, module_name, &hash);
-            }
-
-            if matches!(
-                module_config.map(|config| config.startup_loading),
-                Some(WasmStartupLoading::Eager)
-            ) && let Err(e) = state.server.wasm_engine.compile_and_cache(wasm_bytes)
-            {
-                wasm_failures.push(module_name.clone());
-                tracing::warn!(
-                    tenant,
-                    module = %module_name,
-                    error = %e,
-                    "Failed to eagerly compile WASM module from OS app"
-                );
-            }
-
-            tracing::info!(
-                tenant,
-                module = %module_name,
-                hash = %hash,
-                size = wasm_bytes.len(),
-                duration_ms = module_started.elapsed().as_millis() as u64,
-                startup_loading = ?module_config
-                    .map(|config| config.startup_loading)
-                    .unwrap_or_default(),
-                "WASM module registered from OS app"
-            );
-            wasm_registered.push(module_name.clone());
+    // ── Step 4: modules, when the specs went first (Swap::SpecsFirst). ──
+    let modules = match modules {
+        Some(modules) => modules,
+        None if plan.wasm => {
+            register_bundle_modules(state, tenant, &tenant_id, &bundle, &upload_replacement).await
         }
+        None => BundleModules::default(),
+    };
+    let BundleModules {
+        registered: wasm_registered,
+        skipped: wasm_skipped,
+        failures: wasm_failures,
+    } = modules;
 
-        for (module_name, module_config) in &bundle.wasm_module_configs {
-            if bundle.wasm_modules.contains_key(module_name) {
-                continue;
-            }
-            match module_config.criticality {
-                WasmModuleCriticality::Optional => {
-                    wasm_skipped.push(module_name.clone());
-                    tracing::warn!(
-                        tenant,
-                        module = %module_name,
-                        "Configured optional WASM module artifact is missing from the app bundle"
-                    );
-                }
-                WasmModuleCriticality::PlatformRequired | WasmModuleCriticality::AppRequired => {
-                    wasm_failures.push(module_name.clone());
-                    tracing::error!(
-                        tenant,
-                        module = %module_name,
-                        criticality = ?module_config.criticality,
-                        "Configured required WASM module artifact is missing from the app bundle"
-                    );
-                }
-            }
-        }
-    }
+    // Overdue timers may fire at once: reconcile only now that policies and modules are in.
+    install.installed(&state.server, plan.specs);
 
     tracing::info!(
         "Installed os-app '{app_name}' for tenant '{tenant}': added={added:?} updated={updated:?} skipped={skipped:?} wasm={wasm_registered:?}"
@@ -1582,9 +1108,11 @@ pub(super) async fn install_os_app_with_plan(
         Vec::new()
     };
 
-    reconcile::record_app_install_metadata_for_bundle(state, tenant, app_name, &bundle).await;
+    reconcile::record_app_install_metadata_for_bundle(state, tenant, app_name, &bundle, origin)
+        .await;
+    let (reviewing, review_answers) = review.left_running();
 
-    Ok(InstallResult {
+    Ok(ControlFlow::Break(InstallResult {
         added,
         updated,
         skipped,
@@ -1595,81 +1123,11 @@ pub(super) async fn install_os_app_with_plan(
         skills: skills_bootstrapped,
         adrs_bootstrapped,
         seed_instances: seed_created,
-    })
-}
-
-#[derive(Debug, Clone, Default)]
-struct UploadedWasmReplacementContext {
-    bundle_wasm_digest_changed: bool,
-    app_recorded_at: Option<DateTime<Utc>>,
-}
-
-impl UploadedWasmReplacementContext {
-    fn should_replace(&self, existing: &WasmModuleSource) -> bool {
-        if existing.source != "upload" {
-            return false;
-        }
-        if self.bundle_wasm_digest_changed {
-            return true;
-        }
-        let Some(app_recorded_at) = self.app_recorded_at else {
-            return false;
-        };
-        let Some(updated_at) = existing
-            .updated_at
-            .as_deref()
-            .and_then(parse_persisted_timestamp)
-        else {
-            return false;
-        };
-        updated_at < app_recorded_at
-    }
-}
-
-fn parse_persisted_timestamp(value: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(value)
-        .map(|dt| dt.with_timezone(&Utc))
-        .or_else(|_| {
-            NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S").map(|dt| dt.and_utc())
-        })
-        .ok()
-}
-
-async fn uploaded_wasm_replacement_context(
-    state: &PlatformState,
-    tenant: &str,
-    app_name: &str,
-    bundle: &AppBundle,
-) -> UploadedWasmReplacementContext {
-    let Some(ps) = state
-        .server
-        .storage_stack
-        .as_ref()
-        .and_then(|stack| stack.platform.clone())
-    else {
-        return UploadedWasmReplacementContext::default();
-    };
-    let digest = reconcile::digest_app_bundle(app_name, bundle);
-    match ps.get_installed_app(tenant, app_name).await {
-        Ok(Some(record)) => UploadedWasmReplacementContext {
-            bundle_wasm_digest_changed: record.wasm_digest != digest.wasm_digest,
-            app_recorded_at: record
-                .last_reconciled_at
-                .as_deref()
-                .or(record.installed_at.as_deref())
-                .and_then(parse_persisted_timestamp),
-        },
-        Ok(None) => UploadedWasmReplacementContext::default(),
-        Err(error) => {
-            tracing::warn!(
-                tenant,
-                app = %app_name,
-                error = %error,
-                "Failed to read OS app metadata while deciding WASM hot-upload replacement"
-            );
-            UploadedWasmReplacementContext::default()
-        }
-    }
+        warnings,
+        modules_reviewed: Vec::new(),
+        reviewing,
+        review_answers,
+    }))
 }
 
 // ── Bootstrap helpers (entity creation during install) ───────────────
@@ -1719,7 +1177,7 @@ async fn bootstrap_app_entity(
     // Read app manifest for metadata.
     let manifest = {
         let cat = catalog().read().unwrap(); // ci-ok: infallible lock
-        cat.entries.iter().find(|e| e.name == app_name).cloned()
+        cat.app_entry(Some(tenant), app_name).cloned()
     };
     let description = manifest
         .as_ref()

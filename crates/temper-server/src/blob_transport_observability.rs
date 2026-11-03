@@ -40,10 +40,18 @@ pub(crate) fn blob_transport_span(
     backend: &'static str,
     request_bytes: u64,
 ) -> tracing::Span {
+    // A call to an object store over the network is a client span, so Datadog
+    // shows the store as what the request called; a local disk is internal work.
+    let kind = if backend == "s3" {
+        "client"
+    } else {
+        "internal"
+    };
     match operation {
         "put" => tracing::info_span!(
             "blob.transport.put",
             otel.name = "blob.transport.put",
+            otel.kind = kind,
             blob.backend = backend,
             blob.operation = operation,
             request_bytes,
@@ -56,6 +64,7 @@ pub(crate) fn blob_transport_span(
         "put_content" => tracing::info_span!(
             "blob.transport.put_content",
             otel.name = "blob.transport.put_content",
+            otel.kind = kind,
             blob.backend = backend,
             blob.operation = operation,
             request_bytes,
@@ -68,6 +77,7 @@ pub(crate) fn blob_transport_span(
         "get" => tracing::info_span!(
             "blob.transport.get",
             otel.name = "blob.transport.get",
+            otel.kind = kind,
             blob.backend = backend,
             blob.operation = operation,
             request_bytes,
@@ -80,6 +90,7 @@ pub(crate) fn blob_transport_span(
         "head" => tracing::info_span!(
             "blob.transport.head",
             otel.name = "blob.transport.head",
+            otel.kind = kind,
             blob.backend = backend,
             blob.operation = operation,
             request_bytes,
@@ -92,6 +103,7 @@ pub(crate) fn blob_transport_span(
         _ => tracing::info_span!(
             "blob.transport",
             otel.name = "blob.transport",
+            otel.kind = kind,
             blob.backend = backend,
             blob.operation = operation,
             request_bytes,

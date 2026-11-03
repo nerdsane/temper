@@ -186,8 +186,64 @@ to = "Failed"
     let trigger = &confirm.triggers[0];
     assert_eq!(trigger.kind, TriggerKind::Wasm);
     assert_eq!(trigger.module.as_deref(), Some("stripe_charge"));
-    assert_eq!(trigger.on_success.as_deref(), Some("ChargeSucceeded"));
+    assert_eq!(trigger.on_success, ["ChargeSucceeded"]);
     assert_eq!(trigger.on_failure.as_deref(), Some("ChargeFailed"));
+}
+
+/// A trigger and a state timer may say, in `says`, words for people reading the app, such as the answer a branch
+/// gives or what a timer does. It is optional, and a spec without it parses as before.
+#[test]
+fn test_trigger_and_state_timeout_says_parse() {
+    let spec = r#"
+[automaton]
+name = "Order"
+states = ["Draft", "Confirmed", "Charged", "Failed"]
+initial = "Draft"
+
+[[action]]
+name = "ConfirmOrder"
+from = ["Draft"]
+to = "Confirmed"
+
+[[action.triggers]]
+name = "charge_payment"
+says = "Charge the card"
+kind = "wasm"
+module = "stripe_charge"
+on_success = "ChargeSucceeded"
+on_failure = "ChargeFailed"
+
+[[action]]
+name = "ChargeSucceeded"
+from = ["Confirmed"]
+to = "Charged"
+
+[[action]]
+name = "ChargeFailed"
+from = ["Confirmed", "Draft"]
+to = "Failed"
+
+[[state_timeout]]
+state = "Confirmed"
+after_seconds = 60
+on_timeout = "ChargeFailed"
+says = "give up on the charge"
+
+[[state_timeout]]
+state = "Draft"
+after_seconds = 3600
+on_timeout = "ChargeFailed"
+"#;
+    let automaton =
+        parse_automaton(spec).expect("words on a trigger and a state timer should parse");
+    // Read through the serialized spec, so this test compiles whatever the structs hold.
+    let spec = serde_json::to_value(&automaton).expect("the spec serializes");
+    assert_eq!(spec["action"][0]["triggers"][0]["says"], "Charge the card");
+    assert_eq!(spec["state_timeout"][0]["says"], "give up on the charge");
+    assert!(
+        spec["state_timeout"][1].get("says").is_none(),
+        "a timer that says nothing has no says"
+    );
 }
 
 #[test]
@@ -234,7 +290,7 @@ to = "Failed"
         .find(|ig| ig.trigger == "__trigger__:RecordDataset:propose_mutation")
         .expect("adapter trigger should synthesize integration");
     assert_eq!(integration.integration_type, "adapter");
-    assert_eq!(integration.on_success.as_deref(), Some("RecordMutation"));
+    assert_eq!(integration.on_success, ["RecordMutation"]);
     assert_eq!(integration.on_failure.as_deref(), Some("Fail"));
     assert_eq!(
         integration.config.get("adapter").map(String::as_str),
@@ -285,7 +341,9 @@ to = "Failed"
 }
 
 #[test]
-fn test_action_triggers_webhook_kind() {
+fn webhook_kind_trigger_is_refused_at_load() {
+    // ADR-0182: nothing sends a kind = "webhook" trigger, so it used to
+    // install and never make its request. It is refused with what to write.
     let spec = r#"
 [automaton]
 name = "Order"
@@ -312,19 +370,11 @@ name = "NotificationSent"
 from = ["Confirmed"]
 to = "Notified"
 "#;
-    let automaton = parse_automaton(spec).expect("webhook trigger should parse");
-    let confirm = &automaton.actions[0];
-    let trigger = &confirm.triggers[0];
-    assert_eq!(trigger.kind, TriggerKind::Webhook);
-    assert_eq!(
-        trigger.url.as_deref(),
-        Some("https://hooks.slack.com/services/xxx")
-    );
-    assert_eq!(trigger.method.as_deref(), Some("POST"));
-    assert_eq!(
-        trigger.headers.get("Content-Type").map(String::as_str),
-        Some("application/json")
-    );
+    let err = parse_automaton(spec).expect_err("a webhook trigger must not install");
+    let message = err.to_string();
+    assert!(message.contains("notify_slack"), "{message}");
+    assert!(message.contains("no dispatcher sends"), "{message}");
+    assert!(message.contains("http_fetch"), "{message}");
 }
 
 #[test]
@@ -534,53 +584,6 @@ kind = "wasm"
 }
 
 #[test]
-fn test_webhook_trigger_requires_url_and_method() {
-    let spec_no_url = r#"
-[automaton]
-name = "X"
-states = ["A"]
-initial = "A"
-
-[[action]]
-name = "Go"
-from = ["A"]
-
-[[action.triggers]]
-name = "bad"
-kind = "webhook"
-method = "POST"
-"#;
-    assert!(
-        parse_automaton(spec_no_url)
-            .expect_err("missing url must fail")
-            .to_string()
-            .contains("url")
-    );
-
-    let spec_no_method = r#"
-[automaton]
-name = "X"
-states = ["A"]
-initial = "A"
-
-[[action]]
-name = "Go"
-from = ["A"]
-
-[[action.triggers]]
-name = "bad"
-kind = "webhook"
-url = "https://example.com/hook"
-"#;
-    assert!(
-        parse_automaton(spec_no_method)
-            .expect_err("missing method must fail")
-            .to_string()
-            .contains("method")
-    );
-}
-
-#[test]
 fn test_to_state_must_be_declared_state() {
     let spec = r#"
 [automaton]
@@ -717,7 +720,7 @@ kind = "same_id"
     assert!(err.to_string().contains("empty"));
 }
 
-// ─── ADR-0046: wasm/webhook expansion into integrations ─────────────────
+// ─── ADR-0046: wasm/adapter expansion into integrations ─────────────────
 
 #[test]
 fn wasm_trigger_expands_into_integration_and_effect() {
@@ -759,7 +762,7 @@ to = "Failed"
         .expect("synthesized integration");
     assert_eq!(ig.integration_type, "wasm");
     assert_eq!(ig.module.as_deref(), Some("stripe_charge"));
-    assert_eq!(ig.on_success.as_deref(), Some("ChargeSucceeded"));
+    assert_eq!(ig.on_success, ["ChargeSucceeded"]);
     assert_eq!(ig.on_failure.as_deref(), Some("ChargeFailed"));
 
     // The source action dispatches the synthesized record by name.
@@ -918,55 +921,8 @@ hook = "DispatchCallback"
 }
 
 #[test]
-fn webhook_trigger_expands_with_url_and_method_in_config() {
-    let spec = r#"
-[automaton]
-name = "Order"
-states = ["Draft", "Confirmed", "Notified"]
-initial = "Draft"
-
-[[action]]
-name = "ConfirmOrder"
-from = ["Draft"]
-to = "Confirmed"
-
-[[action.triggers]]
-name = "notify_slack"
-kind = "webhook"
-url = "https://hooks.slack.com/services/xxx"
-method = "POST"
-on_success = "NotificationSent"
-
-[action.triggers.headers]
-"Content-Type" = "application/json"
-
-[[action]]
-name = "NotificationSent"
-from = ["Confirmed"]
-to = "Notified"
-"#;
-    let automaton = parse_automaton(spec).expect("webhook expansion should parse");
-    let ig = automaton
-        .integrations
-        .iter()
-        .find(|i| i.trigger == "__trigger__:ConfirmOrder:notify_slack")
-        .expect("synthesized integration");
-    assert_eq!(ig.integration_type, "webhook");
-    assert_eq!(
-        ig.config.get("url").map(String::as_str),
-        Some("https://hooks.slack.com/services/xxx")
-    );
-    assert_eq!(ig.config.get("method").map(String::as_str), Some("POST"));
-    assert_eq!(
-        ig.config.get("header.Content-Type").map(String::as_str),
-        Some("application/json")
-    );
-    assert_eq!(ig.on_success.as_deref(), Some("NotificationSent"));
-}
-
-#[test]
 fn entity_kind_trigger_does_not_synthesize_integration() {
-    // Regression: only Wasm/Webhook expand. Entity-kind triggers go
+    // Regression: only Wasm/Adapter expand. Entity-kind triggers go
     // through the reaction dispatcher and must NOT appear as integrations.
     let spec = r#"
 [automaton]
@@ -1002,3 +958,79 @@ kind = "same_id"
 // ADR-0046 deleted the [[agent_trigger]] section. The equivalent
 // invariant ([[action.triggers]] body doesn't leak into action fields) is
 // covered by the action-triggers parser tests above.
+
+/// The umbrella app: a forecast module computes the chance of rain, and the
+/// spec decides the move from it.
+const UMBRELLA: &str = r#"
+[automaton]
+name = "Day"
+states = ["Asked", "Wet", "Dry"]
+initial = "Asked"
+
+[[action]]
+name = "Ask"
+from = ["Asked"]
+
+[[action.triggers]]
+name = "forecast"
+kind = "wasm"
+module = "forecast"
+on_success = ["TakeUmbrella", "LeaveUmbrella"]
+
+[[action]]
+name = "TakeUmbrella"
+from = ["Asked"]
+to = "Wet"
+params = [{ name = "rain", type = "int" }]
+guard = "params.rain >= 50"
+
+[[action]]
+name = "LeaveUmbrella"
+from = ["Asked"]
+to = "Dry"
+params = [{ name = "rain", type = "int" }]
+"#;
+
+#[test]
+fn a_wasm_trigger_lists_its_answers_and_their_guards_read_its_values() {
+    let automaton = parse_automaton(UMBRELLA).expect("a list of answers should parse");
+    let trigger = &automaton.actions[0].triggers[0];
+    assert_eq!(trigger.on_success, ["TakeUmbrella", "LeaveUmbrella"]);
+    assert_eq!(automaton.integrations[0].on_success, trigger.on_success);
+    assert_eq!(automaton.actions[1].guard.params_read(), ["rain"]);
+}
+
+#[test]
+fn an_answer_listed_twice_is_refused() {
+    let spec = UMBRELLA.replace(
+        r#"["TakeUmbrella", "LeaveUmbrella"]"#,
+        r#"["TakeUmbrella", "TakeUmbrella"]"#,
+    );
+    let error = parse_automaton(&spec).unwrap_err().to_string();
+    assert!(
+        error.contains("on_success names 'TakeUmbrella' twice"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_guard_reads_only_the_params_its_action_declares() {
+    let spec = UMBRELLA.replace("params.rain >= 50", "params.wind >= 50");
+    let error = parse_automaton(&spec).unwrap_err().to_string();
+    assert!(
+        error.contains("`params.wind` is not a parameter of 'TakeUmbrella'"),
+        "{error}"
+    );
+}
+
+#[test]
+fn only_an_action_guard_reads_a_param() {
+    let spec = format!(
+        "{UMBRELLA}\n[[invariant]]\nname = \"wet_means_rain\"\nassert = \"status == 'Wet' => params.rain >= 50\"\n"
+    );
+    let error = parse_automaton(&spec).unwrap_err().to_string();
+    assert!(
+        error.contains("`params.rain` is a parameter of a move; only an action's guard reads one"),
+        "{error}"
+    );
+}

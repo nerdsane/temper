@@ -15,6 +15,14 @@ struct FileStreamAction<'a> {
     expected_authorization_precondition: Option<String>,
 }
 
+/// A File's bytes, already in the tenant's blob store under their content hash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredFileContent {
+    /// `sha256:<hex>` of the bytes.
+    pub content_hash: String,
+    pub size_bytes: u64,
+}
+
 /// Error returned by the native/File `$value` content upload path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FileStreamContentError {
@@ -174,12 +182,44 @@ impl ServerState {
         expected_authorization_precondition: Option<String>,
     ) -> Result<crate::entity_actor::EntityResponse, FileStreamContentError> {
         let (content_hash, blob_key) = content_hash_and_native_blob_key(body);
-
-        // Load File state first so we can read its `workspace_id` and reject a
-        // write into a non-Active workspace BEFORE persisting any bytes. The
-        // blob write is intentionally NOT joined concurrently here: it must not
+        // The workspace check comes BEFORE the bytes are persisted. The blob
+        // write is intentionally NOT joined concurrently here: it must not
         // happen if the workspace refuses the write (otherwise an orphaned blob
         // would be left behind on guard rejection).
+        self.check_existing_file_writable(tenant, file_id, false)
+            .await?;
+        self.put_file_content_blob(tenant, &blob_key, body)
+            .await
+            .map_err(|e| {
+                FileStreamContentError::BlobStore(format!(
+                    "failed to persist blob '{blob_key}': {e}"
+                ))
+            })?;
+        let content = StoredFileContent {
+            content_hash,
+            size_bytes: body.len() as u64,
+        };
+        self.commit_file_stream_content(
+            tenant,
+            file_id,
+            &content,
+            mime_type,
+            agent_ctx,
+            expected_authorization_precondition,
+        )
+        .await
+    }
+
+    /// Refuse new content for an existing File BEFORE any byte is stored: its
+    /// Workspace is not Active, or (with `require_transition`) its spec takes
+    /// no `StreamUpdated` from the state it is in, such as a File written once.
+    /// A large upload is then refused before its body is read.
+    pub(crate) async fn check_existing_file_writable(
+        &self,
+        tenant: &temper_runtime::tenant::TenantId,
+        file_id: &str,
+        require_transition: bool,
+    ) -> Result<(), FileStreamContentError> {
         let file_state = self
             .get_tenant_entity_state(tenant, "File", file_id)
             .await
@@ -188,7 +228,19 @@ impl ServerState {
                     "failed to load File('{file_id}') state: {e}"
                 ))
             })?;
-
+        if require_transition {
+            let status = &file_state.state.status;
+            let table = self.file_transition_table(tenant)?;
+            let takes_content = table.rules.iter().any(|rule| {
+                rule.name == "StreamUpdated"
+                    && (rule.from_states.is_empty() || rule.from_states.contains(status))
+            });
+            if !takes_content {
+                return Err(FileStreamContentError::ActionRejected(format!(
+                    "Action 'StreamUpdated' not valid from state '{status}'"
+                )));
+            }
+        }
         let workspace_id = file_state
             .state
             .fields
@@ -196,16 +248,28 @@ impl ServerState {
             .and_then(|value| value.as_str())
             .unwrap_or_default();
         self.reject_write_if_workspace_not_active(tenant, workspace_id)
-            .await?;
+            .await
+    }
 
-        self.put_content_addressed_blob(tenant, &blob_key, body, None)
+    /// Record content already stored under its hash on an existing File: the
+    /// verified `StreamUpdated` action, numbered after the File's versions.
+    pub(crate) async fn commit_file_stream_content(
+        &self,
+        tenant: &temper_runtime::tenant::TenantId,
+        file_id: &str,
+        content: &StoredFileContent,
+        mime_type: &str,
+        agent_ctx: &crate::request_context::AgentContext,
+        expected_authorization_precondition: Option<String>,
+    ) -> Result<crate::entity_actor::EntityResponse, FileStreamContentError> {
+        let file_state = self
+            .get_tenant_entity_state(tenant, "File", file_id)
             .await
             .map_err(|e| {
-                FileStreamContentError::BlobStore(format!(
-                    "failed to persist blob '{blob_key}': {e}"
+                FileStreamContentError::State(format!(
+                    "failed to load File('{file_id}') state: {e}"
                 ))
             })?;
-
         let version_number = file_state
             .state
             .counters
@@ -225,8 +289,8 @@ impl ServerState {
             file_id,
             action: "StreamUpdated",
             params: serde_json::json!({
-                "content_hash": content_hash,
-                "size_bytes": body.len() as i64,
+                "content_hash": content.content_hash,
+                "size_bytes": content.size_bytes as i64,
                 "mime_type": mime_type,
                 "version_number": version_number,
                 "previous_version_id": previous_version_id,
@@ -305,6 +369,7 @@ impl ServerState {
             workflow_root_entity_id: agent_ctx.workflow_root_entity_id.clone(),
             workflow_run_id: agent_ctx.workflow_run_id.clone(),
             http_request: None,
+            trigger_principal: None,
         };
 
         let security_ctx = agent_ctx.security_ctx.as_ref().ok_or_else(|| {
@@ -336,11 +401,36 @@ impl ServerState {
                 });
         }
 
+        // The adapter says what it stored; the File records the hash and size of the bytes this server was sent,
+        // and an adapter that names other bytes is refused.
+        let mut params = wasm_result.callback_params;
+        let (content_hash, _) = content_hash_and_native_blob_key(body);
+        if let Some(fields) = params.as_object_mut()
+            && wasm_result.callback_action.rsplit('.').next() == Some("StreamUpdated")
+        {
+            match fields.get("content_hash").and_then(|hash| hash.as_str()) {
+                Some(said) if !said.is_empty() && said != content_hash => {
+                    return Err(FileStreamContentError::Wasm(format!(
+                        "blob_adapter said content_hash '{said}' for bytes whose hash is '{content_hash}'"
+                    )));
+                }
+                _ => {
+                    fields.insert(
+                        "content_hash".to_string(),
+                        serde_json::Value::String(content_hash),
+                    );
+                }
+            }
+            fields.insert(
+                "size_bytes".to_string(),
+                serde_json::json!(body.len() as u64),
+            );
+        }
         self.dispatch_file_stream_action(FileStreamAction {
             tenant,
             file_id,
             action: &wasm_result.callback_action,
-            params: wasm_result.callback_params,
+            params,
             agent_ctx,
             await_reactions: true,
             expected_authorization_precondition,
@@ -371,6 +461,8 @@ impl ServerState {
                         await_integration: options.await_integration,
                         await_reactions: options.await_reactions,
                     },
+                    // The file module's callback action, a kernel follow-on.
+                    crate::state::write_record::WriteCaller::Kernel,
                     expected,
                 )
                 .await
@@ -394,6 +486,11 @@ pub(super) fn content_hash_and_native_blob_key(body: &[u8]) -> (String, String) 
     let mut hasher = Sha256::new();
     hasher.update(body);
     let content_hash = format!("sha256:{:x}", hasher.finalize());
-    let blob_key = format!("temper-fs/{content_hash}");
+    let blob_key = native_file_blob_key(&content_hash);
     (content_hash, blob_key)
+}
+
+/// Where a File's bytes sit in its tenant's blob store: `temper-fs/<content hash>`.
+pub(crate) fn native_file_blob_key(content_hash: &str) -> String {
+    format!("{}/{content_hash}", crate::blob_store::DEFAULT_BLOB_BUCKET)
 }

@@ -405,6 +405,16 @@ impl HttpStreamRegistry {
             .map_err(|_| StreamError::Aborted("kernel head receiver dropped".into()))
     }
 
+    /// Kernel-called once the guest's invocation has ended: a head it never submitted will not
+    /// come, so the kernel's wait ends now with `Aborted`. A head already submitted is unaffected.
+    pub async fn abandon_inbound_response_head(&self, guest_response_body: StreamHandle) {
+        self.inner
+            .lock()
+            .await
+            .inbound_head_senders
+            .remove(&guest_response_body.0);
+    }
+
     /// Kernel-called: await the head submitted by the guest.
     pub async fn await_inbound_response_head(
         &self,
@@ -490,6 +500,39 @@ impl Default for HttpStreamRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn an_abandoned_inbound_head_ends_the_wait_and_a_submitted_one_is_kept() {
+        let reg = HttpStreamRegistry::new();
+        let ended = reg.open_inbound_exchange().await;
+        reg.abandon_inbound_response_head(ended.guest_response_body)
+            .await;
+        let waited = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            reg.await_inbound_response_head(ended.guest_response_body),
+        )
+        .await
+        .expect("the wait ends at once");
+        assert!(matches!(waited, Err(StreamError::Aborted(_))));
+
+        let answered = reg.open_inbound_exchange().await;
+        let head = HttpResponseHead {
+            status: 202,
+            headers: vec![],
+        };
+        reg.submit_inbound_response_head(answered.guest_response_body, head)
+            .await
+            .unwrap();
+        reg.abandon_inbound_response_head(answered.guest_response_body)
+            .await;
+        assert_eq!(
+            reg.await_inbound_response_head(answered.guest_response_body)
+                .await
+                .unwrap()
+                .status,
+            202
+        );
+    }
 
     #[tokio::test]
     async fn create_pair_returns_distinct_ids() {

@@ -7,7 +7,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use temper_authz::{AuthenticatedRequestContext, SecurityContext};
 use temper_odata::path::{KeyValue, ODataPath, parse_path};
-use temper_odata::query::parse_query_options;
+use temper_odata::query::parse_query_options_from_pairs;
 use temper_odata::query::types::{
     BinaryOperator, ExpandItem, ExpandOptions, FilterExpr, ODataValue, QueryOptions,
 };
@@ -22,6 +22,7 @@ use super::common::{
     resolve_value_parent, tenant_csdl_xml, tenant_entity_sets,
 };
 use super::filter_sql;
+use super::property_read::{handle_property_read, is_navigation_property};
 use super::query_plane_read::{
     QueryPlaneReadBudget, QueryPlaneReadRequest, read_entity_set_from_query_plane,
 };
@@ -29,7 +30,7 @@ use super::read_support::{
     record_entity_set_not_found, resolve_entity_set_name, try_load_entity_body_from_catalog,
 };
 use super::response::annotate_entity;
-use super::stream_fast_path::try_file_stream_fast_path;
+use super::stream_fast_path::{file_link_response, try_file_stream_fast_path};
 use crate::blobs::{BlobHydrationBudget, hydrate_blob_refs_for_tenant_with_budget};
 use crate::query_eval::{expand_entity, select_fields};
 use crate::response::{ODataResponse, ODataStreamResponse, ODataXmlResponse, odata_error};
@@ -242,7 +243,12 @@ pub(super) async fn load_existing_entity_descriptor_body(
     state
         .get_tenant_entity_state(tenant, entity_type, key)
         .await
-        .map(|response| serde_json::to_value(&response.state).unwrap_or_default())
+        .map(|response| {
+            let mut body = serde_json::to_value(&response.state).unwrap_or_default();
+            super::read_defaults::ReadDefaults::for_entity(state, tenant, entity_type)
+                .apply(&mut body);
+            body
+        })
         .map_err(|_| resource_not_found_response(set_name, key))
 }
 
@@ -546,7 +552,9 @@ fn enrich_entity_response(
     {
         let table = spec.table();
         for rule in &table.rules {
-            if rule.from_states.iter().any(|s| s == current_status) {
+            if !temper_spec::automaton::is_carry_move(&rule.name)
+                && rule.from_states.iter().any(|s| s == current_status)
+            {
                 // Look up hint from automaton actions
                 let hint = spec
                     .automaton
@@ -615,12 +623,12 @@ pub(super) async fn handle_odata_get_for_tenant(
         }
     };
 
-    let query_string: String = query_params
+    // The extractor already split and decoded the query string; parse those
+    // pairs as they are so `&`, `=` and parentheses inside a value stay data.
+    let pairs = query_params
         .iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect::<Vec<_>>()
-        .join("&");
-    let query_options = match parse_query_options(&query_string) {
+        .map(|(key, value)| (key.as_str(), value.as_str()));
+    let query_options = match parse_query_options_from_pairs(pairs) {
         Ok(q) => q,
         Err(e) => {
             return odata_error(StatusCode::BAD_REQUEST, "InvalidQuery", &e.to_string())
@@ -731,7 +739,18 @@ pub(super) async fn handle_odata_get_for_tenant(
         }
 
         ODataPath::Value { ref parent } => {
-            handle_stream_get(&state, &tenant, &security_ctx, parent, &hydration_budget).await
+            let link = query_params
+                .get("redirect")
+                .and_then(|v| super::stream_fast_path::file_link_secs(v));
+            handle_stream_get(
+                &state,
+                &tenant,
+                &security_ctx,
+                parent,
+                &hydration_budget,
+                link,
+            )
+            .await
         }
 
         _ => odata_error(
@@ -766,6 +785,8 @@ pub(super) async fn handle_odata_get_for_tenant(
     pushdown_sparse_probe_count = tracing::field::Empty,
     pushdown_page_count = tracing::field::Empty,
     pushdown_sparse_skip_reason = tracing::field::Empty,
+    row_authz = tracing::field::Empty,
+    row_policies = tracing::field::Empty,
 ))]
 async fn handle_entity_set(
     state: &ServerState,
@@ -883,6 +904,53 @@ fn encode_query_component(value: &str) -> String {
     out
 }
 
+/// Load the descriptor from the Postgres actor store, shared by whole and property reads.
+pub(super) async fn load_pg_entity_descriptor_body(
+    state: &ServerState,
+    tenant: &TenantId,
+    entity_type: &str,
+    set_name: &str,
+    key: &str,
+) -> Result<serde_json::Value, Response> {
+    let actor_sys = state
+        .pg_actor_system
+        .as_ref()
+        .expect("Postgres actor store");
+    let namespace = format!("{tenant}/{key}");
+    match actor_sys.load_state(&namespace, entity_type).await {
+        Ok(Some(state_bytes)) => {
+            let actor_state: temper_actor_runtime::spec_actor::SpecActorState =
+                serde_json::from_slice(&state_bytes).unwrap_or_default();
+            let mut body = serde_json::json!({
+                "entity_type": entity_type,
+                "entity_id": key,
+                "status": actor_state.status,
+                "counters": actor_state.counters,
+                "booleans": actor_state.booleans,
+                "lists": actor_state.lists,
+                "fields": actor_state.fields,
+                "@odata.context": format!("$metadata#{set_name}/$entity"),
+                "@odata.id": format!("{set_name}('{key}')"),
+            });
+            super::read_defaults::ReadDefaults::for_entity(state, tenant, entity_type)
+                .apply(&mut body);
+            Ok(body)
+        }
+        Ok(None) => Err(odata_error(
+            StatusCode::NOT_FOUND,
+            "ResourceNotFound",
+            &format!("Entity '{set_name}' with key '{key}' not found"),
+        )
+        .into_response()),
+        Err(e) => Err(odata_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "ActorReadError",
+            &e.to_string(),
+        )
+        .into_response()),
+    }
+}
+
 /// Handle `Entity` path: fetch a single entity by key.
 async fn handle_entity(
     state: &ServerState,
@@ -899,55 +967,30 @@ async fn handle_entity(
     };
     let key_str = resolve_entity_request_key(state, tenant, &entity_type, key).await;
 
-    if state.is_pg_actor_backed(tenant, &entity_type)
-        && let Some(actor_sys) = &state.pg_actor_system
-    {
-        let namespace = format!("{tenant}/{key_str}");
-        return match actor_sys.load_state(&namespace, &entity_type).await {
-            Ok(Some(state_bytes)) => {
-                let actor_state: temper_actor_runtime::spec_actor::SpecActorState =
-                    serde_json::from_slice(&state_bytes).unwrap_or_default();
-                let body = serde_json::json!({
-                    "entity_type": entity_type,
-                    "entity_id": key_str,
-                    "status": actor_state.status,
-                    "counters": actor_state.counters,
-                    "booleans": actor_state.booleans,
-                    "lists": actor_state.lists,
-                    "fields": actor_state.fields,
-                    "@odata.context": format!("$metadata#{set_name}/$entity"),
-                    "@odata.id": format!("{set_name}('{key_str}')"),
-                });
-                if let Err(response) = authorize_read(
-                    state,
-                    tenant,
-                    security_ctx,
-                    READ_ACTION,
-                    &entity_type,
-                    &key_str,
-                    &body,
-                ) {
-                    return *response;
-                }
-                ODataResponse {
-                    status: StatusCode::OK,
-                    body,
-                }
-                .into_response()
-            }
-            Ok(None) => odata_error(
-                StatusCode::NOT_FOUND,
-                "ResourceNotFound",
-                &format!("Entity '{set_name}' with key '{key_str}' not found"),
-            )
-            .into_response(),
-            Err(e) => odata_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "ActorReadError",
-                &e.to_string(),
-            )
-            .into_response(),
-        };
+    if state.is_pg_actor_backed(tenant, &entity_type) && state.pg_actor_system.is_some() {
+        let body =
+            match load_pg_entity_descriptor_body(state, tenant, &entity_type, set_name, &key_str)
+                .await
+            {
+                Ok(body) => body,
+                Err(response) => return response,
+            };
+        if let Err(response) = authorize_read(
+            state,
+            tenant,
+            security_ctx,
+            READ_ACTION,
+            &entity_type,
+            &key_str,
+            &body,
+        ) {
+            return *response;
+        }
+        return ODataResponse {
+            status: StatusCode::OK,
+            body,
+        }
+        .into_response();
     }
 
     match build_entity_body(
@@ -975,7 +1018,8 @@ async fn handle_entity(
     }
 }
 
-/// Handle `NavigationProperty` path: resolve parent and expand nav property.
+/// Handle `NavigationProperty` path: resolve the parent, then read the property
+/// on its own when it is a structural one, or expand it when it is a navigation one.
 async fn handle_navigation_property(
     state: &ServerState,
     tenant: &TenantId,
@@ -992,6 +1036,24 @@ async fn handle_navigation_property(
                 return odata_error(status, "InvalidPath", &msg).into_response();
             }
         };
+    if !is_navigation_property(state, tenant, &parent_type, property) {
+        let parent_key = match parent {
+            ODataPath::Entity(_, key) => {
+                resolve_entity_request_key(state, tenant, &parent_type, key).await
+            }
+            _ => parent_key,
+        };
+        return handle_property_read(
+            state,
+            tenant,
+            security_ctx,
+            &parent_type,
+            &parent_set,
+            &parent_key,
+            property,
+        )
+        .await;
+    }
 
     let parent_body = match load_authorized_entity_body(
         state,
@@ -1306,6 +1368,7 @@ async fn handle_stream_get(
     security_ctx: &SecurityContext,
     parent: &ODataPath,
     hydration_budget: &BlobHydrationBudget,
+    link: Option<u64>,
 ) -> axum::response::Response {
     if let Some((set_name, key, property)) = resolve_blob_primitive_value_parent(parent) {
         return handle_blob_primitive_stream(
@@ -1350,6 +1413,15 @@ async fn handle_stream_get(
         Err(resp) => return resp,
     };
 
+    // `?redirect=1`: once Cedar has let the reader read the File, send them to a short-lived link to its bytes in
+    // the object store, rather than carrying the bytes through this server.
+    if let Some(secs) = link
+        && entity_type == "File"
+        && let Some(response) = file_link_response(state, tenant, &entity_state, secs)
+    {
+        return response;
+    }
+
     if let Some(response) =
         try_file_stream_fast_path(state, tenant, &set_name, &entity_type, &key).await
     {
@@ -1377,6 +1449,19 @@ async fn handle_stream_get(
         .into_response();
     }
 
+    // A server that keeps Files only in an object store, without one, serves a File only from its own database copy
+    // (the fast path above), never through the blob adapter from a local store other servers may share.
+    if matches!(entity_type.as_str(), "File" | "FileVersion")
+        && let Some(why) = state.files_refused_here(tenant)
+    {
+        return odata_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "FilesNeedObjectStore",
+            &why,
+        )
+        .into_response();
+    }
+
     // 4. Invoke WASM blob_adapter for download
     let response_stream_id = format!("download-{}", temper_runtime::scheduler::sim_uuid());
     let streams = Arc::new(RwLock::new(StreamRegistry::default()));
@@ -1400,6 +1485,7 @@ async fn handle_stream_get(
         workflow_root_entity_id: None,
         workflow_run_id: None,
         http_request: None,
+        trigger_principal: None,
     };
 
     let wasm_result = match state

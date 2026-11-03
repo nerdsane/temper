@@ -46,12 +46,12 @@ fn verify_source_collection(directory: &Path) -> Result<()> {
         }
     }
     anyhow::ensure!(!csdl.schemas.is_empty(), "CSDL must contain a Schema");
-    let sources = read_ioa_sources(directory)?;
+    let sources = input::read_ioa_files(&AppFiles::find(app_dir_of(directory)).ioa)?;
     anyhow::ensure!(!sources.is_empty(), "source contains no IOA specifications");
     input::validate_ioa_entities(&csdl, &sources)?;
     let model = build_spec_model(csdl, read_tla_sources(directory)?);
     anyhow::ensure!(model.validation.is_valid(), "{:?}", model.validation.errors);
-    package::validate_policy_files(directory)?;
+    package::validate_policy_files(&AppFiles::find(directory).policies)?;
     verify_ioa_sources(&sources)
 }
 
@@ -69,7 +69,7 @@ fn verify_fixture_catalog(directory: &Path) -> Result<()> {
     input::validate_ioa_entities(&csdl, &BTreeMap::from([(name, order)]))?;
     let model = build_spec_model(csdl, read_tla_sources(directory)?);
     anyhow::ensure!(model.validation.is_valid(), "{:?}", model.validation.errors);
-    package::validate_policy_files(directory)?;
+    package::validate_policy_files(&AppFiles::find(directory).policies)?;
     for entry in fs::read_dir(directory)? {
         let path = entry?.path();
         if path.to_string_lossy().ends_with(".ioa.toml") {

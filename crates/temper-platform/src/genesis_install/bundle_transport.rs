@@ -5,11 +5,43 @@ use std::time::Duration;
 use futures::StreamExt as _;
 
 use super::GenesisRegistryBundleResponse;
+use super::bundles::{
+    MAX_GENESIS_BUNDLE_APPS, MAX_GENESIS_BUNDLE_FILES, MAX_GENESIS_BUNDLE_TOTAL_BYTES,
+};
 
-const MAX_BUNDLE_RESPONSE_BYTES: usize = 128 * 1024 * 1024;
+/// Not a limit of its own: the install budget in the form it travels in, so
+/// every bundle `validate_registry_bundle` would accept also arrives. It still
+/// bounds what a broken or hostile registry can make the installer buffer.
+const MAX_BUNDLE_RESPONSE_BYTES: usize = bundle_response_allowance(
+    MAX_GENESIS_BUNDLE_TOTAL_BYTES,
+    MAX_GENESIS_BUNDLE_FILES,
+    MAX_GENESIS_BUNDLE_APPS,
+);
 const MAX_ERROR_RESPONSE_BYTES: usize = 64 * 1024;
 const BUNDLE_RESPONSE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const BUNDLE_RESPONSE_TOTAL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+/// The most bytes a JSON bundle response can take to carry `content_bytes` of
+/// file content in `files` files across `apps` apps:
+///
+/// - content travels as base64, 4 bytes for every 3, which is also how
+///   `validate_registry_bundle` counts it against the budget;
+/// - each file adds its JSON keys and quotes, and its path. A path the
+///   installer can write is shorter than Linux's PATH_MAX (4096 bytes), and
+///   JSON can escape one byte to six (`\u001f`);
+/// - each app adds its keys, an owner and a name of at most 128 bytes each,
+///   and a 40-character hash;
+/// - the envelope holds the root app ref and the registry tenant's id.
+const fn bundle_response_allowance(content_bytes: u64, files: usize, apps: usize) -> usize {
+    const PATH_MAX: usize = 4096;
+    const FILE_JSON_BYTES: usize = 64 + 6 * PATH_MAX;
+    const APP_JSON_BYTES: usize = 512;
+    const ENVELOPE_JSON_BYTES: usize = 64 * 1024;
+    content_bytes.div_ceil(3) as usize * 4
+        + files * FILE_JSON_BYTES
+        + apps * APP_JSON_BYTES
+        + ENVELOPE_JSON_BYTES
+}
 
 pub(super) async fn decode_bundle_response(
     response: reqwest::Response,
@@ -61,3 +93,7 @@ pub(super) async fn decode_bundle_response(
     }
     serde_json::from_slice(&body).map_err(|error| format!("decode Genesis bundle {url}: {error}"))
 }
+
+#[cfg(test)]
+#[path = "bundle_transport_test.rs"]
+mod tests;

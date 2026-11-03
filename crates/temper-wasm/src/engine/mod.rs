@@ -450,6 +450,8 @@ impl WasmEngine {
         tracing::Span::current().record("blob_cache_bytes", blob_cache_bytes);
         let span = tracing::Span::current();
         let runtime_handle = tokio::runtime::Handle::current();
+        let single_threaded =
+            runtime_handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread;
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         let thread_name = format!(
@@ -478,8 +480,23 @@ impl WasmEngine {
             })
             .map_err(|e| WasmError::Invocation(format!("failed to spawn WASM thread: {e}")))?;
 
-        rx.await
-            .map_err(|e| WasmError::Invocation(format!("WASM thread terminated: {e}")))?
+        // A paused clock, which only a single-threaded runtime can have, jumps
+        // to the next timer whenever the runtime has nothing to run, and a
+        // module on a thread of its own is not work the runtime sees. So a
+        // simulation would move its clock on while the module runs, and the
+        // module's answer would arrive at whatever simulated time real time
+        // put it. A wait in the blocking pool is work the runtime sees: the
+        // clock stands still until the module answers. A multi-threaded
+        // runtime's clock is real, and its blocking pool stays free for the
+        // file and DNS work that shares it.
+        let answer = if single_threaded {
+            tokio::task::spawn_blocking(move || rx.blocking_recv())
+                .await
+                .map_err(|e| WasmError::Invocation(format!("WASM wait failed: {e}")))?
+        } else {
+            rx.await
+        };
+        answer.map_err(|e| WasmError::Invocation(format!("WASM thread terminated: {e}")))?
     }
 
     fn invoke_blocking(

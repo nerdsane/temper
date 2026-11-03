@@ -193,10 +193,13 @@ fn customer_security_context(id: &str) -> SecurityContext {
             role: None,
             acting_for: None,
             agent_type: None,
+            label: None,
             attributes: Default::default(),
         },
         context_attrs: Default::default(),
         correlation_id: "local-tdata-test".to_string(),
+        cause: None,
+        credential: None,
     }
 }
 
@@ -572,6 +575,12 @@ async fn allowlisted_public_tdata_calls_use_odata_handlers() {
 
 #[path = "local_tdata_host_test/delegation_tests.rs"]
 mod delegation_tests;
+
+#[path = "local_tdata_host_test/file_value_tests.rs"]
+mod file_value_tests;
+
+#[path = "local_tdata_host_test/encoded_key_tests.rs"]
+mod encoded_key_tests;
 
 /// ARN-243 / ADR-0166. The engine reads the tenant's content decision off the
 /// host it is handed, and production hands it a three-layer stack:

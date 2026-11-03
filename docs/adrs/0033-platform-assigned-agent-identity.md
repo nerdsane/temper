@@ -111,3 +111,28 @@ The existing `with_agent_context()` method is removed — it allowed constructin
 1. **Add `api_key_hash` field to AgentType** — Rejected because multiple agents of the same type need distinct credentials, and credential rotation shouldn't modify the type definition.
 2. **Keep self-declared headers as fallback** — Rejected because any fallback to self-declared identity undermines the security model. The confused deputy problem isn't solved by making it optional.
 3. **JWT-based identity with signing keys** — Too complex for the current stage. API keys are simpler, and the `AgentCredential` entity can be extended to support JWT validation later.
+
+## Adapter delegation authorization
+
+Identity writes (`Issue`, rotation, revocation, and AgentType mutations) are
+reserved for platform actors. Before issuing an adapter's bounded, ephemeral
+credential, the kernel checks the original caller's `Delegate` capability on
+`AdapterCredentialDelegation` in the invoking tenant. The prospective credential
+attributes include `agent_type_id`, `agent_instance_id`, `expires_at`, and `id`, so a tenant
+can restrict which type a caller may delegate:
+
+```cedar
+permit(principal == Agent::"runner", action == Action::"Delegate",
+       resource is AdapterCredentialDelegation)
+when { resource.agent_type_id == "worker-type" };
+```
+
+`AdapterCredentialDelegation` is an authorization-only resource, not an entity
+spec or a writable identity endpoint. The built-in identity protection has no
+exception for delegation actions on identity records. Delegation has no built-in
+permit for tenant agents; tenant policy must grant it. Permission to run the source action alone is insufficient. The
+kernel controls the token material, instance, expiry, issuance, and cleanup.
+Tenant policies that previously granted `Issue` for adapter delegation must
+instead grant `Delegate` on `AdapterCredentialDelegation`; direct `Issue` remains
+platform-only. Broad tenant
+permits cover delegation but cannot override the identity-write forbids.

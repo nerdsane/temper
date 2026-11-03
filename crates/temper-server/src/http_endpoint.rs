@@ -28,16 +28,24 @@
 
 pub mod admission;
 pub(crate) mod budget;
+#[cfg(test)]
+mod fuel_floor_test;
 pub mod native;
 
 use std::collections::BTreeMap;
-use std::time::Duration;
 
 use temper_runtime::tenant::TenantId;
 use tokio::spawn as spawn_http_endpoint_reconciler; // determinism-ok: production HTTP route watcher
 use tokio::sync::RwLock;
 
-const ACTOR_ASK_TIMEOUT: Duration = Duration::from_millis(500);
+/// Fuel floor for the git upload-pack (clone/fetch) module. Pack emission's
+/// instruction count scales with the server's own repo size, so this
+/// bulk-streaming module is bounded by timeout and memory rather than a fixed
+/// instruction budget. 10T is ~100x the previous 100B manual override:
+/// effectively unbounded for any realistic pack while remaining a runaway
+/// safety bound. Not applied to receive-pack, whose input is client-controlled
+/// (see route_from_entity_fields).
+const GIT_PACK_FUEL_FLOOR: u64 = 10_000_000_000_000;
 
 /// One row of the table. Derived from an `HttpEndpoint` entity.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,6 +170,11 @@ impl HttpEndpointTable {
         *guard = rows;
     }
 
+    /// The rows now in force.
+    pub async fn rows(&self) -> Vec<HttpEndpointRoute> {
+        self.rows.read().await.clone()
+    }
+
     /// Number of registered rows — for metrics and tests.
     pub async fn len(&self) -> usize {
         self.rows.read().await.len()
@@ -252,18 +265,32 @@ impl Default for HttpEndpointTables {
 }
 
 /// Rebuild the route table for `tenant` by enumerating every
-/// `HttpEndpoint` row that the tenant owns, asking each entity
-/// actor for its current state, and projecting Active rows into
-/// routes. Called on boot and on every HttpEndpoint state change
-/// (see [`spawn_reconciler`]).
+/// `HttpEndpoint` row that the tenant owns, reading each row's
+/// current state, and projecting Active rows into routes. Called on
+/// boot and on every HttpEndpoint state change (see
+/// [`spawn_reconciler`]).
 ///
-/// Fails silently on per-row problems (actor unreachable, state
-/// parse failure, etc.): a single malformed row should not sink
-/// the rest of the table. Metrics + warn-level logs cover
-/// visibility.
+/// Rows are read at once, each as any entity read is: its actor is
+/// spawned and loaded from its events if it was idle, and a slow
+/// answer is asked again (`get_tenant_entity_state`). A row that still
+/// cannot be read keeps the route it had: a rebuild started by one
+/// row's change must never drop the others because they were slow to
+/// load. Only a row read as not Active, or gone from the tenant, leaves
+/// the table; a row that fails projection is skipped. Metrics +
+/// warn-level logs cover visibility.
 pub async fn rebuild_tenant_table(state: &crate::state::ServerState, tenant: &TenantId) {
-    use crate::entity_actor::types::{EntityMsg, EntityResponse};
+    rebuild_tenant_table_after(state, tenant, None).await;
+}
 
+/// [`rebuild_tenant_table`] after a change of row `changed`, as the
+/// reconciler runs it: that row keeps no earlier route when it cannot
+/// be read, since its change (a Pause, a Delete, a new path) is what the
+/// rebuild is for.
+pub async fn rebuild_tenant_table_after(
+    state: &crate::state::ServerState,
+    tenant: &TenantId,
+    changed: Option<&str>,
+) {
     // On fresh pod boots the in-memory entity_index is lazily
     // populated — we need to prime it from the event store or
     // rebuild sees 0 rows even when there ARE active HttpEndpoint
@@ -271,68 +298,94 @@ pub async fn rebuild_tenant_table(state: &crate::state::ServerState, tenant: &Te
     // populate-if-empty path.
     let ids: Vec<String> = state.list_entity_ids_lazy(tenant, "HttpEndpoint").await;
 
-    // Force-materialise each actor from its snapshot/event log so
-    // the subsequent ask(GetState) finds them in the registry.
-    // Actors materialise lazily on OData reads; for boot-time
-    // table priming we eagerly spawn since the router fallback
-    // can't afford to 404 on the first request after restart.
-    for entity_id in &ids {
-        let _ = state.get_or_spawn_tenant_actor_with_fields(
-            tenant,
-            "HttpEndpoint",
-            entity_id,
-            serde_json::json!({}),
-        );
-    }
-
-    let mut routes: Vec<HttpEndpointRoute> = Vec::with_capacity(ids.len());
-    for entity_id in ids {
-        let actor_key = format!("{}:HttpEndpoint:{}", tenant.as_str(), entity_id);
-        let actor_ref = {
-            let Ok(registry) = state.actor_registry.read() else {
-                continue;
-            };
-            registry.get(&actor_key).cloned()
-        };
-        let Some(actor_ref) = actor_ref else {
-            continue; // actor passivated — will rematerialize on next request
-        };
-        let response: EntityResponse =
-            match actor_ref.ask(EntityMsg::GetState, ACTOR_ASK_TIMEOUT).await {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(
-                        tenant = %tenant.as_str(),
-                        entity_id,
-                        error = %e,
-                        "HttpEndpoint actor ask failed during rebuild"
-                    );
-                    continue;
-                }
-            };
-        if response.state.status != "Active" {
-            continue;
-        }
-        if let Some(route) = route_from_entity_fields(&entity_id, &response.state.fields) {
-            routes.push(route);
-        } else {
-            tracing::warn!(
-                tenant = %tenant.as_str(),
-                entity_id,
-                status = %response.state.status,
-                "HttpEndpoint row failed projection — skipped"
-            );
-        }
-    }
-
     let table = state.http_endpoint_tables.table_for(tenant).await;
+    let previous: BTreeMap<String, HttpEndpointRoute> = table
+        .rows()
+        .await
+        .into_iter()
+        .map(|route| (route.id.clone(), route))
+        .collect();
+    let reads = ids.into_iter().map(|entity_id| async move {
+        let read = state
+            .get_tenant_entity_state(tenant, "HttpEndpoint", &entity_id)
+            .await;
+        (entity_id, read)
+    });
+    let mut routes: Vec<HttpEndpointRoute> = Vec::new();
+    let mut kept = 0usize;
+    for (entity_id, read) in futures_util::future::join_all(reads).await {
+        match read {
+            Ok(response) if response.state.status != "Active" => {}
+            Ok(response) => match route_from_entity_fields(&entity_id, &response.state.fields) {
+                Some(route) => routes.push(route),
+                None => tracing::warn!(
+                    tenant = %tenant.as_str(),
+                    entity_id,
+                    "HttpEndpoint row failed projection — skipped"
+                ),
+            },
+            Err(error) => {
+                let last = previous
+                    .get(&entity_id)
+                    .filter(|_| changed != Some(entity_id.as_str()));
+                if let Some(route) = last {
+                    routes.push(route.clone());
+                    kept += 1;
+                }
+                tracing::warn!(
+                    tenant = %tenant.as_str(),
+                    entity_id,
+                    error,
+                    kept_route = last.is_some(),
+                    "HttpEndpoint row unread during rebuild; a row that did not change keeps its last route"
+                );
+            }
+        }
+    }
+
     let count = routes.len();
     table.replace(routes).await;
     tracing::info!(
         tenant = %tenant.as_str(),
         route_count = count,
+        kept_unread = kept,
         "HttpEndpoint route table rebuilt"
     );
+}
+
+/// Compiles a route's integration module on its first use. Startup recovery restores the module
+/// registry without compiling the modules, and an entity integration compiles its module before it
+/// invokes it (`ensure_wasm_module_cached`); a route does the same. When the module cannot be loaded
+/// the answer to send now is returned: 503, or 504 if loading outlasted the route's budget.
+pub(crate) async fn ensure_integration_module(
+    state: &crate::state::ServerState,
+    tenant: &TenantId,
+    integration: &str,
+    hash: &str,
+    deadline: &budget::ExchangeDeadline,
+) -> Result<(), axum::response::Response> {
+    use axum::response::IntoResponse;
+    match deadline
+        .wait(state.ensure_wasm_module_cached(tenant, integration, hash))
+        .await
+    {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => {
+            tracing::warn!(tenant = %tenant.as_str(), integration, %error, "HttpEndpoint integration module could not be loaded");
+            Err(crate::response::odata_error(
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "ModuleUnavailable",
+                &format!("WASM integration '{integration}' could not be loaded"),
+            )
+            .into_response())
+        }
+        Err(_) => Err(crate::response::odata_error(
+            axum::http::StatusCode::GATEWAY_TIMEOUT,
+            "ModuleLoadTimeout",
+            "Endpoint integration module took too long to load",
+        )
+        .into_response()),
+    }
 }
 
 /// Spawn a long-running task that watches entity state changes and
@@ -351,7 +404,7 @@ pub fn spawn_reconciler(state: crate::state::ServerState) {
             match rx.recv().await {
                 Ok(change) if change.entity_type == "HttpEndpoint" => {
                     let tenant = TenantId::new(&change.tenant);
-                    rebuild_tenant_table(&state, &tenant).await;
+                    rebuild_tenant_table_after(&state, &tenant, Some(&change.entity_id)).await;
                 }
                 Ok(_) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
@@ -431,10 +484,18 @@ pub fn route_from_entity_fields(id: &str, fields: &serde_json::Value) -> Option<
         .unwrap_or(60);
     let git_pack_defaults =
         integration_module == "git_receive_pack" || integration_module == "git_upload_pack";
-    let max_fuel = obj
-        .get("MaxFuel")
-        .and_then(|v| v.as_u64())
-        .or_else(|| git_pack_defaults.then_some(20_000_000_000));
+    let configured_fuel = obj.get("MaxFuel").and_then(|v| v.as_u64());
+    let max_fuel = if integration_module == "git_upload_pack" {
+        // upload-pack (clone/fetch) only emits the server's own pack, so its
+        // instruction count grows with repo size, not client input: a fixed
+        // ceiling silently truncates clones once a repo outgrows it (ARN-57,
+        // 278, 284). Bounded by timeout and memory instead; the stored MaxFuel
+        // can raise the floor, never lower it. receive-pack keeps its tight
+        // bound: its input is a client's pack, ahead of the Cedar-gated ingest.
+        Some(configured_fuel.unwrap_or(0).max(GIT_PACK_FUEL_FLOOR))
+    } else {
+        configured_fuel.or_else(|| git_pack_defaults.then_some(20_000_000_000))
+    };
     let max_memory = obj
         .get("MaxMemory")
         .and_then(|v| v.as_u64())
@@ -789,7 +850,9 @@ mod tests {
         assert_eq!(r.integration_module, "git_upload_pack");
         assert!(r.requires_auth);
         assert_eq!(r.timeout_secs, 120);
-        assert_eq!(r.max_fuel, Some(20_000_000_000));
+        // Git pack modules are floor-raised: a stored 20B (below the floor)
+        // becomes the 10T git-pack floor so large transfers do not exhaust.
+        assert_eq!(r.max_fuel, Some(GIT_PACK_FUEL_FLOOR));
         assert_eq!(r.max_memory, Some(536_870_912));
         assert_eq!(r.max_response_bytes, Some(134_217_728));
         assert!(r.action_bridge.is_none());
@@ -809,6 +872,8 @@ mod tests {
             "ActionBridgeResponse": "git-receive-pack",
         });
         let r = route_from_entity_fields("he-receive", &fields).unwrap();
+        // receive-pack (client-controlled ingest input) keeps its tight 20B
+        // default; the fuel floor applies only to upload-pack.
         assert_eq!(r.max_fuel, Some(20_000_000_000));
         assert_eq!(r.max_memory, Some(512 * 1024 * 1024));
         assert_eq!(r.max_response_bytes, Some(128 * 1024 * 1024));

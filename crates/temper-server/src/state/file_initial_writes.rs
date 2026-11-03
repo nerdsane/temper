@@ -1,13 +1,16 @@
 use std::sync::{Arc, RwLock};
 
-use temper_runtime::persistence::{EventMetadata, PersistenceEnvelope, PersistenceError};
-use temper_runtime::scheduler::{sim_now, sim_uuid};
+use temper_runtime::persistence::{
+    AppendProjection, CommitRows, EventMetadata, PersistenceEnvelope, PersistenceError,
+};
+use temper_runtime::scheduler::sim_uuid;
+use tracing::Instrument;
 
 use crate::entity_actor::{EntityEvent, EntityResponse, EntityState, process_action_with_xref};
 use crate::events::EntityStateChange;
 
 use super::file_writes::content_hash_and_native_blob_key;
-use super::{FileStreamContentError, ServerState};
+use super::{FileStreamContentError, ServerState, StoredFileContent};
 
 impl ServerState {
     /// Create a brand-new TemperFS `File` and persist its first stream bytes as
@@ -52,53 +55,85 @@ impl ServerState {
         mime_type: &str,
         agent_ctx: &crate::request_context::AgentContext,
     ) -> Result<crate::entity_actor::EntityResponse, FileStreamContentError> {
-        if self.ensure_entity_loaded(tenant, "File", file_id).await {
-            return Err(FileStreamContentError::ActionRejected(format!(
-                "File('{file_id}') already exists; use File $value update for existing content"
-            )));
-        }
-
-        let Some((store, _backend)) = self.event_journal() else {
-            return Err(FileStreamContentError::State(
-                "File initial content create requires an event journal".to_string(),
-            ));
-        };
-        let table = self.file_transition_table(tenant)?;
-
-        // Reject a brand-new File whose target Workspace is not Active BEFORE
-        // persisting any bytes. `workspace_id` arrives in the create params on
-        // this path (the File has no persisted state yet).
         let workspace_id = create_params
             .get("workspace_id")
             .and_then(|value| value.as_str())
             .unwrap_or_default()
             .to_string();
-        self.reject_write_if_workspace_not_active(tenant, &workspace_id)
+        self.check_new_file_writable(tenant, file_id, &workspace_id)
             .await?;
 
         let (content_hash, blob_key) = content_hash_and_native_blob_key(body);
-        self.put_content_addressed_blob(tenant, &blob_key, body, None)
+        self.put_file_content_blob(tenant, &blob_key, body)
             .await
             .map_err(|e| {
                 FileStreamContentError::BlobStore(format!(
                     "failed to persist blob '{blob_key}': {e}"
                 ))
             })?;
+        let content = StoredFileContent {
+            content_hash,
+            size_bytes: body.len() as u64,
+        };
+        self.commit_new_file_content(
+            tenant,
+            file_id,
+            create_params,
+            &content,
+            mime_type,
+            agent_ctx,
+        )
+        .await
+    }
+
+    /// Refuse a brand-new File BEFORE any of its bytes are stored: one that
+    /// exists already, or whose target Workspace is not Active (`workspace_id`
+    /// arrives in the create params: the File has no persisted state yet).
+    pub(crate) async fn check_new_file_writable(
+        &self,
+        tenant: &temper_runtime::tenant::TenantId,
+        file_id: &str,
+        workspace_id: &str,
+    ) -> Result<(), FileStreamContentError> {
+        if self.ensure_entity_loaded(tenant, "File", file_id).await {
+            return Err(FileStreamContentError::ActionRejected(format!(
+                "File('{file_id}') already exists; use File $value update for existing content"
+            )));
+        }
+        self.reject_write_if_workspace_not_active(tenant, workspace_id)
+            .await
+    }
+
+    /// Commit a brand-new File whose bytes are already stored under their
+    /// content hash, as ONE atomic create-with-content append.
+    pub(crate) async fn commit_new_file_content(
+        &self,
+        tenant: &temper_runtime::tenant::TenantId,
+        file_id: &str,
+        create_params: serde_json::Value,
+        content: &StoredFileContent,
+        mime_type: &str,
+        agent_ctx: &crate::request_context::AgentContext,
+    ) -> Result<crate::entity_actor::EntityResponse, FileStreamContentError> {
+        let Some((store, _backend)) = self.event_journal() else {
+            return Err(FileStreamContentError::State(
+                "File initial content create requires an event journal".to_string(),
+            ));
+        };
+        let table = self.file_transition_table(tenant)?;
+        let workspace_id = create_params
+            .get("workspace_id")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
 
         let persistence_id = format!("{tenant}:File:{file_id}");
         let mut state = initial_file_state(file_id, &table, serde_json::json!({}));
         let initial = state.clone();
         let mut events = Vec::with_capacity(3);
 
-        let created = EntityEvent {
-            action: "Created".to_string(),
-            from_status: String::new(),
-            to_status: state.status.clone(),
-            timestamp: sim_now(),
-            params: serde_json::json!({}),
-            idempotency_key: None,
-        };
-        push_synthetic_event(&mut state, &mut events, created);
+        let created = EntityEvent::bootstrap(state.status.clone());
+        push_synthetic_event(&mut state, &mut events, created, agent_ctx);
 
         let no_xref = std::collections::BTreeMap::new();
         if create_params
@@ -107,7 +142,7 @@ impl ServerState {
         {
             let create_event =
                 apply_synthetic_file_action(&mut state, &table, "Create", create_params, &no_xref)?;
-            push_synthetic_event(&mut state, &mut events, create_event);
+            push_synthetic_event(&mut state, &mut events, create_event, agent_ctx);
         }
 
         let version_number = state.counters.get("version_count").copied().unwrap_or(0) + 1;
@@ -119,8 +154,8 @@ impl ServerState {
             .to_string();
         let created_by = agent_ctx.agent_id.clone().unwrap_or_default();
         let stream_params = serde_json::json!({
-            "content_hash": content_hash,
-            "size_bytes": body.len() as i64,
+            "content_hash": content.content_hash,
+            "size_bytes": content.size_bytes as i64,
             "mime_type": mime_type,
             "version_number": version_number,
             "previous_version_id": previous_version_id,
@@ -128,7 +163,7 @@ impl ServerState {
         });
         // The `File.StreamUpdated` spec guard reads the owning Workspace's
         // status. On the live dispatch path that status is resolved by
-        // `resolve_cross_entity_guards`; this atomic synthetic path bypasses
+        // `resolve_related_statuses`; this atomic synthetic path bypasses
         // that resolution, so supply it directly. We already confirmed the
         // workspace is Active (or absent) above.
         let mut stream_xref = temper_jit::table::RelatedMap::new();
@@ -145,7 +180,7 @@ impl ServerState {
             stream_params,
             &stream_xref,
         )?;
-        push_synthetic_event(&mut state, &mut events, stream_event);
+        push_synthetic_event(&mut state, &mut events, stream_event, agent_ctx);
 
         let envelopes = events
             .iter()
@@ -155,7 +190,20 @@ impl ServerState {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        match store.append(&persistence_id, 0, &envelopes).await {
+        // The record's query-plane row commits with its events, as a move's.
+        let mut after = state.clone();
+        after.sequence_nr = envelopes.len() as u64;
+        let projection = store
+            .commits_entity_rows()
+            .then(|| self.append_projection(tenant, "File", &after));
+        let rows = CommitRows {
+            projection: projection.as_ref().map(AppendProjection::as_row),
+            ..CommitRows::default()
+        };
+        match store
+            .append_with_rows(&persistence_id, 0, &envelopes, rows)
+            .await
+        {
             Ok(sequence_nr) => state.sequence_nr = sequence_nr,
             Err(PersistenceError::ConcurrencyViolation { .. }) => {
                 return Err(FileStreamContentError::ActionRejected(format!(
@@ -169,27 +217,6 @@ impl ServerState {
             }
         }
 
-        if let Some(query_plane) = self.query_plane_store() {
-            let fields = self.query_projection_fields(tenant, "File", &state.fields);
-            let projected_state = self.query_projection_state(&state);
-            query_plane
-                .upsert_projection(
-                    tenant.as_str(),
-                    "File",
-                    file_id,
-                    &state.status,
-                    &fields,
-                    &projected_state,
-                    state.sequence_nr,
-                )
-                .await
-                .map_err(|error| {
-                    FileStreamContentError::State(format!(
-                        "query projection write failed during atomic File initial content create: {error}"
-                    ))
-                })?;
-        }
-
         self.stop_and_remove_entity(tenant, "File", file_id);
         {
             let index_key = format!("{tenant}:File");
@@ -199,22 +226,27 @@ impl ServerState {
                 .or_default()
                 .insert(file_id.to_string());
         }
-        crate::runtime_metrics::record_server_state_metrics(self);
 
         let response = EntityResponse {
             success: true,
+            refusal: None,
             state,
             error: None,
             custom_effects: vec![],
             scheduled_actions: vec![],
             spawn_requests: vec![],
             spec_governed: true,
+            refused: false,
+            answered_action: None,
+            trigger_failures: Vec::new(),
+            store_unavailable: false,
+            unrecorded_at: None,
         };
         self.broadcast_synthetic_file_stream_update(tenant, file_id, &response, agent_ctx);
         Ok(response)
     }
 
-    fn file_transition_table(
+    pub(super) fn file_transition_table(
         &self,
         tenant: &temper_runtime::tenant::TenantId,
     ) -> Result<temper_jit::table::TransitionTable, FileStreamContentError> {
@@ -325,24 +357,36 @@ impl ServerState {
             let to_state = response.state.status.clone();
             let fields = response.state.fields.clone();
             let agent_ctx = agent_ctx.clone();
-            tokio::spawn(async move {
-                // determinism-ok: post-commit external reaction side effects
-                // determinism-ok: post-commit reaction side effects mirror the
-                // existing non-awaited File `$value` update behavior.
-                dispatcher
-                    .dispatch_reactions(
-                        &state,
-                        &tenant,
-                        "File",
-                        &file_id,
-                        "StreamUpdated",
-                        &to_state,
-                        &fields,
-                        0,
-                        &agent_ctx,
-                    )
-                    .await;
-            });
+            // The reactions are part of the request that wrote the file: their span
+            // is a child of the current one, as for every background reaction.
+            let span = tracing::info_span!(
+                "reaction.dispatch.background",
+                tenant = %tenant,
+                entity_type = "File",
+                entity_id = %file_id,
+                action_name = "StreamUpdated",
+            );
+            tokio::spawn(
+                async move {
+                    // determinism-ok: post-commit external reaction side effects
+                    // determinism-ok: post-commit reaction side effects mirror the
+                    // existing non-awaited File `$value` update behavior.
+                    dispatcher
+                        .dispatch_reactions(
+                            &state,
+                            &tenant,
+                            "File",
+                            &file_id,
+                            "StreamUpdated",
+                            &to_state,
+                            &fields,
+                            0,
+                            &agent_ctx,
+                        )
+                        .await;
+                }
+                .instrument(span),
+            );
         }
     }
 }
@@ -386,8 +430,10 @@ fn apply_synthetic_file_action(
 fn push_synthetic_event(
     state: &mut EntityState,
     events: &mut Vec<EntityEvent>,
-    event: EntityEvent,
+    mut event: EntityEvent,
+    caller: &crate::request_context::AgentContext,
 ) {
+    event.origin = crate::entity_actor::EventOrigin::from_caller(Some(caller));
     state.sequence_nr = state.sequence_nr.saturating_add(1);
     state.push_event_bounded(event.clone());
     events.push(event);

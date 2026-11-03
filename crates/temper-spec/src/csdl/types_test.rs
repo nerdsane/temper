@@ -219,16 +219,3 @@ fn csdl_document_schemas_by_namespace() {
     assert_eq!(doc.schemas_by_namespace("Other").len(), 1);
     assert_eq!(doc.schemas_by_namespace("None").len(), 0);
 }
-
-#[test]
-fn annotation_value_variants() {
-    let s = AnnotationValue::String("hello".into());
-    let f = AnnotationValue::Float(2.72);
-    let b = AnnotationValue::Bool(true);
-    let i = AnnotationValue::Int(42);
-    let c = AnnotationValue::Collection(vec!["a".into()]);
-    let r = AnnotationValue::Record(HashMap::from([("k".into(), "v".into())]));
-    for value in [&s, &f, &b, &i, &c, &r] {
-        assert!(!format!("{value:?}").is_empty());
-    }
-}

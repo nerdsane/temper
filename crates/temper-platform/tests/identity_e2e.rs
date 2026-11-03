@@ -326,7 +326,7 @@ async fn e2e_identity_resolution_invalid_token() {
     let result = resolver
         .resolve(&state.server, &tenant, "nonexistent-key")
         .await;
-    assert!(result.is_none(), "invalid token should not resolve");
+    assert!(result.is_err(), "invalid token should not resolve");
 }
 
 /// Identity resolver: rotated credential → None.
@@ -379,7 +379,7 @@ async fn e2e_identity_resolution_rotated_credential() {
         resolver
             .resolve(&state.server, &tenant, plaintext)
             .await
-            .is_some()
+            .is_ok()
     );
 
     // Rotate the credential
@@ -398,7 +398,7 @@ async fn e2e_identity_resolution_rotated_credential() {
 
     // Should no longer resolve (status is Rotated, not Active)
     let result = resolver.resolve(&state.server, &tenant, plaintext).await;
-    assert!(result.is_none(), "rotated credential should not resolve");
+    assert!(result.is_err(), "rotated credential should not resolve");
 }
 
 /// Identity resolver: revocation takes effect for an already-used resolver.
@@ -421,7 +421,7 @@ async fn e2e_identity_resolution_revocation_is_immediate() {
         resolver
             .resolve(&state.server, &tenant, plaintext)
             .await
-            .is_some()
+            .is_ok()
     );
     let response = dispatch(
         &state,
@@ -437,7 +437,7 @@ async fn e2e_identity_resolution_revocation_is_immediate() {
         resolver
             .resolve(&state.server, &tenant, plaintext)
             .await
-            .is_none(),
+            .is_err(),
         "revocation must remove authority on the next resolution"
     );
 }
@@ -462,7 +462,7 @@ async fn e2e_identity_resolution_rejects_mismatched_stored_hash() {
         resolver
             .resolve(&state.server, &tenant, plaintext)
             .await
-            .is_some()
+            .is_ok()
     );
 
     state
@@ -481,7 +481,7 @@ async fn e2e_identity_resolution_rejects_mismatched_stored_hash() {
         resolver
             .resolve(&state.server, &tenant, plaintext)
             .await
-            .is_none(),
+            .is_err(),
         "mismatched durable lookup ID and stored key hash must fail closed"
     );
 }
@@ -536,7 +536,7 @@ async fn e2e_identity_resolution_deprecated_agent_type() {
         resolver
             .resolve(&state.server, &tenant, plaintext)
             .await
-            .is_some()
+            .is_ok()
     );
 
     // Deprecate the AgentType
@@ -552,7 +552,7 @@ async fn e2e_identity_resolution_deprecated_agent_type() {
     // Should no longer resolve (AgentType status is Deprecated, not Active)
     let result = resolver.resolve(&state.server, &tenant, plaintext).await;
     assert!(
-        result.is_none(),
+        result.is_err(),
         "credential linked to deprecated AgentType should not resolve"
     );
 }
@@ -604,6 +604,72 @@ async fn e2e_http_identity_resolve_exempt_from_auth() {
     );
 }
 
+/// A span's name, and its parent's (None for a root).
+type NamedSpan = (String, Option<String>);
+
+/// Each span made, in order.
+#[derive(Clone, Default)]
+struct SpanParents(std::sync::Arc<std::sync::Mutex<Vec<NamedSpan>>>);
+
+impl<S> tracing_subscriber::Layer<S> for SpanParents
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    fn on_new_span(
+        &self,
+        _attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let span = ctx.span(id).expect("a new span is registered");
+        let parent = span.parent().map(|parent| parent.name().to_string());
+        self.0
+            .lock()
+            .unwrap()
+            .push((span.name().to_string(), parent));
+    }
+}
+
+/// The credential lookup is inside the request's own span: one request is one
+/// trace, never a lookup that starts a trace of its own.
+#[tokio::test]
+async fn e2e_http_credential_lookup_is_inside_the_request_span() {
+    use tracing_subscriber::layer::SubscriberExt as _;
+    let app = identity_test_router().await;
+    let spans = SpanParents::default();
+    let _guard =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(spans.clone()));
+    let response = app
+        .oneshot(
+            // Not the public service document: a read that needs the credential.
+            Request::get("/tdata/AgentTypes")
+                .header("Authorization", format!("Bearer {TEST_OPERATOR_KEY}"))
+                .header("X-Tenant-Id", TEST_TENANT)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // The credential is accepted (the test policy may still refuse the read).
+    assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+    let seen = spans.0.lock().unwrap().clone();
+    assert!(
+        seen.iter()
+            .any(|(name, _)| name == "get_tenant_entity_state"),
+        "the credential is looked up: {seen:?}"
+    );
+    let roots: Vec<&str> = seen
+        .iter()
+        .filter(|(_, parent)| parent.is_none())
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert_eq!(
+        roots,
+        ["http.request"],
+        "only the request is a root: {seen:?}"
+    );
+}
+
 /// Bearer auth: valid agent credential resolves identity on HTTP requests.
 #[tokio::test]
 async fn e2e_http_agent_credential_auth() {
@@ -643,7 +709,8 @@ async fn e2e_http_agent_credential_auth() {
     let json = body_json(response).await;
     assert_eq!(json["status"], "Active");
 
-    // 2. Create AgentCredential with key_hash as entity ID
+    // 2. Create AgentCredential with key_hash as entity ID. It starts Active,
+    // so it carries the bindings an Active credential must have.
     let agent_key = "tmpr_http-auth-test-key";
     let key_hash = hash_token(agent_key);
 
@@ -654,7 +721,9 @@ async fn e2e_http_agent_credential_auth() {
                 .header("Content-Type", "application/json")
                 .header("Authorization", format!("Bearer {TEST_OPERATOR_KEY}"))
                 .header("X-Tenant-Id", TEST_TENANT)
-                .body(Body::from(format!(r#"{{"id": "{key_hash}"}}"#)))
+                .body(Body::from(format!(
+                    r#"{{"id": "{key_hash}", "key_hash": "{key_hash}", "agent_type_id": "http-cc-type", "agent_instance_id": "http-inst-1"}}"#
+                )))
                 .unwrap(),
         )
         .await
@@ -720,6 +789,30 @@ async fn e2e_http_agent_credential_auth() {
 }
 
 /// Bearer auth: no token → 401, wrong token → 401.
+/// A credential starts Active, so one created with no key hash, agent type or
+/// instance is refused: an Active credential must carry all three.
+#[tokio::test]
+async fn e2e_http_bare_active_credential_is_refused() {
+    let app = identity_test_router().await;
+    let key_hash = hash_token("tmpr_http-bare-credential");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/AgentCredentials")
+                .header("Content-Type", "application/json")
+                .header("Authorization", format!("Bearer {TEST_OPERATOR_KEY}"))
+                .header("X-Tenant-Id", TEST_TENANT)
+                .body(Body::from(format!(r#"{{"id": "{key_hash}"}}"#)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["code"], "ConstraintViolation", "{json}");
+}
+
 #[tokio::test]
 async fn e2e_http_missing_and_wrong_token_rejected() {
     let app = identity_test_router().await;
@@ -795,7 +888,7 @@ async fn e2e_http_generic_delete_removes_credential_authority() {
         resolver
             .resolve(&state.server, &tenant, plaintext)
             .await
-            .is_some()
+            .is_ok()
     );
 
     // Use the generic entity mutation path, not an AgentCredential action.
@@ -815,7 +908,7 @@ async fn e2e_http_generic_delete_removes_credential_authority() {
         resolver
             .resolve(&state.server, &tenant, plaintext)
             .await
-            .is_none(),
+            .is_err(),
         "generic deletion must remove authority on the next resolution"
     );
 }
@@ -977,7 +1070,7 @@ async fn e2e_identity_resolution_is_tenant_scoped() {
         .resolve(&state.server, &TenantId::new("other-tenant"), api_key)
         .await;
     assert!(
-        leaked.is_none(),
+        leaked.is_err(),
         "identity authority must not cross tenant boundaries"
     );
 }
@@ -994,7 +1087,7 @@ async fn e2e_unregistered_api_key_does_not_resolve() {
         .resolve(&state.server, &tenant, "tmpr_never-registered")
         .await;
     assert!(
-        result.is_none(),
+        result.is_err(),
         "unregistered API key should not resolve to any identity"
     );
 }

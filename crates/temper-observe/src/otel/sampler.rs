@@ -4,7 +4,9 @@ use std::sync::OnceLock;
 
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Gauge};
-use opentelemetry::trace::{Link, SamplingDecision, SamplingResult, SpanKind, TraceId, TraceState};
+use opentelemetry::trace::{
+    Link, SamplingDecision, SamplingResult, SpanKind, TraceContextExt, TraceId, TraceState,
+};
 use opentelemetry_sdk::trace::{Sampler, ShouldSample};
 
 use super::config::read_non_empty_env;
@@ -20,15 +22,16 @@ const WASM_AUXILIARY_SAMPLE_RATE_ENV: &str = "TEMPER_TRACE_WASM_AUX_SAMPLE_PCT";
 const DISPATCH_BACKGROUND_SAMPLE_RATE_ENV: &str = "TEMPER_TRACE_DISPATCH_BACKGROUND_SAMPLE_PCT";
 pub(super) const WASM_AUXILIARY_SAMPLE_RATE_DEFAULT: u8 = 5;
 pub(super) const DISPATCH_BACKGROUND_SAMPLE_RATE_DEFAULT: u8 = 25;
-/// Span name prefixes that are sampled at a reduced rate. Do not include
+/// Span name prefixes that are sampled at a reduced rate when they start a trace
+/// of their own (inside a trace they are always kept). Do not include
 /// tool/provider guest module boundaries or their background dispatch parents
 /// here: guest spans inherit parent sampling, so reducing those boundaries can
-/// sever traces operators need when following work through WASM.
+/// sever traces operators need when following work through WASM. Do not include
+/// the root span of runtime-started work either (a timer, a scheduled action, a
+/// spawn, a background reaction or integration): each such move is a trace of
+/// its own, and every one is kept.
 pub(super) const WASM_AUXILIARY_PREFIXES: &[&str] = &["wasm:workspace_fs"];
-pub(super) const DISPATCH_BACKGROUND_PREFIXES: &[&str] = &[
-    "dispatch.phase.query_projection",
-    "dispatch.scheduled_actions",
-];
+pub(super) const DISPATCH_BACKGROUND_PREFIXES: &[&str] = &["dispatch.phase.query_projection"];
 
 #[derive(Clone, Debug)]
 struct ReducedSampleRule {
@@ -182,6 +185,11 @@ pub(super) fn record_trace_sampler_config(config: &TraceSamplerConfig) {
     }
 }
 
+/// Whether a span with this parent would be the root of its trace.
+fn is_trace_root(parent_context: Option<&opentelemetry::Context>) -> bool {
+    parent_context.is_none_or(|context| !context.span().span_context().is_valid())
+}
+
 /// Trace-id-based deterministic sampling: keep if `(trace_id_low_u64 % 100) < rate_pct`.
 /// Using trace_id instead of random keeps the decision consistent across
 /// span siblings in the same trace, so a sampled trace keeps all its spans.
@@ -228,11 +236,15 @@ impl ShouldSample for NameBasedSampler {
                 trace_state: TraceState::default(),
             };
         }
-        if let Some(rule) = self
-            .config
-            .reduced_rules
-            .iter()
-            .find(|rule| rule.matches(name))
+        // A reduced rule only trims a span that would start its own trace. Inside a
+        // trace it keeps the span: dropping it would drop everything beneath it
+        // (parent-based sampling) and leave a hole in a trace that is kept.
+        if is_trace_root(parent_context)
+            && let Some(rule) = self
+                .config
+                .reduced_rules
+                .iter()
+                .find(|rule| rule.matches(name))
         {
             if !trace_id_sample_at(trace_id, rule.sample_rate_pct) {
                 record_trace_sampler_decision(rule.name, "reduced_drop");

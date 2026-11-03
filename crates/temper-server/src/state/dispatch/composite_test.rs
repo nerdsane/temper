@@ -4,6 +4,9 @@ mod authenticated_params_test;
 #[cfg(feature = "sim")]
 #[path = "composite/defaults_test.rs"]
 mod defaults_test;
+#[cfg(feature = "sim")]
+#[path = "composite/state_timers_test.rs"]
+mod state_timers_test;
 use std::collections::BTreeMap;
 
 use serde_json::json;
@@ -448,6 +451,63 @@ async fn composite_integration_result_executes_declared_sub_writes() {
     );
 }
 
+/// The writes a module returns are its own picks, even when the move that set
+/// it off was a reaction: Cedar checks each as `via == "request"`, so a policy
+/// that admits only the moves a spec makes follow does not admit them.
+#[tokio::test]
+async fn a_composite_sub_write_is_the_modules_request_whatever_set_it_off() {
+    let state = composite_test_state();
+    let tenant = TenantId::default();
+    let mut agent = AgentContext::for_service("composite-test");
+    agent
+        .security_ctx
+        .as_mut()
+        .expect("a service has a security context")
+        .cause = Some(temper_authz::MoveCause::reaction(
+        temper_authz::ReactionHop {
+            rule: "Parent:Start:creates".to_string(),
+            action: "Start".to_string(),
+            entity_type: "Parent".to_string(),
+            entity_id: "parent-via".to_string(),
+        },
+        None,
+    ));
+
+    state
+        .authz
+        .reload_tenant_policies(
+            tenant.as_str(),
+            r#"
+                permit(
+                  principal is Agent,
+                  action == Action::"Create",
+                  resource is Child
+                ) when { context has via && context.via == "request" };
+                "#,
+        )
+        .expect("policy should load");
+
+    let applied = state
+        .apply_composite_integration_result(
+            &tenant,
+            "Parent",
+            "parent-via",
+            "CreateChild",
+            &json!({
+                "sub_writes": [{
+                    "entity_type": "Child",
+                    "entity_id": "child-via",
+                    "action": "Create",
+                    "params": { "Name": "picked by the module" }
+                }]
+            }),
+            &agent,
+        )
+        .await
+        .expect("the module's sub-write is checked as its request");
+    assert!(applied);
+}
+
 #[tokio::test]
 async fn composite_sub_write_authorization_receives_action_context() {
     let state = composite_test_state();
@@ -606,10 +666,13 @@ async fn composite_app_create_sub_write_authorization_can_enforce_owner_scope() 
                 role: None,
                 acting_for: None,
                 agent_type: None,
+                label: None,
                 attributes: std::collections::HashMap::new(),
             },
             context_attrs: std::collections::HashMap::new(),
             correlation_id: "composite-owner-scope".to_string(),
+            cause: None,
+            credential: None,
         }),
         ..Default::default()
     };
@@ -1025,7 +1088,9 @@ async fn parent_gated_pack_object_create_repairs_partial_existing_object() {
     let state = composite_test_state_with_store(store.clone());
     let tenant = TenantId::default();
     let mut agent = AgentContext::for_service("composite-test");
-    agent.idempotency_key = Some("legacy-partial-pack".to_string());
+    agent.idempotency_key = Some(crate::idempotency::IdempotencyKey::Request(
+        "legacy-partial-pack".to_string(),
+    ));
     let blob_id = "rp-test-abc123";
     let blob_pid = format!("default:Blob:{blob_id}");
 
@@ -1113,7 +1178,9 @@ async fn parent_gated_pack_object_create_skips_complete_existing_object() {
         }]
     });
 
-    agent.idempotency_key = Some("first-pack".to_string());
+    agent.idempotency_key = Some(crate::idempotency::IdempotencyKey::Request(
+        "first-pack".to_string(),
+    ));
     state
         .apply_composite_integration_result(
             &tenant,
@@ -1127,7 +1194,9 @@ async fn parent_gated_pack_object_create_skips_complete_existing_object() {
         .expect("first complete object write should append");
     let first_len = store.dump_journal(&blob_pid).len();
 
-    agent.idempotency_key = Some("second-pack".to_string());
+    agent.idempotency_key = Some(crate::idempotency::IdempotencyKey::Request(
+        "second-pack".to_string(),
+    ));
     state
         .apply_composite_integration_result(
             &tenant,
@@ -1417,14 +1486,22 @@ async fn composite_atomic_batch_allows_existing_sub_write_to_delete_target() {
             &agent,
         )
         .await
-        .expect("composite delete sub-write should commit without reloading a tombstone");
+        .expect("composite delete sub-write should commit");
     assert!(applied);
 
+    // Child's Delete is a spec move into a state named Deleted, not the
+    // kernel's tombstone: the record stays, read and listed as Deleted.
+    let child = state
+        .get_tenant_entity_state(&tenant, "Child", child_id)
+        .await
+        .expect("read the child after the batch");
+    assert_eq!(child.state.status, "Deleted");
     assert!(
-        !state.ensure_entity_loaded(&tenant, "Child", child_id).await,
-        "deleted composite sub-write target should not be reloaded as a live entity"
+        state
+            .list_entity_ids(&tenant, "Child")
+            .contains(&child_id.to_string()),
+        "a spec-Deleted batch target stays listed"
     );
-    assert!(!state.entity_exists(&tenant, "Child", child_id));
 
     let child_journal = store.dump_journal(&format!("default:Child:{child_id}"));
     assert_eq!(
@@ -1985,7 +2062,6 @@ async fn strict_composite_preflight_uses_defaults_and_sequential_target_state() 
         BackendLabel::Sim,
         &json!({}),
         None,
-        false,
     )
     .await
     .unwrap();

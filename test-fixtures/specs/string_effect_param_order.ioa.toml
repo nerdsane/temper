@@ -1,0 +1,41 @@
+# Shared by the actor adapter, server dispatch/replay, and verification cascade.
+[automaton]
+name = "StringRecord"
+states = ["Ready", "Written", "Read"]
+initial = "Ready"
+terminal = ["Read"]
+strict_action_params = true
+
+[[state]]
+name = "error"
+type = "string"
+initial = ""
+
+[[state]]
+name = "reason"
+type = "string"
+initial = "initial"
+
+[[action]]
+name = "Write"
+from = ["Ready"]
+to = "Written"
+params = ["error"]
+effect = ["error = ''", "reason = 'first'", "reason = 'last'"]
+[[action.constraints]]
+kind = "param_nonempty"
+param = "error"
+
+[[action]]
+name = "Read"
+from = ["Written"]
+to = "Read"
+guard = "!empty(error) && reason == 'last'"
+
+[[invariant]]
+name = "ParameterWinsOverStringEffect"
+assert = "status in ['Written', 'Read'] => !empty(error)"
+
+[[invariant]]
+name = "EffectsKeepDeclarationOrder"
+assert = "status in ['Written', 'Read'] => reason == 'last'"

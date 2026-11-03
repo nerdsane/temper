@@ -6,6 +6,7 @@
 #![allow(clippy::manual_async_fn)]
 
 use std::future::Future;
+use std::sync::Arc;
 
 use thiserror::Error;
 
@@ -16,6 +17,12 @@ mod database;
 pub(crate) use database::Database;
 mod handle;
 use handle::DriverHandle;
+#[cfg(debug_assertions)]
+mod plan_check;
+mod synced;
+use synced::ConnectionPool;
+pub(crate) use synced::TrimWriters;
+pub use synced::{CopyState, SyncCopy};
 
 /// Driver failures retain the original engine or transport error.
 #[derive(Debug, Error)]
@@ -28,6 +35,8 @@ pub(crate) enum DriverError {
     RemoteBusy(#[source] turso_serverless::Error),
     #[error("remote Turso transport failure: {0}")]
     RemoteTransport(#[source] turso_serverless::Error),
+    #[error("{0}")]
+    SyncSetup(String),
 }
 
 impl From<turso_serverless::Error> for DriverError {
@@ -47,13 +56,55 @@ impl From<turso_serverless::Error> for DriverError {
     }
 }
 
+/// One use of an embedded connection. Result streams and transactions hold a
+/// clone, so a pooled connection is reused only once nothing still uses it.
+pub(crate) type SharedConnection = Arc<Lease>;
+
+pub(crate) struct Lease {
+    conn: Arc<DriverHandle<'static, turso::Connection>>,
+    /// Held while the connection is in use, so a synced database's checkpoint
+    /// runs only when no statement can be running (see `SyncCopy`).
+    _in_use: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
+}
+
+impl Lease {
+    pub(super) fn new(
+        conn: Arc<DriverHandle<'static, turso::Connection>>,
+        in_use: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
+    ) -> SharedConnection {
+        Arc::new(Self {
+            conn,
+            _in_use: in_use,
+        })
+    }
+}
+
+impl std::ops::Deref for Lease {
+    type Target = turso::Connection;
+
+    fn deref(&self) -> &turso::Connection {
+        &self.conn
+    }
+}
+
 pub(crate) enum Connection {
-    Local(DriverHandle<'static, turso::Connection>),
+    Local {
+        conn: SharedConnection,
+        /// Where the connection goes back when dropped (synced databases).
+        pool: Option<ConnectionPool>,
+    },
     Remote(turso_serverless::Connection),
 }
 
 impl Drop for Connection {
     fn drop(&mut self) {
+        if let Self::Local {
+            conn,
+            pool: Some(pool),
+        } = self
+        {
+            pool.give_back(conn, &conn.conn);
+        }
         if let Self::Remote(conn) = self {
             // The SDK defers rollback to connection reuse. Store operations own
             // separate connections, so close the stream when their scope ends.
@@ -83,8 +134,10 @@ impl Connection {
         async move {
             let params = params.into_params()?;
             match self {
-                Self::Local(conn) => {
-                    Rows::local(conn.query(sql, local_params(params)).await?).await
+                Self::Local { conn, .. } => {
+                    #[cfg(debug_assertions)]
+                    plan_check::check(conn, sql).await;
+                    Rows::local(conn.query(sql, local_params(params)).await?, conn).await
                 }
                 Self::Remote(conn) => Ok(Rows::Remote(conn.query(sql, params).await?)),
             }
@@ -99,7 +152,11 @@ impl Connection {
         async move {
             let params = params.into_params()?;
             match self {
-                Self::Local(conn) => Ok(conn.execute(sql, local_params(params)).await?),
+                Self::Local { conn, .. } => {
+                    #[cfg(debug_assertions)]
+                    plan_check::check(conn, sql).await;
+                    Ok(conn.execute(sql, local_params(params)).await?)
+                }
                 Self::Remote(conn) => Ok(conn.execute(sql, params).await?),
             }
         }
@@ -111,13 +168,16 @@ impl Connection {
         async move {
             // Each store operation owns its connection. The SDK still refuses a nested transaction.
             match self {
-                Self::Local(conn) => Ok(Transaction::Local(DriverHandle::new(
-                    turso::transaction::Transaction::new_unchecked(
-                        conn,
-                        turso::transaction::TransactionBehavior::Immediate,
-                    )
-                    .await?,
-                ))),
+                Self::Local { conn, .. } => Ok(Transaction::Local(
+                    DriverHandle::new(
+                        turso::transaction::Transaction::new_unchecked(
+                            conn,
+                            turso::transaction::TransactionBehavior::Immediate,
+                        )
+                        .await?,
+                    ),
+                    conn.clone(),
+                )),
                 Self::Remote(conn) => Ok(Transaction::Remote(
                     turso_serverless::Transaction::new_unchecked(
                         conn,
@@ -131,7 +191,10 @@ impl Connection {
 }
 
 pub(crate) enum Transaction<'conn> {
-    Local(DriverHandle<'conn, turso::transaction::Transaction<'conn>>),
+    Local(
+        DriverHandle<'conn, turso::transaction::Transaction<'conn>>,
+        SharedConnection,
+    ),
     Remote(turso_serverless::Transaction<'conn>),
 }
 
@@ -144,7 +207,11 @@ impl Transaction<'_> {
         async move {
             let params = params.into_params()?;
             match self {
-                Self::Local(tx) => Rows::local(tx.query(sql, local_params(params)).await?).await,
+                Self::Local(tx, conn) => {
+                    #[cfg(debug_assertions)]
+                    plan_check::check(conn, sql).await;
+                    Rows::local(tx.query(sql, local_params(params)).await?, conn).await
+                }
                 Self::Remote(tx) => Ok(Rows::Remote(tx.query(sql, params).await?)),
             }
         }
@@ -158,7 +225,11 @@ impl Transaction<'_> {
         async move {
             let params = params.into_params()?;
             match self {
-                Self::Local(tx) => Ok(tx.execute(sql, local_params(params)).await?),
+                Self::Local(tx, _conn) => {
+                    #[cfg(debug_assertions)]
+                    plan_check::check(_conn, sql).await;
+                    Ok(tx.execute(sql, local_params(params)).await?)
+                }
                 Self::Remote(tx) => Ok(tx.execute(sql, params).await?),
             }
         }
@@ -167,7 +238,7 @@ impl Transaction<'_> {
     pub(crate) fn rollback(self) -> impl Future<Output = Result<(), DriverError>> + Send {
         async move {
             match self {
-                Self::Local(tx) => Ok(tx.into_inner().rollback().await?),
+                Self::Local(tx, _) => Ok(tx.into_inner().rollback().await?),
                 Self::Remote(tx) => Ok(tx.rollback().await?),
             }
         }
@@ -176,7 +247,7 @@ impl Transaction<'_> {
     pub(crate) fn commit(self) -> impl Future<Output = Result<(), DriverError>> + Send {
         async move {
             match self {
-                Self::Local(tx) => Ok(tx.into_inner().commit().await?),
+                Self::Local(tx, _) => Ok(tx.into_inner().commit().await?),
                 Self::Remote(tx) => Ok(tx.commit().await?),
             }
         }
@@ -187,18 +258,20 @@ pub(crate) enum Rows {
     Local {
         rows: DriverHandle<'static, turso::Rows>,
         first: Option<Row>,
+        _conn: SharedConnection,
     },
     Remote(turso_serverless::Rows),
     Exhausted,
 }
 
 impl Rows {
-    async fn local(mut rows: turso::Rows) -> Result<Self, DriverError> {
+    async fn local(mut rows: turso::Rows, conn: &SharedConnection) -> Result<Self, DriverError> {
         // Start the statement before returning, including PRAGMAs whose rows are discarded.
         match rows.next().await? {
             Some(row) => Ok(Self::Local {
                 rows: DriverHandle::new(rows),
                 first: Some(remote_row(row)?),
+                _conn: conn.clone(),
             }),
             None => Ok(Self::Exhausted),
         }
@@ -208,7 +281,7 @@ impl Rows {
         async move {
             let row = match self {
                 Self::Remote(rows) => rows.next().await?,
-                Self::Local { rows, first } => match first.take() {
+                Self::Local { rows, first, .. } => match first.take() {
                     Some(row) => Some(row),
                     None => rows.next().await?.map(remote_row).transpose()?,
                 },

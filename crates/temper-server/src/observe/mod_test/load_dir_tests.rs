@@ -59,6 +59,10 @@ async fn test_load_dir_registers_specs() {
     let summary = lines.last().unwrap();
     assert_eq!(summary["type"], "summary");
     assert_eq!(summary["tenant"], "test-tenant");
+    assert_eq!(
+        summary["committed"], false,
+        "no durable store, so nothing was committed: {summary}"
+    );
 
     // Verify specs are in the registry
     let registry = state.registry.read().unwrap();
@@ -432,4 +436,112 @@ async fn test_load_dir_emits_design_time_events() {
 
     let done_events: Vec<_> = events.iter().filter(|e| e.kind == "verify_done").collect();
     assert!(!done_events.is_empty(), "should have verify_done events");
+}
+
+/// Order that fails verification: `Complete` reaches Done with no items.
+const FAILING_ORDER_IOA: &str = r#"
+[automaton]
+name = "Order"
+states = ["Draft", "Done"]
+initial = "Draft"
+
+[[state]]
+name = "items"
+type = "counter"
+initial = 0
+
+[[action]]
+name = "AddItem"
+kind = "input"
+from = ["Draft"]
+effect = ["items += 1"]
+
+[[action]]
+name = "Complete"
+from = ["Draft"]
+to = "Done"
+
+[[invariant]]
+name = "DoneHasItems"
+assert = "status in ['Done'] => items > 0"
+"#;
+
+/// Load-inline one Order spec into a Turso-backed server and return the
+/// stream's summary line once verification has finished.
+async fn load_inline_order(db_url: &str, tenant: &str, ioa: &str) -> serde_json::Value {
+    let turso = TursoEventStore::new(db_url, None)
+        .await
+        .expect("create local turso db");
+    let mut state =
+        ServerState::from_registry(ActorSystem::new("test-restart"), SpecRegistry::new());
+    state.set_storage_stack(StorageStack::from_turso(turso));
+    install_admin_submit_specs_policy(&state, tenant);
+    let response = build_app_with_state(state)
+        .oneshot(with_tenant_security_context(
+            Request::post("/api/specs/load-inline")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "tenant": tenant,
+                        "specs": { "model.csdl.xml": CSDL_XML, "order.ioa.toml": ioa }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+            tenant,
+            admin_security_context(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
+        .await
+        .unwrap();
+    let summary = String::from_utf8_lossy(&body)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|line| line["type"] == "summary");
+    summary.expect("load-inline stream ends with a summary")
+}
+
+/// What a restarted server restores from the same database.
+async fn restored_order(db_url: &str, tenant: &str) -> bool {
+    let turso = TursoEventStore::new(db_url, None)
+        .await
+        .expect("reopen local turso db");
+    let mut registry = SpecRegistry::new();
+    crate::registry_bootstrap::restore_registry_from_turso(&mut registry, &turso)
+        .await
+        .expect("restore registry");
+    registry.get_spec(&TenantId::new(tenant), "Order").is_some()
+}
+
+#[tokio::test]
+async fn test_load_inline_verified_install_survives_restart() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let db_url = format!("file:{}", dir.path().join("temper.db").display());
+
+    let summary = load_inline_order(&db_url, "restart-tenant", ORDER_IOA).await;
+    assert_eq!(summary["all_passed"], true, "{summary}");
+
+    assert!(
+        restored_order(&db_url, "restart-tenant").await,
+        "a verified load-inline install must come back after restart without a reinstall"
+    );
+    assert_eq!(summary["committed"], true, "{summary}");
+}
+
+#[tokio::test]
+async fn test_load_inline_failed_install_is_dropped_at_restart() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let db_url = format!("file:{}", dir.path().join("temper.db").display());
+
+    let summary = load_inline_order(&db_url, "failed-tenant", FAILING_ORDER_IOA).await;
+    assert_eq!(summary["all_passed"], false, "{summary}");
+    assert_ne!(summary["committed"], true, "{summary}");
+
+    assert!(
+        !restored_order(&db_url, "failed-tenant").await,
+        "an install that failed verification must not come back half-installed"
+    );
 }

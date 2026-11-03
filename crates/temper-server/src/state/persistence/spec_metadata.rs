@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use sqlx::types::Json;
 use temper_store_turso::TursoSpecVerificationUpdate;
 
@@ -20,38 +22,71 @@ impl ServerState {
 
         match backend {
             TenantMetadataBackend::Postgres(store) => {
-                sqlx::query(
-                    &store.schema().qualify_sql("INSERT INTO {schema}specs \
-                     (tenant, entity_type, ioa_source, csdl_xml, version, verified, verification_status, updated_at) \
-                     VALUES ($1, $2, $3, $4, 1, false, 'pending', now()) \
-                     ON CONFLICT (tenant, entity_type) DO UPDATE SET \
-                         ioa_source = EXCLUDED.ioa_source, \
-                         csdl_xml = EXCLUDED.csdl_xml, \
-                         version = specs.version + 1, \
-                         verified = false, \
-                         verification_status = 'pending', \
-                         levels_passed = NULL, \
-                         levels_total = NULL, \
-                         verification_result = NULL, \
-                         updated_at = now()"),
-                )
-                .bind(tenant)
-                .bind(entity_type)
-                .bind(ioa_source)
-                .bind(csdl_xml)
-                .execute(store.pool())
-                .await
-                .map(|_| ())
-                .map_err(|e| format!("failed to upsert spec {tenant}/{entity_type} in postgres: {e}"))
+                let hash = temper_store_turso::spec_content_hash(ioa_source);
+                store
+                    .upsert_spec(tenant, entity_type, ioa_source, csdl_xml, &hash)
+                    .await
+                    .map_err(|e| {
+                        format!("failed to upsert spec {tenant}/{entity_type} in postgres: {e}")
+                    })
             }
             TenantMetadataBackend::Turso(turso) => {
                 let hash = temper_store_turso::spec_content_hash(ioa_source);
                 turso
                     .upsert_spec(tenant, entity_type, ioa_source, csdl_xml, &hash)
                     .await
-                    .map_err(|e| format!("failed to upsert spec {tenant}/{entity_type} in turso: {e}"))
+                    .map_err(|e| {
+                        format!("failed to upsert spec {tenant}/{entity_type} in turso: {e}")
+                    })
             }
-            TenantMetadataBackend::Redis => Err(Self::redis_ephemeral_error("Spec source persistence")),
+            TenantMetadataBackend::Redis => {
+                Err(Self::redis_ephemeral_error("Spec source persistence"))
+            }
+        }
+    }
+
+    /// Commit an install whose specs all passed verification: exactly these
+    /// sources with this CSDL, plus the removal of `removed` types (a
+    /// replace-mode load dropped them), in one transaction. Returns whether
+    /// the install is now committed (false: another install replaced a row
+    /// first), or `None` when no durable backend is configured.
+    pub async fn commit_spec_sources(
+        &self,
+        tenant: &str,
+        ioa_sources: &BTreeMap<String, String>,
+        csdl_xml: &str,
+        removed: &[String],
+    ) -> Result<Option<bool>, String> {
+        let Some(backend) = self.tenant_metadata_backend(tenant).await else {
+            return Ok(None);
+        };
+        let hashes: Vec<(&str, String)> = ioa_sources
+            .iter()
+            .map(|(entity_type, ioa_source)| {
+                (
+                    entity_type.as_str(),
+                    temper_store_turso::spec_content_hash(ioa_source),
+                )
+            })
+            .collect();
+        let versions: Vec<(&str, &str, &str)> = hashes
+            .iter()
+            .map(|(entity_type, hash)| (*entity_type, hash.as_str(), csdl_xml))
+            .collect();
+        let removed: Vec<&str> = removed.iter().map(String::as_str).collect();
+
+        match backend {
+            TenantMetadataBackend::Postgres(store) => store
+                .commit_spec_versions(tenant, &versions, &removed)
+                .await
+                .map(Some)
+                .map_err(|e| format!("failed to commit specs for {tenant} in postgres: {e}")),
+            TenantMetadataBackend::Turso(turso) => turso
+                .commit_spec_versions(tenant, &versions, &removed)
+                .await
+                .map(Some)
+                .map_err(|e| format!("failed to commit specs for {tenant} in turso: {e}")),
+            TenantMetadataBackend::Redis => Err(Self::redis_ephemeral_error("Spec commit")),
         }
     }
 

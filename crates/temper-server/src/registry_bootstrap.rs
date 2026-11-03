@@ -162,19 +162,32 @@ fn restored_csdl_for_rows<R>(
     }))
 }
 
+/// Restore every tenant in `grouped` into `registry`.
+///
+/// Each tenant's rows belong to that tenant alone, so a tenant whose stored
+/// CSDL or constraints do not load is logged, marked unavailable in the
+/// registry and left out; every other tenant is still restored. Its rows stay
+/// in the store untouched, so once they are fixed the next start restores it.
+/// Only store-level read failures, handled by the callers, stop a restore.
 fn populate_registry<R: SpecRowLike>(
     registry: &mut SpecRegistry,
     grouped: BTreeMap<String, Vec<R>>,
     constraints_by_tenant: &mut BTreeMap<String, String>,
     get_csdl: impl Fn(&R) -> Option<String>,
     get_ioa: impl Fn(&R) -> (String, String),
-) -> Result<usize, String> {
+) -> usize {
     let mut restored_specs = 0usize;
     for (tenant, tenant_rows) in grouped {
-        let Some((csdl, csdl_xml)) = restored_csdl_for_rows(&tenant, &tenant_rows, &get_csdl)?
-        else {
-            tracing::warn!(tenant = %tenant, "skipping restored tenant due to missing CSDL");
-            continue;
+        let (csdl, csdl_xml) = match restored_csdl_for_rows(&tenant, &tenant_rows, &get_csdl) {
+            Ok(Some(restored)) => restored,
+            Ok(None) => {
+                tracing::warn!(tenant = %tenant, "skipping restored tenant due to missing CSDL");
+                continue;
+            }
+            Err(reason) => {
+                mark_unrestorable(registry, &tenant, reason);
+                continue;
+            }
         };
 
         // A stored spec in the old predicate syntax is converted in memory; one
@@ -197,16 +210,21 @@ fn populate_registry<R: SpecRowLike>(
             .collect();
 
         let cross_invariants_toml = constraints_by_tenant.remove(&tenant);
-        registry
-            .try_register_tenant_with_constraints(
-                tenant.as_str(),
-                csdl,
-                csdl_xml,
-                &ioa_pairs,
-                cross_invariants_toml,
-                false,
-            )
-            .map_err(|e| format!("Failed to restore tenant '{tenant}' into registry: {e}"))?;
+        if let Err(error) = registry.try_register_tenant_with_constraints(
+            tenant.as_str(),
+            csdl,
+            csdl_xml,
+            &ioa_pairs,
+            cross_invariants_toml,
+            false,
+        ) {
+            mark_unrestorable(
+                registry,
+                &tenant,
+                format!("Failed to restore tenant '{tenant}' into registry: {error}"),
+            );
+            continue;
+        }
         let tenant_id = TenantId::new(&tenant);
         for row in &tenant_rows {
             let entity_type = get_ioa(row).0;
@@ -220,7 +238,17 @@ fn populate_registry<R: SpecRowLike>(
             restored_specs += 1;
         }
     }
-    Ok(restored_specs)
+    restored_specs
+}
+
+/// Log a tenant whose stored rows do not load and mark it unavailable.
+fn mark_unrestorable(registry: &mut SpecRegistry, tenant: &str, reason: String) {
+    tracing::error!(
+        tenant,
+        %reason,
+        "stored specs for this tenant do not load; the tenant is unavailable until they are fixed, every other tenant is restored"
+    );
+    registry.mark_tenant_unavailable(tenant, reason);
 }
 
 /// Restore a [`SpecRegistry`] from Postgres.
@@ -237,10 +265,24 @@ pub async fn restore_registry_from_postgres_store(
     registry: &mut SpecRegistry,
     store: &temper_store_postgres::PostgresEventStore,
 ) -> Result<usize, String> {
+    // Same rule as Turso: restore loads each type's committed version.
+    match store.delete_uncommitted_specs().await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(
+            "discarded {n} uncommitted spec versions during startup recovery; types with a committed version keep it"
+        ),
+        Err(e) => tracing::warn!("failed to discard uncommitted spec versions: {e}"),
+    }
     let rows: Vec<PersistedSpecRow> = sqlx::query_as(&store.schema().qualify_sql(
         "SELECT tenant, entity_type, ioa_source, csdl_xml, verification_status, verified, \
                 levels_passed, levels_total, verification_result, updated_at \
-         FROM {schema}specs \
+         FROM {schema}specs WHERE committed = true \
+         UNION ALL \
+         SELECT tenant, entity_type, ioa_source, csdl_xml, verification_status, verified, \
+                levels_passed, levels_total, verification_result, updated_at \
+         FROM {schema}spec_committed_versions AS b WHERE NOT EXISTS ( \
+             SELECT 1 FROM {schema}specs AS s \
+             WHERE s.tenant = b.tenant AND s.entity_type = b.entity_type AND s.committed = true) \
          ORDER BY tenant, entity_type",
     ))
     .fetch_all(store.pool())
@@ -276,13 +318,13 @@ pub async fn restore_registry_from_postgres_store(
         grouped.entry(row.tenant.clone()).or_default().push(row);
     }
 
-    populate_registry(
+    Ok(populate_registry(
         registry,
         grouped,
         &mut constraints_by_tenant,
         |rows| rows.csdl_xml.clone(),
         |row| (row.entity_type.clone(), row.ioa_source.clone()),
-    )
+    ))
 }
 
 /// Restore a [`SpecRegistry`] from Turso.
@@ -290,11 +332,13 @@ pub async fn restore_registry_from_turso(
     registry: &mut SpecRegistry,
     turso: &TursoEventStore,
 ) -> Result<usize, String> {
-    // GC uncommitted specs left behind by interrupted install_os_app writes.
+    // Discard uncommitted spec versions left by failed or interrupted installs.
     match turso.delete_uncommitted_specs().await {
         Ok(0) => {}
-        Ok(n) => tracing::info!("deleted {n} uncommitted specs during startup recovery"),
-        Err(e) => tracing::warn!("failed to delete uncommitted specs: {e}"),
+        Ok(n) => tracing::info!(
+            "discarded {n} uncommitted spec versions during startup recovery; types with a committed version keep it"
+        ),
+        Err(e) => tracing::warn!("failed to discard uncommitted spec versions: {e}"),
     }
     let rows = turso
         .load_specs()
@@ -319,13 +363,13 @@ pub async fn restore_registry_from_turso(
         grouped.entry(row.tenant.clone()).or_default().push(row);
     }
 
-    populate_registry(
+    Ok(populate_registry(
         registry,
         grouped,
         &mut constraints_by_tenant,
         |rows| rows.csdl_xml.clone(),
         |row| (row.entity_type.clone(), row.ioa_source.clone()),
-    )
+    ))
 }
 
 /// Restore a [`SpecRegistry`] from a [`PlatformStore`] (trait-based).
@@ -343,8 +387,10 @@ pub async fn restore_registry_from_platform_store(
 ) -> Result<usize, String> {
     match store.delete_uncommitted_specs().await {
         Ok(0) => {}
-        Ok(n) => tracing::info!("deleted {n} uncommitted specs during startup recovery"),
-        Err(e) => tracing::warn!("failed to delete uncommitted specs: {e}"),
+        Ok(n) => tracing::info!(
+            "discarded {n} uncommitted spec versions during startup recovery; types with a committed version keep it"
+        ),
+        Err(e) => tracing::warn!("failed to discard uncommitted spec versions: {e}"),
     }
     let rows = store
         .load_specs()
@@ -504,6 +550,7 @@ async fn persist_converted_specs(
             BTreeMap::new()
         });
     let mut carry_verification = Vec::new();
+    let mut written: Vec<(&str, String, &str)> = Vec::new();
     for (row, source) in converted {
         let hash = temper_store_turso::spec_content_hash(source);
         let csdl_xml = row.csdl_xml.as_deref().unwrap_or_default();
@@ -514,6 +561,7 @@ async fn persist_converted_specs(
             tracing::warn!(tenant, entity_type = %row.entity_type, %error, "failed to store converted spec");
             continue;
         }
+        written.push((row.entity_type.as_str(), hash, csdl_xml));
         if verified_before
             .get(&row.entity_type)
             .is_some_and(|(cached_hash, verified)| *verified && *cached_hash == row.content_hash)
@@ -539,10 +587,16 @@ async fn persist_converted_specs(
             tracing::warn!(tenant, entity_type, %error, "failed to carry verification to converted spec");
         }
     }
-    // upsert_spec marks a changed row uncommitted, and uncommitted rows are
-    // deleted at the next startup.
-    if let Err(error) = store.commit_specs(tenant).await {
-        tracing::warn!(tenant, %error, "failed to commit converted specs");
+    // upsert_spec marks a changed row uncommitted; commit exactly the
+    // converted rows, or restore keeps loading the stored version.
+    let versions: Vec<(&str, &str, &str)> = written
+        .iter()
+        .map(|(entity_type, hash, csdl_xml)| (*entity_type, hash.as_str(), *csdl_xml))
+        .collect();
+    match store.commit_spec_versions(tenant, &versions, &[]).await {
+        Ok(true) => {}
+        Ok(false) => tracing::warn!(tenant, "converted specs changed before commit"),
+        Err(error) => tracing::warn!(tenant, %error, "failed to commit converted specs"),
     }
 }
 

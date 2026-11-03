@@ -1,0 +1,48 @@
+# Late Delivery — a spec no legal execution can break.
+#
+# A regression fixture, not a model of anything real. Its invariant holds in
+# every execution that only ever applies actions where they are enabled, so a
+# reported violation is proof that the checker applied one where it was not.
+#
+# The shape that makes that work: `Mark` is the only writer of `flag = true`
+# and is legal only in `Open`; `Seal` clears `flag` on the way into `Sealed`;
+# nothing in `Sealed` writes `flag`. So `Sealed` always implies `!flag` --
+# unless a `Mark` chosen while the actor was in `Open` is delivered after it
+# has already sealed, which is exactly the fault the simulator injects.
+
+[automaton]
+name = "LateDelivery"
+states = ["Open", "Sealed"]
+initial = "Open"
+allow_indefinite_states = ["Open", "Sealed"]
+
+[[state]]
+name = "flag"
+type = "bool"
+initial = false
+
+[[action]]
+name = "Mark"
+kind = "input"
+from = ["Open"]
+effect = ["flag = true"]
+hint = "Set the flag. Legal only while Open. Declares no `to`, so it leaves the status alone -- with a `to` it would reset the status on delivery and mask the very mismatch this fixture exists to catch."
+
+[[action]]
+name = "Seal"
+kind = "input"
+from = ["Open"]
+to = "Sealed"
+effect = ["flag = false"]
+hint = "Seal the entity, clearing the flag as it goes."
+
+[[action]]
+name = "Unseal"
+kind = "input"
+from = ["Sealed"]
+to = "Open"
+hint = "Reopen, so exploration does not dead-end in Sealed."
+
+[[invariant]]
+name = "SealedMeansFlagClear"
+assert = "status == 'Sealed' => !flag"

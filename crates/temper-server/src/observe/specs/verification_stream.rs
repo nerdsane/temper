@@ -8,14 +8,23 @@ use temper_runtime::scheduler::sim_now;
 use crate::registry::VerificationStatus;
 use crate::state::ServerState;
 
-use super::verification_cached::{cached_verification_line, restore_unchanged_verification};
+use super::kept;
+
+/// An install that is committed once every spec in it verifies.
+pub(super) struct PendingInstall {
+    /// Entity type to IOA source.
+    pub(super) ioa_sources: BTreeMap<String, String>,
+    /// The CSDL persisted with each spec row.
+    pub(super) csdl_xml: String,
+    /// Types a replace-mode load dropped; their rows go when it commits.
+    pub(super) removed_types: Vec<String>,
+}
 
 pub(super) fn build_verification_stream_response(
     state: ServerState,
     tenant: String,
     entity_names: Vec<String>,
-    ioa_sources: BTreeMap<String, String>,
-    cached_verification: BTreeMap<String, crate::registry::EntityVerificationResult>,
+    install: PendingInstall,
     lint_warning_lines: Vec<serde_json::Value>,
     cross_lint_warning_lines: Vec<serde_json::Value>,
 ) -> axum::response::Response {
@@ -56,15 +65,6 @@ pub(super) fn build_verification_stream_response(
             std::collections::BTreeMap::new();
 
         for entity_name in &entity_names {
-            if let Some(cached) = cached_verification.get(entity_name) {
-                restore_unchanged_verification(&state_for_task, &tenant, entity_name, cached);
-                let _ = tx
-                    .send(Ok(cached_verification_line(entity_name, cached)))
-                    .await;
-                entity_results.insert(entity_name.clone(), cached.all_passed);
-                continue;
-            }
-
             // Emit design-time events for UI (spec_loaded + verify_started)
             let loaded_event = crate::state::DesignTimeEvent {
                 kind: "spec_loaded".to_string(),
@@ -153,23 +153,39 @@ pub(super) fn build_verification_stream_response(
                         + "\n"))
                 .await;
 
-            // Run verification: in subprocess (if configured) or in-process.
-            let ioa_source = ioa_sources[entity_name].clone();
+            // A passing verdict kept for what the levels read, else the
+            // check, in a subprocess (if configured) or in-process.
+            let ioa_source = install.ioa_sources[entity_name].clone();
+            let check = {
+                let ioa_source = ioa_source.clone();
+                move || {
+                    temper_verify::VerificationCascade::from_ioa(&ioa_source)
+                        .with_sim_seeds(5)
+                        .with_prop_test_cases(100)
+                }
+            };
+            let key = kept::key(check.clone()).await;
+            let kept_result = match &key {
+                Some(key) => kept::kept(&state_for_task, key).await,
+                None => None,
+            };
             let result: Result<temper_verify::CascadeResult, String> =
-                if let Some(bin) = state_for_task.verify_subprocess_bin.as_deref() {
+                if let Some(kept_result) = kept_result {
+                    Ok(kept_result)
+                } else if let Some(bin) = state_for_task.verify_subprocess_bin.as_deref() {
                     tracing::debug!(entity = %entity_name, "running verification in subprocess");
                     crate::observe::subprocess_verify::verify_in_subprocess(bin, &ioa_source).await
                 } else {
-                    tokio::task::spawn_blocking(move || {
-                        // determinism-ok: HTTP handler offloads CPU-intensive verification
-                        temper_verify::VerificationCascade::from_ioa(&ioa_source)
-                            .with_sim_seeds(5)
-                            .with_prop_test_cases(100)
-                            .run()
-                    })
-                    .await
-                    .map_err(|e| e.to_string())
+                    // determinism-ok: HTTP handler offloads CPU-intensive verification
+                    tokio::task::spawn_blocking(move || check().run())
+                        .await
+                        .map_err(|e| e.to_string())
                 };
+            if let (Ok(result), Some(key)) = (&result, &key)
+                && result.kept.is_none()
+            {
+                kept::keep(&state_for_task, &key.digest, result).await;
+            }
 
             let level_labels = [
                 "L0_symbolic",
@@ -325,6 +341,8 @@ pub(super) fn build_verification_stream_response(
                                 "type": "verification_result",
                                 "entity": entity_name,
                                 "all_passed": cascade_result.all_passed,
+                                "cached": cascade_result.kept.is_some(),
+                                "kept": &cascade_result.kept,
                                 "levels": levels_json,
                             }))
                             .unwrap() // ci-ok: infallible serialization
@@ -466,13 +484,37 @@ pub(super) fn build_verification_stream_response(
             }
         }
 
-        // Stream final summary
+        // Only an install whose every spec passed is committed, so restart
+        // recovery brings it back; anything else is dropped at the next boot.
         let all_passed = entity_results.values().all(|&p| p);
+        let (committed, commit_error) = if all_passed {
+            match state_for_task
+                .commit_spec_sources(
+                    &tenant,
+                    &install.ioa_sources,
+                    &install.csdl_xml,
+                    &install.removed_types,
+                )
+                .await
+            {
+                Ok(committed) => (committed == Some(true), None),
+                Err(e) => {
+                    tracing::error!(tenant = %tenant, error = %e, "failed to commit verified specs");
+                    (false, Some(e))
+                }
+            }
+        } else {
+            (false, None)
+        };
+
+        // Stream final summary
         let _ = tx
             .send(Ok(serde_json::to_string(&serde_json::json!({
                     "type": "summary",
                     "tenant": &tenant,
                     "all_passed": all_passed,
+                    "committed": committed,
+                    "commit_error": commit_error,
                     "entities": entity_results,
                 }))
                 .unwrap() // ci-ok: infallible serialization

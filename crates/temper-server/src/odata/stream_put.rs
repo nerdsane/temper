@@ -12,13 +12,18 @@ use tracing::instrument;
 
 use super::authz::{MutationResource, UPDATE_ACTION, authorize_mutation};
 use super::common::{
-    check_has_stream_or_400, resolve_entity_type, resolve_value_parent, verification_gate_response,
+    authorized_snapshot_failure, check_has_stream_or_400, resolve_entity_type,
+    resolve_value_parent, verification_gate_response,
 };
 use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::entity_actor::EntityResponse;
 use crate::request_context::AgentContext;
 use crate::response::odata_error;
+use crate::state::redecide::Redecide;
 use crate::state::{DispatchCommand, FileStreamContentError, ServerState};
+
+mod file_body;
+pub(super) use file_body::{handle_file_value_put, streamed_file_target};
 
 type ODataStreamPutError = Box<axum::response::Response>;
 
@@ -146,150 +151,165 @@ pub(super) async fn handle_stream_put(
         };
     }
 
-    let snapshot = match state
-        .load_authz_resource_snapshot(tenant, &entity_type, &key)
-        .await
-    {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            return odata_error(StatusCode::INTERNAL_SERVER_ERROR, "ReadError", &error)
-                .into_response();
-        }
-    };
-    if let Err(response) = authorize_mutation(
-        state,
-        tenant,
-        security_ctx,
-        agent_ctx,
-        UPDATE_ACTION,
-        MutationResource {
-            entity_type: &entity_type,
-            entity_id: &key,
-            attrs: &snapshot.resource_attrs,
-        },
-    )
-    .await
-    {
-        return response;
-    }
-    if let Err(resp) = check_verification_gate_or_423(state, tenant, &entity_type) {
-        return *resp;
-    }
-
-    let snapshot = match state
-        .materialize_authorized_snapshot(tenant, &entity_type, &key, snapshot)
-        .await
-    {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            return odata_error(
-                if matches!(error, crate::state::DispatchError::Conflict(_)) {
-                    StatusCode::CONFLICT
-                } else {
-                    StatusCode::INTERNAL_SERVER_ERROR
-                },
-                "AuthorizationStateChanged",
-                &error.to_string(),
-            )
-            .into_response();
-        }
-    };
-    let expected_authorization_precondition =
-        crate::entity_actor::effects::entity_authorization_precondition(
-            &snapshot.current_state.state,
-        );
-
-    if entity_type == "File" {
-        return match state
-            .put_file_stream_content_checked(
-                tenant,
-                &key,
-                body.as_ref(),
-                &content_type,
-                agent_ctx,
-                Some(expected_authorization_precondition),
-            )
+    let mut redecide = Redecide::start(state);
+    loop {
+        let snapshot = match state
+            .load_authz_resource_snapshot(tenant, &entity_type, &key)
             .await
         {
-            Ok(entity_resp) => stream_put_success_response(&entity_resp),
-            Err(error) => file_stream_content_error_response(error),
-        };
-    }
-
-    let mut entity_state = serde_json::to_value(&snapshot.current_state.state).unwrap_or_default();
-    hydrate_blob_refs_for_tenant(state, tenant, &mut entity_state).await;
-
-    let size_bytes = body.len() as i64;
-    let stream_id = format!("upload-{}", temper_runtime::scheduler::sim_uuid());
-    let streams = Arc::new(RwLock::new(StreamRegistry::default()));
-    {
-        let mut s = match streams.write() {
-            Ok(lock) => lock,
-            Err(_) => {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
                 return odata_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "StreamRegistryPoisoned",
-                    "stream registry lock was poisoned",
+                    "ReadError",
+                    &error.to_string(),
                 )
                 .into_response();
             }
         };
-        s.register_stream(&stream_id, body.to_vec());
-    }
-
-    let inv_ctx = WasmInvocationContext {
-        tenant: tenant.to_string(),
-        entity_type: entity_type.clone(),
-        entity_id: key.clone(),
-        trigger_action: "StreamUpload".to_string(),
-        wasm_module: Some("blob_adapter".to_string()),
-        trigger_params: serde_json::json!({
-            "stream_id": stream_id,
-            "size_bytes": size_bytes,
-            "content_type": content_type,
-            "operation": "put",
-        }),
-        entity_state,
-        agent_id: agent_ctx.agent_id.clone(),
-        session_id: agent_ctx.session_id.clone(),
-        integration_config: std::collections::BTreeMap::new(),
-        trace_id: agent_ctx.trace_id.clone().unwrap_or_default(),
-        workflow_root_entity_type: agent_ctx.workflow_root_entity_type.clone(),
-        workflow_root_entity_id: agent_ctx.workflow_root_entity_id.clone(),
-        workflow_run_id: agent_ctx.workflow_run_id.clone(),
-        http_request: None,
-    };
-
-    let wasm_result = match state
-        .invoke_wasm_direct(tenant, "blob_adapter", inv_ctx, streams, security_ctx)
+        if let Err(response) = authorize_mutation(
+            state,
+            tenant,
+            security_ctx,
+            agent_ctx,
+            UPDATE_ACTION,
+            MutationResource {
+                entity_type: &entity_type,
+                entity_id: &key,
+                attrs: &snapshot.resource_attrs,
+            },
+        )
         .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!(error = %e, "WASM blob_adapter invocation failed");
+        {
+            return response;
+        }
+        if let Err(resp) = check_verification_gate_or_423(state, tenant, &entity_type) {
+            return *resp;
+        }
+
+        let snapshot = match state
+            .materialize_authorized_snapshot(tenant, &entity_type, &key, snapshot)
+            .await
+        {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                // A conflict is the record created, differently than Cedar read
+                // it, while it was decided.
+                let changed = matches!(error, crate::state::DispatchError::Conflict(_));
+                if redecide.again(changed, "stream_put") {
+                    continue;
+                }
+                return authorized_snapshot_failure(&error).into_response();
+            }
+        };
+        let decided_on = crate::entity_actor::effects::entity_authorization_precondition(
+            &snapshot.current_state.state,
+        );
+
+        if entity_type == "File" {
+            // The bytes go under their hash, so writing them again on a later
+            // decision stores the same blob.
+            redecide.dispatching().await;
+            let answer = state
+                .put_file_stream_content_checked(
+                    tenant,
+                    &key,
+                    body.as_ref(),
+                    &content_type,
+                    agent_ctx,
+                    Some(decided_on),
+                )
+                .await;
+            if let Ok(entity_resp) = &answer
+                && redecide.again(entity_resp.is_record_changed(), "stream_put")
+            {
+                continue;
+            }
+            return match answer {
+                Ok(entity_resp) => stream_put_success_response(&entity_resp),
+                Err(error) => file_stream_content_error_response(error),
+            };
+        }
+
+        let mut entity_state =
+            serde_json::to_value(&snapshot.current_state.state).unwrap_or_default();
+        hydrate_blob_refs_for_tenant(state, tenant, &mut entity_state).await;
+
+        let size_bytes = body.len() as i64;
+        let stream_id = format!("upload-{}", temper_runtime::scheduler::sim_uuid());
+        let streams = Arc::new(RwLock::new(StreamRegistry::default()));
+        {
+            let mut s = match streams.write() {
+                Ok(lock) => lock,
+                Err(_) => {
+                    return odata_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "StreamRegistryPoisoned",
+                        "stream registry lock was poisoned",
+                    )
+                    .into_response();
+                }
+            };
+            s.register_stream(&stream_id, body.to_vec());
+        }
+
+        let inv_ctx = WasmInvocationContext {
+            tenant: tenant.to_string(),
+            entity_type: entity_type.clone(),
+            entity_id: key.clone(),
+            trigger_action: "StreamUpload".to_string(),
+            wasm_module: Some("blob_adapter".to_string()),
+            trigger_params: serde_json::json!({
+                "stream_id": stream_id,
+                "size_bytes": size_bytes,
+                "content_type": content_type,
+                "operation": "put",
+            }),
+            entity_state,
+            agent_id: agent_ctx.agent_id.clone(),
+            session_id: agent_ctx.session_id.clone(),
+            integration_config: std::collections::BTreeMap::new(),
+            trace_id: agent_ctx.trace_id.clone().unwrap_or_default(),
+            workflow_root_entity_type: agent_ctx.workflow_root_entity_type.clone(),
+            workflow_root_entity_id: agent_ctx.workflow_root_entity_id.clone(),
+            workflow_run_id: agent_ctx.workflow_run_id.clone(),
+            http_request: None,
+            trigger_principal: None,
+        };
+
+        let wasm_result = match state
+            .invoke_wasm_direct(tenant, "blob_adapter", inv_ctx, streams, security_ctx)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(error = %e, "WASM blob_adapter invocation failed");
+                return odata_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "BlobAdapterError",
+                    &format!("Blob adapter failed: {e}"),
+                )
+                .into_response();
+            }
+        };
+
+        if !wasm_result.success {
+            let error_msg = wasm_result
+                .error
+                .unwrap_or_else(|| "unknown error".to_string());
             return odata_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "BlobAdapterError",
-                &format!("Blob adapter failed: {e}"),
+                "BlobUploadFailed",
+                &error_msg,
             )
             .into_response();
         }
-    };
 
-    if !wasm_result.success {
-        let error_msg = wasm_result
-            .error
-            .unwrap_or_else(|| "unknown error".to_string());
-        return odata_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "BlobUploadFailed",
-            &error_msg,
-        )
-        .into_response();
-    }
-
-    if !wasm_result.callback_action.is_empty() {
-        match state
+        if wasm_result.callback_action.is_empty() {
+            return StatusCode::NO_CONTENT.into_response();
+        }
+        redecide.dispatching().await;
+        let answer = state
             .dispatch_tenant_action_ext_typed_if_current(
                 DispatchCommand {
                     tenant,
@@ -301,17 +321,22 @@ pub(super) async fn handle_stream_put(
                     await_integration: false,
                     await_reactions: true,
                 },
-                expected_authorization_precondition,
+                // The upload module callback is a kernel follow-on.
+                crate::state::write_record::WriteCaller::Kernel,
+                decided_on,
             )
-            .await
+            .await;
+        if let Ok(entity_resp) = &answer
+            && redecide.again(entity_resp.is_record_changed(), "stream_put")
         {
+            continue;
+        }
+        return match answer {
             Ok(entity_resp) => stream_put_success_response(&entity_resp),
             Err(e) => {
                 odata_error(StatusCode::CONFLICT, "ActionRejected", &e.to_string()).into_response()
             }
-        }
-    } else {
-        StatusCode::NO_CONTENT.into_response()
+        };
     }
 }
 

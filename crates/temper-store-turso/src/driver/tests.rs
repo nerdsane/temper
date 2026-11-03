@@ -14,7 +14,7 @@ async fn driver_futures_remain_send_and_lazy() {
     drop(send(Database::remote("https://db.invalid", "unused")));
 
     let db = send(Database::local(":memory:")).await.unwrap();
-    let conn = db.connect().unwrap();
+    let conn = db.connect().await.unwrap();
     send(conn.execute("CREATE TABLE lazy_values(id INTEGER PRIMARY KEY)", ()))
         .await
         .unwrap();
@@ -97,7 +97,7 @@ async fn local_connection_waits_for_a_contended_write_lock() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("contention.db");
     let db = Database::local(path.to_str().unwrap()).await.unwrap();
-    let owner = db.connect().unwrap();
+    let owner = db.connect().await.unwrap();
     owner
         .execute("CREATE TABLE committed_values(id INTEGER PRIMARY KEY)", ())
         .await
@@ -107,7 +107,7 @@ async fn local_connection_waits_for_a_contended_write_lock() {
         .await
         .unwrap();
 
-    let contender = db.connect().unwrap();
+    let contender = db.connect().await.unwrap();
     let write = contender.execute("INSERT INTO committed_values VALUES (2)", ());
     tokio::pin!(write);
     assert!(
@@ -131,7 +131,7 @@ async fn local_connection_waits_for_a_contended_write_lock() {
 #[tokio::test]
 async fn local_rows_preserve_positional_and_named_values() {
     let db = Database::local(":memory:").await.unwrap();
-    let conn = db.connect().unwrap();
+    let conn = db.connect().await.unwrap();
     let mut rows = conn
         .query(
             "SELECT ?1, ?2, ?3, ?4, ?5",
@@ -164,7 +164,7 @@ async fn local_rows_preserve_positional_and_named_values() {
 #[tokio::test]
 async fn failed_transaction_rolls_back_before_next_connection_use() {
     let db = Database::local(":memory:").await.unwrap();
-    let conn = db.connect().unwrap();
+    let conn = db.connect().await.unwrap();
     conn.execute("CREATE TABLE values_to_commit(id INTEGER PRIMARY KEY)", ())
         .await
         .unwrap();
@@ -206,7 +206,7 @@ async fn failed_transaction_rolls_back_before_next_connection_use() {
 #[tokio::test]
 async fn query_executes_configuration_even_when_rows_are_discarded() {
     let db = Database::local(":memory:").await.unwrap();
-    let conn = db.connect().unwrap();
+    let conn = db.connect().await.unwrap();
     drop(conn.query("PRAGMA user_version=17", ()).await.unwrap());
     let mut rows = conn.query("PRAGMA user_version", ()).await.unwrap();
     assert_eq!(
@@ -278,7 +278,7 @@ async fn dropping_remote_connection_closes_its_transaction_stream() {
         .await;
 
     let db = Database::remote(&server.uri(), "test-token").await.unwrap();
-    let conn = db.connect().unwrap();
+    let conn = db.connect().await.unwrap();
     let tx = conn.begin_immediate().await.unwrap();
     drop(tx);
     drop(conn);

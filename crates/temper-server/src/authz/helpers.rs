@@ -231,11 +231,7 @@ pub(crate) async fn require_governed_mutation_auth(
             .get("sessionId")
             .and_then(|value| value.as_str())
     });
-    if matches!(
-        security_ctx.principal.kind,
-        temper_authz::PrincipalKind::Agent
-    ) && session_id.is_some()
-    {
+    if denial_can_be_answered(security_ctx, session_id) {
         let resource_attrs_json =
             serde_json::to_value(&input.resource_attrs).unwrap_or_else(|_| serde_json::json!({}));
         let pd = record_authz_denial(
@@ -281,22 +277,105 @@ pub(crate) async fn require_governed_mutation_auth(
     Some((StatusCode::FORBIDDEN, reason))
 }
 
+/// Whether a refused request can become a decision that someone answers: an
+/// agent's, in a session that waits for the answer. `declared_session` is the
+/// session the request named; a session a server-side path minted itself is
+/// read from `context_attrs` (the WASM and agent dispatch contexts carry one
+/// there, not in a header). A decision with no one to answer it never
+/// resolves, so anyone else's refusal is a plain 403 with no decision.
+pub(crate) fn denial_can_be_answered(
+    security_ctx: &SecurityContext,
+    declared_session: Option<&str>,
+) -> bool {
+    security_ctx.principal.kind == temper_authz::PrincipalKind::Agent
+        && (declared_session.is_some() || security_ctx.context_attrs.contains_key("sessionId"))
+}
+
+/// [`record_authz_denial`] for a refusal someone can answer
+/// ([`denial_can_be_answered`]). Any other refusal files no decision and no
+/// denial pattern, and gets `None`, but still writes its trajectory row: a
+/// direct request is recorded even when it changes nothing
+/// (`entity_actor::unrecorded`), and a refusal is the same kind of act, made
+/// at human speed. Those rows are how refused moves and the key that made
+/// them are found.
+pub(crate) async fn record_answerable_denial(
+    state: &crate::state::ServerState,
+    input: DenialInput<'_>,
+) -> Option<PendingDecision> {
+    if !denial_can_be_answered(input.security_ctx, input.session_id.as_deref()) {
+        enqueue_denial_trajectory(state, denial_trajectory(&input));
+        return None;
+    }
+    Some(record_authz_denial(state, input).await)
+}
+
+/// The trajectory row of a refused request: who asked, what they asked
+/// for, and the Cedar-evaluated attributes, the request payload of an
+/// authorization decision; without them a denial cannot be replayed against a
+/// revised policy.
+fn denial_trajectory(input: &DenialInput<'_>) -> TrajectoryEntry {
+    let principal_id = input
+        .agent_id_override
+        .unwrap_or(input.security_ctx.principal.id.as_str());
+    let session_id = input.session_id.clone().or_else(|| {
+        input
+            .security_ctx
+            .context_attrs
+            .get("sessionId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    });
+    TrajectoryEntry {
+        timestamp: sim_now().to_rfc3339(),
+        tenant: input.tenant.to_string(),
+        entity_type: input.resource_type.to_string(),
+        entity_id: input.resource_id.to_string(),
+        action: input.action.to_string(),
+        success: false,
+        from_status: input.from_status.clone(),
+        to_status: None,
+        error: Some(input.reason.to_string()),
+        agent_id: Some(principal_id.to_string()),
+        session_id,
+        authz_denied: Some(true),
+        denied_resource: Some(format!("{}:{}", input.resource_type, input.resource_id)),
+        denied_module: input.module_name.clone(),
+        source: Some(TrajectorySource::Authz),
+        spec_governed: input.spec_governed,
+        agent_type: input.security_ctx.principal.agent_type.clone(),
+        request_body: Some(input.resource_attrs.clone()),
+        intent: input.intent.clone(),
+        matched_policy_ids: None,
+        capture_seq: None,
+    }
+}
+
+/// Record a denial's trajectory row as observability without back-pressuring
+/// the caller: it is enqueued onto the bounded outbox and persisted by the
+/// drainer task (ADR-0067).
+fn enqueue_denial_trajectory(state: &crate::state::ServerState, traj: TrajectoryEntry) {
+    if !state.enqueue_trajectory_entry(traj) {
+        tracing::warn!("failed to enqueue authz trajectory");
+    }
+}
+
 /// Record result of an authorization denial.
 ///
 /// Creates a `PendingDecision` for human review, broadcasts it via SSE, and
 /// persists both the decision and trajectory to the durable metadata backend.
 ///
 /// Returns the `PendingDecision` so callers can include the decision ID in
-/// their HTTP response.
+/// their HTTP response. An agent refused the same action on the same resource
+/// while its earlier decision still waits gets that decision back, and nothing
+/// new is filed: a retrying agent cannot fill its person's queue.
 pub(crate) async fn record_authz_denial(
     state: &crate::state::ServerState,
     input: DenialInput<'_>,
 ) -> PendingDecision {
+    let traj = denial_trajectory(&input);
     let principal_id = input
         .agent_id_override
         .unwrap_or(input.security_ctx.principal.id.as_str());
-    let denied_module = input.module_name.clone();
-    let denial_request_body = input.resource_attrs.clone();
     let session_id = input.session_id.clone().or_else(|| {
         input
             .security_ctx
@@ -327,6 +406,10 @@ pub(crate) async fn record_authz_denial(
         .to_string(),
     );
     pd.session_id = session_id.clone();
+
+    if let Some(waiting) = waiting_decision(state, &pd).await {
+        return waiting;
+    }
 
     // Broadcast for SSE.
     let _ = state.pending_decision_tx.send(pd.clone());
@@ -377,38 +460,7 @@ pub(crate) async fn record_authz_denial(
         .observe_refresh_tx
         .send(crate::state::ObserveRefreshHint::Decisions);
 
-    // Record authorization denials as observability without back-pressuring the
-    // caller — the trajectory entry below is enqueued onto the bounded outbox
-    // and persisted by the drainer task (ADR-0067).
-    let traj = TrajectoryEntry {
-        timestamp: sim_now().to_rfc3339(),
-        tenant: input.tenant.to_string(),
-        entity_type: input.resource_type.to_string(),
-        entity_id: input.resource_id.to_string(),
-        action: input.action.to_string(),
-        success: false,
-        from_status: input.from_status,
-        to_status: None,
-        error: Some(input.reason.to_string()),
-        agent_id: Some(principal_id.to_string()),
-        session_id,
-        authz_denied: Some(true),
-        denied_resource: Some(format!("{}:{}", input.resource_type, input.resource_id)),
-        denied_module,
-        source: Some(TrajectorySource::Authz),
-        spec_governed: input.spec_governed,
-        agent_type: input.security_ctx.principal.agent_type.clone(),
-        // The Cedar-evaluated resource attributes are the request payload for
-        // an authorization decision; without them a denial cannot be replayed
-        // against a revised policy.
-        request_body: Some(denial_request_body),
-        intent: input.intent.clone(),
-        matched_policy_ids: None,
-        capture_seq: None,
-    };
-    if !state.enqueue_trajectory_entry(traj.clone()) {
-        tracing::warn!("failed to enqueue authz trajectory");
-    }
+    enqueue_denial_trajectory(state, traj.clone());
 
     // Feed denial into suggestion engine for pattern detection.
     if let Ok(mut engine) = state.suggestion_engine.write() {
@@ -436,6 +488,25 @@ pub(crate) async fn record_authz_denial(
     }
 
     pd
+}
+
+/// The decision still waiting for the same agent, action and resource, if any.
+async fn waiting_decision(
+    state: &crate::state::ServerState,
+    pd: &PendingDecision,
+) -> Option<PendingDecision> {
+    let store = state.metadata_store_for_tenant(&pd.tenant).await?;
+    let rows = match store.query_decisions(&pd.tenant, Some("pending")).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = %e, tenant = %pd.tenant, backend = store.backend_name(), "failed to read waiting decisions");
+            return None;
+        }
+    };
+    let key = pd.dedup_key();
+    rows.iter()
+        .filter_map(|row| serde_json::from_str::<PendingDecision>(row).ok())
+        .find(|waiting| waiting.dedup_key() == key)
 }
 
 #[cfg(test)]

@@ -2,7 +2,7 @@
 
 use temper_jit::table::{Effect, TransitionTable};
 use temper_runtime::actor::ActorError;
-use temper_runtime::persistence::{CompositeEvent, PersistenceEnvelope};
+use temper_runtime::persistence::{CompositeEvent, PersistenceEnvelope, TOMBSTONE_EVENT_TYPE};
 
 use super::types::{EntityEvent, EntityState};
 
@@ -30,6 +30,36 @@ pub(super) fn validate_strict_composite_event(
     Ok(())
 }
 
+/// Validate the kernel's tombstone: bound to its envelope, and leaving the
+/// current status for `Deleted`.
+pub(super) fn validate_strict_tombstone(
+    state: &EntityState,
+    envelope: &PersistenceEnvelope,
+    event: &EntityEvent,
+) -> Result<(), ActorError> {
+    if envelope.event_type != event.action {
+        return Err(incompatible_event(
+            state,
+            envelope,
+            format!(
+                "envelope type '{}' differs from payload action '{}'",
+                envelope.event_type, event.action
+            ),
+        ));
+    }
+    if event.from_status != state.status || event.to_status != TOMBSTONE_EVENT_TYPE {
+        return Err(incompatible_event(
+            state,
+            envelope,
+            format!(
+                "tombstone transition '{} -> {}' does not match current '{}' -> '{TOMBSTONE_EVENT_TYPE}'",
+                event.from_status, event.to_status, state.status
+            ),
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn validate_strict_entity_event(
     table: &TransitionTable,
     state: &EntityState,
@@ -45,20 +75,6 @@ pub(super) fn validate_strict_entity_event(
                 envelope.event_type, event.action
             ),
         ));
-    }
-
-    if event.action == "Deleted" {
-        if event.from_status != state.status || event.to_status != "Deleted" {
-            return Err(incompatible_event(
-                state,
-                envelope,
-                format!(
-                    "tombstone transition '{} -> {}' does not match current '{}' -> 'Deleted'",
-                    event.from_status, event.to_status, state.status
-                ),
-            ));
-        }
-        return Ok(());
     }
 
     if event.action == "Created" && event.from_status.is_empty() {

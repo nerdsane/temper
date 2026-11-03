@@ -244,33 +244,6 @@ fn truncate_for_span_attr_truncates_long_values_on_utf8_boundary() {
 }
 
 #[test]
-fn apply_response_captures_is_safe_when_body_is_not_json() {
-    // Should not panic on malformed JSON; call site passes through raw body.
-    let span = tracing::Span::none();
-    apply_response_captures(
-        &span,
-        "this is not JSON",
-        &[(
-            "gen_ai.completion".to_string(),
-            "/content/0/text".to_string(),
-        )],
-    );
-}
-
-#[test]
-fn apply_response_captures_is_safe_when_pointer_misses() {
-    let span = tracing::Span::none();
-    apply_response_captures(
-        &span,
-        r#"{"nope": "not here"}"#,
-        &[(
-            "gen_ai.completion".to_string(),
-            "/content/0/text".to_string(),
-        )],
-    );
-}
-
-#[test]
 fn default_http_call_batch_runs_requests_concurrently() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;

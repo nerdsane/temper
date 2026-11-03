@@ -383,6 +383,99 @@ async fn persisted_wasm_modules_are_lazy_compiled_on_first_invoke() {
     );
 }
 
+fn module_version(version: u32) -> String {
+    format!(
+        r#"(module (memory (export "memory") 1)
+             (func (export "run") (param i32 i32) (result i32) i32.const {version}))"#
+    )
+}
+
+/// Each app release registers a new hash under the same module name. Katagami's
+/// main Temper kept every replaced version compiled until restart (16 Oct 2026:
+/// apps_build alone is about 9 MB of machine code per version).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replaced_module_leaves_the_compiled_cache() {
+    let state = build_echo_test_state();
+    let tenant = TenantId::default();
+    let other = TenantId::new("other");
+    let compile = |version| {
+        state
+            .wasm_engine
+            .compile_and_cache(module_version(version).as_bytes())
+            .expect("module compiles")
+    };
+
+    let v1 = compile(1);
+    state.register_wasm_module(&tenant, "build", &v1);
+    state.register_wasm_module(&tenant, "build", &v1);
+    assert!(
+        state.wasm_engine.is_cached(&v1),
+        "registering the same version again keeps it"
+    );
+
+    let v2 = compile(2);
+    state.register_wasm_module(&tenant, "build", &v2);
+    assert!(
+        !state.wasm_engine.is_cached(&v1),
+        "the replaced version is dropped"
+    );
+    assert!(state.wasm_engine.is_cached(&v2));
+
+    state.register_wasm_module(&other, "build", &v2);
+    let v3 = compile(3);
+    state.register_wasm_module(&tenant, "build", &v3);
+    assert!(
+        state.wasm_engine.is_cached(&v2),
+        "another tenant still runs v2"
+    );
+
+    state.register_wasm_module(&other, "build", &v3);
+    assert!(
+        !state.wasm_engine.is_cached(&v2),
+        "dropped once nobody runs it"
+    );
+    assert!(state.wasm_engine.is_cached(&v3));
+
+    // A call prepared with v1 before the install runs the version registered
+    // now, and a v1 that a first-use compile cached after the install had
+    // dropped it is dropped again.
+    compile(1);
+    for prepared in [&v1, &v3] {
+        let to_invoke = state
+            .module_hash_to_invoke(&tenant, "build", prepared)
+            .await
+            .expect("a registered version");
+        assert_eq!(&to_invoke, &v3);
+    }
+    assert!(!state.wasm_engine.is_cached(&v1));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_module_whose_stored_bytes_do_not_match_its_hash_is_not_loaded() {
+    let state = build_echo_test_state_with_turso().await;
+    let tenant = TenantId::default();
+    let turso = state
+        .platform_turso_store()
+        .expect("turso backend required");
+    let hash = temper_wasm::WasmEngine::hash_module(ECHO_WASM);
+
+    turso
+        .upsert_wasm_module("default", "echo_integration", ECHO_WASM, &hash, "bundled")
+        .await
+        .expect("persist metadata-only echo module");
+    turso
+        .put_blob(&format!("wasm-modules/{hash}"), b"other bytes")
+        .await
+        .expect("persist other bytes under the module's key");
+
+    let refused = state
+        .ensure_wasm_module_cached(&tenant, "echo_integration", &hash)
+        .await
+        .expect_err("bytes that are not the module's are not loaded");
+    assert!(refused.contains("does not match its hash"), "{refused}");
+    assert!(!state.wasm_engine.is_cached(&hash));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn persisted_wasm_modules_with_legacy_db_blob_fallback_execute_after_startup_restore() {
     let state = build_echo_test_state_with_turso().await;

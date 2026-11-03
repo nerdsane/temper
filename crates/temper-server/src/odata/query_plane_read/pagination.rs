@@ -38,7 +38,8 @@ use crate::query_eval::resolve_property;
 pub(super) const ID_PROPERTY: &str = "entity_id";
 
 /// One key of a decoded cursor: the boundary row's value for a pagination
-/// clause. `present == false` means the row had no value there (SQL NULL).
+/// clause. `present == false` means the row had no value there (SQL NULL),
+/// including an explicit JSON null.
 #[derive(Clone, Debug, PartialEq)]
 struct CursorKey {
     present: bool,
@@ -79,11 +80,11 @@ pub(super) fn cursor_for_row(row: &serde_json::Value, order: &[OrderByClause]) -
     let keys = order
         .iter()
         .map(|clause| match resolve_property(row, &clause.property) {
-            Some(value) => CursorKey {
+            Some(value) if !value.is_null() => CursorKey {
                 present: true,
                 value,
             },
-            None => CursorKey {
+            _ => CursorKey {
                 present: false,
                 value: serde_json::Value::Null,
             },
@@ -126,7 +127,9 @@ pub(super) fn decode_cursor(token: &str) -> Option<Cursor> {
         if pair.len() != 2 {
             return None;
         }
-        let present = pair[0].as_bool()?;
+        // Tokens issued before null keys were marked absent must resume
+        // with the same null semantics as newly generated cursors.
+        let present = pair[0].as_bool()? && !pair[1].is_null();
         keys.push(CursorKey {
             present,
             value: pair[1].clone(),
@@ -313,10 +316,18 @@ pub(in crate::odata) async fn read_entity_set_from_query_plane(
         None => None,
     };
 
-    // The `$select` set is applied by this layer (after the cursor is taken), so
-    // the underlying page read always materializes full bodies — the cursor can
-    // read the ordering properties, and projection can never change membership.
+    // `$select` is applied again after the cursor is taken. A select-only read
+    // (no filter, sort, or continuation) is also projected in the catalog
+    // query so the page does not transfer full `fields` and `state` documents.
+    // The page keeps `entity_id` for the cursor; this layer strips it when the
+    // caller did not ask for it.
     let select = query_options.select.clone();
+    let project_select_in_catalog = query_options.filter.is_none()
+        && query_options.orderby.is_none()
+        && query_options.expand.is_none()
+        && resume_predicate.is_none()
+        && select.as_ref().is_some_and(|fields| !fields.is_empty());
+    let count_separately = query_options.count == Some(true) && resume_predicate.is_some();
     let base_filter = match resume_predicate {
         Some(keyset) => Some(and_filter(query_options.filter.clone(), keyset)),
         None => query_options.filter.clone(),
@@ -334,9 +345,36 @@ pub(in crate::odata) async fn read_entity_set_from_query_plane(
         max_entities: request.budget.max_entities.saturating_add(1),
     };
 
+    // A continuation narrows the page, not the collection described by $count.
+    // Reuse the bounded, row-authorized reader with only the original filter;
+    // neither a cursor predicate nor a raw storage candidate count is valid here.
+    // Page one can still obtain its count and rows in the same read.
+    let count_result = if count_separately {
+        let count_options = QueryOptions {
+            filter: query_options.filter.clone(),
+            top: Some(0),
+            count: Some(true),
+            ..QueryOptions::default()
+        };
+        Some(
+            read_entity_set_page(QueryPlaneReadRequest {
+                query_options: &count_options,
+                budget: page_budget,
+                ..request
+            })
+            .await?,
+        )
+    } else {
+        None
+    };
+
     let page_options = QueryOptions {
         filter: base_filter,
-        select: None,
+        select: if project_select_in_catalog {
+            select.clone()
+        } else {
+            None
+        },
         expand: None,
         orderby: effective_orderby,
         top: Some(fetch_top),
@@ -346,7 +384,11 @@ pub(in crate::odata) async fn read_entity_set_from_query_plane(
         } else {
             query_options.skip
         },
-        count: query_options.count,
+        count: if count_separately {
+            None
+        } else {
+            query_options.count
+        },
         skiptoken: None,
     };
     let page_request = QueryPlaneReadRequest {
@@ -354,7 +396,20 @@ pub(in crate::odata) async fn read_entity_set_from_query_plane(
         budget: page_budget,
         ..request
     };
-    let mut result = read_entity_set_page(page_request).await?;
+    let mut page_result = read_entity_set_page(page_request).await;
+    if let Some(count_result) = count_result {
+        match &mut page_result {
+            Ok(result) => {
+                result.count = count_result.count;
+                result.telemetry.add_scan_work(&count_result.telemetry);
+            }
+            Err(QueryPlaneReadError::QueryTooLarge { telemetry }) => {
+                telemetry.add_scan_work(&count_result.telemetry);
+            }
+            Err(_) => {}
+        }
+    }
+    let mut result = page_result?;
 
     // Telemetry is recorded against the original request shape, not the rewritten
     // page read (which strips `$select` and adds the keyset filter).
@@ -363,6 +418,7 @@ pub(in crate::odata) async fn read_entity_set_from_query_plane(
 
     let truncated = result.entities.len() > page_size;
     result.entities.truncate(page_size);
+    result.telemetry.returned_count = result.entities.len();
 
     let next_skiptoken = if truncated {
         result

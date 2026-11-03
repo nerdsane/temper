@@ -6,6 +6,7 @@ use super::errors::ActorError;
 use super::traits::Actor;
 use crate::mailbox::{self, DEFAULT_MAILBOX_CAPACITY, MailboxReceiver};
 use crate::supervision::SupervisionStrategy;
+use tracing::Instrument;
 
 /// The ActorCell is the runtime container for an actor instance.
 /// It owns the actor, its state, its mailbox receiver, and drives the message loop.
@@ -42,7 +43,10 @@ impl<A: Actor> ActorCell<A> {
             id: id.clone(),
         };
 
-        tokio::spawn(self.run(rx)); // determinism-ok: production actor cell, not on simulation path
+        // The first start loads the actor's state for whoever woke it, so it
+        // runs inside the spawner's span rather than starting its own trace.
+        let woken_by = tracing::Span::current();
+        tokio::spawn(self.run(rx, woken_by)); // determinism-ok: production actor cell, not on simulation path
 
         actor_ref
     }
@@ -51,23 +55,38 @@ impl<A: Actor> ActorCell<A> {
     /// 1. pre_start → initialize state
     /// 2. loop: receive message → handle
     /// 3. post_stop → cleanup
-    async fn run(self, mut rx: MailboxReceiver<A::Msg>) {
+    async fn run(self, mut rx: MailboxReceiver<A::Msg>, woken_by: tracing::Span) {
         let actor = self.actor;
         let id = self.id;
         let strategy = actor.supervision_strategy();
 
         let mut restart_count: u32 = 0;
+        let mut woken_by = Some(woken_by);
 
         loop {
             // Phase 1: Initialize
             let mut ctx = ActorContext::new(id.clone());
             info!(actor = %id, "actor starting");
 
-            let mut state = match actor.pre_start(&mut ctx).await {
+            let start_span = woken_by.take().unwrap_or_else(tracing::Span::none);
+            let mut state = match actor.pre_start(&mut ctx).instrument(start_span).await {
                 Ok(s) => {
                     info!(actor = %id, "actor started");
                     restart_count = 0;
                     s
+                }
+                // The actor refused to start for a reason a restart here does
+                // not fix: it stops now, and every ask waiting on it is told why
+                // instead of finding it stopped.
+                Err(ActorError::InitFailed(reason)) => {
+                    warn!(actor = %id, reason = %reason, "actor did not start");
+                    rx.close_not_started(&reason);
+                    while let Some(envelope) = rx.recv().await {
+                        if let Envelope::Ask { reply, .. } = envelope {
+                            let _ = reply.send(Err(ActorError::InitFailed(reason.clone())));
+                        }
+                    }
+                    return;
                 }
                 Err(e) => {
                     error!(actor = %id, error = %e, "actor pre_start failed");
@@ -103,9 +122,13 @@ impl<A: Actor> ActorCell<A> {
                             }
                         }
                     }
-                    Envelope::Ask { msg, reply } => {
+                    Envelope::Ask { msg, reply, span } => {
                         ctx.reply_channel = Some(reply);
-                        if let Err(e) = actor.handle(msg, &mut state, &mut ctx).await {
+                        if let Err(e) = actor
+                            .handle(msg, &mut state, &mut ctx)
+                            .instrument(span)
+                            .await
+                        {
                             error!(actor = %id, error = %e, "actor handle (ask) failed");
                             if let Some(tx) = ctx.reply_channel.take() {
                                 let _ = tx

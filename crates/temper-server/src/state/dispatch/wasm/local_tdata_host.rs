@@ -7,7 +7,7 @@ use axum::extract::{Extension, Path, Query, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use axum::response::IntoResponse;
 use reqwest::Url;
-use temper_authz::{AuthenticatedRequestContext, SecurityContext};
+use temper_authz::{AuthenticatedRequestContext, SecurityContext, platform_keys};
 use temper_runtime::tenant::TenantId;
 use temper_wasm::WasmHost;
 use temper_wasm::http_stream::{
@@ -22,7 +22,9 @@ const LOCAL_TDATA_RESPONSE_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 /// WASM host wrapper that executes loopback `/tdata` calls in-process.
 ///
 /// This is intentionally a transport optimization only: local calls still run
-/// through the same OData handlers as external HTTP traffic.
+/// through the same OData handlers as external HTTP traffic, File `$value`
+/// reads and writes included, so each call gets the Cedar decision the HTTP
+/// route makes for the same caller.
 pub(super) struct LocalTDataWasmHost {
     state: ServerState,
     authenticated: Option<AuthenticatedRequestContext>,
@@ -42,7 +44,7 @@ impl LocalTDataWasmHost {
             state,
             authenticated: security_ctx.cloned().map(|mut security_ctx| {
                 security_ctx.context_attrs.insert(
-                    "module".into(),
+                    platform_keys::MODULE.to_string(),
                     serde_json::Value::String(module_name.into()),
                 );
                 AuthenticatedRequestContext::new(tenant, security_ctx)
@@ -64,40 +66,57 @@ impl LocalTDataWasmHost {
         };
 
         let method_upper = method.to_ascii_uppercase();
-        if !matches!(method_upper.as_str(), "GET" | "POST") {
+        if !matches!(method_upper.as_str(), "GET" | "POST" | "PUT") {
             return Ok(None);
         }
         let Some(authenticated) = self.authenticated.clone() else {
             return Ok(None);
         };
-        let headers = header_map(headers);
-        let path_for_span = request.path.clone();
+        let mut headers = header_map(headers);
+        if method_upper == "PUT" {
+            // The length an HTTP client would send for this body.
+            headers.insert(
+                axum::http::header::CONTENT_LENGTH,
+                HeaderValue::from(body.len()),
+            );
+        }
         let span = tracing::info_span!(
             "wasm.local_tdata_http_call",
             otel.name = "wasm.local_tdata_http_call",
             http.method = %method_upper,
-            url.path = %path_for_span,
+            url.path = %request.telemetry_path(),
             local_tdata = true,
         );
 
+        // The OData handlers' futures are among the largest in the kernel;
+        // boxed, they are not carried inline by the WASM invocation above.
         let response = async {
             match method_upper.as_str() {
-                "GET" => crate::odata::handle_odata_get(
+                "GET" => Box::pin(crate::odata::handle_odata_get(
                     State(self.state.clone()),
                     Some(Extension(authenticated.clone())),
                     headers,
                     Path(request.path),
                     Query(request.query),
-                )
+                ))
                 .await
                 .into_response(),
-                "POST" => crate::odata::handle_odata_post(
+                "POST" => Box::pin(crate::odata::handle_odata_post(
                     State(self.state.clone()),
                     Some(Extension(authenticated)),
                     headers,
                     Path(request.path),
                     Query(request.query),
                     Bytes::copy_from_slice(body.as_bytes()),
+                ))
+                .await
+                .into_response(),
+                "PUT" => crate::odata::handle_odata_put(
+                    State(self.state.clone()),
+                    Some(Extension(authenticated)),
+                    headers,
+                    Path(request.path),
+                    axum::extract::Request::new(axum::body::Body::from(body.to_owned())),
                 )
                 .await
                 .into_response(),
@@ -253,6 +272,13 @@ struct LocalTDataRequest {
 }
 
 impl LocalTDataRequest {
+    /// The parser separates the query before decoding this path. A decoded '?'
+    /// belongs to the path and must remain in telemetry. Only a parsed request,
+    /// rather than an arbitrary string labelled `url.path`, can use this accessor.
+    fn telemetry_path(&self) -> &str {
+        &self.path
+    }
+
     fn parse(url: &str, local_tdata_hosts: &BTreeSet<String>) -> Option<Self> {
         let parsed = Url::parse(url).ok()?;
         if !matches!(parsed.scheme(), "http" | "https") {
@@ -264,14 +290,17 @@ impl LocalTDataRequest {
         }
 
         let raw_path = parsed.path();
-        let path = match raw_path {
-            "/tdata" | "/tdata/" => String::new(),
-            _ => raw_path.strip_prefix("/tdata/")?.to_string(),
+        let encoded_path = match raw_path {
+            "/tdata" | "/tdata/" => "",
+            _ => raw_path.strip_prefix("/tdata/")?,
         };
-        if is_file_value_path(&path) {
-            return None;
-        }
-
+        // The HTTP route hands the OData handlers a percent-decoded path
+        // (axum's `Path`), so a key reads the same whichever way it arrives.
+        // A path that does not decode to UTF-8 is left to the HTTP route.
+        let path = percent_encoding::percent_decode_str(encoded_path)
+            .decode_utf8()
+            .ok()?
+            .into_owned();
         let query = parsed
             .query_pairs()
             .map(|(key, value)| (key.into_owned(), value.into_owned()))
@@ -290,10 +319,6 @@ fn is_local_tdata_host(host: &str, local_tdata_hosts: &BTreeSet<String>) -> bool
         return true;
     }
     local_tdata_hosts.contains(&host.to_ascii_lowercase())
-}
-
-fn is_file_value_path(path: &str) -> bool {
-    path.starts_with("Files('") && path.ends_with("')/$value")
 }
 
 fn header_map(headers: &[(String, String)]) -> HeaderMap {

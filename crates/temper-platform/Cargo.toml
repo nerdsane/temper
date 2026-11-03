@@ -36,8 +36,12 @@ futures = { workspace = true }
 tempfile = "3.27.0"
 
 [dev-dependencies]
+tower-http = { workspace = true }
+tracing-subscriber = { workspace = true }
 temper-wasm = { workspace = true, features = ["test-shared-compilation"] }
-temper-codegen = { workspace = true }
+# Deterministic fault injection for identity dependency-failure tests.
+temper-store-sim = { workspace = true }
+temper-server = { workspace = true, features = ["observe", "sim"] }
 tokio-test = { workspace = true }
 tower = { workspace = true }
 hyper = { workspace = true }

@@ -153,36 +153,24 @@ mod tests {
     fn host_bootstrap_secret_resolution_authorizes_only_bootstrap_keys() {
         let tenant = TenantId::new("tenant-a");
         let vault = SecretsVault::new(&[7u8; 32]);
-        vault
-            .cache_secret(
-                tenant.as_str(),
-                "blob_endpoint",
-                "https://blob.example".into(),
-            )
-            .unwrap();
-        vault
-            .cache_secret(
-                tenant.as_str(),
-                "temper_api_url",
-                "https://temper.example".into(),
-            )
-            .unwrap();
-        vault
-            .cache_secret(tenant.as_str(), "temper_api_key", "internal-token".into())
-            .unwrap();
-        vault
-            .cache_secret(
-                tenant.as_str(),
-                "ca_cert:internal",
-                "-----BEGIN CERT-----".into(),
-            )
-            .unwrap();
-        vault
-            .cache_secret(tenant.as_str(), "provider_api_key", "sk-provider".into())
-            .unwrap();
-        vault
-            .cache_secret(tenant.as_str(), "unrelated_secret", "unused".into())
-            .unwrap();
+        vault.cache_secret(
+            tenant.as_str(),
+            "blob_endpoint",
+            "https://blob.example".into(),
+        );
+        vault.cache_secret(
+            tenant.as_str(),
+            "temper_api_url",
+            "https://temper.example".into(),
+        );
+        vault.cache_secret(tenant.as_str(), "temper_api_key", "internal-token".into());
+        vault.cache_secret(
+            tenant.as_str(),
+            "ca_cert:internal",
+            "-----BEGIN CERT-----".into(),
+        );
+        vault.cache_secret(tenant.as_str(), "provider_api_key", "sk-provider".into());
+        vault.cache_secret(tenant.as_str(), "unrelated_secret", "unused".into());
         let state = state_with_vault(vault);
         let gate = RecordingSecretGate::allowing(&[
             "blob_endpoint",
@@ -213,12 +201,8 @@ mod tests {
     fn lazy_secret_resolver_authorizes_requested_key_and_reads_current_value() {
         let tenant = TenantId::new("tenant-a");
         let vault = SecretsVault::new(&[8u8; 32]);
-        vault
-            .cache_secret(tenant.as_str(), "provider_api_key", "first".into())
-            .unwrap();
-        vault
-            .cache_secret(tenant.as_str(), "blocked_key", "blocked".into())
-            .unwrap();
+        vault.cache_secret(tenant.as_str(), "provider_api_key", "first".into());
+        vault.cache_secret(tenant.as_str(), "blocked_key", "blocked".into());
         let state = state_with_vault(vault);
         let vault = Arc::clone(state.secrets_vault.as_ref().expect("vault installed"));
         let gate = RecordingSecretGate::allowing(&["provider_api_key"]);
@@ -228,9 +212,7 @@ mod tests {
             .expect("resolver should exist when vault is configured");
 
         assert_eq!(resolver("provider_api_key"), Ok("first".to_string()));
-        vault
-            .cache_secret(tenant.as_str(), "provider_api_key", "second".into())
-            .unwrap();
+        vault.cache_secret(tenant.as_str(), "provider_api_key", "second".into());
         assert_eq!(resolver("provider_api_key"), Ok("second".to_string()));
 
         let denied = resolver("blocked_key").expect_err("blocked key should be denied");
@@ -249,9 +231,7 @@ mod tests {
     fn lazy_secret_resolver_never_exposes_reserved_root_key() {
         let tenant = TenantId::new("tenant-a");
         let vault = SecretsVault::new(&[9_u8; 32]);
-        vault
-            .cache_secret(tenant.as_str(), "temper_api_key", "deployment-root".into())
-            .unwrap();
+        vault.cache_secret(tenant.as_str(), "temper_api_key", "deployment-root".into());
         let state = state_with_vault(vault);
         let gate = RecordingSecretGate::allowing(&["temper_api_key"]);
         let requested = gate.requested.clone();

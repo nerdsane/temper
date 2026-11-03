@@ -4,10 +4,10 @@ use std::time::Instant;
 use temper_runtime::tenant::TenantId;
 
 use crate::entity_actor::recover_entity_state_from_store;
-use crate::runtime_metrics;
 
 use super::ServerState;
 
+mod boot_repair;
 mod key_index;
 mod replay_parity;
 mod vector_index;
@@ -77,7 +77,6 @@ pub(super) async fn load_entity_current_fields(
         backend,
         &serde_json::json!({}),
         blob_store,
-        true, // strict: a journal read failure → Err → LoadFailed (don't watermark)
     )
     .await
     {
@@ -92,11 +91,21 @@ pub(super) async fn load_entity_current_fields(
 /// AND-equality candidate pushdown can bound any non-keyed point lookup (e.g. `Path eq
 /// '/souls' and WorkspaceId eq …`) instead of full-scanning and 413ing at tenant scale
 /// (ARN-68). Enumerates authoritatively (registry types + `store.list_entity_ids_by_type`),
-/// loads each entity's current state from its snapshot (or event replay), and upserts the
-/// query projection. Idempotent (re-runs converge; it re-processes every entity — there
-/// is no watermark/skip like the key-index backfill has); runs as a background task off
-/// the boot path. This is the generic counterpart to the declared-key backfill — covers ALL
-/// types, where the key backfill covers only declared-key shapes (incl. null components).
+/// recovers each entity from its snapshot plus journal tail, and rewrites its existing
+/// catalog row and field index. Idempotent (re-runs converge; it re-processes every entity:
+/// there is no watermark/skip like the key-index backfill has); runs as a background task
+/// off the boot path, while the server serves. This is the generic counterpart to the
+/// declared-key backfill: it covers ALL types, where the key backfill covers only
+/// declared-key shapes (incl. null components).
+///
+/// What it covers that boot repair does not: a catalog row as current as its journal whose
+/// field index is out of step with it, such as a row written before the field index
+/// existed, one whose fields sit wrapped under `fields`, or one written before its spec
+/// changed which fields are indexed (`query_indexed`). Boot repair only replays records
+/// whose catalog row is missing or behind their journal, and does so before serving.
+/// So this pass leaves a record with no catalog row alone (`refresh_projection`): while
+/// the server serves, only the record's own commit creates that row, and a commit cannot
+/// lock or see a row another writer creates while it runs.
 pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, tenant: &TenantId) {
     let overall_started_at = Instant::now(); // determinism-ok: production-only backfill duration metric
     let Some((store, backend)) = state.event_journal() else {
@@ -162,112 +171,10 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
 
     let mut indexed = 0usize;
     let mut errors = 0usize;
-    let mut needs_replay = Vec::new();
-
     for (entity_type, entity_id) in &entities {
-        let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
-        match store.load_snapshot(&persistence_id).await {
-            Ok(Some((_seq, snapshot_bytes))) => {
-                if let Ok(state_snapshot) =
-                    serde_json::from_slice::<crate::entity_actor::EntityState>(&snapshot_bytes)
-                {
-                    if let Err(e) = query_plane
-                        .upsert_projection(
-                            tenant.as_str(),
-                            entity_type,
-                            entity_id,
-                            &state_snapshot.status,
-                            &state.query_projection_fields(
-                                tenant,
-                                entity_type,
-                                &state_snapshot.fields,
-                            ),
-                            &state.query_projection_state(&state_snapshot),
-                            state_snapshot.sequence_nr,
-                        )
-                        .await
-                    {
-                        tracing::debug!(
-                            error = %e,
-                            entity_type = %entity_type,
-                            entity_id = %entity_id,
-                            "field index backfill: upsert failed"
-                        );
-                        errors += 1;
-                        crate::query_projection_metrics::record_backfill_entities(
-                            tenant.as_str(),
-                            entity_type,
-                            "backfill_snapshot",
-                            "error",
-                            1,
-                        );
-                    } else {
-                        indexed += 1;
-                        crate::query_projection_metrics::record_backfill_entities(
-                            tenant.as_str(),
-                            entity_type,
-                            "backfill_snapshot",
-                            "ok",
-                            1,
-                        );
-                        crate::query_projection_metrics::record_update_applied_sequence(
-                            tenant.as_str(),
-                            entity_type,
-                            "upsert",
-                            "backfill_snapshot",
-                            state_snapshot.sequence_nr,
-                        );
-                    }
-                }
-            }
-            Ok(None) => {
-                needs_replay.push((entity_type.clone(), entity_id.clone()));
-                crate::query_projection_metrics::record_backfill_entities(
-                    tenant.as_str(),
-                    entity_type,
-                    "backfill_snapshot",
-                    "missing_snapshot",
-                    1,
-                );
-            }
-            Err(e) => {
-                tracing::debug!(
-                    error = %e,
-                    entity_type = %entity_type,
-                    entity_id = %entity_id,
-                    "field index backfill: snapshot load failed"
-                );
-                errors += 1;
-                crate::query_projection_metrics::record_backfill_entities(
-                    tenant.as_str(),
-                    entity_type,
-                    "backfill_snapshot",
-                    "error",
-                    1,
-                );
-            }
-        }
-        // Phase 1 now iterates EVERY entity (not the near-empty lazy index), so yield
-        // between entities for cooperative back-pressure on large tenants — mirroring
-        // phase 2 and the key-index backfill.
+        // Yield even when this entity cannot be recovered. A snapshot is only a
+        // replay checkpoint, never evidence that the query projection is current.
         tokio::task::yield_now().await;
-    }
-
-    tracing::info!(
-        tenant = %tenant,
-        total,
-        snapshot_indexed = indexed,
-        needs_replay = needs_replay.len(),
-        "field index phase 1 (snapshots) complete, starting phase 2 (persistence replay)"
-    );
-    if !needs_replay.is_empty() {
-        runtime_metrics::record_projection_backfill_snapshot_misses(
-            tenant.as_str(),
-            needs_replay.len() as u64,
-        );
-    }
-
-    for (entity_type, entity_id) in &needs_replay {
         let Some(table) = transition_table_for(state, tenant, entity_type) else {
             tracing::debug!(
                 entity_type = %entity_type,
@@ -295,7 +202,6 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
             backend,
             &serde_json::json!({}),
             tenant_blob_store.as_ref(),
-            false, // field-index backfill: lenient (unchanged behavior)
         )
         .await;
         let replayed = match replayed {
@@ -308,6 +214,13 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
                     "field index backfill: persistence replay failed"
                 );
                 errors += 1;
+                crate::query_projection_metrics::record_backfill_entities(
+                    tenant.as_str(),
+                    entity_type,
+                    "backfill_replay",
+                    "error",
+                    1,
+                );
                 continue;
             }
         };
@@ -332,7 +245,7 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
                 "field index backfill: persistence replay produced no state"
             );
             errors += 1;
-        } else if replayed.status == "Deleted" {
+        } else if replayed.is_tombstoned() {
             if let Err(e) = query_plane
                 .remove_projection(tenant.as_str(), entity_type, entity_id)
                 .await
@@ -381,7 +294,7 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
             }
         } else {
             match query_plane
-                .upsert_projection(
+                .refresh_projection(
                     tenant.as_str(),
                     entity_type,
                     entity_id,
@@ -439,8 +352,6 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
                 }
             }
         }
-
-        tokio::task::yield_now().await;
     }
 
     tracing::info!(

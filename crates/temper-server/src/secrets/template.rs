@@ -68,12 +68,8 @@ mod tests {
 
     fn test_vault() -> SecretsVault {
         let vault = SecretsVault::new(&[0x42u8; 32]);
-        vault
-            .cache_secret("t1", "API_KEY", "sk-live-abc123".into())
-            .unwrap();
-        vault
-            .cache_secret("t1", "DB_PASS", "hunter2".into())
-            .unwrap();
+        vault.cache_secret("t1", "API_KEY", "sk-live-abc123".into());
+        vault.cache_secret("t1", "DB_PASS", "hunter2".into());
         vault
     }
 

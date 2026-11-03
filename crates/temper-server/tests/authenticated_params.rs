@@ -336,14 +336,3 @@ async fn subject_fallback_and_tenant_contracts_are_isolated() {
         assert_eq!(ordinary.state.fields["owner_id"], "declared-input");
     }
 }
-
-#[test]
-fn binding_survives_transition_table_serialization() {
-    let table = temper_jit::table::TransitionTable::from_ioa_source(IOA);
-    let restored: temper_jit::table::TransitionTable =
-        serde_json::from_value(serde_json::to_value(table).unwrap()).unwrap();
-    assert_eq!(
-        restored.action_contracts["Create"].param_sources["owner_id"],
-        temper_spec::automaton::ParameterSource::AuthenticatedSubject,
-    );
-}

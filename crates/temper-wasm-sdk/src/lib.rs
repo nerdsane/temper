@@ -150,7 +150,9 @@ pub mod http_stream {
     }
 }
 
-pub use context::{Context, HttpRequest, HttpResponse, SubWrite, SubWriteBuilder, WasmSpan};
+pub use context::{
+    Context, HttpRequest, HttpResponse, SubWrite, SubWriteBuilder, TriggerPrincipal, WasmSpan,
+};
 
 /// Re-export serde_json types for convenience.
 pub use serde_json::{self, Value, json};
@@ -163,6 +165,15 @@ pub fn set_success_result(action: &str, params: &Value) {
         "success": true,
     });
     let json = result.to_string();
+    unsafe {
+        host::host_set_result(json.as_ptr() as i32, json.len() as i32);
+    }
+}
+
+/// Answer empty: the module has nothing to report, so the kernel moves
+/// nothing, whatever the trigger's `on_success` names.
+pub fn set_empty_result() {
+    let json = serde_json::json!({ "empty": true, "success": true }).to_string();
     unsafe {
         host::host_set_result(json.as_ptr() as i32, json.len() as i32);
     }
@@ -232,7 +243,7 @@ macro_rules! temper_module {
 /// ```
 pub mod prelude {
     pub use crate::context::{
-        Context, HttpRequest, HttpResponse, SubWrite, SubWriteBuilder, WasmSpan,
+        Context, HttpRequest, HttpResponse, SubWrite, SubWriteBuilder, TriggerPrincipal, WasmSpan,
     };
     pub use crate::{Value, json, serde_json, set_error_result, set_success_result, temper_module};
 }

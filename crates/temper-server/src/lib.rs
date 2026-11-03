@@ -3,6 +3,9 @@
 //! HTTP / OData / Cedar / registry live here with EntityActor and
 //! `entity_actor/effects.rs` (the default `apply_effects`). Not a plug.
 
+// The wasm host's async blocks exceed rustc's default query depth.
+#![recursion_limit = "256"]
+
 pub mod adapters;
 mod admin;
 #[cfg(feature = "observe")]
@@ -19,6 +22,11 @@ pub mod entity_actor;
 pub mod event_budget_metrics;
 pub mod events;
 pub mod eventual_invariants;
+mod growable_stack;
+#[cfg(feature = "observe")]
+pub mod host_room;
+#[cfg(feature = "observe")]
+pub mod host_turn;
 pub mod http_endpoint;
 pub mod idempotency;
 pub mod identity;
@@ -45,15 +53,23 @@ pub mod sentinel;
 pub mod state;
 mod static_web;
 pub mod storage;
+#[cfg(test)]
+pub(crate) mod test_spans;
+pub(crate) mod trace_context;
 pub(crate) mod trajectory_outbox;
 pub mod trigger;
 pub mod vector_index;
+pub mod wake;
 pub mod wasm_registry;
 pub mod webhooks;
-pub(crate) mod workflow_tracing;
+pub mod write_health;
+
+// Reads RSS from procfs, which only Linux has.
+#[cfg(all(test, target_os = "linux"))]
+mod rss_pin_suspects;
 
 pub use entity_actor::{EntityActor, EntityActorHandler, EntityMsg, EntityResponse, EntityState};
 pub use registry::SpecRegistry;
-pub use router::{build_router, http_endpoint_fallback};
+pub use router::{build_router, build_routes, http_endpoint_fallback, with_request_span};
 pub use state::ServerState;
 pub use storage::StorageStack;

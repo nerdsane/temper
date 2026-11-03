@@ -44,6 +44,15 @@ pub struct SpecVerificationUpdate<'a> {
     pub verification_result_json: Option<&'a str>,
 }
 
+/// What the newest review of an app's modules said.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleReviewRow {
+    /// What was reviewed: the commit the app's files say, else its bundle's digest.
+    pub version: String,
+    /// JSON: `{"warnings": [...], "modules_reviewed": [...]}`.
+    pub result: String,
+}
+
 /// WASM module row returned by [`PlatformStore`] WASM queries.
 #[derive(Debug, Clone)]
 pub struct WasmModuleRow {
@@ -130,7 +139,21 @@ pub trait PlatformStore: Send + Sync {
 
     /// Mark all uncommitted specs for a tenant as committed.
     async fn commit_specs(&self, tenant: &str) -> Result<(), String>;
-    /// Delete all uncommitted specs across all tenants.
+
+    /// Commit one install: exactly these `(entity_type, content_hash,
+    /// csdl_xml)` versions, and delete the `removed` types, in one
+    /// transaction. Returns false (and changes nothing) when a row no longer
+    /// holds its version.
+    async fn commit_spec_versions(
+        &self,
+        tenant: &str,
+        versions: &[(&str, &str, &str)],
+        removed: &[&str],
+    ) -> Result<bool, String>;
+
+    /// Discard abandoned uncommitted spec versions (startup recovery). A type
+    /// returns to its last committed version, or is removed if it never
+    /// committed.
     async fn delete_uncommitted_specs(&self) -> Result<usize, String>;
 
     /// Load verification cache: (entity_type -> (content_hash, verified)) for a tenant.
@@ -222,6 +245,25 @@ pub trait PlatformStore: Send + Sync {
     /// Load all WASM modules across all tenants (for startup recovery).
     async fn load_wasm_modules_all_tenants(&self) -> Result<Vec<WasmModuleRow>, String>;
 
+    // ── Module reviews ───────────────────────────────────────────────
+
+    /// Keep what the newest review of `app_name`'s modules said, in place of the
+    /// last: `result` is JSON, `version` what was reviewed.
+    async fn save_module_review(
+        &self,
+        tenant: &str,
+        app_name: &str,
+        version: &str,
+        result: &str,
+    ) -> Result<(), String>;
+
+    /// What the newest review of `app_name`'s modules said, if one is kept.
+    async fn load_module_review(
+        &self,
+        tenant: &str,
+        app_name: &str,
+    ) -> Result<Option<ModuleReviewRow>, String>;
+
     /// Upsert a WASM module binary for a tenant.
     ///
     /// `source` distinguishes the os-apps install pipeline (`"bundled"`) from
@@ -249,6 +291,30 @@ use temper_store_turso::{TursoEventStore, TursoInstalledAppRow, TursoSpecVerific
 
 #[async_trait::async_trait]
 impl PlatformStore for TursoEventStore {
+    async fn save_module_review(
+        &self,
+        tenant: &str,
+        app_name: &str,
+        version: &str,
+        result: &str,
+    ) -> Result<(), String> {
+        self.save_module_review(tenant, app_name, version, result)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn load_module_review(
+        &self,
+        tenant: &str,
+        app_name: &str,
+    ) -> Result<Option<ModuleReviewRow>, String> {
+        let row = self
+            .load_module_review(tenant, app_name)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(row.map(|(version, result)| ModuleReviewRow { version, result }))
+    }
+
     async fn upsert_spec(
         &self,
         tenant: &str,
@@ -285,6 +351,17 @@ impl PlatformStore for TursoEventStore {
 
     async fn commit_specs(&self, tenant: &str) -> Result<(), String> {
         self.commit_specs(tenant).await.map_err(|e| e.to_string())
+    }
+
+    async fn commit_spec_versions(
+        &self,
+        tenant: &str,
+        versions: &[(&str, &str, &str)],
+        removed: &[&str],
+    ) -> Result<bool, String> {
+        self.commit_spec_versions(tenant, versions, removed)
+            .await
+            .map_err(|e| e.to_string())
     }
     async fn delete_uncommitted_specs(&self) -> Result<usize, String> {
         self.delete_uncommitted_specs()
@@ -515,6 +592,30 @@ impl PlatformStore for TursoEventStore {
 
 #[async_trait::async_trait]
 impl PlatformStore for PostgresEventStore {
+    async fn save_module_review(
+        &self,
+        tenant: &str,
+        app_name: &str,
+        version: &str,
+        result: &str,
+    ) -> Result<(), String> {
+        self.save_module_review(tenant, app_name, version, result)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn load_module_review(
+        &self,
+        tenant: &str,
+        app_name: &str,
+    ) -> Result<Option<ModuleReviewRow>, String> {
+        let row = self
+            .load_module_review(tenant, app_name)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(row.map(|(version, result)| ModuleReviewRow { version, result }))
+    }
+
     async fn upsert_spec(
         &self,
         tenant: &str,
@@ -551,6 +652,17 @@ impl PlatformStore for PostgresEventStore {
 
     async fn commit_specs(&self, tenant: &str) -> Result<(), String> {
         self.commit_specs(tenant).await.map_err(|e| e.to_string())
+    }
+
+    async fn commit_spec_versions(
+        &self,
+        tenant: &str,
+        versions: &[(&str, &str, &str)],
+        removed: &[&str],
+    ) -> Result<bool, String> {
+        self.commit_spec_versions(tenant, versions, removed)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     async fn delete_uncommitted_specs(&self) -> Result<usize, String> {
@@ -884,6 +996,8 @@ mod sim_platform_store {
         faults: SimPlatformFaultConfig,
         /// Specs keyed by (tenant, entity_type).
         specs: BTreeMap<(String, String), SpecRow>,
+        /// Last committed version of a spec whose row is uncommitted.
+        committed_versions: BTreeMap<(String, String), SpecRow>,
         /// Verification cache: (tenant, entity_type) -> (content_hash, verified).
         verification_cache: BTreeMap<(String, String), (String, bool)>,
         /// Cedar policies keyed by tenant.
@@ -892,6 +1006,8 @@ mod sim_platform_store {
         policy_entries: BTreeMap<(String, String), PolicyEntryRow>,
         /// Cross-invariant definitions keyed by tenant.
         constraints: BTreeMap<String, String>,
+        /// The newest module review, keyed by (tenant, app_name).
+        module_reviews: BTreeMap<(String, String), ModuleReviewRow>,
         /// Installed apps: (tenant, app_name).
         installed_apps: BTreeSet<(String, String)>,
         /// Installed app digest metadata keyed by (tenant, app_name).
@@ -910,10 +1026,12 @@ mod sim_platform_store {
                     rng: DeterministicRng::new(seed),
                     faults,
                     specs: BTreeMap::new(),
+                    committed_versions: BTreeMap::new(),
                     verification_cache: BTreeMap::new(),
                     policies: BTreeMap::new(),
                     policy_entries: BTreeMap::new(),
                     constraints: BTreeMap::new(),
+                    module_reviews: BTreeMap::new(),
                     installed_apps: BTreeSet::new(),
                     installed_app_records: BTreeMap::new(),
                     pending_decisions: BTreeMap::new(),
@@ -980,6 +1098,36 @@ mod sim_platform_store {
 
     #[async_trait::async_trait]
     impl PlatformStore for SimPlatformStore {
+        async fn save_module_review(
+            &self,
+            tenant: &str,
+            app_name: &str,
+            version: &str,
+            result: &str,
+        ) -> Result<(), String> {
+            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
+            inner.module_reviews.insert(
+                (tenant.to_string(), app_name.to_string()),
+                ModuleReviewRow {
+                    version: version.to_string(),
+                    result: result.to_string(),
+                },
+            );
+            Ok(())
+        }
+
+        async fn load_module_review(
+            &self,
+            tenant: &str,
+            app_name: &str,
+        ) -> Result<Option<ModuleReviewRow>, String> {
+            let inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
+            Ok(inner
+                .module_reviews
+                .get(&(tenant.to_string(), app_name.to_string()))
+                .cloned())
+        }
+
         async fn upsert_spec(
             &self,
             tenant: &str,
@@ -996,6 +1144,14 @@ mod sim_platform_store {
             }
 
             let key = (tenant.to_string(), entity_type.to_string());
+            if let Some(existing) = inner.specs.get(&key).filter(|row| {
+                row.committed
+                    && (row.content_hash != content_hash
+                        || row.csdl_xml.as_deref() != Some(csdl_xml))
+            }) {
+                let saved = existing.clone();
+                inner.committed_versions.insert(key.clone(), saved);
+            }
             inner.specs.insert(
                 key,
                 SpecRow {
@@ -1018,11 +1174,17 @@ mod sim_platform_store {
                 return Err("SimPlatformStore: injected spec read failure".into());
             }
 
+            // An uncommitted row is restored at its saved committed version.
             Ok(inner
                 .specs
-                .values()
-                .filter(|s| s.committed)
-                .cloned()
+                .iter()
+                .filter_map(|(key, row)| {
+                    if row.committed {
+                        Some(row.clone())
+                    } else {
+                        inner.committed_versions.get(key).cloned()
+                    }
+                })
                 .collect())
         }
 
@@ -1032,9 +1194,9 @@ mod sim_platform_store {
             if inner.rng.chance(prob) {
                 return Err("SimPlatformStore: injected cleanup failure".into());
             }
-            inner
-                .specs
-                .remove(&(tenant.to_string(), entity_type.to_string()));
+            let key = (tenant.to_string(), entity_type.to_string());
+            inner.specs.remove(&key);
+            inner.committed_versions.remove(&key);
             Ok(())
         }
 
@@ -1045,14 +1207,54 @@ mod sim_platform_store {
                     spec.committed = true;
                 }
             }
+            inner.committed_versions.retain(|(t, _), _| t != tenant);
             Ok(())
+        }
+
+        async fn commit_spec_versions(
+            &self,
+            tenant: &str,
+            versions: &[(&str, &str, &str)],
+            removed: &[&str],
+        ) -> Result<bool, String> {
+            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
+            let key = |entity_type: &str| (tenant.to_string(), entity_type.to_string());
+            let all_held = versions.iter().all(|(entity_type, hash, csdl)| {
+                inner.specs.get(&key(entity_type)).is_some_and(|row| {
+                    row.content_hash == *hash && row.csdl_xml.as_deref() == Some(*csdl)
+                })
+            });
+            if !all_held {
+                return Ok(false);
+            }
+            for (entity_type, _, _) in versions {
+                if let Some(row) = inner.specs.get_mut(&key(entity_type)) {
+                    row.committed = true;
+                }
+                inner.committed_versions.remove(&key(entity_type));
+            }
+            for entity_type in removed {
+                inner.specs.remove(&key(entity_type));
+                inner.committed_versions.remove(&key(entity_type));
+            }
+            Ok(true)
         }
 
         async fn delete_uncommitted_specs(&self) -> Result<usize, String> {
             let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
+            // One process and no clock: every uncommitted row is abandoned. It
+            // returns to its last committed version, if any.
+            let saved = std::mem::take(&mut inner.committed_versions);
+            let mut discarded = 0;
+            for (key, version) in saved {
+                if let Some(row) = inner.specs.get_mut(&key).filter(|row| !row.committed) {
+                    *row = version;
+                    discarded += 1;
+                }
+            }
             let before = inner.specs.len();
             inner.specs.retain(|_, s| s.committed);
-            Ok(before - inner.specs.len())
+            Ok(discarded + before - inner.specs.len())
         }
 
         async fn load_verification_cache(

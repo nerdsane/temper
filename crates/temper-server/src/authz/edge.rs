@@ -67,8 +67,19 @@ pub fn is_public_kernel_request(method: &Method, path: &str) -> bool {
     {
         return true;
     }
-    (matches!(*method, Method::GET | Method::POST) && path.starts_with("/webhooks/"))
-        || (method == Method::GET && path.starts_with("/genesis/"))
+    // Webhook ingress takes any method: its Class B verifier (the sender's
+    // signature, then Cedar) admits each request (ADR-0182).
+    path.starts_with("/webhooks/") || (method == Method::GET && path.starts_with("/genesis/"))
+}
+
+/// A browser's CORS preflight: `OPTIONS` with an `Origin` and the method it asks to send. It carries no credential by
+/// the fetch standard, so it is admitted without one; the router's CORS layer answers it and no route runs.
+pub fn is_cors_preflight(request: &Request) -> bool {
+    request.method() == Method::OPTIONS
+        && request.headers().contains_key(axum::http::header::ORIGIN)
+        && request
+            .headers()
+            .contains_key(axum::http::header::ACCESS_CONTROL_REQUEST_METHOD)
 }
 
 /// Routes that serve an anonymous caller, but must still resolve a credential
@@ -116,6 +127,7 @@ pub async fn require_authenticated_request_context(request: Request, next: Next)
     // public kernel request instead would have discarded that credential before
     // resolution ever ran.
     if is_public_kernel_request(request.method(), request.uri().path())
+        || is_cors_preflight(&request)
         || allows_anonymous_fallback(request.method(), request.uri().path())
         || request
             .extensions()
@@ -292,9 +304,16 @@ mod tests {
             assert!(!is_public_kernel_request(&Method::GET, path), "{path}");
         }
         assert!(!is_public_kernel_request(&Method::POST, "/tdata"));
+        // Any method reaches the webhook receiver, which admits by signature.
+        for method in [Method::POST, Method::PUT, Method::PATCH, Method::DELETE] {
+            assert!(is_public_kernel_request(
+                &method,
+                "/webhooks/tenant/provider"
+            ));
+        }
         assert!(!is_public_kernel_request(
-            &Method::DELETE,
-            "/webhooks/tenant/provider"
+            &Method::POST,
+            "/webhooks-evil/path"
         ));
     }
 

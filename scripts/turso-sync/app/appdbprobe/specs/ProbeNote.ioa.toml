@@ -1,0 +1,35 @@
+# A note an app keeps: a title and a body of about 1.5 KB, rewritten by each Write; n counts the writes it took, so a
+# record read back says how many acknowledged writes reached the database.
+[automaton]
+name = "ProbeNote"
+states = ["Open"]
+initial = "Open"
+allow_indefinite_states = ["Open"]
+
+[[state]]
+name = "title"
+type = "string"
+initial = ""
+
+[[state]]
+name = "body"
+type = "string"
+initial = ""
+
+[[state]]
+name = "n"
+type = "counter"
+initial = 0
+
+[[state]]
+name = "error_message"
+type = "string"
+initial = ""
+
+[[action]]
+name = "Write"
+kind = "input"
+from = ["Open"]
+to = "Open"
+params = ["title", "body"]
+effect = ["n += 1"]

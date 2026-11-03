@@ -184,3 +184,49 @@ params = ["Id", "ctx_owner_status"]
         .expect_err("runtime-owned fields cannot be declared as action params");
     assert!(error.to_string().contains("parameter 'Id'"));
 }
+
+#[test]
+fn last_event_properties_are_reserved_for_the_kernel() {
+    for name in [
+        "first_event_at",
+        "last_event_at",
+        "last_event_via",
+        "last_event_by",
+        "last_event_for",
+        "last_event_agent_type",
+        "last_event_label",
+    ] {
+        let source = format!(
+            r#"
+[automaton]
+name = "Job"
+states = ["Idle"]
+initial = "Idle"
+[[state]]
+name = "{name}"
+type = "string"
+initial = "forged"
+"#
+        );
+        assert!(
+            parse_automaton(&source).is_err(),
+            "spec state must not declare {name}"
+        );
+        let source = format!(
+            r#"
+[automaton]
+name = "Job"
+states = ["Idle"]
+initial = "Idle"
+[[action]]
+name = "Poke"
+from = ["Idle"]
+params = ["{name}"]
+"#
+        );
+        assert!(
+            parse_automaton(&source).is_err(),
+            "action must not declare {name}"
+        );
+    }
+}

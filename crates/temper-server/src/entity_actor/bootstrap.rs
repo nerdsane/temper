@@ -42,6 +42,9 @@ pub(super) fn clear_for_replay(state: &mut EntityState, initial_status: &str) {
     state.last_snapshot_sequence_nr = 0;
     state.sequence_nr = 0;
     state.processed_idempotency_keys.clear();
+    state.status_clock = Default::default();
+    state.last_event = Default::default();
+    state.spawn_reservations.clear();
     state.item_count = 0;
     state.counters.clear();
     state.booleans.clear();

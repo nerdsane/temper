@@ -14,17 +14,40 @@ use cedar_policy::{
     Request, Response as CedarResponse,
 };
 
-use crate::context::{PrincipalKind, SecurityContext, is_cedar_authority_context_key};
+use crate::context::{
+    PrincipalKind, SecurityContext, is_cedar_authority_context_key, platform_keys,
+};
 use crate::error::{AuthzDenial, AuthzError};
-use crate::metrics::{CedarDecisionMetric, CedarPhaseOutcome};
+use crate::metrics::{CedarCheck, CedarDecisionMetric, CedarPhaseOutcome};
 
 mod candidates;
+mod list_read;
+mod list_uniformity;
+mod may;
+mod permit_reach;
+mod platform_policy;
+
+pub use list_read::{ListRead, RowRule};
+pub use list_uniformity::ListReadUniformity;
+pub use may::{Asker, Attr, Cause, Hop, Kind, May, Question, SendAnalysis};
+pub use permit_reach::permitted_resource_types;
+pub use platform_policy::VERIFIED_OPERATOR_WHEN;
+use platform_policy::{
+    compiled_system_platform_policies, count_user_policies, merge_system_platform_policy,
+    platform_authority_policy,
+};
 
 #[cfg(test)]
 mod tests;
 
 #[cfg(test)]
 mod stack_tests;
+
+#[cfg(test)]
+mod identity_records_tests;
+
+#[cfg(test)]
+mod principal_record_tests;
 
 /// The result of an authorization check.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,6 +118,8 @@ pub struct AuthzEngine {
     /// Only System principals are evaluated against this set; all externally
     /// resolvable principal kinds still fail closed for an unloaded tenant.
     platform_policy_set: CompiledPolicies,
+    /// Permits exactly the principals with platform authority.
+    platform_authority_policy: CompiledPolicies,
     authorizer: Authorizer,
 }
 
@@ -114,6 +139,7 @@ impl AuthzEngine {
             tenant_policies: RwLock::new(BTreeMap::new()),
             fallback_policy_set: RwLock::new(CompiledPolicies::new(policy_set)),
             platform_policy_set: compiled_system_platform_policies(),
+            platform_authority_policy: platform_authority_policy(),
             authorizer: Authorizer::new(),
         })
     }
@@ -132,6 +158,7 @@ impl AuthzEngine {
             tenant_policies: RwLock::new(BTreeMap::new()),
             fallback_policy_set: RwLock::new(CompiledPolicies::new(policy_set)),
             platform_policy_set: compiled_system_platform_policies(),
+            platform_authority_policy: platform_authority_policy(),
             authorizer: Authorizer::new(),
         }
     }
@@ -153,6 +180,7 @@ impl AuthzEngine {
             tenant_policies: RwLock::new(BTreeMap::new()),
             fallback_policy_set: RwLock::new(CompiledPolicies::new(policy_set)),
             platform_policy_set: compiled_system_platform_policies(),
+            platform_authority_policy: platform_authority_policy(),
             authorizer: Authorizer::new(),
         }
     }
@@ -336,6 +364,7 @@ impl AuthzEngine {
             resource_type,
             resource_attrs,
             &policy_set,
+            CedarCheck::Gate,
         )
     }
 
@@ -355,6 +384,66 @@ impl AuthzEngine {
         resource_type: &str,
         resource_attrs: &HashMap<String, serde_json::Value>,
     ) -> AuthzDecision {
+        self.authorize_for_tenant_checked(
+            tenant,
+            security_ctx,
+            action,
+            resource_type,
+            resource_attrs,
+            CedarCheck::Gate,
+        )
+    }
+
+    /// The same decision as [`Self::authorize_for_tenant`], for the per-row check a list read makes to leave out the
+    /// rows the caller may not see. Only its metric differs: it is counted as `check:row_filter`, never as a refusal.
+    pub fn authorize_row_for_tenant(
+        &self,
+        tenant: &str,
+        security_ctx: &SecurityContext,
+        action: &str,
+        resource_type: &str,
+        resource_attrs: &HashMap<String, serde_json::Value>,
+    ) -> AuthzDecision {
+        self.authorize_for_tenant_checked(
+            tenant,
+            security_ctx,
+            action,
+            resource_type,
+            resource_attrs,
+            CedarCheck::RowFilter,
+        )
+    }
+
+    /// The same decision as [`Self::authorize_for_tenant`], for a page asking which moves to show before any is
+    /// sent. Only its metric differs: it is counted as `check:offer`, never as a refusal; the move, if sent, is
+    /// checked again at the gate.
+    pub fn authorize_offer_for_tenant(
+        &self,
+        tenant: &str,
+        security_ctx: &SecurityContext,
+        action: &str,
+        resource_type: &str,
+        resource_attrs: &HashMap<String, serde_json::Value>,
+    ) -> AuthzDecision {
+        self.authorize_for_tenant_checked(
+            tenant,
+            security_ctx,
+            action,
+            resource_type,
+            resource_attrs,
+            CedarCheck::Offer,
+        )
+    }
+
+    fn authorize_for_tenant_checked(
+        &self,
+        tenant: &str,
+        security_ctx: &SecurityContext,
+        action: &str,
+        resource_type: &str,
+        resource_attrs: &HashMap<String, serde_json::Value>,
+        check: CedarCheck,
+    ) -> AuthzDecision {
         let tenants = match self.tenant_policies.read() {
             Ok(t) => t,
             Err(e) => {
@@ -371,6 +460,7 @@ impl AuthzEngine {
                 resource_type,
                 resource_attrs,
                 &tp.policies,
+                check,
             );
         }
 
@@ -381,6 +471,7 @@ impl AuthzEngine {
                 resource_type,
                 resource_attrs,
                 &self.platform_policy_set,
+                check,
             );
         }
 
@@ -396,8 +487,9 @@ impl AuthzEngine {
         resource_type: &str,
         resource_attrs: &HashMap<String, serde_json::Value>,
         policies: &CompiledPolicies,
+        check: CedarCheck,
     ) -> AuthzDecision {
-        let mut recorder = CedarEvaluationRecorder::start();
+        let mut recorder = CedarEvaluationRecorder::start(check);
 
         // Build Cedar principal
         let principal_type = match security_ctx.principal.kind {
@@ -449,24 +541,34 @@ impl AuthzEngine {
         // Add principal attributes to context
         if let Some(ref role) = security_ctx.principal.role {
             ctx_map.insert(
-                "role".to_string(),
+                platform_keys::ROLE.to_string(),
                 cedar_policy::RestrictedExpression::new_string(role.clone()),
             );
         }
         if let Some(ref acting_for) = security_ctx.principal.acting_for {
             ctx_map.insert(
-                "actingFor".to_string(),
+                platform_keys::ACTING_FOR.to_string(),
                 cedar_policy::RestrictedExpression::new_string(acting_for.clone()),
             );
         }
 
-        // Add context attributes
+        // Add context attributes. The cause keys come from the cause alone,
+        // below, so no attribute speaks under them, even where it has none.
         for (key, value) in &security_ctx.context_attrs {
+            if platform_keys::CAUSE.contains(&key.as_str()) {
+                continue;
+            }
             insert_json_as_cedar(&mut ctx_map, key.clone(), value);
         }
 
+        // How the move came about: `via` and `depth` on every check, the
+        // reaction's hop and the timer's arm where the move has them.
+        for (key, value) in crate::cause::cause_context(security_ctx.cause.as_ref()) {
+            insert_json_as_cedar(&mut ctx_map, key.to_string(), &value);
+        }
+
         // Resource fields may appear as context.key for domain policies.
-        // Authority keys (sessionId, agentType, role, …) stay on SecurityContext.
+        // A key only the platform sets (`platform_keys`) never comes from one.
         for (key, value) in resource_attrs {
             if is_cedar_authority_context_key(key) || ctx_map.contains_key(key) {
                 continue;
@@ -543,8 +645,10 @@ impl AuthzEngine {
             }
         };
         let resource_entity = if resource_uid == principal_uid {
-            let mut merged_attrs = principal_attrs;
-            merged_attrs.extend(resource_entity_attrs);
+            // The principal's attributes come from its token and the identity
+            // boundary; a field of the record it is reading never replaces one.
+            let mut merged_attrs = resource_entity_attrs;
+            merged_attrs.extend(principal_attrs);
             match Entity::new(resource_uid.clone(), merged_attrs, HashSet::new()) {
                 Ok(entity) => entity,
                 Err(e) => {
@@ -648,21 +752,20 @@ impl AuthzEngine {
             Decision::Deny => CedarDecisionMetric::Deny,
         });
 
+        // A statement labelled with its source (`@source("app/file.cedar#2")`,
+        // `statements::label_statements`) is named by it; others keep Cedar's id.
+        let named = |id: &PolicyId| {
+            effective_policy_set
+                .annotation(id, crate::statements::SOURCE_ANNOTATION)
+                .map_or_else(|| id.to_string(), str::to_string)
+        };
         match decision {
             Decision::Allow => {
-                let policy_ids: Vec<String> = response
-                    .diagnostics()
-                    .reason()
-                    .map(|id| id.to_string())
-                    .collect();
+                let policy_ids: Vec<String> = response.diagnostics().reason().map(named).collect();
                 AuthzDecision::Allow { policy_ids }
             }
             Decision::Deny => {
-                let policy_ids: Vec<String> = response
-                    .diagnostics()
-                    .reason()
-                    .map(|id| id.to_string())
-                    .collect();
+                let policy_ids: Vec<String> = response.diagnostics().reason().map(named).collect();
                 if policy_ids.is_empty() {
                     AuthzDecision::Deny(AuthzDenial::NoMatchingPermit)
                 } else {
@@ -670,6 +773,49 @@ impl AuthzEngine {
                 }
             }
         }
+    }
+
+    /// Whether a list's `read` decision is the same for every row of `resource_type`.
+    ///
+    /// Callers that get [`ListReadUniformity::Uniform`] evaluate Cedar once and
+    /// apply that decision to the page. A per-entity result still filters each
+    /// row; `attribute_keys` is the set of resource fields that can change the
+    /// answer, so the caller does not have to load the rest of the document.
+    pub fn list_read_uniformity(
+        &self,
+        tenant: &str,
+        security_ctx: &SecurityContext,
+        action: &str,
+        resource_type: &str,
+    ) -> ListReadUniformity {
+        let tenants = match self.tenant_policies.read() {
+            Ok(tenants) => tenants,
+            Err(_) => {
+                return ListReadUniformity::PerEntity {
+                    attribute_keys: None,
+                };
+            }
+        };
+        if let Some(tenant_policies) = tenants.get(tenant) {
+            return list_uniformity::classify(
+                &tenant_policies.policies.policy_set,
+                security_ctx,
+                action,
+                resource_type,
+            );
+        }
+        drop(tenants);
+        if Self::is_system(security_ctx) {
+            return list_uniformity::classify(
+                &self.platform_policy_set.policy_set,
+                security_ctx,
+                action,
+                resource_type,
+            );
+        }
+        // No tenant policy and not a system principal: Cedar default-deny.
+        // That denial does not depend on which row is being read.
+        ListReadUniformity::Uniform
     }
 
     /// Quick check: is this a system principal?
@@ -718,118 +864,19 @@ impl AuthzEngine {
     }
 }
 
-/// Built-in Cedar policy granting System-kind principals broad authority
-/// (ADR-0046). Installed into every [`AuthzEngine`] at construction time so
-/// that platform code paths using `AgentContext::system()` continue to
-/// function after the blanket bypass was removed.
-///
-/// This is intentionally broad for day-one migration — it preserves the
-/// pre-ADR-0046 behavior of System principals being universally allowed,
-/// but makes that authority an auditable, overridable Cedar policy rather
-/// than hard-coded control flow. Follow-up work narrows this policy to the
-/// specific actions the platform genuinely needs (bootstrap writes,
-/// credential rotation, recovery).
-/// The single source of truth for "who is a verified platform operator" in
-/// Cedar. Shared by the built-in [`system_platform_policy`] identity-entity
-/// clauses here in temper-authz AND the seeded operator `manage_policies`
-/// permit in temper-platform (which re-exports this const), so the two
-/// authorization surfaces can never drift to different strength.
-///
-/// It requires BOTH `agent_type == "operator"` and `agentTypeVerified == true`:
-/// a self-declared, credential-unverified context claiming the operator type
-/// (e.g. one built via `SecurityContext::with_agent_context`) does NOT satisfy
-/// it. The `has` guards make a principal lacking either attribute evaluate the
-/// clause to `false` (a clean deny) rather than raising a Cedar evaluation
-/// error.
-///
-/// "operator" is a privileged claim ultimately guarded by trusted-issuer
-/// registration: a registered issuer could mint an operator-claim JWT, but
-/// registering an issuer is itself gated to System/Admin/verified-operator by
-/// the identity-entity clauses below.
-pub const VERIFIED_OPERATOR_WHEN: &str = "principal has agent_type && principal.agent_type == \"operator\" && principal has agentTypeVerified && principal.agentTypeVerified == true";
-
-/// Built the built-in system-platform Cedar policy, interpolating the shared
-/// [`VERIFIED_OPERATOR_WHEN`] predicate into the four identity-entity clauses.
-fn system_platform_policy() -> String {
-    format!(
-        r#"
-@id("system-platform:broad-permit")
-permit(principal is System, action, resource);
-
-@id("system-platform:identity-entities-permit-trusted-issuer")
-permit(principal, action, resource is TrustedIssuer)
-when {{ principal is System || principal is Admin || ({op}) }};
-
-@id("system-platform:identity-entities-permit-principal-generation")
-permit(principal, action, resource is PrincipalGeneration)
-when {{ principal is System || principal is Admin || ({op}) }};
-
-@id("system-platform:protect-trusted-issuer")
-forbid(principal, action, resource is TrustedIssuer)
-unless {{ principal is System || principal is Admin || ({op}) }};
-
-@id("system-platform:protect-principal-generation")
-forbid(principal, action, resource is PrincipalGeneration)
-unless {{ principal is System || principal is Admin || ({op}) }};
-"#,
-        op = VERIFIED_OPERATOR_WHEN
-    )
-}
-
-/// PolicyId prefix used for the built-in system-platform policies
-/// (ADR-0046). Used to exclude them from user-facing counts.
-const SYSTEM_PLATFORM_POLICY_ID_PREFIX: &str = "system-platform:";
-
-/// Merge the built-in system-platform policy into an existing [`PolicySet`].
-///
-/// Policies are added with explicit `PolicyId`s prefixed by
-/// [`SYSTEM_PLATFORM_POLICY_ID_PREFIX`] so downstream code can filter them
-/// out of user-facing reports (see [`count_user_policies`]). If the
-/// hard-coded system policy fails to parse, the combined set is left
-/// unchanged — preserving availability at the cost of System auth.
-fn merge_system_platform_policy(combined: &mut PolicySet) {
-    let system_set: PolicySet = match system_platform_policy().parse() {
-        Ok(ps) => ps,
-        Err(_) => return,
-    };
-    for (idx, policy) in system_set.policies().enumerate() {
-        let named = policy.clone().new_id(PolicyId::new(format!(
-            "{SYSTEM_PLATFORM_POLICY_ID_PREFIX}broad-permit-{idx}"
-        )));
-        let _ = combined.add(named);
-    }
-}
-
-fn compiled_system_platform_policies() -> CompiledPolicies {
-    let mut policy_set = PolicySet::new();
-    merge_system_platform_policy(&mut policy_set);
-    CompiledPolicies::new(policy_set)
-}
-
-/// Count user-authored policies in a [`PolicySet`], excluding the built-in
-/// `system-platform` policies (ADR-0046). Tenants should reason about their
-/// own policy surface without the platform's internals polluting the count.
-fn count_user_policies(ps: &PolicySet) -> usize {
-    ps.policies()
-        .filter(|p| {
-            !p.id()
-                .to_string()
-                .starts_with(SYSTEM_PLATFORM_POLICY_ID_PREFIX)
-        })
-        .count()
-}
-
 struct CedarEvaluationRecorder {
     started_at: Instant,
     phase_started_at: Instant,
+    check: CedarCheck,
 }
 
 impl CedarEvaluationRecorder {
-    fn start() -> Self {
+    fn start(check: CedarCheck) -> Self {
         let now = Instant::now();
         Self {
             started_at: now,
             phase_started_at: now,
+            check,
         }
     }
 
@@ -851,12 +898,13 @@ impl CedarEvaluationRecorder {
         crate::metrics::record_cedar_evaluation(
             self.started_at.elapsed(),
             CedarDecisionMetric::Error,
+            self.check,
         );
         AuthzDecision::Deny(denial)
     }
 
     fn finish(&self, decision: CedarDecisionMetric) {
-        crate::metrics::record_cedar_evaluation(self.started_at.elapsed(), decision);
+        crate::metrics::record_cedar_evaluation(self.started_at.elapsed(), decision, self.check);
     }
 }
 

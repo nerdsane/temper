@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Appdb" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="ProbeNote">
+        <Key>
+          <PropertyRef Name="Id" />
+        </Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false" />
+        <Property Name="State" Type="Edm.String" Nullable="true" />
+        <Property Name="title" Type="Edm.String" Nullable="true" />
+        <Property Name="body" Type="Edm.String" Nullable="true" />
+        <Property Name="n" Type="Edm.Int64" Nullable="true" />
+        <Property Name="error_message" Type="Edm.String" Nullable="true" />
+      </EntityType>
+      <EntityContainer Name="Default">
+        <EntitySet Name="ProbeNotes" EntityType="Appdb.ProbeNote" />
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>

@@ -10,9 +10,11 @@ use super::types::ReactionTarget;
 /// the source entity (see [`temper_spec::automaton::resolve_args`]).
 ///
 /// A literal passes its value, `Id` the source entity's id, and a field name
-/// that field of `source_fields`. A field the source does not have logs a
-/// warning and leaves its key out — the reaction still fires with the other
-/// params.
+/// that field of `source_fields`, which are the source's fields as guards read
+/// them: a declared variable it stores no value for has its initial value. A
+/// field that leaves absent, such as a parameter the source action was not
+/// sent, logs a warning and leaves its key out — the reaction still fires with
+/// the other params.
 pub(crate) fn build_effective_params(
     target: &ReactionTarget,
     source_entity_id: &str,

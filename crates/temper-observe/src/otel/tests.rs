@@ -2,9 +2,13 @@ use super::config::{LOGFIRE_ENDPOINT, resolve_otel_config};
 use super::sampler::{DISPATCH_BACKGROUND_PREFIXES, WASM_AUXILIARY_PREFIXES};
 use super::*;
 
-use opentelemetry::trace::{SamplingDecision, SpanKind, TraceId};
-use opentelemetry_sdk::trace::{Sampler, ShouldSample};
-use std::sync::Mutex;
+use super::retry::{Closing, Retrying};
+use futures::future::BoxFuture;
+use opentelemetry::trace::{SamplingDecision, Span as _, SpanKind, TraceId, Tracer as _};
+use opentelemetry_sdk::error::{OTelSdkError, OTelSdkResult};
+use opentelemetry_sdk::trace::{Sampler, ShouldSample, SpanData};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 const TEST_ENV_VARS: [&str; 5] = [
@@ -243,4 +247,197 @@ fn trace_sampler_config_reads_and_clamps_sample_rate_overrides() {
             );
         },
     );
+}
+
+#[test]
+fn reduced_sample_prefixes_never_trim_a_span_inside_a_trace() {
+    use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceState};
+
+    let sampler = NameBasedSampler {
+        inner: Sampler::ParentBased(Box::new(Sampler::AlwaysOn)),
+        config: TraceSamplerConfig::default(),
+    };
+    for i in 0..1_000u64 {
+        let mut bytes = [0u8; 16];
+        bytes[8..].copy_from_slice(&i.to_be_bytes());
+        let trace_id = TraceId::from_bytes(bytes);
+        let parent = opentelemetry::Context::new().with_remote_span_context(SpanContext::new(
+            trace_id,
+            SpanId::from_bytes(7u64.to_be_bytes()),
+            TraceFlags::SAMPLED,
+            true,
+            TraceState::default(),
+        ));
+        for name in [
+            "wasm:workspace_fs.read",
+            "dispatch.phase.query_projection.queued",
+            "dispatch.scheduled_actions.fire",
+        ] {
+            let result =
+                sampler.should_sample(Some(&parent), trace_id, name, &SpanKind::Internal, &[], &[]);
+            assert!(
+                matches!(result.decision, SamplingDecision::RecordAndSample),
+                "{name} inside a sampled trace must be kept (trace {trace_id})"
+            );
+        }
+    }
+}
+
+/// An exporter whose every send fails, as when the collector's end resets
+/// the connection, counting the sends.
+#[derive(Debug)]
+struct Unreachable(Arc<AtomicUsize>);
+
+impl opentelemetry_sdk::trace::SpanExporter for Unreachable {
+    fn export(&mut self, _batch: Vec<SpanData>) -> BoxFuture<'static, OTelSdkResult> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        let reset = OTelSdkError::InternalFailure("Connection reset by peer".to_string());
+        Box::pin(std::future::ready(Err(reset)))
+    }
+}
+
+/// A stopping server sends a batch that fails once: sending it again would
+/// hold up its exit.
+#[test]
+fn a_batch_that_fails_during_shutdown_is_sent_once() {
+    const QUICK: [Duration; 4] = [Duration::from_millis(10); 4];
+    let sends = Arc::new(AtomicUsize::new(0));
+    let closing = Closing::default();
+    let exporter = Retrying::with_delays(Unreachable(Arc::clone(&sends)), &closing, &QUICK);
+    let tracer_provider = SdkTracerProvider::builder()
+        .with_span_processor(BatchSpanProcessor::builder(exporter).build())
+        .build();
+    tracer_provider.tracer("test").start("test.stopping").end();
+    let guard = OtelGuard {
+        closing,
+        tracer_provider,
+        meter_provider: SdkMeterProvider::builder().build(),
+        logger_provider: SdkLoggerProvider::builder().build(),
+    };
+    guard.shutdown();
+    assert_eq!(sends.load(Ordering::SeqCst), 1);
+}
+
+/// Reports each failed send so shutdown can overlap the final production
+/// backoff rather than the initial flush.
+#[derive(Debug)]
+struct FailingDuringBackoff {
+    sends: Arc<AtomicUsize>,
+    failed: std::sync::mpsc::Sender<()>,
+}
+
+impl FailingDuringBackoff {
+    fn fail(&self) -> OTelSdkResult {
+        self.sends.fetch_add(1, Ordering::SeqCst);
+        self.failed.send(()).expect("test is waiting for sends");
+        Err(OTelSdkError::InternalFailure(
+            "Connection reset by peer".to_string(),
+        ))
+    }
+}
+
+impl opentelemetry_sdk::trace::SpanExporter for FailingDuringBackoff {
+    fn export(&mut self, _batch: Vec<SpanData>) -> BoxFuture<'static, OTelSdkResult> {
+        Box::pin(std::future::ready(self.fail()))
+    }
+}
+
+impl opentelemetry_sdk::logs::LogExporter for FailingDuringBackoff {
+    async fn export(&self, _batch: opentelemetry_sdk::logs::LogBatch<'_>) -> OTelSdkResult {
+        self.fail()
+    }
+}
+
+fn assert_shutdown_interrupts_backoff(
+    guard: OtelGuard,
+    sends: Arc<AtomicUsize>,
+    failed: std::sync::mpsc::Receiver<()>,
+) {
+    // The fourth failure precedes the 2 s backoff. Let the processor enter
+    // that wait before shutting down, as a handoff can do during export.
+    for _ in 0..4 {
+        failed
+            .recv_timeout(Duration::from_secs(5))
+            .expect("processor must reach its final retry delay");
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    let started = std::time::Instant::now();
+    guard.shutdown();
+    let elapsed = started.elapsed();
+    assert_eq!(
+        sends.load(Ordering::SeqCst),
+        4,
+        "send after closing (shutdown took {elapsed:?})"
+    );
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "shutdown waited for the retry delay: {elapsed:?}"
+    );
+}
+
+#[test]
+fn span_shutdown_interrupts_backoff_without_another_send() {
+    let sends = Arc::new(AtomicUsize::new(0));
+    let (failed, failures) = std::sync::mpsc::channel();
+    let closing = Closing::default();
+    let exporter = Retrying::new(
+        FailingDuringBackoff {
+            sends: Arc::clone(&sends),
+            failed,
+        },
+        &closing,
+    );
+    let processor = BatchSpanProcessor::builder(exporter)
+        .with_batch_config(
+            opentelemetry_sdk::trace::BatchConfigBuilder::default()
+                .with_max_export_batch_size(1)
+                .build(),
+        )
+        .build();
+    let tracer_provider = SdkTracerProvider::builder()
+        .with_span_processor(processor)
+        .build();
+    tracer_provider.tracer("test").start("test.backoff").end();
+    let guard = OtelGuard {
+        closing,
+        tracer_provider,
+        meter_provider: SdkMeterProvider::builder().build(),
+        logger_provider: SdkLoggerProvider::builder().build(),
+    };
+    assert_shutdown_interrupts_backoff(guard, sends, failures);
+}
+
+#[test]
+fn log_shutdown_interrupts_backoff_without_another_send() {
+    use opentelemetry::logs::{Logger, LoggerProvider};
+
+    let sends = Arc::new(AtomicUsize::new(0));
+    let (failed, failures) = std::sync::mpsc::channel();
+    let closing = Closing::default();
+    let exporter = Retrying::new(
+        FailingDuringBackoff {
+            sends: Arc::clone(&sends),
+            failed,
+        },
+        &closing,
+    );
+    let processor = BatchLogProcessor::builder(exporter)
+        .with_batch_config(
+            opentelemetry_sdk::logs::BatchConfigBuilder::default()
+                .with_max_export_batch_size(1)
+                .build(),
+        )
+        .build();
+    let logger_provider = SdkLoggerProvider::builder()
+        .with_log_processor(processor)
+        .build();
+    let logger = logger_provider.logger("test");
+    logger.emit(logger.create_log_record());
+    let guard = OtelGuard {
+        closing,
+        tracer_provider: SdkTracerProvider::builder().build(),
+        meter_provider: SdkMeterProvider::builder().build(),
+        logger_provider,
+    };
+    assert_shutdown_interrupts_backoff(guard, sends, failures);
 }

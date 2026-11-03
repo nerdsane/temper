@@ -1,0 +1,116 @@
+name: Linux binary
+
+# Every merge to main builds the Linux temper binary once and publishes it with its sha256, so a deploy never builds
+# Temper itself (Katagami's people's Tempers run it from a Tensorlake image and a shared binaries volume). The release
+# is `main-<first 12 of the commit>`, a prerelease holding `temper-x86_64-linux` and `temper-x86_64-linux.sha256`.
+# When KATAGAMI_DISPATCH_TOKEN is set, it then tells arni-labs/katagami (repository_dispatch `temper-binary`), whose
+# image workflow builds the sandbox image from it and publishes a KatagamiRelease.
+#
+# Built on ubuntu-22.04 so its glibc is no newer than the sandbox image's. Tagged releases stay with release.yml.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: linux-binary-${{ github.sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  build:
+    name: Build and publish
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libz3-dev
+
+      - name: Read the pinned toolchain
+        id: toolchain
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-binary
+
+      - name: Build temper
+        # /version answers this build-time commit (temper-platform router.rs); without it a
+        # people's Temper, which has no Railway variable, says "unknown".
+        env:
+          GIT_COMMIT_SHA: ${{ github.sha }}
+        run: cargo build --release --locked -p temper-cli
+
+      - name: Check the binary serves
+        run: |
+          set -euo pipefail
+          bin=target/release/temper
+          ldd "$bin"
+          if ldd "$bin" | grep -q 'not found'; then exit 1; fi
+          dir="$(mktemp -d)"
+          TURSO_URL="file:$dir/smoke.db" TEMPER_API_KEY="$(openssl rand -hex 16)" "$bin" serve --port 3999 --tenant default --storage turso --no-observe > "$dir/serve.log" 2>&1 &
+          pid=$!
+          for _ in $(seq 1 120); do
+            if curl -fsS http://127.0.0.1:3999/healthz > /dev/null 2>&1; then break; fi
+            kill -0 "$pid" 2> /dev/null || { tail -40 "$dir/serve.log"; exit 1; }
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:3999/healthz > /dev/null || { tail -40 "$dir/serve.log"; exit 1; }
+          version="$(curl -fsS http://127.0.0.1:3999/version)"
+          kill "$pid"
+          echo "temper serves /healthz; /version: $version"
+          case "$version" in *"\"$GITHUB_SHA\""*) ;; *) echo "::warning::the binary does not name its commit $GITHUB_SHA" ;; esac
+
+      - name: Publish the binary and its sha256
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="main-${GITHUB_SHA:0:12}"
+          mkdir -p out
+          cp target/release/temper out/temper-x86_64-linux
+          (cd out && sha256sum temper-x86_64-linux > temper-x86_64-linux.sha256)
+          sha="$(cut -d' ' -f1 out/temper-x86_64-linux.sha256)"
+          echo "sha256 $sha"
+          if gh release view "$tag" > /dev/null 2>&1; then
+            echo "$tag is already published"
+          else
+            gh release create "$tag" out/temper-x86_64-linux out/temper-x86_64-linux.sha256 \
+              --target "$GITHUB_SHA" --prerelease --title "temper $tag (Linux x86_64)" \
+              --notes "Built from $GITHUB_SHA on ubuntu-22.04 by linux-binary.yml. sha256 $sha"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+          echo "### temper $tag" >> "$GITHUB_STEP_SUMMARY"
+          echo "sha256 \`$sha\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Tell Katagami
+        env:
+          GH_TOKEN: ${{ secrets.KATAGAMI_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$GH_TOKEN" ]; then
+            echo "KATAGAMI_DISPATCH_TOKEN is not set: Katagami is not told (its image workflow can be run by hand with this tag)"
+            exit 0
+          fi
+          gh api repos/arni-labs/katagami/dispatches -f event_type=temper-binary \
+            -f "client_payload[tag]=${{ steps.publish.outputs.tag }}" \
+            -f "client_payload[sha256]=${{ steps.publish.outputs.sha256 }}" \
+            -f "client_payload[commit]=$GITHUB_SHA"
+          echo "told arni-labs/katagami: temper-binary ${{ steps.publish.outputs.tag }}"

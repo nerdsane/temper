@@ -40,7 +40,7 @@ span "test.sampled_caller" scope=temper trace=[4bf92f3577b34da6a3ce929d0e0e4736]
   attribute idle_ns = "<masked>"
   attribute thread.id = "<masked>"
   attribute thread.name = "<masked>"
-span "wasm:workspace_fs.read" scope=temper trace=[00000000000000000000000000000064] id=span#5 parent=span#4 kind=1 flags=1 status=0 events=[]
+span "wasm:workspace_fs.read" scope=temper trace=[00000000000000000000000000000063] id=span#5 parent=span#4 kind=1 flags=1 status=0 events=[]
   resource runtime-id = "<masked>"
   resource service.name = "temper-platform"
   attribute busy_ns = "<masked>"
@@ -85,15 +85,13 @@ metric "temper_trace_sampler_configured_rules" scope=temper.observe kind=gauge u
   resource runtime-id = "<masked>"
   resource service.name = "temper-platform"
   point {"rule_kind": "drop_exact"} = 2
-  point {"rule_kind": "reduced_prefix"} = 3
+  point {"rule_kind": "reduced_prefix"} = 2
 metric "temper_trace_sampler_decisions_total" scope=temper.observe kind=sum unit="" description="Trace sampler decisions by bounded rule name and final sampling decision."
   resource runtime-id = "<masked>"
   resource service.name = "temper-platform"
   point {"decision": "drop", "rule": "delegate"} = 1
   point {"decision": "drop", "rule": "drop_exact"} = 2
-  point {"decision": "record_and_sample", "rule": "delegate"} = 3
-  point {"decision": "record_and_sample", "rule": "wasm_auxiliary"} = 1
-  point {"decision": "reduced_drop", "rule": "wasm_auxiliary"} = 1
+  point {"decision": "record_and_sample", "rule": "delegate"} = 4
 metric "temper_trace_sampler_reduced_sample_rate_pct" scope=temper.observe kind=gauge unit="%" description="Effective trace sampler keep rate for reduced-prefix rules."
   resource runtime-id = "<masked>"
   resource service.name = "temper-platform"

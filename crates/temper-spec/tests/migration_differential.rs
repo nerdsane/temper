@@ -14,10 +14,6 @@
 //! those apply to entity-kind triggers and are covered by the reaction
 //! synthesis tests. Assumes every listed migration SHA has exactly one parent
 //! (true for all commits in MIGRATIONS as of ship).
-//!
-//! Temper SHAs must be reachable from `main`, so that any full clone can read
-//! them, a fork included. The original branch commits were rebased before the
-//! merge and exist only on side branches, which a fork does not carry.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -49,53 +45,54 @@ const MIGRATIONS: &[(RepoFixture, &str, &str)] = &[
     // --- temper repo ---
     (
         TEMPER,
-        "3c45720a",
+        "3c45720",
         "reference-apps/weather-tracker/specs/weather_report.ioa.toml",
     ),
     (
         TEMPER,
-        "7a202380",
+        "7a20238",
         "os-apps/temper-agent/specs/cron_job.ioa.toml",
     ),
     (
         TEMPER,
-        "7a202380",
+        "7a20238",
         "os-apps/temper-agent/specs/cron_scheduler.ioa.toml",
     ),
     (
         TEMPER,
-        "7a202380",
+        "7a20238",
         "os-apps/temper-agent/specs/heartbeat_monitor.ioa.toml",
     ),
     (
         TEMPER,
-        "7a202380",
+        "7a20238",
         "reference-apps/crucible/specs/crucible_scheduler.ioa.toml",
     ),
     (
         TEMPER,
-        "7a202380",
+        "7a20238",
         "reference-apps/crucible/specs/session_schedule.ioa.toml",
     ),
-    // 93b513c4 (not 365cbcb4): get pre-migration content, not post-prompt-fix.
+    // 93b513c (not 365cbcb): parent is the pre-migration file, not the later
+    // prompt restore that put propose_mutation's prompt back.
     (
         TEMPER,
-        "93b513c4",
+        "93b513c",
         "os-apps/evolution/evolution_run.ioa.toml",
     ),
     (
         TEMPER,
-        "93b513c4",
+        "93b513c",
         "os-apps/intent-discovery/specs/intent_discovery.ioa.toml",
     ),
     (
         TEMPER,
-        "93b513c4",
+        "93b513c",
         "os-apps/temper-agent/specs/temper_agent.ioa.toml",
     ),
     (
         TEMPER,
-        "93b513c4",
+        "93b513c",
         "os-apps/temper-channels/specs/channel.ioa.toml",
     ),
     // --- openpaw repo — 7a644954 bulk migration ---
@@ -403,6 +400,13 @@ fn normalize_old_config_for_expected_evolution(
     config: &BTreeMap<String, String>,
 ) -> BTreeMap<String, String> {
     let mut normalized = config.clone();
+    // Legacy sandbox addresses move to the managed sandbox, whose token the
+    // WASM host attaches when resolving the platform secret.
+    if let Some(sandbox_url) = normalized.get_mut("sandbox_url")
+        && sandbox_url == "http://127.0.0.1:9999"
+    {
+        *sandbox_url = "{secret:sandbox_url}".to_string();
+    }
     match (path, trigger_name) {
         ("os-apps/paw-agent/specs/session.ioa.toml", "call_provider") => {
             normalized.remove("api_key");
@@ -585,8 +589,8 @@ fn git_show_ignores_inherited_git_dir_from_other_repo() {
     let wrong_git_dir = repo.join("target/not-a-real-git-dir");
     let path = "reference-apps/weather-tracker/specs/weather_report.ioa.toml";
 
-    let clean = git_show(&repo, "3c45720a", path);
-    let contaminated = git_show_inner(&repo, "3c45720a", path, Some(&wrong_git_dir));
+    let clean = git_show(&repo, "3c45720", path);
+    let contaminated = git_show_inner(&repo, "3c45720", path, Some(&wrong_git_dir));
 
     assert_eq!(clean, contaminated);
 }

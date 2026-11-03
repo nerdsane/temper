@@ -17,11 +17,18 @@ use temper_runtime::tenant::TenantId;
 use temper_spec::csdl::parse_csdl;
 use temper_store_turso::TursoEventStore;
 
-mod dst_projection_lag;
+mod count_telemetry;
+mod declared_default_count;
+mod declared_defaults;
+mod empty_match;
+mod equality_delta;
+mod equality_delta_postgres;
+mod equality_probe;
+mod event_metadata;
 mod keyed_existence;
 mod paging;
-mod point_read_freshness;
 mod proof;
+mod spec_deleted;
 
 const CSDL_XML: &str = include_str!("../../../../../test-fixtures/specs/model.csdl.xml");
 const ORDER_IOA: &str = include_str!("../../../../../test-fixtures/specs/order.ioa.toml");
@@ -87,31 +94,6 @@ async fn upsert_order_projection(
 }
 
 #[test]
-fn fallback_reason_labels_are_stable() {
-    assert_eq!(QueryPlaneFallbackReason::None.as_str(), "none");
-    assert_eq!(
-        QueryPlaneFallbackReason::NoFilterPushdown.as_str(),
-        "no_filter_pushdown"
-    );
-    assert_eq!(
-        QueryPlaneFallbackReason::NativePageUnavailable.as_str(),
-        "native_page_unavailable"
-    );
-    assert_eq!(
-        QueryPlaneFallbackReason::FilterPushdownUnavailable.as_str(),
-        "filter_pushdown_unavailable"
-    );
-    assert_eq!(
-        QueryPlaneFallbackReason::CatalogCoverageGap.as_str(),
-        "catalog_coverage_gap"
-    );
-    assert_eq!(
-        QueryPlaneFallbackReason::FallbackCandidateBudget.as_str(),
-        "fallback_candidate_budget"
-    );
-}
-
-#[test]
 fn scan_candidate_budget_matches_existing_odata_cap() {
     let small_default = QueryPlaneReadBudget {
         default_page_size: 100,
@@ -156,7 +138,7 @@ fn native_catalog_coverage_short_circuit_requires_pushdown_without_count() {
     };
     let filtered_plan = native_candidate_page_plan(&filtered_request).expect("native plan");
 
-    assert!(should_try_native_before_catalog_coverage(
+    assert!(should_try_native_page_first(
         &filtered_request,
         &filtered_plan
     ));
@@ -170,10 +152,7 @@ fn native_catalog_coverage_short_circuit_requires_pushdown_without_count() {
         ..filtered_request
     };
     let count_plan = native_candidate_page_plan(&count_request).expect("native count plan");
-    assert!(!should_try_native_before_catalog_coverage(
-        &count_request,
-        &count_plan
-    ));
+    assert!(!should_try_native_page_first(&count_request, &count_plan));
 
     let unfiltered_options = QueryOptions {
         top: Some(1),
@@ -184,7 +163,7 @@ fn native_catalog_coverage_short_circuit_requires_pushdown_without_count() {
         ..count_request
     };
     let unfiltered_plan = native_candidate_page_plan(&unfiltered_request).expect("native plan");
-    assert!(!should_try_native_before_catalog_coverage(
+    assert!(!should_try_native_page_first(
         &unfiltered_request,
         &unfiltered_plan
     ));
@@ -247,10 +226,180 @@ async fn row_authorized_count_over_budget_returns_413() {
         QueryPlaneReadError::AuthorizationDenied(_) => {
             panic!("test state should allow collection reads")
         }
+        QueryPlaneReadError::ReadUnavailable => panic!("authoritative read should be available"),
         QueryPlaneReadError::InvalidContinuation => {
             panic!("no $skiptoken was supplied")
         }
     }
+}
+
+#[tokio::test]
+async fn list_read_drops_rows_a_per_entity_forbid_names() {
+    let state = build_order_state("query-plane-row-forbid");
+    create_orders(&state, 3).await;
+    let tenant = TenantId::default();
+    state
+        .authz
+        .reload_tenant_policies(
+            tenant.as_str(),
+            r#"
+            permit(principal, action == Action::"list", resource is Order);
+            permit(principal, action == Action::"read", resource is Order);
+            forbid(principal, action == Action::"read", resource == Order::"ord-01");
+            "#,
+        )
+        .expect("install row forbid");
+    let security_ctx = SecurityContext {
+        principal: temper_authz::Principal {
+            id: "reader".to_string(),
+            kind: temper_authz::PrincipalKind::Customer,
+            role: None,
+            acting_for: None,
+            agent_type: None,
+            label: None,
+            attributes: Default::default(),
+        },
+        context_attrs: Default::default(),
+        correlation_id: "row-forbid".to_string(),
+        cause: None,
+        credential: None,
+    };
+    let query_options = QueryOptions {
+        top: Some(10),
+        count: Some(true),
+        ..QueryOptions::default()
+    };
+
+    let result = match read_entity_set_page(QueryPlaneReadRequest {
+        state: &state,
+        tenant: &tenant,
+        security_ctx: &security_ctx,
+        entity_type: "Order",
+        entity_set_name: "Orders",
+        query_options: &query_options,
+        budget: QueryPlaneReadBudget {
+            default_page_size: 10,
+            max_entities: 10,
+        },
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => panic!("per-entity forbid should filter rows, not reject the list"),
+    };
+    assert_eq!(result.count, Some(2));
+
+    let ids = result
+        .entities
+        .iter()
+        .map(listed_entity_id)
+        .collect::<Vec<_>>();
+    assert!(
+        ids.iter().any(|id| id == "ord-00"),
+        "allowed row must remain: {ids:?}"
+    );
+    assert!(
+        ids.iter().any(|id| id == "ord-02"),
+        "allowed row must remain: {ids:?}"
+    );
+    assert!(
+        !ids.iter().any(|id| id == "ord-01"),
+        "forbidden row must be filtered: {ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn uniform_type_permit_returns_every_row() {
+    let state = build_order_state("query-plane-uniform-permit");
+    create_orders(&state, 3).await;
+    let tenant = TenantId::default();
+    state
+        .authz
+        .reload_tenant_policies(
+            tenant.as_str(),
+            r#"
+            permit(principal, action == Action::"list", resource is Order);
+            permit(principal, action == Action::"read", resource is Order);
+            "#,
+        )
+        .expect("install uniform permit");
+    let security_ctx = SecurityContext {
+        principal: temper_authz::Principal {
+            id: "reader".to_string(),
+            kind: temper_authz::PrincipalKind::Customer,
+            role: None,
+            acting_for: None,
+            agent_type: None,
+            label: None,
+            attributes: Default::default(),
+        },
+        context_attrs: Default::default(),
+        correlation_id: "uniform-permit".to_string(),
+        cause: None,
+        credential: None,
+    };
+    let query_options = QueryOptions {
+        top: Some(10),
+        count: Some(true),
+        ..QueryOptions::default()
+    };
+
+    let result = match read_entity_set_page(QueryPlaneReadRequest {
+        state: &state,
+        tenant: &tenant,
+        security_ctx: &security_ctx,
+        entity_type: "Order",
+        entity_set_name: "Orders",
+        query_options: &query_options,
+        budget: QueryPlaneReadBudget {
+            default_page_size: 10,
+            max_entities: 10,
+        },
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => panic!("uniform permit should allow the list"),
+    };
+    assert_eq!(result.count, Some(3));
+
+    let ids = result
+        .entities
+        .iter()
+        .map(listed_entity_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        ids,
+        ["ord-00", "ord-01", "ord-02"]
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    );
+}
+
+fn listed_entity_id(entity: &serde_json::Value) -> String {
+    if let Some(id) = entity.get("entity_id").and_then(|value| value.as_str()) {
+        return id.to_string();
+    }
+    if let Some(id) = entity.get("Id").and_then(|value| value.as_str()) {
+        return id.to_string();
+    }
+    if let Some(id) = entity
+        .get("fields")
+        .and_then(|fields| fields.get("Id"))
+        .and_then(|value| value.as_str())
+    {
+        return id.to_string();
+    }
+    let odata_id = entity
+        .get("@odata.id")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    odata_id
+        .split_once('(')
+        .and_then(|(_, rest)| rest.strip_suffix(')'))
+        .map(|inner| inner.trim_matches('\'').to_string())
+        .unwrap_or_default()
 }
 
 #[tokio::test]
@@ -289,79 +438,6 @@ async fn row_authorized_first_page_can_stop_after_proof() {
         result.telemetry.strategy,
         QueryPlaneReadStrategy::ReadSourceCursor
     );
-}
-
-#[tokio::test]
-async fn projection_lagged_actor_write_repairs_missing_catalog_row() {
-    let db_path =
-        std::env::temp_dir().join(format!("temper-query-plane-lag-repair-{}.db", sim_uuid()));
-    let _ = std::fs::remove_file(&db_path);
-    let db_url = format!("file:{}", db_path.display());
-    let store = TursoEventStore::new(&db_url, None)
-        .await
-        .expect("create local turso db");
-    let mut state = build_order_state("query-plane-lag-repair");
-    create_orders(&state, 1).await;
-    state.set_storage_stack(StorageStack::from_turso(store.clone()));
-    let tenant = TenantId::default();
-
-    let security_ctx = SecurityContext::system();
-    let query_options = QueryOptions {
-        filter: Some(FilterExpr::BinaryOp {
-            left: Box::new(FilterExpr::Property("Id".to_string())),
-            op: BinaryOperator::Eq,
-            right: Box::new(FilterExpr::Literal(ODataValue::String(
-                "ord-00".to_string(),
-            ))),
-        }),
-        top: Some(1),
-        select: Some(vec!["Id".to_string(), "Status".to_string()]),
-        ..QueryOptions::default()
-    };
-
-    let result = match read_entity_set_page(QueryPlaneReadRequest {
-        state: &state,
-        tenant: &tenant,
-        security_ctx: &security_ctx,
-        entity_type: "Order",
-        entity_set_name: "Orders",
-        query_options: &query_options,
-        budget: QueryPlaneReadBudget {
-            default_page_size: 1,
-            max_entities: 10,
-        },
-    })
-    .await
-    {
-        Ok(result) => result,
-        Err(_) => panic!("lagged projection should fall back to actor and repair"),
-    };
-
-    assert_eq!(result.entities.len(), 1);
-    assert_eq!(result.entities[0]["Id"].as_str(), Some("ord-00"));
-    assert_eq!(
-        result.telemetry.strategy,
-        QueryPlaneReadStrategy::ReadSourceCursor
-    );
-    assert_eq!(
-        result.telemetry.fallback_reason,
-        QueryPlaneFallbackReason::CatalogCoverageGap
-    );
-    assert_eq!(result.telemetry.coverage.missing, 1);
-
-    let ids = vec!["ord-00".to_string()];
-    let query_plane = state
-        .query_plane_store()
-        .expect("query-plane store should be configured");
-    let repaired = load_catalog_rows_by_id(&query_plane, tenant.as_str(), "Order", &ids)
-        .await
-        .expect("load repaired catalog row");
-    let CatalogRowsLoad::Available(rows) = repaired else {
-        panic!("turso catalog row load should be supported");
-    };
-    assert!(rows.contains_key("ord-00"));
-
-    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]

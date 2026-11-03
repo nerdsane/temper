@@ -23,6 +23,7 @@ fn context() -> WasmInvocationContext {
         workflow_root_entity_id: Some("s-1".to_string()),
         workflow_run_id: Some("Session:s-1".to_string()),
         http_request: None,
+        trigger_principal: None,
     }
 }
 
