@@ -51,7 +51,7 @@ pub(in crate::composite::joint) struct Explored<'a> {
     pub(in crate::composite::joint) held_back: bool,
     /// The moves the runtime could make in a walked state that the walk
     /// never takes.
-    unwalked: BTreeSet<Unwalked>,
+    pub(super) unwalked: BTreeSet<Unwalked>,
     /// The memory its tables hold, given back when it is dropped.
     pub(in crate::composite::joint) held: Held<'a>,
 }
@@ -407,6 +407,7 @@ impl JointModel {
             broken.iter().all(Option::is_some)
         });
         let unwalked = explored.unwalked();
+        let (states, held_back) = (explored.len(), explored.held_back);
         let outcomes = broken
             .iter()
             .enumerate()
@@ -433,10 +434,12 @@ impl JointModel {
                 },
             })
             .collect();
+        // Past where it stopped, phase two (`guided.rs`).
+        let outcomes = self.guided_invariants(owner, invariants, outcomes, explored, bound);
         Walk {
-            states: explored.len(),
+            states,
             outcomes,
-            held_back: explored.held_back,
+            held_back,
         }
     }
 }
