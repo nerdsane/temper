@@ -11,15 +11,14 @@ use temper_authz::AuthenticatedRequestContext;
 use tracing::instrument;
 
 use super::PolicyAuthed;
-use crate::authz::persist_and_activate_policy;
 use crate::state::ServerState;
 
 mod replacement;
-mod support;
+pub(super) mod support;
 pub(crate) use replacement::handle_replace_policy;
 use support::{
-    build_prospective_enabled_text, build_prospective_enabled_text_with_override, persist_new_rule,
-    policy_row_to_json, reload_tenant_from_store,
+    build_prospective_enabled_text_with_override, live_text_with_entry, persist_and_reload_entry,
+    persist_new_rule, policy_row_to_json, reload_tenant_from_store,
 };
 
 // ---------------------------------------------------------------------------
@@ -312,26 +311,29 @@ pub(crate) async fn handle_create_policy(
         }
     };
 
-    // Validate: build prospective enabled policy text with the new entry added.
-    let prospective =
-        build_prospective_enabled_text(&state, &tenant, Some((&policy_id, &cedar_text))).await;
-    if let Err(resp) = super::validate_and_reload_policies(&state, &tenant, &prospective) {
-        return resp;
+    // The live text with this entry set: its old statements leave, so a
+    // repeated or replacing create never stacks copies.
+    // A create that changes nothing (the row and live set already hold this
+    // text) reloads and writes nothing.
+    match live_text_with_entry(&state, &tenant, &policy_id, &cedar_text).await {
+        Err(refused) => return refused.into_response(),
+        Ok(None) => {}
+        Ok(Some(prospective)) => {
+            let created_by = auth.security_context().principal.id.as_str();
+            if let Err(resp) = persist_and_reload_entry(
+                &state,
+                &tenant,
+                &policy_id,
+                &cedar_text,
+                created_by,
+                prospective,
+            )
+            .await
+            {
+                return resp;
+            }
+        }
     }
-
-    // Persist the new policy entry.
-    let created_by = auth.security_context().principal.id.as_str();
-    persist_and_activate_policy(&state, &tenant, &policy_id, &cedar_text, created_by).await;
-
-    // Update in-memory map to match the prospective text.
-    {
-        let mut policies = state.tenant_policies.write().unwrap(); // ci-ok: infallible lock
-        policies.insert(tenant.clone(), prospective);
-    }
-
-    let _ = state
-        .observe_refresh_tx
-        .send(crate::state::ObserveRefreshHint::Policies);
 
     (
         StatusCode::CREATED,
