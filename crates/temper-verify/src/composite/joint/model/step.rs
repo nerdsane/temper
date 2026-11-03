@@ -16,6 +16,9 @@ use super::labels::rename_label;
 use super::{Delivery, JointModel, MAX_IN_FLIGHT};
 use crate::model::{ModelString, TemperModelAction};
 
+#[path = "guard.rs"]
+mod guard;
+
 /// One move of the walk.
 #[derive(Debug, Clone)]
 pub(in crate::composite::joint) enum Move {
@@ -290,6 +293,13 @@ impl JointModel {
                     }
                 }
             }
+            Move::Read(dispatch) if dispatch.unread_guard.is_some() => {
+                for outcome in self.read_trigger_guard(dispatch, state) {
+                    if !self.expansion.push(&mut outcomes, outcome) {
+                        return (Vec::new(), false);
+                    }
+                }
+            }
             Move::Read(dispatch) => {
                 let mut next = state.clone();
                 remove(&mut next, dispatch);
@@ -458,6 +468,7 @@ pub(super) fn sent(entity: &str, action: &TemperModelAction, by: u32) -> Dispatc
         chain: Vec::new(),
         via: None,
         by,
+        unread_guard: None,
     }
 }
 

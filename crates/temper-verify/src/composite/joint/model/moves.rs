@@ -75,7 +75,7 @@ impl JointModel {
         let mut seen = BTreeSet::new();
         for dispatch in &state.inflight {
             if seen.insert(dispatch) {
-                let mv = if dispatch.read {
+                let mv = if dispatch.read && dispatch.unread_guard.is_none() {
                     Move::Arrive(dispatch.clone())
                 } else {
                     Move::Read(dispatch.clone())

@@ -36,6 +36,7 @@ impl JointModel {
             chain: Vec::new(),
             via: None,
             by,
+            unread_guard: None,
         };
         if !dispatch.read {
             let mut next = state;

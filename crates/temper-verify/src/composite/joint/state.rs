@@ -84,6 +84,57 @@ pub struct Dispatch {
     pub via: Option<usize>,
     /// Who sends it, by sender number; Cedar decides it as them.
     pub by: u32,
+    /// For a reaction whose trigger's guard reads a related record in
+    /// scope: its source as it committed, until the guard is read. The
+    /// runtime reads the related records after the source commits, one
+    /// trigger at a time, so other moves can land first.
+    pub unread_guard: Option<Committed>,
+}
+
+impl Dispatch {
+    /// The values it carries: its parameters and its unread source's fields.
+    pub(super) fn values(&self) -> impl Iterator<Item = &ParamValue> {
+        let committed = self.unread_guard.iter().flat_map(|c| c.fields.values());
+        self.params.values().chain(committed)
+    }
+}
+
+/// What a trigger's guard reads of its source, as the source committed:
+/// its status and the fields the guard names.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Committed {
+    /// The source's status after its move.
+    pub status: String,
+    /// The fields the guard reads, by name.
+    pub fields: BTreeMap<String, ParamValue>,
+}
+
+impl Committed {
+    /// The source record as the guard reads it.
+    pub(super) fn record(&self) -> TemperModelState {
+        let mut record = TemperModelState {
+            status: self.status.clone(),
+            counters: BTreeMap::new(),
+            booleans: BTreeMap::new(),
+            lists: BTreeMap::new(),
+            strings: BTreeMap::new(),
+        };
+        for (field, value) in &self.fields {
+            match value {
+                ParamValue::Count(count) => {
+                    record.counters.insert(field.clone(), *count);
+                }
+                ParamValue::Bool(value) => {
+                    record.booleans.insert(field.clone(), *value);
+                }
+                ParamValue::Str(text) => {
+                    record.strings.insert(field.clone(), text.clone());
+                }
+                ParamValue::Fresh => {}
+            }
+        }
+        record
+    }
 }
 
 impl fmt::Display for Dispatch {
@@ -94,7 +145,9 @@ impl fmt::Display for Dispatch {
             params: self.params.clone(),
         };
         write!(f, "{}.{action}", self.to)?;
-        if !self.read {
+        if self.unread_guard.is_some() {
+            f.write_str(" (trigger guard unread)")?;
+        } else if !self.read {
             f.write_str(" (unread)")?;
         }
         Ok(())
@@ -137,11 +190,20 @@ pub(super) fn canonical(state: &mut JointState) -> BTreeMap<ModelString, ModelSt
         })
         .collect();
     let renamed = {
+        let committed = dispatches
+            .iter_mut()
+            .filter_map(|d| d.unread_guard.as_mut())
+            .flat_map(|c| c.fields.values_mut())
+            .filter_map(|value| match value {
+                ParamValue::Str(text) => Some(text),
+                _ => None,
+            });
         let values = state
             .records
             .values_mut()
             .flat_map(|s| s.strings.values_mut().chain(s.lists.values_mut().flatten()))
             .chain(strings.iter_mut().flat_map(|s| s.values_mut()))
+            .chain(committed)
             .chain(state.calls.iter_mut().flat_map(|c| c.asked.values_mut()));
         canonical_values(values)
     };

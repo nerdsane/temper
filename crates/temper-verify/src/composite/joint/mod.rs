@@ -87,7 +87,7 @@ pub use model::DroppedReaction;
 pub(crate) use model::dropped_reactions;
 use model::{JointModel, Move, Sending};
 use state::render;
-pub use state::{Call, Dispatch, JointState, ReactionStep};
+pub use state::{Call, Committed, Dispatch, JointState, ReactionStep};
 
 /// What the joint check found for one invariant.
 #[derive(Debug, Clone)]
