@@ -487,3 +487,5 @@ fn oversized_parameter_expansion_is_incomplete() {
     assert_eq!(results.len(), 1);
     assert!(results[0].holds(), "{}", results[0]);
 }
+
+mod cause;

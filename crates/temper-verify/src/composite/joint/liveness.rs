@@ -360,7 +360,7 @@ pub(super) fn settle_bytes(explored: &model::Explored<'_>) -> usize {
 }
 
 #[cfg(test)]
-#[path = "liveness_test.rs"]
+#[path = "liveness_test/mod.rs"]
 mod tests;
 
 #[cfg(test)]

@@ -8,7 +8,7 @@ use temper_authz::May;
 use temper_spec::predicate::{Truth, eval};
 
 use super::super::env::Blind;
-use super::super::senders::OUTSIDE;
+use super::super::senders::{OUTSIDE, Rule};
 use super::super::state::canonical;
 use super::super::{Call, Dispatch, JointState};
 use super::commit::add;
@@ -195,7 +195,8 @@ impl JointModel {
                 outcomes.push((next, text, Certainty::unless(known, Unsure)));
             }
             Move::Timer(entity, name) => {
-                let by = state.armed.get(entity).copied().unwrap_or(OUTSIDE);
+                let armed = state.armed.get(entity).copied().unwrap_or(OUTSIDE);
+                let by = self.senders.timer(armed);
                 let text = if self.sender_matters.contains(entity) {
                     format!("{entity}.{name} (timer, as {})", self.senders.name(by))
                 } else {
@@ -280,9 +281,15 @@ impl JointModel {
                 remove(&mut next, dispatch);
                 // Cedar decides a reaction as its sender; every other
                 // dispatch was decided at its entry point, or is the kernel's.
-                let may = if dispatch.via.is_some() {
+                let may = if let Some(index) = dispatch.via {
+                    let reaction = &self.reactions[index];
+                    let rule = Rule {
+                        from: &reaction.from,
+                        action: &reaction.source_action,
+                        trigger: &reaction.trigger,
+                    };
                     self.senders
-                        .may_in(dispatch.by, &dispatch.to, &dispatch.action, state)
+                        .may_in(dispatch.by, &rule, &dispatch.to, &dispatch.action, state)
                 } else {
                     May::Yes
                 };
@@ -386,7 +393,7 @@ impl JointModel {
         {
             return May::Yes;
         }
-        self.senders.may(OUTSIDE, entity, action)
+        self.senders.request(entity, action)
     }
 
     /// Whether the guard of the transition `action` names holds on `state`,

@@ -123,8 +123,9 @@ impl JointModel {
         let timeout = self.timeout(entity, &moved.status);
         match timeout {
             Some(timeout) if entered || timeout.reset_on.iter().any(|a| a == action) => {
+                // Its fire starts a timer's chain, whichever chain armed it.
                 let sender = if self.sender_matters.contains(entity) {
-                    by
+                    super::super::senders::Senders::armer(by)
                 } else {
                     super::super::senders::OUTSIDE
                 };

@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::Value as Json;
 
 use super::json::{entity_parts, like, same, single};
-use super::{Asker, Attr};
+use super::{Asker, Attr, Cause};
 
 /// The results a condition can have, as a set: true, false, an error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +91,8 @@ pub(super) struct Request<'a> {
     pub(super) resource_type: &'a str,
     /// The record's attributes the caller knows.
     pub(super) record: &'a BTreeMap<String, Attr>,
+    /// How the move came about, when the caller knows.
+    pub(super) cause: Option<&'a Cause>,
 }
 
 impl Request<'_> {
@@ -325,7 +327,19 @@ impl Request<'_> {
         }
     }
 
+    /// A cause key's value, when the caller knows the cause: only the
+    /// kernel sets these, so one the cause lacks is an error to read.
+    fn cause_key(&self, of: &Val, key: &str) -> Option<Option<&Attr>> {
+        match of {
+            Val::Context => self.cause?.get(key),
+            _ => None,
+        }
+    }
+
     fn attribute(&self, of: &Val, attr: &str) -> Val {
+        if let Some(value) = self.cause_key(of, attr) {
+            return value.map_or(Val::Error, |a| self.known(a.clone()));
+        }
         match (of, self.asker) {
             (Val::Principal, Asker::Service { name, .. }) => {
                 Self::service_attribute(name, attr).map_or(Val::Error, Val::Known)
@@ -368,6 +382,9 @@ impl Request<'_> {
     }
 
     fn has(&self, of: &Val, attr: &str) -> Results {
+        if let Some(value) = self.cause_key(of, attr) {
+            return Results::of(value.is_some());
+        }
         match (of, self.asker) {
             (Val::Principal, Asker::Service { name, .. }) => {
                 Results::of(Self::service_attribute(name, attr).is_some())

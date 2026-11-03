@@ -15,6 +15,7 @@
 //! forbid always does, and [`May::Maybe`] otherwise. A caller that knows some
 //! of the record's attributes passes them, and those are unknown no longer.
 
+mod cause;
 mod json;
 mod request;
 
@@ -28,6 +29,7 @@ use serde_json::Value as Json;
 
 use super::platform_policy::merge_system_platform_policy;
 use crate::error::AuthzError;
+pub use cause::{Cause, Hop};
 use request::{Request, TRUE};
 
 /// A kind of sender.
@@ -111,19 +113,22 @@ impl SendAnalysis {
     }
 
     /// Whether `asker` may send `action` to a record of `resource_type`, of
-    /// which the caller knows the attributes in `record` (`id` its id).
+    /// which the caller knows the attributes in `record` (`id` its id), for
+    /// a move with `cause` (unknown when None).
     pub fn may(
         &self,
         asker: &Asker,
         action: &str,
         resource_type: &str,
         record: &BTreeMap<String, Attr>,
+        cause: Option<&Cause>,
     ) -> May {
         let request = Request {
             asker,
             action,
             resource_type,
             record,
+            cause,
         };
         let (mut permit_can, mut permit_always) = (false, false);
         let (mut forbid_can, mut forbid_always) = (false, false);
@@ -161,6 +166,7 @@ impl SendAnalysis {
             action,
             resource_type,
             record: &record,
+            cause: None,
         };
         let mut applicable: Vec<String> = self
             .policies
@@ -170,5 +176,14 @@ impl SendAnalysis {
             .collect();
         applicable.sort();
         applicable
+    }
+
+    /// Whether some policy can tell a move in a timer's chain from the same
+    /// move in a request's ([`Cause::reaction`]): when none can, a model
+    /// need not keep the two apart.
+    pub fn tells_timer_chains(&self) -> bool {
+        self.policies
+            .iter()
+            .any(|(_, policy)| cause::tells_timer_chains(&policy["conditions"]))
     }
 }

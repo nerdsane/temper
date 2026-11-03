@@ -18,7 +18,7 @@ pub use context::{
     is_cedar_authority_context_key, platform_keys,
 };
 pub use engine::{
-    Asker, Attr, AuthzDecision, AuthzEngine, ListReadUniformity, May, SendAnalysis,
+    Asker, Attr, AuthzDecision, AuthzEngine, Cause, Hop, ListReadUniformity, May, SendAnalysis,
     VERIFIED_OPERATOR_WHEN, permitted_resource_types,
 };
 pub use error::{AuthzDenial, AuthzError};

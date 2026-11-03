@@ -7,7 +7,7 @@ use temper_spec::automaton::TargetResolver;
 use temper_spec::predicate::{Arg, Literal, ParamKind, Truth, eval};
 
 use super::super::env::{Blind, Found, ID, resolve};
-use super::super::senders::OUTSIDE;
+use super::super::senders::Senders;
 use super::super::state::ReactionStep;
 use super::super::{Call, Dispatch, JointState};
 use super::JointModel;
@@ -46,7 +46,7 @@ impl JointModel {
         let answer_as = if self.sender_matters.contains(source) {
             by
         } else {
-            OUTSIDE
+            Senders::anyone(by)
         };
         let internal = self.kernel.internal.get(source);
         let asked: Vec<BTreeSet<String>> = specs

@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::ops::ControlFlow;
 
-use temper_authz::{Asker, May, SendAnalysis};
+use temper_authz::{Asker, Cause, May, SendAnalysis};
 use temper_runtime::tenant::TenantId;
 use temper_spec::automaton::Automaton;
 use temper_spec::cross_invariant;
@@ -355,7 +355,13 @@ pub(super) fn timer_strands(
         return Vec::new();
     };
     let outside_may = |entity_type: &str, action: &str| {
-        cedar.may(&Asker::Outside, action, entity_type, &BTreeMap::new()) != May::No
+        cedar.may(
+            &Asker::Outside,
+            action,
+            entity_type,
+            &BTreeMap::new(),
+            Some(&Cause::request()),
+        ) != May::No
     };
     let mut warnings = Vec::new();
     for (entity_type, source) in specs {

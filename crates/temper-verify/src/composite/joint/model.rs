@@ -256,7 +256,7 @@ impl JointModel {
             sending
                 .relies_on
                 .contains(&(entity.to_string(), action.to_string()))
-                || senders.may(OUTSIDE, entity, action) != May::No
+                || senders.request(entity, action) != May::No
                 || kernel.chooses(entity, action)
         };
         let order = Order::read(&Specs {
