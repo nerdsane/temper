@@ -9,7 +9,7 @@ use super::super::state::render;
 use super::super::{JointState, JointStep};
 use super::JointModel;
 use super::held::Tables;
-use super::step::Certainty;
+use super::step::{Certainty, Move};
 
 mod invariants;
 
@@ -79,6 +79,9 @@ pub(in crate::composite::joint) struct Explored<'a> {
     /// The moves the runtime could make in a walked state that the walk
     /// never takes.
     unwalked: BTreeSet<Unwalked>,
+    /// The moves (names in `packer`) that are reactions from a type outside
+    /// the scope, with the type and action each one sends.
+    outside: BTreeMap<u32, (String, String)>,
     /// The memory its tables hold, given back when it is dropped.
     pub(in crate::composite::joint) held: Held<'a>,
 }
@@ -135,16 +138,40 @@ impl Explored<'_> {
 
     /// The first move on the way to the state walked `index`th that the
     /// walk cannot be sure the runtime makes, when there is one: the move
-    /// into the first state on it that sure moves alone do not reach.
-    pub(in crate::composite::joint) fn first_unsure(&self, mut index: usize) -> Option<String> {
+    /// into the first state on it that sure moves alone do not reach. It is
+    /// a name in the walk's packer ([`Self::label`]).
+    pub(in crate::composite::joint) fn first_unsure(&self, mut index: usize) -> Option<u32> {
         let mut first = None;
         while let Some((from, label)) = self.nodes[index].parent {
             if !self.nodes[index].sure && self.nodes[from as usize].sure {
-                first = Some(self.packer.name(label).to_string());
+                first = Some(label);
             }
             index = from as usize;
         }
         first
+    }
+
+    /// The move a name in the walk's packer stands for, in words.
+    pub(in crate::composite::joint) fn label(&self, label: u32) -> &str {
+        self.packer.name(label)
+    }
+
+    /// The type and action the move `label` sends, when it is a reaction
+    /// from a type outside the scope.
+    pub(in crate::composite::joint) fn outside_at(&self, label: u32) -> Option<(&str, &str)> {
+        self.outside
+            .get(&label)
+            .map(|(entity, action)| (entity.as_str(), action.as_str()))
+    }
+
+    /// Remember that `label` names `mv`, when it is a reaction from a type
+    /// outside the scope.
+    fn note_outside(&mut self, label: u32, mv: &Move) {
+        if let Move::Reaction(entity, action, _) = mv {
+            self.outside
+                .entry(label)
+                .or_insert_with(|| (entity.clone(), action.name.clone()));
+        }
     }
 
     /// The moves the runtime could make that the walk never took, one line
@@ -238,6 +265,7 @@ impl JointModel {
             stopped: None,
             held_back: false,
             unwalked: BTreeSet::new(),
+            outside: BTreeMap::new(),
             held: Held::new(bound),
         };
         if let Some(reason) = &self.senders.problem {
@@ -374,6 +402,7 @@ impl JointModel {
                                 queue.push_back(at as usize);
                             }
                             let label = explored.packer.id(&next.label);
+                            explored.note_outside(label, mv);
                             let node = &mut explored.nodes[at as usize];
                             node.sure = true;
                             node.queued = true;
@@ -390,6 +419,7 @@ impl JointModel {
                             }
                             let at = explored.nodes.len() as u32;
                             let label = explored.packer.id(&next.label);
+                            explored.note_outside(label, mv);
                             tables.states += block(size_of::<[usize; 2]>() + 4 * packed.len());
                             seen.insert(packed.clone(), at);
                             explored.nodes.push(Node {

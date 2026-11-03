@@ -104,6 +104,9 @@ pub(super) struct Walk {
     pub(super) outcomes: Vec<JointOutcome>,
     /// Whether a move was held back for [`MAX_IN_FLIGHT`].
     pub(super) held_back: bool,
+    /// One per invariant: when it is false only where the walk went by a
+    /// reaction from types outside the scope, those types, else none.
+    pub(super) outside: Vec<BTreeSet<String>>,
 }
 
 /// The joint model of one entity's properties that read related entities.
