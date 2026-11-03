@@ -354,6 +354,38 @@ async fn recovered_granular_row_still_allows_verified_operator() {
     );
 }
 
+/// The operator key reads its tenant's installs (`read_app_installs`), which
+/// is how Katagami finds the folder an app is served from; a developer key
+/// does not.
+#[tokio::test]
+async fn http_app_installs_read_allows_operator_and_denies_developer() {
+    let tenant = "acme";
+    let (state, _temp) = virgin_state_with_store(tenant).await;
+    bootstrap_operator_credential(&state, OPERATOR_KEY, tenant)
+        .await
+        .expect("operator credential bootstrap should succeed");
+    issue_developer_credential(&state, tenant, DEVELOPER_KEY).await;
+    let app = build_platform_router(state);
+
+    for (key, expected) in [
+        (OPERATOR_KEY, StatusCode::OK),
+        (DEVELOPER_KEY, StatusCode::FORBIDDEN),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/api/genesis/apps/installs")
+                    .header("Authorization", format!("Bearer {key}"))
+                    .header("X-Tenant-Id", tenant)
+                    .body(Body::empty())
+                    .expect("GET installs"),
+            )
+            .await
+            .expect("GET installs should run");
+        assert_eq!(response.status(), expected, "{key}");
+    }
+}
+
 #[tokio::test]
 async fn http_policy_api_allows_operator_and_denies_developer() {
     let tenant = "acme";

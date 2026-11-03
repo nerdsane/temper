@@ -7,6 +7,7 @@
 
 mod answers;
 mod change_log;
+mod hung_push;
 mod projection;
 mod startup;
 mod support;
@@ -83,7 +84,9 @@ async fn a_restart_keeps_local_writes_and_sends_them() {
         "the restart did not replace the local file"
     );
 
-    // Opening pushes what the last run left behind.
+    // The next push sends what the last run left behind; a server makes one
+    // as soon as it serves.
+    push(&a).await;
     let (_b_dir, b_path) = machine();
     let b = server.open(&b_path).await;
     assert_eq!(count(&b, "r1").await, 1);
@@ -238,6 +241,78 @@ async fn checkpoints_between_writes_fail_none_of_them() {
     for n in 0..8 {
         assert_eq!(count(&b, &format!("c{n}")).await, 15, "entity c{n}");
     }
+}
+
+/// A checkpoint waits for the calls in flight instead of skipping, and says
+/// how long it waited and how long it took: every call that needed a
+/// connection meanwhile, the write holding the store's write gate included,
+/// waited as long.
+#[tokio::test]
+async fn a_checkpoint_waits_for_the_calls_in_flight_instead_of_skipping() {
+    // Skipping whenever a connection was in use let the log grow without
+    // bound under steady writes (1.21 GB in four minutes, staging, 27 Oct
+    // 2026), and the checkpoint that finally ran moved all of it while every
+    // call waited.
+    let Some(server) = SyncServer::start() else {
+        return;
+    };
+    let lines = Lines::default();
+    // This thread's own listener: the test runtime runs every task here.
+    let _listening =
+        tracing::subscriber::set_default(tracing_subscriber::layer::SubscriberExt::with(
+            tracing_subscriber::registry(),
+            lines.clone(),
+        ));
+    let (_a_dir, a_path) = machine();
+    let a = std::sync::Arc::new(server.open(&a_path).await);
+    for i in 0..10 {
+        write(&a, "c1", i).await;
+    }
+    push(&a).await;
+    let copy = a.sync_copy().expect("copy").clone();
+    // A trim holds one connection through its batches until its budget runs
+    // out. Given 100 ms, it starts one batch and lets go when that batch's
+    // commit returns, about 400 ms in: a call in flight that ends within the
+    // checkpoint's turn.
+    copy.simulate_slow_trim(Duration::ZERO, Duration::from_millis(400));
+    let trimming = {
+        let a = a.clone();
+        tokio::spawn(async move { a.trim_change_log(Duration::from_millis(100)).await })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !trimming.is_finished(),
+        "the trim still holds its connection"
+    );
+
+    let asked = Instant::now();
+    assert!(
+        copy.checkpoint_if_wal_over(0).await.expect("checkpoint"),
+        "the checkpoint ran once the trim let go of its connection"
+    );
+    let took = asked.elapsed();
+    let held = lines
+        .find(|line| line.message == "turso.sync checkpoint held new calls")
+        .expect("a checkpoint that waited for the trim says so");
+    let field = |name: &str| -> u128 {
+        held.fields[name]
+            .parse()
+            .unwrap_or_else(|_| panic!("{name} in {held:?}"))
+    };
+    assert!(
+        field("waited_ms") >= 100 && field("waited_ms") + field("fold_ms") <= took.as_millis(),
+        "the line gives the wait for the trim's connection and the fold, \
+         within the {} ms the call took: {held:?}",
+        took.as_millis()
+    );
+    let trimmed = trimming.await.expect("trim task").expect("trim");
+    assert!(trimmed > 0, "the trim deleted the pushed changes");
+    write(&a, "c1", 10).await;
+    push(&a).await;
+
+    let (_b_dir, b_path) = machine();
+    let b = server.open(&b_path).await;
+    assert_eq!(count(&b, "c1").await, 11, "every write reached the remote");
 }
 
 #[tokio::test]

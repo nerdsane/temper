@@ -155,6 +155,8 @@ async fn a_transport_failure_before_remote_commit_finishes_stays_unknown_without
                             persistence_id: (*id).into(),
                             expected_sequence: 0,
                             events: vec![fault.events[index].clone()],
+                            state_timer: None,
+                            projection: None,
                         })
                         .collect::<Vec<_>>(),
                 )

@@ -16,8 +16,9 @@
 //! entity); their `on_success`/`on_failure` dispatches do show up as edges
 //! from the source entity to itself if the follow-up is a declared action.
 //!
-//! Cycles are permitted (a reaction cascade can feed back) and detected;
-//! the verifier bounds cycle exploration by `MAX_TRIGGER_DEPTH = 8`.
+//! Cycles are permitted (a reaction cascade can feed back) and detected; at
+//! runtime and in the verifier a chain stops the first time it would repeat a
+//! step.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -46,11 +47,10 @@ pub struct TriggerEdge {
     /// Whether the spec asks for the composite verifier to emit a
     /// `Property::eventually` for this chain.
     pub liveness_required: bool,
-    /// Whether the trigger resolves its target via `type = "create"`, which
-    /// spawns a fresh (always-enabled) target instance (ADR-0150). Such a
-    /// reaction can never be dropped, so the composite verifier's
-    /// `no_dropped_reaction` property exempts it.
-    pub creates_target: bool,
+    /// How the trigger resolves its target's identity. The verifier needs
+    /// the resolver to distinguish a generated id from one read from fields;
+    /// `create_if_missing` can do either.
+    pub resolve_target: TargetResolver,
     /// Whether the spec marked this reaction as an intentional best-effort
     /// drop (`drop_ok = true`, ADR-0150). When `true`, the composite
     /// verifier suppresses the `no_dropped_reaction` violation for this edge.
@@ -136,8 +136,8 @@ impl TriggerGraph {
     /// Returns `true` if the graph contains any cycle reachable from `seed`.
     ///
     /// Cycles are not errors (trigger cascades can legally feed back) but
-    /// callers like the composite verifier may want to know so they can
-    /// enforce `MAX_TRIGGER_DEPTH` vs compose a DAG differently.
+    /// callers like the composite verifier may want to know, since a chain
+    /// round a cycle stops at its first repeated step.
     pub fn has_cycle_from(&self, seed: &str) -> bool {
         let mut visited: BTreeSet<String> = BTreeSet::new();
         let mut in_stack: BTreeSet<String> = BTreeSet::new();
@@ -179,7 +179,7 @@ fn edge_from_trigger(
     }
     let target_entity = trigger.target_entity.as_ref()?.clone();
     let target_action = trigger.target_action.as_ref()?.clone();
-    let creates_target = matches!(trigger.resolve_target, Some(TargetResolver::Create));
+    let resolve_target = trigger.resolve_target.clone()?;
     Some(TriggerEdge {
         from: source_entity.to_string(),
         source_action: source_action.to_string(),
@@ -189,7 +189,7 @@ fn edge_from_trigger(
         status_filter: trigger.status_filter(),
         guard: trigger.guard.clone(),
         liveness_required: matches!(trigger.liveness, super::types::TriggerLiveness::Required),
-        creates_target,
+        resolve_target,
         drop_ok: trigger.drop_ok,
     })
 }

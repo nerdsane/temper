@@ -9,12 +9,8 @@
 
 mod common;
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use common::projection_writes_fail::ProjectionWritesFail;
 use common::{CSDL_XML, ORDER_IOA};
 use temper_runtime::ActorSystem;
 use temper_runtime::tenant::TenantId;
@@ -36,9 +32,6 @@ initial = "Pending"
 
 /// Enough referencing rows that reading them shows up plainly in the actor count.
 const REFERENCING_PAYMENTS: usize = 40;
-
-/// More unprojected rows than any delete should read one by one.
-const UNPROJECTED_PAYMENTS: usize = 250;
 
 struct Store {
     db_path: std::path::PathBuf,
@@ -107,19 +100,6 @@ fn server(name: &str, stack: StorageStack) -> ServerState {
 /// A server whose writes reach the journal and the query projection.
 async fn indexed_server(name: &str, store: &Store) -> ServerState {
     server(name, StorageStack::from_turso(store.open().await))
-}
-
-/// A server whose writes reach only the journal, as before a projection exists.
-async fn journal_only_server(name: &str, store: &Store) -> ServerState {
-    let mut stack = StorageStack::from_turso(store.open().await);
-    stack.query_plane = None;
-    server(name, stack)
-}
-
-/// A server whose projection writes fail while the returned switch is on.
-async fn projection_failing_server(name: &str, store: &Store) -> (ServerState, Arc<AtomicBool>) {
-    let (stack, failing) = ProjectionWritesFail::stack(store.open().await);
-    (server(name, stack), failing)
 }
 
 /// The same store opened by a fresh process: ids indexed at boot, no actor resident.
@@ -223,191 +203,47 @@ async fn restrict_delete_is_answered_without_reading_the_referencing_rows() {
 }
 
 #[tokio::test]
-async fn restrict_delete_still_sees_a_reference_the_index_has_not_projected() {
-    let store = Store::new("lagging");
-    let writer = indexed_server("delete-reference-lag-writer", &store).await;
-    create(&writer, "Order", "ord-lagging", serde_json::json!({})).await;
-    create(&writer, "Order", "ord-free", serde_json::json!({})).await;
-    create_payments(&writer, "pay", REFERENCING_PAYMENTS, "ord-elsewhere").await;
-
-    // One Payment reaches the journal but not the projection yet.
-    let lagging = journal_only_server("delete-reference-lag-journal", &store).await;
-    create(
-        &lagging,
-        "Payment",
-        "pay-unprojected",
-        serde_json::json!({ "OrderId": "ord-lagging" }),
-    )
-    .await;
-
-    let state = restarted_server("delete-reference-lag-restarted", &store).await;
-
-    let (status, body) = delete_order(&state, "ord-lagging").await;
-    assert_eq!(status, StatusCode::CONFLICT, "lagging reference: {body}");
-    let message = body["error"]["message"].as_str().unwrap_or_default();
-    assert!(
-        message.contains("referenced by Payment('pay-unprojected')"),
-        "refusal names the unprojected Payment: {message}"
-    );
-
-    let (status, body) = delete_order(&state, "ord-free").await;
-    assert_eq!(
-        status,
-        StatusCode::NO_CONTENT,
-        "unreferenced delete: {body}"
-    );
-}
-
-#[tokio::test]
-async fn restrict_delete_refuses_when_the_index_cannot_vouch_for_the_rows() {
-    let store = Store::new("unprojected");
-    let writer = journal_only_server("delete-reference-unprojected-writer", &store).await;
-    create(&writer, "Order", "ord-target", serde_json::json!({})).await;
-    create_payments(&writer, "pay", UNPROJECTED_PAYMENTS, "ord-elsewhere").await;
-
-    let state = restarted_server("delete-reference-unprojected-restarted", &store).await;
-    let actors_before = state.active_actor_count();
-
-    let (status, body) = delete_order(&state, "ord-target").await;
-    assert_eq!(
-        status,
-        StatusCode::SERVICE_UNAVAILABLE,
-        "a delete the index cannot check is refused, not scanned: {body}"
-    );
-    assert_eq!(body["error"]["details"]["type"], "relation_unverified");
-
-    let actors_started = state.active_actor_count().saturating_sub(actors_before);
-    assert!(
-        actors_started <= 1,
-        "the refused delete started {actors_started} actors; it should read no Payment"
-    );
-    assert_eq!(get_order(&state, "ord-target").await, StatusCode::OK);
-}
-
-#[tokio::test]
-async fn restrict_delete_reads_a_projected_row_whose_later_change_was_not_projected() {
-    let store = Store::new("stale");
-    let (state, projection_fails) =
-        projection_failing_server("delete-reference-stale", &store).await;
-    create(&state, "Order", "ord-target", serde_json::json!({})).await;
-    create_payments(&state, "pay", REFERENCING_PAYMENTS, "ord-elsewhere").await;
-
-    // pay-7 is projected pointing elsewhere. Its move to ord-target commits,
-    // but the projection write fails, so the index still has the old value.
-    projection_fails.store(true, Ordering::SeqCst);
-    let moved = state
-        .update_tenant_entity_fields(
-            &TenantId::default(),
-            "Payment",
-            "pay-7",
-            serde_json::json!({ "OrderId": "ord-target" }),
-            false,
-        )
-        .await;
-    assert!(
-        moved
-            .as_ref()
-            .is_err_and(|error| error.contains("query projection write failed")),
-        "the move commits and reports its failed projection: {moved:?}"
-    );
-    let committed = state
-        .get_tenant_entity_state(&TenantId::default(), "Payment", "pay-7")
-        .await
-        .expect("read pay-7");
-    assert_eq!(committed.state.fields["OrderId"], "ord-target");
-
-    let (status, body) = delete_order(&state, "ord-target").await;
-    assert_eq!(
-        status,
-        StatusCode::CONFLICT,
-        "a reference the index missed refuses the delete: {body}"
-    );
-    let message = body["error"]["message"].as_str().unwrap_or_default();
-    assert!(
-        message.contains("referenced by Payment('pay-7')"),
-        "refusal names the moved Payment: {message}"
-    );
-    assert_eq!(get_order(&state, "ord-target").await, StatusCode::OK);
-
-    // A restarted process sees the same journal and the same stale row.
-    projection_fails.store(false, Ordering::SeqCst);
-    let restarted = restarted_server("delete-reference-stale-restarted", &store).await;
-    let (status, body) = delete_order(&restarted, "ord-target").await;
-    assert_eq!(status, StatusCode::CONFLICT, "after restart: {body}");
-    assert!(
-        body["error"]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("referenced by Payment('pay-7')"),
-        "after restart the refusal names the moved Payment: {body}"
-    );
-}
-
-#[tokio::test]
-async fn restrict_delete_ignores_a_stale_row_that_no_longer_references_it() {
-    let store = Store::new("stale-away");
-    let (state, projection_fails) =
-        projection_failing_server("delete-reference-stale-away", &store).await;
-    create(&state, "Order", "ord-target", serde_json::json!({})).await;
-    create_payments(&state, "pay", 3, "ord-target").await;
-
-    // Every Payment moves away; the moves commit but none is projected, so
-    // the index still says all three reference ord-target.
-    projection_fails.store(true, Ordering::SeqCst);
-    for n in 0..3 {
-        let _ = state
-            .update_tenant_entity_fields(
-                &TenantId::default(),
-                "Payment",
-                &format!("pay-{n}"),
-                serde_json::json!({ "OrderId": "ord-elsewhere" }),
-                false,
-            )
-            .await;
-    }
-    projection_fails.store(false, Ordering::SeqCst);
-
-    let (status, body) = delete_order(&state, "ord-target").await;
-    assert_eq!(
-        status,
-        StatusCode::NO_CONTENT,
-        "stale index entries do not hold a delete the rows no longer block: {body}"
-    );
-    assert_eq!(get_order(&state, "ord-target").await, StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn restrict_delete_sees_a_reference_written_under_a_fields_object() {
+async fn restrict_delete_uses_the_stored_top_level_reference() {
     let store = Store::new("wrapped");
     let writer = indexed_server("delete-reference-wrapped-writer", &store).await;
     create(&writer, "Order", "ord-wrapped", serde_json::json!({})).await;
     create_payments(&writer, "pay", REFERENCING_PAYMENTS, "ord-elsewhere").await;
-    // The create check reads this reference inside the `fields` object, so
-    // the delete must too, though the field index holds top-level fields only.
+    create(&writer, "Order", "ord-top-level", serde_json::json!({})).await;
+    // Relations read the stored record's top-level properties. A nested
+    // `fields` object is arbitrary data, not another record envelope.
     create(
         &writer,
         "Payment",
         "pay-wrapped",
-        serde_json::json!({ "fields": { "OrderId": "ord-wrapped" } }),
+        serde_json::json!({
+            "OrderId": "ord-top-level",
+            "fields": { "OrderId": "ord-wrapped" }
+        }),
     )
     .await;
 
     let state = restarted_server("delete-reference-wrapped-restarted", &store).await;
     let actors_before = state.active_actor_count();
     let (status, body) = delete_order(&state, "ord-wrapped").await;
-    assert_eq!(status, StatusCode::CONFLICT, "wrapped reference: {body}");
+    assert_eq!(status, StatusCode::NO_CONTENT, "nested data: {body}");
+    let (status, body) = delete_order(&state, "ord-top-level").await;
+    assert_eq!(status, StatusCode::CONFLICT, "stored reference: {body}");
     assert!(
         body["error"]["message"]
             .as_str()
             .unwrap_or_default()
             .contains("referenced by Payment('pay-wrapped')"),
-        "refusal names the wrapped Payment: {body}"
+        "refusal names the Payment with the top-level reference: {body}"
     );
     let actors_started = state.active_actor_count().saturating_sub(actors_before);
     assert!(
-        actors_started <= 1,
-        "the delete started {actors_started} actors; the wrapped reference is \
+        actors_started <= 2,
+        "the deletes started {actors_started} actors; the reference is \
          read from its projection, not its actor"
     );
-    assert_eq!(get_order(&state, "ord-wrapped").await, StatusCode::OK);
+    assert_eq!(
+        get_order(&state, "ord-wrapped").await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(get_order(&state, "ord-top-level").await, StatusCode::OK);
 }

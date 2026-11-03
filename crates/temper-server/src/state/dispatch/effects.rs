@@ -5,15 +5,12 @@
 //! dispatch path focused on transition execution.
 
 use std::sync::Arc;
-use std::time::Instant;
 
 use tokio::spawn as spawn_post_dispatch_effect; // determinism-ok: post-dispatch side effects are outside transition semantics
-use tracing::Instrument;
 
 use crate::entity_actor::EntityResponse;
 use crate::events::EntityStateChange;
 use crate::request_context::AgentContext;
-use crate::state::ProjectionEnqueueOutcome;
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
@@ -35,21 +32,8 @@ pub(crate) struct PostDispatchContext<'a> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum QueryProjectionUpdateMode {
-    /// The dispatch response is returned after the journal append and after a
-    /// bounded, coalescing projection update is accepted. The projection row
-    /// may lag the journal, but stale pending writes are skipped before DB
-    /// access and lag is observable (ADR-0148).
-    Queued,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchTrajectoryPersistenceMode {
     Background,
-}
-
-fn query_projection_update_mode() -> QueryProjectionUpdateMode {
-    QueryProjectionUpdateMode::Queued
 }
 
 fn dispatch_trajectory_persistence_mode() -> DispatchTrajectoryPersistenceMode {
@@ -59,7 +43,8 @@ fn dispatch_trajectory_persistence_mode() -> DispatchTrajectoryPersistenceMode {
 /// The state the action was attempted from.
 ///
 /// A successful dispatch appends an event whose `from_status` is exactly that
-/// state, so the newest event answers the question. A rejected one appends no
+/// state, so the newest event answers the question; a successful move that
+/// wrote none says it itself (`EntityResponse::move_start`). A rejected one appends no
 /// event (`entity_actor::effects::process_action` returns `event: None` on a
 /// guard or state mismatch), so the newest event belongs to the *previous*
 /// successful transition and names a state the entity has already left.
@@ -72,7 +57,7 @@ fn dispatch_trajectory_persistence_mode() -> DispatchTrajectoryPersistenceMode {
 /// where the attempt was made.
 fn source_status(response: &EntityResponse) -> Option<String> {
     if response.success {
-        response.state.events.back().map(|e| e.from_status.clone())
+        response.move_start().map(|(from, _)| from.to_string())
     } else {
         Some(response.state.status.clone())
     }
@@ -85,201 +70,6 @@ impl crate::state::ServerState {
             DispatchTrajectoryPersistenceMode::Background
         );
         self.enqueue_trajectory_entry(entry);
-    }
-
-    async fn apply_query_projection_update(
-        &self,
-        ctx: &PostDispatchContext<'_>,
-        response: &EntityResponse,
-    ) {
-        debug_assert_eq!(
-            query_projection_update_mode(),
-            QueryProjectionUpdateMode::Queued
-        );
-        let Some(query_plane) = self.query_plane_written_after_commit() else {
-            return;
-        };
-
-        let tenant = ctx.tenant.to_string();
-        let entity_type = ctx.entity_type.to_string();
-        let entity_id = ctx.entity_id.to_string();
-        let status = response.state.status.clone();
-        let fields =
-            self.query_projection_fields(ctx.tenant, ctx.entity_type, &response.state.fields);
-        let projected_state = self.query_projection_state(&response.state);
-        let sequence_nr = response.state.sequence_nr;
-        let operation = if status == "Deleted" {
-            "remove"
-        } else {
-            "upsert"
-        }
-        .to_string();
-        let source = "queued_dispatch".to_string();
-        let enqueued_at = Instant::now(); // determinism-ok: production-only projection queue metric
-        let queue = self
-            .query_projection_queue
-            .lock()
-            .ok()
-            .and_then(|slot| slot.clone());
-        if let Some(queue) = queue {
-            let outcome = if status == "Deleted" {
-                queue.enqueue_remove(
-                    tenant.clone(),
-                    entity_type.clone(),
-                    entity_id.clone(),
-                    sequence_nr,
-                    "queued_dispatch",
-                )
-            } else {
-                queue.enqueue_upsert(
-                    tenant.clone(),
-                    entity_type.clone(),
-                    entity_id.clone(),
-                    status.clone(),
-                    fields,
-                    projected_state,
-                    sequence_nr,
-                    "queued_dispatch",
-                )
-            };
-            match outcome {
-                ProjectionEnqueueOutcome::Enqueued | ProjectionEnqueueOutcome::Coalesced => {
-                    crate::query_projection_metrics::record_update_enqueued(
-                        &tenant,
-                        &entity_type,
-                        &operation,
-                        &source,
-                    );
-                }
-                ProjectionEnqueueOutcome::StaleSkipped => {
-                    tracing::debug!(
-                        tenant = %tenant,
-                        entity_type = %entity_type,
-                        entity_id = %entity_id,
-                        sequence_nr,
-                        operation = %operation,
-                        "skipped stale queued query projection update"
-                    );
-                }
-                ProjectionEnqueueOutcome::Full => {
-                    tracing::error!(
-                        tenant = %tenant,
-                        entity_type = %entity_type,
-                        entity_id = %entity_id,
-                        sequence_nr,
-                        operation = %operation,
-                        "bounded query projection queue full; acknowledged dispatch will rely on repair/backfill"
-                    );
-                }
-            }
-            return;
-        }
-
-        let span = tracing::info_span!(
-            "dispatch.phase.query_projection",
-            otel.name = "dispatch.phase.query_projection",
-            tenant = %tenant,
-            entity_type = %entity_type,
-            entity_id = %entity_id,
-            operation = %operation,
-        );
-
-        // Boxed so the update does not inflate every dispatch future: the
-        // dispatch state machine nests through reactions and callbacks, and
-        // embedding this future inline overflowed the stack where the
-        // previous tokio::spawn had heap-allocated it. Box::pin keeps that
-        // heap allocation while preserving awaited-before-response order.
-        Box::pin(
-            async move {
-                let started_at = Instant::now(); // determinism-ok: production-only projection duration metric
-                crate::query_projection_metrics::record_update_enqueued(
-                    &tenant,
-                    &entity_type,
-                    &operation,
-                    "inline_dispatch_fallback",
-                );
-                crate::query_projection_metrics::record_update_started(
-                    &tenant,
-                    &entity_type,
-                    &operation,
-                    "inline_dispatch_fallback",
-                );
-                crate::query_projection_metrics::record_update_queue_wait(
-                    &tenant,
-                    &entity_type,
-                    &operation,
-                    "inline_dispatch_fallback",
-                    started_at.duration_since(enqueued_at),
-                );
-                let result = if status == "Deleted" {
-                    query_plane
-                        .remove_projection(&tenant, &entity_type, &entity_id)
-                        .await
-                } else {
-                    query_plane
-                        .upsert_projection(
-                            &tenant,
-                            &entity_type,
-                            &entity_id,
-                            &status,
-                            &fields,
-                            &projected_state,
-                            sequence_nr,
-                        )
-                        .await
-                };
-                let result_label = if result.is_ok() { "ok" } else { "error" };
-                crate::query_projection_metrics::record_update_duration(
-                    &tenant,
-                    &entity_type,
-                    &operation,
-                    "inline_dispatch_fallback",
-                    result_label,
-                    started_at.elapsed(),
-                );
-                crate::query_projection_metrics::record_update_end_to_end_duration(
-                    &tenant,
-                    &entity_type,
-                    &operation,
-                    "inline_dispatch_fallback",
-                    result_label,
-                    enqueued_at.elapsed(),
-                );
-
-                if let Err(e) = result {
-                    crate::query_projection_metrics::record_update_error(
-                        &tenant,
-                        &entity_type,
-                        &operation,
-                        "inline_dispatch_fallback",
-                    );
-                    // The action is committed and non-idempotent, so the
-                    // dispatch is still acknowledged — but the projection now
-                    // serves a stale row until shadow/parity repair. Loud by
-                    // convention (entity_ops create/patch fail their request
-                    // on this same error); the ack-vs-fail tradeoff for
-                    // dispatch is recorded in ADR-0142.
-                    tracing::error!(
-                        error = %e,
-                        tenant = %tenant,
-                        entity_type = %entity_type,
-                        entity_id = %entity_id,
-                        operation = %operation,
-                        "failed to update query projection for an acknowledged dispatch"
-                    );
-                } else {
-                    crate::query_projection_metrics::record_update_applied_sequence(
-                        &tenant,
-                        &entity_type,
-                        &operation,
-                        "inline_dispatch_fallback",
-                        sequence_nr,
-                    );
-                }
-            }
-            .instrument(span),
-        )
-        .await;
     }
 
     /// Record a trajectory entry for a completed dispatch (success or guard failure).
@@ -540,7 +330,7 @@ impl crate::state::ServerState {
     /// callback response. They are fire-and-forget (background tasks), so the
     /// caller is free to return the (possibly integration-updated) response
     /// afterwards.
-    fn dispatch_transition_deferred_effects(
+    pub(super) fn dispatch_transition_deferred_effects(
         &self,
         ctx: &PostDispatchContext<'_>,
         response: &EntityResponse,
@@ -569,14 +359,32 @@ impl crate::state::ServerState {
         ctx: &PostDispatchContext<'_>,
         response: EntityResponse,
     ) -> EntityResponse {
+        // A write refused because its record changed was not decided: its
+        // route decides it again, and that decision is the one recorded.
+        if response.is_record_changed() {
+            return response;
+        }
+        // A scheduled action that came due where its action has no
+        // transition did not fire, and nothing is recorded for it.
+        if super::scheduled_actions::scheduled_fire_lapsed(
+            ctx.agent_ctx.fires_scheduled_action.as_ref(),
+            &response,
+        ) {
+            return response;
+        }
+
         // 1. Record metrics
         self.metrics
             .record_transition(ctx.entity_type, ctx.action, response.success);
 
         // 2. Record trajectory outside the action critical path. The entity
         // transition is already durable; trajectory persistence is an
-        // observability/audit side effect.
-        self.record_dispatch_trajectory(ctx, &response);
+        // observability/audit side effect. A move that wrote nothing (a
+        // machine's, leaving its record as it was) has no history to add.
+        let recorded = response.unrecorded_at.is_none();
+        if recorded {
+            self.record_dispatch_trajectory(ctx, &response);
+        }
 
         if !response.success {
             return response;
@@ -587,63 +395,39 @@ impl crate::state::ServerState {
         self.invalidate_state_timeouts_if_needed(ctx, &response);
 
         // The status is committed, so guards decide on it from here on, even
-        // when the projection below fails and the action answers with an
-        // error. Simulation runs other requests between the commit and this
-        // write, as a slow writer would.
+        // while the projection below is still being written. Simulation runs
+        // other requests between the commit and this write, as a slow writer
+        // would.
         temper_runtime::buggify::buggify_yield(
             crate::state::status_cache::STATUS_WRITE_YIELD_BUDGET,
         )
         .await;
         self.cache_entity_status(ctx.tenant, &response.state);
 
-        // Every committed transition is visible through the query plane before
-        // the response returns: the caller, a reaction or an integration may
-        // read it at once, and queue admission does not establish visibility.
-        if let Err(error) = self.project_before_dependents(ctx, &response).await {
-            tracing::error!(tenant = %ctx.tenant, entity_type = ctx.entity_type,
-                entity_id = ctx.entity_id, action = ctx.action, %error,
-                "Committed transition projection failed; dependents not started");
-            // The journal is committed: hand the projection to the retrying
-            // queue so reads catch up once the store recovers.
-            self.apply_query_projection_update(ctx, &response).await;
-            // Its scheduled actions were committed with its event: arm them.
-            self.arm_scheduled_actions(ctx, &response);
-            let mut response = response;
-            response.success = false;
-            response.error = Some(format!(
-                "Action committed, but its query projection failed; dependents were not started: {error}"
-            ));
-            return response;
-        }
+        // The state timer the transition entered or reset is bookkeeping for
+        // the commit, like the cancellation above: it fires through the
+        // record's actor and reads nothing from the query plane, so it starts
+        // now rather than after the projection. A projection that lags or
+        // fails must not leave a committed record without its timer. Boxed:
+        // the timer row's write inline overflowed a test thread's stack once
+        // dispatch carried request traces.
+        Box::pin(self.arm_state_timeouts_if_needed(ctx, &response)).await;
 
-        if response.state.status == "Deleted" {
-            // Queue cleanup before integrations can return early. Older queued
-            // writes remain guarded until this ordered removal is applied.
-            self.apply_query_projection_update(ctx, &response).await;
-        }
+        // The transition's query-plane row committed with its event, so the
+        // caller, a reaction or an integration that reads it at once finds it.
 
         // 3. Broadcast SSE
         self.broadcast_state_change(ctx, &response);
 
-        // Arm the successor only after visibility, before an inline adapter
-        // can return early or dispatch another transition. Boxed like the
-        // projection update above: the timer row's write inline overflowed a
-        // test thread's stack once dispatch carried request traces.
-        Box::pin(self.arm_state_timeouts_if_needed(ctx, &response)).await;
-
-        // 4. Fire webhooks
-        self.fire_webhooks(ctx, &response);
+        // 4. Fire webhooks: each sends the trajectory entry of a recorded move.
+        if recorded {
+            self.fire_webhooks(ctx, &response);
+        }
 
         // 5. Integrations (WASM + native adapters)
         if !response.custom_effects.is_empty() {
             if ctx.await_integration {
                 let mut inline_response: Option<EntityResponse> = None;
-
-                // ADR-0056 Sub-Decision 3: snapshot pre-integration state so
-                // we can detect silent exits (integrations that returned
-                // without causing a state transition) after the inline WASM
-                // call returns.
-                let pre_integration_status = response.state.status.clone();
 
                 let req = super::WasmDispatchRequest {
                     tenant: ctx.tenant,
@@ -657,50 +441,15 @@ impl crate::state::ServerState {
                     action_params: ctx.action_params,
                     mode: super::WasmDispatchMode::Inline,
                 };
+                // Each trigger runs whether or not one before it failed, so a
+                // failure is kept and the triggers after it still run.
+                let mut failures: Vec<String> = Vec::new();
                 match super::wasm::dispatch_wasm_integrations_boxed(self, &req).await {
                     Ok(Some(final_response)) => {
-                        // Silent-exit regression guard: trigger integration
-                        // returned but state didn't advance. Under healthy
-                        // operation the consumer-side WASM invariant (openpaw
-                        // ADR-0039 Sub-Decision 3a) and the Turso persist retry
-                        // (ADR-0056 Sub-Decision 2) prevent this; any nonzero
-                        // reading of the counter is a critical-severity alert
-                        // that something regressed.
-                        if final_response.state.status == pre_integration_status {
-                            tracing::warn!(
-                                target: "temper_server::integration",
-                                tenant = %ctx.tenant,
-                                entity_type = ctx.entity_type,
-                                entity_id = ctx.entity_id,
-                                action = ctx.action,
-                                state = %pre_integration_status,
-                                "integration returned without state transition \u{2014} invariant violation"
-                            );
-                            crate::runtime_metrics::record_integration_silent_exit(
-                                ctx.tenant.as_str(),
-                                ctx.entity_type,
-                                ctx.action,
-                                &pre_integration_status,
-                            );
-                        }
                         inline_response = Some(final_response);
                     }
                     Ok(None) => {}
-                    Err(err) => {
-                        // Committed with its event: its scheduled actions still fire.
-                        self.arm_scheduled_actions(ctx, &response);
-                        return EntityResponse {
-                            success: false,
-                            refusal: None,
-                            state: response.state.clone(),
-                            error: Some(format!("WASM integration failed: {err}")),
-                            custom_effects: response.custom_effects.clone(),
-                            scheduled_actions: Vec::new(),
-                            spawn_requests: Vec::new(),
-                            spec_governed: response.spec_governed,
-                            refused: false,
-                        };
-                    }
+                    Err(err) => failures.push(format!("WASM integration failed: {err}")),
                 }
 
                 let adapter_state = inline_response
@@ -724,23 +473,16 @@ impl crate::state::ServerState {
                         inline_response = Some(final_response);
                     }
                     Ok(None) => {}
-                    Err(err) => {
-                        // Committed with its event: its scheduled actions still fire.
-                        self.arm_scheduled_actions(ctx, &response);
-                        return EntityResponse {
-                            success: false,
-                            refusal: None,
-                            state: response.state.clone(),
-                            error: Some(format!("adapter integration failed: {err}")),
-                            custom_effects: response.custom_effects.clone(),
-                            scheduled_actions: Vec::new(),
-                            spawn_requests: Vec::new(),
-                            spec_governed: response.spec_governed,
-                            refused: false,
-                        };
-                    }
+                    Err(err) => failures.push(format!("adapter integration failed: {err}")),
                 }
 
+                if !failures.is_empty()
+                    || inline_response
+                        .as_ref()
+                        .is_some_and(|answer| !answer.success)
+                {
+                    return self.answer_failed_triggers(ctx, response, inline_response, failures);
+                }
                 if let Some(final_response) = inline_response {
                     // ARN-188: the inline integration produced a callback
                     // response (a separate action), but the ORIGINAL
@@ -755,7 +497,13 @@ impl crate::state::ServerState {
                     // handle them twice. The projection and the state-timer
                     // arm ran above, before the integration.
                     self.dispatch_transition_deferred_effects(ctx, &response);
-                    return final_response;
+                    // The request's own action committed. If the store did not
+                    // take the answer, saying so (503) would ask the caller to
+                    // send the action again, and it would apply twice.
+                    return EntityResponse {
+                        store_unavailable: false,
+                        ..final_response
+                    };
                 }
             } else {
                 self.dispatch_wasm_integrations(
@@ -827,16 +575,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn query_projection_updates_are_queued_after_journal_commit() {
-        // ADR-0148: dispatch waits for the event journal, then accepts derived
-        // projection maintenance into a bounded coalescing queue.
-        assert_eq!(
-            query_projection_update_mode(),
-            QueryProjectionUpdateMode::Queued
-        );
-    }
-
-    #[test]
     fn dispatch_trajectory_persistence_is_not_on_the_dispatch_critical_path() {
         assert_eq!(
             dispatch_trajectory_persistence_mode(),
@@ -891,7 +629,3 @@ mod strict_timer_tests {
         assert!(!rejected.success);
     }
 }
-
-#[cfg(test)]
-#[path = "causal_projection_test.rs"]
-mod causal_projection_tests;

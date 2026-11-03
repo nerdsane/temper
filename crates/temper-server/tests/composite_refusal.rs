@@ -17,13 +17,10 @@
 #[path = "composite_refusal/support.rs"]
 mod support;
 
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use temper_runtime::persistence::EventStore;
 use temper_server::StorageStack;
-use temper_server::storage::{BackendLabel, BoxedEventStore, QueryPlaneStore};
 use temper_store_sim::SimEventStore;
 
 use support::*;
@@ -101,47 +98,6 @@ async fn a_sub_write_refused_by_cedar_runs_the_composites_on_failure() {
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_sub_write_that_committed_does_not_run_the_composites_on_failure() {
-    let plane = Arc::new(ReleaseProjectionFails::default());
-    let stack = StorageStack::new(
-        BackendLabel::Sim,
-        BoxedEventStore::new(SimEventStore::no_faults(31)),
-        None,
-        None,
-        None,
-        None,
-        Some(plane.clone() as Arc<dyn QueryPlaneStore>),
-        None,
-        None,
-        None,
-    );
-    let state = notice_server(&release_with_own_effect(), Some(stack), PERMIT_ALL);
-    act(&state, "Release", RELEASE, "Hold").await;
-    // The Release's `Approve` commits, then its query projection fails, so its
-    // write answers unsuccessfully although the Release moved.
-    plane.fail_release.store(true, Ordering::SeqCst);
-
-    act(&state, "Notice", NOTICE, "PutItLive").await;
-
-    let (release, _) = settle(&state, "Release", RELEASE, &["Live"]).await;
-    assert_eq!(release, "Live", "the sub-write committed");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    while tokio::time::Instant::now() < deadline {
-        assert_eq!(
-            status_of(&state, "Notice", NOTICE).await,
-            "Answered",
-            "a committed sub-write does not run on_failure"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
-/// Storage fails for every write to the Release. The composite's sub-write may
-/// have landed, so it is not a refusal: `on_failure` does not run, and the
-/// error propagates. With the atomic batch the whole batch append fails. When
-/// `Approve` has its own effect, the composite writes it on the per-write
-/// path, and the Release's own append fails.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_sub_write_whose_storage_fails_does_not_run_the_composites_on_failure() {
     for (path, release_ioa) in [

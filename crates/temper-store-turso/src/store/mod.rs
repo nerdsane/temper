@@ -34,7 +34,9 @@ macro_rules! tombstone_sql {
 mod append_commit;
 mod append_config;
 mod authz;
+mod blob_chunks;
 mod blobs;
+mod catalog_groups;
 mod commit_probe;
 mod constraints;
 mod entity_listing;
@@ -42,13 +44,17 @@ mod event_store;
 mod evolution;
 pub mod field_index;
 mod field_index_rows;
+mod first_event;
 mod instrumentation;
 mod migration_support;
+mod module_reviews;
 pub mod ots;
 mod policy;
 mod policy_approval;
 mod policy_replace;
+mod projection_delta;
 mod projection_freshness;
+mod projection_repair;
 mod projection_rows;
 mod published_artifacts;
 mod query_page;
@@ -75,6 +81,8 @@ pub(crate) use write_gate::WritePriority;
 #[derive(Clone, Debug)]
 pub struct TursoEventStore {
     db: Arc<Database>,
+    /// SQLite-compatible local file, used only for incremental legacy blob reads.
+    blob_read_path: Option<std::path::PathBuf>,
     write_gate: Arc<write_gate::WriteGate>,
     /// Trajectory rows waiting for their batch's transaction.
     trajectory_batch: Arc<trajectory_batch::TrajectoryBatch>,
@@ -107,7 +115,11 @@ impl TursoEventStore {
         };
 
         let is_remote = url.starts_with("libsql://");
-        Self::open(db, is_remote, None).await
+        let mut store = Self::open(db, is_remote, None).await?;
+        if !is_remote && url != ":memory:" && url != "file::memory:" {
+            store.blob_read_path = Some(url.strip_prefix("file:").unwrap_or(url).into());
+        }
+        Ok(store)
     }
 
     /// Open a local database file whose commits are copied to its own Turso
@@ -126,13 +138,13 @@ impl TursoEventStore {
         let copy = SyncCopy::open(local_path, sync_url, auth_token)
             .await
             .map_err(storage_error)?;
-        let store = Self::open(Database::synced(copy.clone()), false, Some(copy.clone())).await?;
+        let mut store = Self::open(Database::synced(copy.clone()), false, Some(copy)).await?;
+        store.blob_read_path = Some(local_path.into());
         store.require_primary_keys().await?;
-        // Schema made by this start goes out now; an answer pushes anything
-        // still left before it confirms a write.
-        if let Err(error) = copy.push_committed().await {
-            tracing::warn!(%error, "turso.sync push after migration failed");
-        }
+        // What this start adds to the schema goes out with the next push, as
+        // anything else it commits does: a start never waits on the remote to
+        // build an index over every record (2.7 s for 1,800 records of
+        // 120 KB on staging, 30 Oct 2026).
         Ok(store)
     }
 
@@ -143,6 +155,7 @@ impl TursoEventStore {
     ) -> Result<Self, PersistenceError> {
         let store = Self {
             db: Arc::new(db),
+            blob_read_path: None,
             write_gate: Arc::new(write_gate::WriteGate::new()),
             trajectory_batch: Arc::default(),
             is_remote,
@@ -151,6 +164,7 @@ impl TursoEventStore {
             commit_probe: None,
         };
         store.migrate().await?;
+        store.start_first_event_backfill().await?;
         Ok(store)
     }
 
@@ -267,6 +281,9 @@ impl TursoEventStore {
             .await
             .map_err(storage_error)?;
         conn.execute(schema::CREATE_SNAPSHOTS_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_SNAPSHOTS_CHECKPOINT_INDEX, ())
             .await
             .map_err(storage_error)?;
         conn.execute(schema::CREATE_SNAPSHOT_HISTORY_TABLE, ())
@@ -418,6 +435,12 @@ impl TursoEventStore {
         conn.execute(schema::CREATE_TENANT_SECRETS_TABLE, ())
             .await
             .map_err(storage_error)?;
+        migration_support::add_column_if_missing(
+            &conn,
+            schema::ALTER_TENANT_SECRETS_ADD_VERSION_ID,
+        )
+        .await?;
+        secrets::backfill_versions(&conn).await?;
         conn.execute(schema::CREATE_STATE_TIMERS_TABLE, ())
             .await
             .map_err(storage_error)?;
@@ -429,6 +452,9 @@ impl TursoEventStore {
         let _ = conn.execute(schema::ALTER_SPECS_ADD_CONTENT_HASH, ()).await;
         let _ = conn.execute(schema::ALTER_SPECS_ADD_COMMITTED, ()).await;
         conn.execute(schema::CREATE_SPEC_COMMITTED_VERSIONS_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_MODULE_REVIEWS_TABLE, ())
             .await
             .map_err(storage_error)?;
 
@@ -525,6 +551,17 @@ impl TursoEventStore {
         let _ = conn
             .execute(schema::ALTER_ENTITY_CATALOG_ADD_STATE, ())
             .await;
+        migration_support::add_column_if_missing(
+            &conn,
+            "ALTER TABLE entity_catalog ADD COLUMN first_event_at TEXT",
+        )
+        .await?;
+        conn.execute(first_event::CREATE_BACKFILL_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_ENTITY_CATALOG_CHECKPOINT_INDEX, ())
+            .await
+            .map_err(storage_error)?;
 
         // Entity field index — EAV table for OData filter push-down.
         conn.execute(schema::CREATE_ENTITY_FIELD_INDEX_TABLE, ())
@@ -536,6 +573,8 @@ impl TursoEventStore {
         conn.execute(schema::CREATE_ENTITY_FIELD_INDEX_STATUS, ())
             .await
             .map_err(storage_error)?;
+
+        projection_delta::migrate_delta(&conn).await?;
 
         // Entity key index (ADR-0153) — declared composite-key -> entity_id, the
         // negative-existence access path co-committed with the journal append.

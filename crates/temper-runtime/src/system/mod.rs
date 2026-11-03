@@ -47,6 +47,7 @@ mod tests {
     use crate::actor::errors::ActorError;
     use crate::actor::traits::{Actor, Message};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Duration;
     use tokio::sync::Notify;
 
@@ -218,6 +219,76 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 1); // fresh state after restart
+    }
+
+    // --- A start refused with InitFailed is not restarted ---
+
+    struct RefusingActor {
+        starts: Arc<AtomicU32>,
+    }
+
+    impl Actor for RefusingActor {
+        type Msg = FaultyMsg;
+        type State = u32;
+
+        async fn pre_start(&self, _ctx: &mut ActorContext<Self>) -> Result<u32, ActorError> {
+            self.starts.fetch_add(1, Ordering::SeqCst);
+            Err(ActorError::InitFailed(
+                "its first write was not taken".into(),
+            ))
+        }
+
+        async fn handle(
+            &self,
+            _msg: FaultyMsg,
+            _state: &mut u32,
+            _ctx: &mut ActorContext<Self>,
+        ) -> Result<(), ActorError> {
+            Ok(())
+        }
+
+        async fn post_stop(&self, _state: u32, _ctx: &mut ActorContext<Self>) {}
+    }
+
+    #[tokio::test]
+    async fn a_refused_start_tells_the_asker_why_and_is_not_restarted() {
+        let starts = Arc::new(AtomicU32::new(0));
+        let system = ActorSystem::new("test");
+        let actor = system.spawn(
+            RefusingActor {
+                starts: starts.clone(),
+            },
+            "refusing",
+        );
+        match actor
+            .ask::<u32>(FaultyMsg::Ping, Duration::from_secs(5))
+            .await
+        {
+            Err(ActorError::InitFailed(reason)) => {
+                assert_eq!(reason, "its first write was not taken");
+            }
+            other => panic!("the asker is told why the actor did not start, got {other:?}"),
+        }
+        assert_eq!(
+            starts.load(Ordering::SeqCst),
+            1,
+            "a refused start is not restarted"
+        );
+        assert!(
+            actor.is_closed(),
+            "an actor that did not start takes no messages"
+        );
+        // On a multi-threaded runtime the start can be refused before the
+        // creator's first ask is sent; that ask is told why all the same.
+        match actor
+            .ask::<u32>(FaultyMsg::Ping, Duration::from_secs(5))
+            .await
+        {
+            Err(ActorError::InitFailed(reason)) => {
+                assert_eq!(reason, "its first write was not taken");
+            }
+            other => panic!("an ask sent after the refusal is told why, got {other:?}"),
+        }
     }
 
     // --- An ask is handled inside the asker's span ---

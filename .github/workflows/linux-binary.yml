@@ -50,6 +50,10 @@ jobs:
           key: linux-binary
 
       - name: Build temper
+        # /version answers this build-time commit (temper-platform router.rs); without it a
+        # people's Temper, which has no Railway variable, says "unknown".
+        env:
+          GIT_COMMIT_SHA: ${{ github.sha }}
         run: cargo build --release --locked -p temper-cli
 
       - name: Check the binary serves
@@ -67,8 +71,10 @@ jobs:
             sleep 1
           done
           curl -fsS http://127.0.0.1:3999/healthz > /dev/null || { tail -40 "$dir/serve.log"; exit 1; }
+          version="$(curl -fsS http://127.0.0.1:3999/version)"
           kill "$pid"
-          echo "temper serves /healthz"
+          echo "temper serves /healthz; /version: $version"
+          case "$version" in *"\"$GITHUB_SHA\""*) ;; *) echo "::warning::the binary does not name its commit $GITHUB_SHA" ;; esac
 
       - name: Publish the binary and its sha256
         id: publish

@@ -2,7 +2,6 @@ pub mod actor;
 pub mod buggify;
 pub mod mailbox;
 pub mod persistence;
-pub mod reaction;
 pub mod scheduler;
 pub mod supervision;
 mod system;

@@ -153,10 +153,9 @@ pub(super) async fn connect_postgres_store(
         .await
         .context("Failed to migrate evolution_records")?;
     eprintln!("  Postgres connected, migrations applied.");
-    Ok((
-        StorageStack::from_postgres(PostgresEventStore::new(pool.clone())),
-        pool,
-    ))
+    let store = PostgresEventStore::new(pool.clone());
+    store.start_first_event_backfill();
+    Ok((StorageStack::from_postgres(store), pool))
 }
 
 async fn connect_postgres_pool(

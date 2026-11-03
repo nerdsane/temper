@@ -6,7 +6,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::Value as Json;
 
 use super::json::{entity_parts, like, same, single};
-use super::{Asker, Attr};
+use super::profile::{Fact, Profile, UNKNOWN};
+use sender::fact_equal;
+
+mod residual;
+mod sender;
+use super::{Asker, Attr, Cause};
 
 /// The results a condition can have, as a set: true, false, an error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +84,13 @@ enum Val {
         name: String,
         unlike: BTreeSet<String>,
     },
+    /// Some value of an outside sender's that is none of `unlike`, matching
+    /// the `like` patterns marked ([`Fact::Other`]).
+    Other {
+        unlike: Vec<Json>,
+        like: BTreeMap<String, bool>,
+        string: Option<bool>,
+    },
     /// Any value, or an error.
     Unknown,
     /// Certainly an error.
@@ -87,10 +99,14 @@ enum Val {
 
 pub(super) struct Request<'a> {
     pub(super) asker: &'a Asker,
+    /// What is known of the sender, when it is someone outside.
+    pub(super) profile: &'a Profile,
     pub(super) action: &'a str,
     pub(super) resource_type: &'a str,
     /// The record's attributes the caller knows.
     pub(super) record: &'a BTreeMap<String, Attr>,
+    /// How the move came about, when the caller knows.
+    pub(super) cause: Option<&'a Cause>,
 }
 
 impl Request<'_> {
@@ -106,8 +122,7 @@ impl Request<'_> {
         let conditions = object
             .get("conditions")
             .and_then(Json::as_array)
-            .cloned()
-            .unwrap_or_default();
+            .map_or(&[][..], Vec::as_slice);
         conditions.iter().fold(scope, |sofar, condition| {
             sofar.and_then(|| {
                 let body = self.truth(&condition["body"]);
@@ -164,10 +179,13 @@ impl Request<'_> {
     }
 
     fn principal_is(&self, kind: Option<&str>) -> Results {
-        match self.asker {
-            Asker::Service { .. } => Results::of(kind == Some("Agent")),
-            Asker::Outside if kind == Some("System") => FALSE,
-            Asker::Outside => TRUE_OR_FALSE,
+        let Some(profile) = self.outside() else {
+            return Results::of(kind == Some("Agent"));
+        };
+        match (kind, &profile.kind) {
+            (Some("System"), _) => FALSE,
+            (Some(kind), Some(fact)) => fact_equal(fact, &Json::from(kind)),
+            _ => TRUE_OR_FALSE,
         }
     }
 
@@ -211,6 +229,14 @@ impl Request<'_> {
                     Some(pattern) => Results::of(like(&text, pattern)),
                     None => ANY,
                 },
+                Val::Other {
+                    string: Some(false),
+                    ..
+                } => ERROR,
+                Val::Other { like, .. } => match like.get(&arg["pattern"].to_string()) {
+                    Some(matches) => Results::of(*matches),
+                    None => ANY,
+                },
                 Val::Known(_) | Val::Error => ERROR,
                 _ => ANY,
             },
@@ -247,7 +273,7 @@ impl Request<'_> {
             | Val::ResourceId
             | Val::Same { .. } => ERROR,
             Val::Error => ERROR,
-            Val::Unknown => ANY,
+            Val::Unknown | Val::Other { .. } => ANY,
         }
     }
 
@@ -297,35 +323,19 @@ impl Request<'_> {
         }
     }
 
-    /// The service principal's attributes, as the engine builds them.
-    fn service_attribute(name: &str, attr: &str) -> Option<Json> {
-        let id = format!("service:{name}");
-        match attr {
-            "id" | "accountId" => Some(Json::String(id)),
-            "agent_type" => Some(Json::String(name.to_string())),
-            "role" => Some(Json::String("service".to_string())),
-            "agentTypeVerified" => Some(Json::Bool(false)),
+    /// A cause key's value, when the caller knows the cause: only the
+    /// kernel sets these, so one the cause lacks is an error to read.
+    fn cause_key(&self, of: &Val, key: &str) -> Option<Option<&Attr>> {
+        match of {
+            Val::Context => self.cause?.get(key),
             _ => None,
         }
     }
 
-    /// A service's context: the engine's own keys, then the kernel's. A key
-    /// it lacks may still come from the record's fields.
-    fn service_context(&self, key: &str) -> Option<Attr> {
-        let Asker::Service { name, context } = self.asker else {
-            return None;
-        };
-        let id = format!("service:{name}");
-        match key {
-            "role" => Some(Attr::Value(Json::String("service".to_string()))),
-            "agentId" => Some(Attr::Value(Json::String(id))),
-            "agentType" => Some(Attr::Value(Json::String(name.clone()))),
-            "agentTypeVerified" => Some(Attr::Value(Json::Bool(false))),
-            _ => context.get(key).cloned(),
-        }
-    }
-
     fn attribute(&self, of: &Val, attr: &str) -> Val {
+        if let Some(value) = self.cause_key(of, attr) {
+            return value.map_or(Val::Error, |a| self.known(a.clone()));
+        }
         match (of, self.asker) {
             (Val::Principal, Asker::Service { name, .. }) => {
                 Self::service_attribute(name, attr).map_or(Val::Error, Val::Known)
@@ -333,6 +343,10 @@ impl Request<'_> {
             (Val::Context, Asker::Service { .. }) => self
                 .service_context(attr)
                 .map_or(Val::Unknown, |a| self.known(a)),
+            (Val::Principal, _) => Self::fact_value(self.outside().and_then(|p| p.attrs.get(attr))),
+            (Val::Context, _) if self.sender_key(attr).is_some() => {
+                Self::fact_value(self.sender_key(attr))
+            }
             // The kernel puts the record's id in its attributes under both
             // names (`build_authz_resource_attrs`).
             (Val::Resource, _) if matches!(attr, "id" | "Id") => self.known(Attr::ResourceId),
@@ -368,6 +382,9 @@ impl Request<'_> {
     }
 
     fn has(&self, of: &Val, attr: &str) -> Results {
+        if let Some(value) = self.cause_key(of, attr) {
+            return Results::of(value.is_some());
+        }
         match (of, self.asker) {
             (Val::Principal, Asker::Service { name, .. }) => {
                 Results::of(Self::service_attribute(name, attr).is_some())
@@ -376,6 +393,14 @@ impl Request<'_> {
                 Some(_) => TRUE,
                 None => TRUE_OR_FALSE,
             },
+            (Val::Principal, _) => match self.outside().and_then(|p| p.attrs.get(attr)) {
+                Some(fact) => Results::of(*fact != Fact::Absent),
+                None => TRUE_OR_FALSE,
+            },
+            (Val::Context, _) if self.sender_key(attr).is_some() => {
+                Results::of(self.sender_key(attr) != Some(&Fact::Absent))
+            }
+            (Val::Other { .. }, _) => ANY,
             (Val::Known(Json::Object(record)), _) if !record.contains_key("__entity") => {
                 Results::of(record.contains_key(attr))
             }
@@ -392,6 +417,15 @@ impl Request<'_> {
         match (left, right) {
             (Val::Error, _) | (_, Val::Error) => ERROR,
             (Val::Known(a), Val::Known(b)) => Results::of(same(a, b)),
+            (Val::Other { unlike, .. }, Val::Known(value))
+            | (Val::Known(value), Val::Other { unlike, .. }) => {
+                if unlike.iter().any(|other| same(other, value)) {
+                    FALSE
+                } else {
+                    TRUE_OR_FALSE
+                }
+            }
+            (Val::Other { .. }, _) | (_, Val::Other { .. }) => ANY,
             (Val::ResourceId, Val::ResourceId) => TRUE,
             (Val::ResourceId, Val::Known(Json::String(_)))
             | (Val::Known(Json::String(_)), Val::ResourceId) => TRUE_OR_FALSE,
@@ -411,13 +445,19 @@ impl Request<'_> {
                     (Asker::Service { name, .. }, Some((kind, id))) => {
                         Results::of(kind == "Agent" && id == format!("service:{name}"))
                     }
-                    (Asker::Outside, Some((kind, id)))
-                        if kind == "System" || id.starts_with("service:") =>
-                    {
+                    (_, Some((kind, id))) if kind == "System" || id.starts_with("service:") => {
                         FALSE
                     }
                     (_, None) => FALSE,
-                    (Asker::Outside, Some(_)) => TRUE_OR_FALSE,
+                    // The id in a principal's uid is its `id` attribute.
+                    (_, Some((kind, id))) => {
+                        let profile = self.outside().unwrap_or(&UNKNOWN);
+                        let fact = |fact: Option<&Fact>, value: &str| {
+                            fact.map_or(TRUE_OR_FALSE, |fact| fact_equal(fact, &Json::from(value)))
+                        };
+                        fact(profile.kind.as_ref(), kind)
+                            .and_then(|| fact(profile.attrs.get("id"), id))
+                    }
                 }
             }
             (Val::Action, Val::Known(entity)) | (Val::Known(entity), Val::Action) => {
@@ -442,8 +482,9 @@ impl Request<'_> {
                 .iter()
                 .map(|member| self.equal(left, &Val::Known(member.clone())))
                 .fold(FALSE, |sofar, next| sofar.or_else(|| next)),
-            Val::Known(entity) if entity_parts(entity).is_some() => match (left, self.asker) {
-                (Val::Principal, Asker::Outside) => TRUE_OR_FALSE,
+            Val::Known(entity) if entity_parts(entity).is_some() => match left {
+                Val::Principal if self.outside().is_some() => TRUE_OR_FALSE,
+                Val::Other { .. } => ANY,
                 _ => self.equal(left, right),
             },
             Val::Error => ERROR,

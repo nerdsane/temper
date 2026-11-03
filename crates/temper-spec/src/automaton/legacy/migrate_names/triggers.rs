@@ -110,6 +110,7 @@ impl Pass<'_> {
                 "params",
                 "constraints",
                 "hint",
+                "says",
                 "record_parent_event",
                 "triggers",
                 "cedar_gate",

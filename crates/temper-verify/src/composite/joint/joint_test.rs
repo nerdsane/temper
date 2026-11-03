@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::time::Duration;
 
 use temper_authz::SendAnalysis;
 use temper_spec::automaton::{Automaton, parse_automaton};
@@ -111,11 +110,12 @@ fn check_under(sources: &[&str], policies: Option<&str>) -> JointInvariantResult
     let automatons = parse(sources);
     let refs: Vec<&Automaton> = automatons.iter().collect();
     let analysis = policies.map(|text| SendAnalysis::new(text).expect("fixture policies parse"));
-    let budget = Budget {
-        time: Duration::from_secs(30),
-        states: 100_000,
+    let (room, progress) = (Bytes::new(1 << 30), Progress::default());
+    let bound = Bound {
+        room: &room,
+        progress: &progress,
     };
-    let mut results = verify_joint_invariants(&refs, analysis.as_ref(), budget);
+    let mut results = verify_joint_invariants(&refs, analysis.as_ref(), bound);
     assert_eq!(results.len(), 1);
     results.remove(0)
 }
@@ -136,6 +136,12 @@ fn ids(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         .iter()
         .map(|(entity, id)| (entity.to_string(), id.to_string()))
         .collect()
+}
+
+/// Whether nothing breaks `result`'s rule and no settled state meets
+/// `premise`: how a fixture shows a move never lands.
+fn never_meets(result: &JointInvariantResult, premise: &str) -> bool {
+    matches!(&result.outcome, JointOutcome::Vacuous { premise: met } if met == premise)
 }
 
 #[test]
@@ -261,11 +267,12 @@ fn specs_without_cross_entity_invariants_have_nothing_to_check() {
     let parent = parent(false);
     let automatons = parse(&[&parent, CHILD]);
     let refs: Vec<&Automaton> = automatons.iter().collect();
-    let budget = Budget {
-        time: Duration::from_secs(30),
-        states: 100_000,
+    let (room, progress) = (Bytes::new(1 << 30), Progress::default());
+    let bound = Bound {
+        room: &room,
+        progress: &progress,
     };
-    assert!(verify_joint_invariants(&refs, None, budget).is_empty());
+    assert!(verify_joint_invariants(&refs, None, bound).is_empty());
 }
 
 #[test]
@@ -348,6 +355,152 @@ fn a_value_only_the_invariant_names_is_one_a_request_may_send() {
             .any(|m| m.starts_with("Parent.Set") && m.contains("'secret'")),
         "{result}"
     );
+}
+
+/// A parent that tells its child each value it is set to, then seals the
+/// child with the value it ended on. The child takes the seal only while it
+/// holds that value: `sealed_with` must equal `value`, and the child has no
+/// field of that name.
+const SEALING_PARENT: &str = r#"
+[automaton]
+name = "Parent"
+states = ["Open", "Closed"]
+initial = "Open"
+
+[[state]]
+name = "value"
+type = "string"
+initial = ""
+
+[[action]]
+name = "Set"
+kind = "input"
+from = ["Open"]
+to = "Open"
+params = [{ name = "value", type = "string" }]
+
+[[action.triggers]]
+name = "tell"
+kind = "entity"
+principal = "tell"
+target_entity = "Child"
+target_action = "Copy"
+
+[action.triggers.args]
+value = "value"
+
+[action.triggers.resolve_target]
+kind = "same_id"
+
+[[action]]
+name = "Close"
+kind = "input"
+from = ["Open"]
+to = "Closed"
+
+[[action.triggers]]
+name = "seal"
+kind = "entity"
+principal = "tell"
+target_entity = "Child"
+target_action = "Seal"
+
+[action.triggers.args]
+sealed_with = "value"
+
+[action.triggers.resolve_target]
+kind = "same_id"
+"#;
+
+const SEALED_CHILD: &str = r#"
+[automaton]
+name = "Child"
+states = ["Waiting", "Done", "Sealed"]
+initial = "Waiting"
+
+[[state]]
+name = "value"
+type = "string"
+initial = ""
+
+[[action]]
+name = "Copy"
+kind = "internal"
+from = ["Waiting", "Done"]
+to = "Done"
+params = [{ name = "value", type = "string" }]
+
+[[action]]
+name = "Seal"
+kind = "internal"
+from = ["Done"]
+to = "Sealed"
+params = [{ name = "sealed_with", type = "string" }]
+
+[[action.constraints]]
+kind = "param_equals_field"
+param = "sealed_with"
+field = "value"
+
+[[invariant]]
+name = "sealed_with_the_parents_value"
+assert = "status == 'Sealed' => Parent[Id].value == value"
+"#;
+
+const ONLY_TELL_REACHES_THE_CHILD: &str = r#"
+permit(principal, action in [Action::"Set", Action::"Close"], resource is Parent);
+permit(principal == Agent::"service:tell", action in [Action::"Copy", Action::"Seal"], resource is Child);
+"#;
+
+#[test]
+fn a_constraint_on_a_parameter_that_writes_no_field_is_decided() {
+    // Set A, Set B, Close: Copy(A), Copy(B) and Seal(B) are in flight. If
+    // Copy(A) lands last of the copies, the child holds A and refuses
+    // Seal(B). A model that cannot read `sealed_with` lets the seal land
+    // and reports the child sealed with A while the parent ended on B.
+    let result = check_under(
+        &[SEALING_PARENT, SEALED_CHILD],
+        Some(ONLY_TELL_REACHES_THE_CHILD),
+    );
+    assert!(result.holds(), "{result}");
+}
+
+#[test]
+fn a_seal_sent_without_its_value_is_refused() {
+    // The runtime refuses a constrained parameter nobody passed, so a seal
+    // that does not carry `sealed_with` never lands. A seal comes only once
+    // the parent is Closed, so this rule breaks if one ever lands, and no
+    // settled state has the child Sealed if none does.
+    let parent = SEALING_PARENT.replace("sealed_with = \"value\"", "");
+    let child = SEALED_CHILD.replace(
+        "assert = \"status == 'Sealed' => Parent[Id].value == value\"",
+        "assert = \"status == 'Sealed' => Parent[Id].value == value && Parent[Id].status == 'Open'\"",
+    );
+    let result = check_under(&[&parent, &child], Some(ONLY_TELL_REACHES_THE_CHILD));
+    assert!(never_meets(&result, "status == 'Sealed'"), "{result}");
+}
+
+#[path = "equalities_test.rs"]
+mod equalities;
+
+#[test]
+fn a_walk_its_room_cannot_hold_is_not_checked_and_gives_its_memory_back() {
+    let child = child_with("status == 'Finished' => Parent[Id].status == 'Closed'");
+    let parent = parent(false);
+    let automatons = parse(&[&parent, &child]);
+    let refs: Vec<&Automaton> = automatons.iter().collect();
+    let (room, progress) = (Bytes::new(4 << 10), Progress::default());
+    let bound = Bound {
+        room: &room,
+        progress: &progress,
+    };
+    let results = verify_joint_invariants(&refs, None, bound);
+    assert_eq!(results.len(), 1);
+    let JointOutcome::Incomplete { reason } = &results[0].outcome else {
+        panic!("expected not checked, got {}", results[0]);
+    };
+    assert!(reason.contains("does not fit"), "{reason}");
+    assert_eq!(room.held(), 0, "the walk gives back what it took");
 }
 
 #[test]
@@ -470,7 +623,7 @@ fn a_literal_in_a_related_read_is_explored_by_the_parent_setter() {
 }
 
 #[test]
-fn initial_partitions_stop_within_a_tiny_budget() {
+fn initial_partitions_stop_within_a_tiny_room() {
     let sources: Vec<String> = (0..13)
         .map(|i| format!("[automaton]\nname = 'T{i}'\nstates = ['Ready']\ninitial = 'Ready'\n"))
         .collect();
@@ -483,20 +636,85 @@ fn initial_partitions_stop_within_a_tiny_budget() {
         "\n[[invariant]]\nname = 'rule'\nassert = \"{assertion}\"\n"
     ));
     let automatons = parse(&sources.iter().map(String::as_str).collect::<Vec<_>>());
+    // 13 records start in 27,644,437 ways their ids can be equal: the
+    // starting states take their memory from the room too.
+    let (room, progress) = (Bytes::new(64 << 10), Progress::default());
     let results = verify_joint_invariants(
         &automatons.iter().collect::<Vec<_>>(),
         None,
-        Budget {
-            states: 10,
-            time: Duration::from_secs(1),
+        Bound {
+            room: &room,
+            progress: &progress,
         },
     );
     assert_eq!(results.len(), 1);
-    assert!(matches!(
-        results[0].outcome,
-        JointOutcome::Incomplete { .. }
-    ));
-    assert!(results[0].states <= 10);
+    let JointOutcome::Incomplete { reason } = &results[0].outcome else {
+        panic!("expected not checked, got {}", results[0]);
+    };
+    assert!(reason.contains("does not fit"), "{reason}");
+    // Every start takes at least 16 bytes of the room, so the walk stops
+    // after a few thousand of them at most.
+    assert!(results[0].states <= (64 << 10) / 16 + 1, "{}", results[0]);
+    assert_eq!(room.held(), 0, "the walk gives back what it took");
+}
+
+/// A record whose one move sets off `reactions` reactions, each with a
+/// guard on `Far`, a type outside the rule's scope, that the model cannot
+/// decide, so the move goes two ways for each: what it builds doubles with
+/// every reaction, while the states it leads to are all the same one.
+fn many_undecided(reactions: usize) -> Vec<String> {
+    let mut many = String::from(
+        "[automaton]\nname = 'Many'\nstates = ['Start', 'Done']\ninitial = 'Start'\n\n\
+         [[action]]\nname = 'Go'\nkind = 'input'\nfrom = ['Start', 'Done']\nto = 'Done'\n",
+    );
+    for i in 0..reactions {
+        many.push_str(&format!(
+            "\n[[action.triggers]]\nname = 'again{i}'\nkind = 'entity'\n\
+             target_entity = 'Many'\ntarget_action = 'Go'\n\
+             guard = \"Far[Id].status == 'Open'\"\n\
+             [action.triggers.resolve_target]\nkind = 'same_id'\n"
+        ));
+    }
+    many.push_str(
+        "\n[[invariant]]\nname = 'rule'\n\
+         assert = \"status == 'Start' || status == 'Done' || Other[Id].status == 'Open'\"\n",
+    );
+    let other = "[automaton]\nname = 'Other'\nstates = ['Open']\ninitial = 'Open'\n\n\
+                 [[action]]\nname = 'Stay'\nkind = 'input'\nfrom = ['Open']\nto = 'Open'\n";
+    let far = "[automaton]\nname = 'Far'\nstates = ['Open']\ninitial = 'Open'\n";
+    vec![many, other.to_string(), far.to_string()]
+}
+
+fn check_in(sources: &[String], room: &Bytes) -> JointInvariantResult {
+    let automatons = parse(&sources.iter().map(String::as_str).collect::<Vec<_>>());
+    let progress = Progress::default();
+    let bound = Bound {
+        room,
+        progress: &progress,
+    };
+    let mut results = verify_joint_invariants(&automatons.iter().collect::<Vec<_>>(), None, bound);
+    assert_eq!(results.len(), 1);
+    results.remove(0)
+}
+
+#[test]
+fn what_one_move_builds_counts_against_the_room() {
+    // 2^12 ways for one move, a few KB each: tens of MB built before the
+    // walk keeps the one state they all lead to.
+    let sources = many_undecided(12);
+    let room = Bytes::new(1 << 20);
+    let result = check_in(&sources, &room);
+    let JointOutcome::Incomplete { reason } = &result.outcome else {
+        panic!("a move that builds more than the room holds is not checked, got {result}");
+    };
+    assert!(reason.contains("does not fit"), "{reason}");
+    assert_eq!(room.held(), 0, "the walk gives back what it took");
+
+    // With room for what the move builds, the rule is checked and holds.
+    let room = Bytes::new(1 << 30);
+    let result = check_in(&sources, &room);
+    assert!(matches!(result.outcome, JointOutcome::Holds), "{result}");
+    assert_eq!(room.held(), 0, "the walk gives back what it took");
 }
 
 #[test]
@@ -584,4 +802,65 @@ fn empty_references_never_find_a_record() {
     let child = "[automaton]\nname = 'Child'\nstates = ['Ready']\ninitial = 'Ready'\n[[state]]\nname = 'parent_id'\ntype = 'string'\ninitial = ''\n[[invariant]]\nname = 'rule'\nassert = \"Parent[parent_id].status != 'Closed'\"\n";
     let result = check(&[parent, child]);
     assert!(matches!(result.outcome, JointOutcome::Holds), "{result}");
+}
+
+/// The digest of each joint proof of `sources`, with `policies` (Cedar)
+/// deciding each move as its sender.
+fn digests(sources: &[&str], policies: Option<&str>) -> Vec<String> {
+    let automatons = parse(sources);
+    let refs: Vec<&Automaton> = automatons.iter().collect();
+    let analysis = policies.map(|text| SendAnalysis::new(text).expect("fixture policies parse"));
+    let room = Bytes::new(1 << 30);
+    joint_proofs(&refs, analysis.as_ref(), &room)
+        .iter()
+        .map(JointProof::digest)
+        .collect()
+}
+
+#[test]
+fn a_proof_keeps_its_digest_through_a_change_its_cut_leaves_out() {
+    let child = child_with("status == 'Finished' => Parent[Id].status == 'Closed'");
+    let parent = parent(false);
+    let before = digests(&[&parent, &child], None);
+    assert_eq!(before.len(), 1);
+    assert_eq!(
+        before,
+        digests(&[&parent, &child], None),
+        "the same specs, the same digest"
+    );
+    // A counter the rule never reads, counted by an action the cut keeps.
+    let counted = parent
+        .replace(
+            "[[action]]\nname = \"Close\"",
+            "[[state]]\nname = \"closings\"\ntype = \"counter\"\ninitial = 0\n\n[[action]]\nname = \"Close\"",
+        )
+        .replace("to = \"Closed\"\n", "to = \"Closed\"\neffect = [\"closings += 1\"]\n");
+    assert!(counted.contains("closings += 1"));
+    assert_eq!(before, digests(&[&counted, &child], None));
+    // Cedar about an action no type in scope has.
+    let more = format!(
+        "{ONLY_TELL_COPIES}\npermit(principal, action == Action::\"Elsewhere\", resource);\n"
+    );
+    assert_eq!(
+        digests(&[&parent, &child], Some(ONLY_TELL_COPIES)),
+        digests(&[&parent, &child], Some(&more))
+    );
+}
+
+#[test]
+fn a_proof_gets_a_new_digest_from_a_change_its_walk_reads() {
+    let child = child_with("status == 'Finished' => Parent[Id].status == 'Closed'");
+    let before = digests(&[&parent(false), &child], None);
+    assert_ne!(
+        before,
+        digests(&[&parent(true), &child], None),
+        "a parent that reopens"
+    );
+    let child = child_with("status == 'Done' => Parent[Id].value == value");
+    let parent = parent_told_once();
+    assert_ne!(
+        digests(&[&parent, &child], None),
+        digests(&[&parent, &child], Some(ONLY_TELL_COPIES)),
+        "Cedar that decides who may send Copy"
+    );
 }

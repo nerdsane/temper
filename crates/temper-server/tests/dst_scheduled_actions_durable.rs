@@ -88,7 +88,7 @@ fn run_seed(seed: u64) -> Result<usize, String> {
             state
                 .get_or_create_tenant_entity(&TenantId::new(TENANT), "Job", &id, json!({}))
                 .await
-                .map_err(|error| run.fail("records are created", error))?;
+                .map_err(|error| run.fail("records are created", error.to_string()))?;
             let now = sim_now();
             let in_a_period = now + chrono::Duration::seconds(PERIOD);
             let (action, params, kind, due) = match rng.next_bound(4) {
@@ -332,3 +332,8 @@ fn dst_scheduled_actions_outlive_a_restart() {
         "no stop over {SEEDS} seeds came right after a written fire"
     );
 }
+
+#[path = "dst_scheduled_actions_durable/fractional.rs"]
+mod fractional;
+#[path = "dst_scheduled_actions_durable/lapsed.rs"]
+mod lapsed;

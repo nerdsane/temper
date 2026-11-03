@@ -62,6 +62,7 @@ export interface SmtState {
 
 export interface SmtDetails {
   guard_satisfiability: [string, boolean][];
+  /** true: proved inductive. false: not proved; the model check decides. */
   inductive_invariants: [string, boolean][];
   unreachable_states: string[];
   all_passed: boolean;
@@ -69,6 +70,8 @@ export interface SmtDetails {
 
 export interface Counterexample {
   property: string;
+  /** The invariants false in the trace's last state, or the property's name. */
+  violated?: string[];
   trace: SmtState[];
 }
 

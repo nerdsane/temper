@@ -1,7 +1,10 @@
 use super::*;
 
+/// An inline callback that runs the action it is inside of again is a loop:
+/// it is refused at its first repeat, naming the loop, long before the spec's
+/// own guard would end it. The old depth bound let it run eight more times.
 #[tokio::test]
-async fn self_callback_stops_at_the_runtime_budget_before_the_spec_guard() {
+async fn self_callback_stops_at_its_first_repeat_before_the_spec_guard() {
     let _slot = CALLBACK_TEST_SLOT.acquire().await.unwrap();
     let spec = r#"
 [automaton]
@@ -75,24 +78,25 @@ on_success = "Tick"
     .await
     .expect("self callback did not terminate")
     .unwrap();
-    assert!(!result.success);
+    // The first Tick committed, so it is answered committed; the refused
+    // repeat is named among its trigger failures (ADR-0184).
+    assert!(result.success, "{result:?}");
     let actual = state
         .get_tenant_entity_state(&tenant, "Job", "job")
         .await
         .unwrap()
         .state;
-    assert!(
-        actual.counters["ticks"] <= 9,
-        "callback chain bypassed runtime budget: {}",
-        actual.counters["ticks"]
+    assert_eq!(
+        actual.counters["ticks"], 1,
+        "the callback repeating Tick must not run"
     );
     assert!(
         result
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("callback depth")),
+            .trigger_failures
+            .iter()
+            .any(|failure| failure.contains("Job(job).Tick -> Job(job).Tick")),
         "{:?}",
-        result.error
+        result.trigger_failures
     );
 }
 

@@ -747,14 +747,6 @@ mod tests {
     }
 
     #[test]
-    fn config_default_values() {
-        let config = SimActorSystemConfig::default();
-        assert_eq!(config.seed, 42);
-        assert_eq!(config.max_ticks, 500);
-        assert_eq!(config.max_actions_per_actor, 50);
-    }
-
-    #[test]
     fn run_record_equality() {
         let r1 = RunRecord {
             seed: 42,

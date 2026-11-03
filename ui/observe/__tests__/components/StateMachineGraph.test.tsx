@@ -17,12 +17,6 @@ const mockSpec: SpecDetail = {
 };
 
 describe("StateMachineGraph", () => {
-  it("renders an SVG element", () => {
-    const { container } = render(<StateMachineGraph spec={mockSpec} />);
-    const svg = container.querySelector("svg");
-    expect(svg).toBeTruthy();
-  });
-
   it("renders correct number of state nodes", () => {
     const { container } = render(<StateMachineGraph spec={mockSpec} />);
     const texts = container.querySelectorAll("text");

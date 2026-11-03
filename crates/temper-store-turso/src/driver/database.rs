@@ -76,6 +76,24 @@ impl Database {
         }
     }
 
+    /// A local file read and written through `io`, which a test can count.
+    #[cfg(test)]
+    pub(crate) fn local_with_io(
+        path: &str,
+        io: std::sync::Arc<dyn turso::core::IO>,
+    ) -> impl Future<Output = Result<Self, DriverError>> + Send {
+        async move {
+            Ok(Self {
+                driver: Box::new(
+                    turso::Builder::new_local(path)
+                        .with_io_impl(io)
+                        .build()
+                        .await?,
+                ),
+            })
+        }
+    }
+
     /// A local file whose commits are copied to its own Turso Cloud database.
     pub(crate) fn synced(copy: SyncCopy) -> Self {
         Self {

@@ -88,13 +88,17 @@ impl CedarPhaseOutcome {
     }
 }
 
-/// Why Cedar was asked: a check that lets an action or a single read through or refuses it, or the per-row check a
-/// list read makes to leave out the rows the caller may not see. A row left out is the policy working, not a refusal,
-/// so an alert on refusals reads only `check:gate`.
+/// Why Cedar was asked: a check that lets an action or a single read through or refuses it, the per-row check a
+/// list read makes to leave out the rows the caller may not see, or a page asking which moves to show. A row left
+/// out is the policy working and a "no" to a page hides a button; neither is a refusal, so an alert on refusals
+/// reads only `check:gate`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CedarCheck {
     Gate,
     RowFilter,
+    /// Asks whether a caller acts with platform authority; a deny is an answer, not a refusal.
+    PlatformAuthority,
+    Offer,
 }
 
 impl CedarCheck {
@@ -102,6 +106,8 @@ impl CedarCheck {
         match self {
             Self::Gate => "gate",
             Self::RowFilter => "row_filter",
+            Self::PlatformAuthority => "platform_authority",
+            Self::Offer => "offer",
         }
     }
 }

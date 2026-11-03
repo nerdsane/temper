@@ -58,6 +58,33 @@ impl ServerState {
         body: &[u8],
         ttl: Option<Duration>,
     ) -> Result<(), String> {
+        if super::kernel_owns(key) {
+            return Err(format!(
+                "'{key}' is a key the kernel keeps its own records under; nothing was written"
+            ));
+        }
+        self.write_blob_object(tenant, key, body, ttl).await
+    }
+
+    /// Write one of the kernel's own blobs ([`super::kernel_owns`]), such as
+    /// a module's bytes.
+    pub(crate) async fn put_kernel_blob_object(
+        &self,
+        tenant: &TenantId,
+        key: &str,
+        body: &[u8],
+    ) -> Result<(), String> {
+        assert!(super::kernel_owns(key), "'{key}' is not a kernel key");
+        self.write_blob_object(tenant, key, body, None).await
+    }
+
+    async fn write_blob_object(
+        &self,
+        tenant: &TenantId,
+        key: &str,
+        body: &[u8],
+        ttl: Option<Duration>,
+    ) -> Result<(), String> {
         let store = self.blob_store_for_tenant(tenant)?;
         store.put_if_absent(key, body, ttl).await?;
         self.put_metadata_blob_shadow(tenant, key, body, ttl).await
@@ -191,11 +218,8 @@ impl ServerState {
 
     /// Open a tenant-scoped object-store blob as a bounded stream.
     ///
-    /// Objects within the caller's ceiling fall back to the legacy database
-    /// store when the object store does not have them, so this agrees with
-    /// [`Self::get_blob_with_legacy_fallback`] about what exists. Anything above
-    /// the ceiling is still refused there rather than buffered, which is why
-    /// the fallback asks the store to bound the read instead of reading first.
+    /// The legacy database fallback reads fixed-size chunks too, so the
+    /// caller's ceiling is a content boundary, never an allocation budget.
     pub async fn stream_blob_object(
         &self,
         tenant: &TenantId,
@@ -238,40 +262,47 @@ impl ServerState {
         let Some(store) = self.metadata_store_for_tenant(tenant.as_str()).await else {
             return Ok(super::BlobStreamRead::Missing);
         };
-        // Bound before materializing. The legacy interface is buffered, which is
-        // why streaming reads skipped it originally; asking the store to refuse
-        // anything over the caller's ceiling keeps that intent — the fallback
-        // never pulls a large object into memory, it just stops pretending
-        // small ones do not exist.
-        let ceiling = usize::try_from(max_bytes).unwrap_or(usize::MAX);
-        // Hold the same blob I/O permit the object-store path takes. The read is
-        // bounded per caller but still buffered, so without the permit a burst
-        // of legacy reads is unbounded in aggregate — the ceiling limits one
-        // read, the semaphore limits how many happen at once.
-        let _permit = tokio::time::timeout(
+        const CHUNK_BYTES: usize = 64 * 1024;
+        // Active downloads use the same stream budget as object storage.
+        // Shared blob I/O permits cover database operations only, so a paused
+        // client cannot occupy the permits needed by unrelated reads or writes.
+        let stream_permit = tokio::time::timeout(
             super::BLOB_IO_QUEUE_TIMEOUT,
-            super::blob_io_semaphore().acquire_owned(),
+            super::streaming::blob_stream_semaphore().acquire_owned(),
         )
         .await
-        .map_err(|_| format!("legacy DB blob read for '{key}' timed out queueing for blob I/O"))?
-        .map_err(|error| format!("legacy DB blob I/O semaphore closed for '{key}': {error}"))?;
-        // Bounded in time as well as size, like every other buffered blob
-        // operation. This is an external database read holding a blob I/O
-        // permit: without a deadline a hung store would keep the permit and
-        // starve the readers queued behind it.
-        let Some(bytes) = tokio::time::timeout(
-            super::BLOB_BUFFERED_OPERATION_TIMEOUT,
-            store.get_blob_if_size_at_most(key, ceiling),
-        )
-        .await
-        .map_err(|_| format!("legacy DB blob read for '{key}' timed out"))?
-        .map_err(|error| format!("legacy DB blob read failed for '{key}': {error}"))?
-        else {
+        .map_err(|_| format!("legacy DB blob stream for '{key}' timed out queueing"))?
+        .map_err(|error| format!("blob stream semaphore closed for '{key}': {error}"))?;
+        // Open with a zero-byte read: this obtains the actual length without
+        // fetching content, including for a caller whose ceiling is too small.
+        let Some((length, _)) = read_legacy_chunk(store.as_ref(), key, 0, 0).await? else {
             return Ok(super::BlobStreamRead::Missing);
         };
-        tracing::debug!(%key, bytes = bytes.len(), "served blob from the legacy DB store");
+        if length > max_bytes {
+            return Ok(super::BlobStreamRead::TooLarge {
+                actual_bytes: Some(length),
+            });
+        }
+        let key = key.to_owned();
+        let source = Box::pin(async_stream::try_stream! {
+            let _stream_permit = stream_permit;
+            let mut offset = 0;
+            while offset < length {
+                let count = (length - offset).min(CHUNK_BYTES as u64) as usize;
+                let chunk = read_legacy_chunk(store.as_ref(), &key, offset, count)
+                    .await.map_err(std::io::Error::other)?;
+                let Some((actual_length, bytes)) = chunk else {
+                    Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "legacy blob disappeared during read"))?
+                };
+                if actual_length != length || bytes.len() != count {
+                    Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "legacy blob changed length during read"))?;
+                }
+                offset += bytes.len() as u64;
+                yield bytes::Bytes::from(bytes);
+            }
+        });
         Ok(super::BlobStreamRead::Found(
-            super::BlobObjectStream::from_bytes(bytes),
+            super::BlobObjectStream::from_stream(length, source),
         ))
     }
 
@@ -320,6 +351,29 @@ impl ServerState {
     }
 }
 
+/// Read one chunk while occupying the shared blob I/O budget only for the
+/// database operation. No permit escapes this call to a response's `yield`.
+async fn read_legacy_chunk(
+    store: &dyn crate::storage::MetadataStore,
+    key: &str,
+    offset: u64,
+    count: usize,
+) -> Result<Option<(u64, Vec<u8>)>, String> {
+    let _io_permit = tokio::time::timeout(
+        super::BLOB_IO_QUEUE_TIMEOUT,
+        super::blob_io_semaphore().acquire_owned(),
+    )
+    .await
+    .map_err(|_| format!("legacy DB blob read for '{key}' timed out queueing for blob I/O"))?
+    .map_err(|error| format!("legacy DB blob I/O semaphore closed for '{key}': {error}"))?;
+    tokio::time::timeout(
+        super::BLOB_BUFFERED_OPERATION_TIMEOUT,
+        store.get_blob_chunk(key, offset, count),
+    )
+    .await
+    .map_err(|_| format!("legacy DB blob read for '{key}' timed out"))?
+}
+
 /// Where a tenant's objects sit in the bucket: under the deployment's own prefix (`blob_prefix`, such as one app's
 /// folder in a bucket many servers share), then, for any tenant but `default`, under `tenants/<sha256 of its name>`.
 fn object_key_prefix(prefix: Option<&str>, tenant: &TenantId) -> Option<String> {
@@ -347,135 +401,5 @@ fn tenant_blob_root(root: PathBuf, tenant: &TenantId) -> PathBuf {
 }
 
 #[cfg(test)]
-mod tests {
-    use temper_runtime::ActorSystem;
-    use temper_spec::csdl::CsdlDocument;
-
-    use super::*;
-
-    #[test]
-    fn tenant_object_namespaces_are_stable_and_default_compatible() {
-        assert_eq!(tenant_object_namespace(&TenantId::default()), None);
-        let namespace = tenant_object_namespace(&TenantId::new("tenant-a"))
-            .expect("non-default tenant namespace");
-        assert_eq!(namespace.len(), 64);
-        assert_eq!(
-            tenant_object_namespace(&TenantId::new("tenant-a")),
-            Some(namespace)
-        );
-    }
-
-    #[test]
-    fn a_deployment_prefix_comes_before_the_tenant_namespace() {
-        let other = TenantId::new("tenant-a");
-        let namespace = tenant_object_namespace(&other).expect("namespace");
-        assert_eq!(object_key_prefix(None, &TenantId::default()), None);
-        assert_eq!(
-            object_key_prefix(Some("/people/t1/a1/"), &TenantId::default()).as_deref(),
-            Some("people/t1/a1")
-        );
-        assert_eq!(object_key_prefix(Some(""), &TenantId::default()), None);
-        assert_eq!(
-            object_key_prefix(None, &other),
-            Some(format!("tenants/{namespace}"))
-        );
-        assert_eq!(
-            object_key_prefix(Some("people/t1"), &other),
-            Some(format!("people/t1/tenants/{namespace}"))
-        );
-    }
-
-    #[tokio::test]
-    async fn local_object_storage_is_namespaced_by_tenant() {
-        let data_dir = tempfile::tempdir().expect("data dir");
-        let mut state = ServerState::new(
-            ActorSystem::new("tenant-blob-isolation"),
-            CsdlDocument {
-                version: "4.0".to_string(),
-                schemas: Vec::new(),
-            },
-            String::new(),
-        );
-        state.data_dir = data_dir.path().to_path_buf();
-        let tenant_a = TenantId::new("tenant-a");
-        let tenant_b = TenantId::new("tenant-b");
-
-        state
-            .put_blob_object(&tenant_a, "field-overflow/value", b"tenant-a", None)
-            .await
-            .expect("tenant A write");
-        state
-            .put_blob_object(&tenant_b, "field-overflow/value", b"tenant-b", None)
-            .await
-            .expect("tenant B write");
-
-        assert_eq!(
-            state
-                .get_blob_with_legacy_fallback(&tenant_a, "field-overflow/value")
-                .await
-                .expect("tenant A read"),
-            Some(b"tenant-a".to_vec())
-        );
-        assert_eq!(
-            state
-                .get_blob_with_legacy_fallback(&tenant_b, "field-overflow/value")
-                .await
-                .expect("tenant B read"),
-            Some(b"tenant-b".to_vec())
-        );
-        assert_eq!(
-            state
-                .get_blob_with_legacy_fallback(&TenantId::new("tenant-c"), "field-overflow/value",)
-                .await
-                .expect("tenant C read"),
-            None
-        );
-    }
-
-    /// A Katagami app whose vault key was lost (Run probe, 21 Oct 2026) restored its data with no readable
-    /// `blob_endpoint`, and a File put then answered 204 while its bytes went to this disk and the app's database.
-    #[tokio::test]
-    async fn a_server_that_keeps_files_only_in_an_object_store_refuses_them_without_one() {
-        let data_dir = tempfile::tempdir().expect("data dir");
-        let mut state = ServerState::new(
-            ActorSystem::new("files-need-object-store"),
-            CsdlDocument {
-                version: "4.0".to_string(),
-                schemas: Vec::new(),
-            },
-            String::new(),
-        );
-        state.data_dir = data_dir.path().to_path_buf();
-        let tenant = TenantId::default();
-        let key = "temper-fs/sha256:refused";
-
-        state.files_need_object_store = true;
-        let refused = state
-            .put_file_content_blob(&tenant, key, b"bytes")
-            .await
-            .expect_err("no object store, so no File bytes");
-        assert!(refused.contains("only in an object store"), "{refused}");
-        assert_eq!(
-            state
-                .get_blob_with_legacy_fallback(&tenant, key)
-                .await
-                .expect("read"),
-            None,
-            "nothing kept on disk or in the database"
-        );
-
-        // Without the setting, a local store keeps them as before.
-        state.files_need_object_store = false;
-        state
-            .put_file_content_blob(&tenant, key, b"bytes")
-            .await
-            .expect("a local store keeps Files");
-        assert_eq!(
-            state
-                .get_blob_with_legacy_fallback(&tenant, key)
-                .await
-                .expect("read"),
-            Some(b"bytes".to_vec())
-        );
-    }
-}
+#[path = "state_test.rs"]
+mod tests;

@@ -5,13 +5,20 @@ use temper_spec::csdl::parse_csdl;
 
 /// The first spec: `Start` enters `Waiting`. `Expire` and `Approve` are
 /// accepted from every live state, so a timer that fired outside its state
-/// would leave an event saying so instead of being refused.
+/// would leave an event saying so instead of being refused. `Poke` counts
+/// itself, so it moves the journal: a machine's move that changes nothing
+/// writes no event.
 pub(super) const JOB_V1: &str = r#"
 [automaton]
 name = "Job"
 states = ["Idle", "Waiting", "Review", "Done"]
 initial = "Idle"
 allow_indefinite_states = ["Idle", "Done"]
+
+[[state]]
+name = "pokes"
+type = "counter"
+initial = 0
 
 [[action]]
 name = "Start"
@@ -21,6 +28,7 @@ to = "Waiting"
 [[action]]
 name = "Poke"
 from = ["Waiting", "Review"]
+effect = ["pokes += 1"]
 
 [[action]]
 name = "Expire"

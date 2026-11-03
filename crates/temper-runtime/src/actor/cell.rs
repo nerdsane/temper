@@ -75,6 +75,19 @@ impl<A: Actor> ActorCell<A> {
                     restart_count = 0;
                     s
                 }
+                // The actor refused to start for a reason a restart here does
+                // not fix: it stops now, and every ask waiting on it is told why
+                // instead of finding it stopped.
+                Err(ActorError::InitFailed(reason)) => {
+                    warn!(actor = %id, reason = %reason, "actor did not start");
+                    rx.close_not_started(&reason);
+                    while let Some(envelope) = rx.recv().await {
+                        if let Envelope::Ask { reply, .. } = envelope {
+                            let _ = reply.send(Err(ActorError::InitFailed(reason.clone())));
+                        }
+                    }
+                    return;
+                }
                 Err(e) => {
                     error!(actor = %id, error = %e, "actor pre_start failed");
                     if should_restart(&strategy, restart_count) {

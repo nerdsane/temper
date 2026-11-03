@@ -30,14 +30,13 @@ use temper_runtime::persistence::{
     CommitRows, PersistenceAppend, PersistenceAppendResult, PersistenceEnvelope, PersistenceError,
     ScheduledActionRecord, storage_error,
 };
-use tokio::sync::OwnedSemaphorePermit;
 use tracing::Instrument;
 
 use super::TursoEventStore;
 use super::append_config::append_max_attempts;
 use super::commit_probe::CommitPoint;
 use super::instrumentation::WriteConnection;
-use super::write_gate::WritePriority;
+use super::write_gate::{GatePermit, WritePriority};
 use crate::driver::Transaction;
 use crate::metrics::record_turso_write_retry;
 use crate::retry::{is_transient_write_error, retry_delay_ms};
@@ -142,7 +141,7 @@ impl TursoEventStore {
     ) -> Result<T, PersistenceError>
     where
         T: Send + 'static,
-        F: Fn(TursoEventStore, OwnedSemaphorePermit) -> Fut,
+        F: Fn(TursoEventStore, GatePermit) -> Fut,
         Fut: Future<Output = Attempt<T>> + Send + 'static,
     {
         let total_attempts = append_max_attempts();
@@ -203,11 +202,7 @@ impl TursoEventStore {
     }
 
     /// One attempt of one append, on the write gate's `permit`.
-    async fn append_attempt(
-        &self,
-        permit: OwnedSemaphorePermit,
-        append: &OwnedAppend,
-    ) -> Attempt<u64> {
+    async fn append_attempt(&self, permit: GatePermit, append: &OwnedAppend) -> Attempt<u64> {
         let conn = match self.write_connection_on(permit).await {
             Ok(conn) => conn,
             Err(error) => return Attempt::NotWritten(error),
@@ -253,7 +248,7 @@ impl TursoEventStore {
     /// One attempt of one batch, on the write gate's `permit`.
     async fn append_batch_attempt(
         &self,
-        permit: OwnedSemaphorePermit,
+        permit: GatePermit,
         appends: &[PersistenceAppend],
     ) -> Attempt<Vec<PersistenceAppendResult>> {
         let conn = match self.write_connection_on(permit).await {

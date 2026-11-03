@@ -5,6 +5,9 @@ pub(in crate::odata) fn catalog_select_projection_fields(
 ) -> Option<&[String]> {
     let select = query_options.select.as_deref()?;
     if select.is_empty()
+        // Sparse store projections combine app fields and top-level values.
+        // Keep kernel provenance in its authoritative full-state namespace.
+        || select.iter().any(|property| temper_spec::automaton::is_event_metadata_field(property.as_str()))
         || query_options.filter.is_some()
         || query_options.orderby.is_some()
         || query_options.expand.is_some()
@@ -20,6 +23,15 @@ fn selected_catalog_property(
     row: &EntityCatalogRow,
     prop: &str,
 ) -> Option<serde_json::Value> {
+    if temper_spec::automaton::is_event_metadata_field(prop) {
+        return Some(
+            row.state
+                .as_ref()
+                .and_then(|state| state.get(prop))
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        );
+    }
     match prop {
         "entity_type" => return Some(serde_json::json!(entity_type)),
         "entity_id" => return Some(serde_json::json!(row.entity_id)),

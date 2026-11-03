@@ -1,15 +1,12 @@
 //! Shared specs, server fixtures, and assertions for composite refusal tests.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde_json::json;
 use temper_runtime::ActorSystem;
-use temper_runtime::persistence::PersistenceError;
 use temper_runtime::tenant::TenantId;
 use temper_server::registry::SpecRegistry;
 use temper_server::request_context::AgentContext;
-use temper_server::storage::{QueryPlaneStore, QueryProjectionFieldsRow};
 use temper_server::{ServerState, StorageStack};
 use temper_spec::csdl::parse_csdl;
 use temper_store_sim::SimEventStore;
@@ -287,69 +284,6 @@ pub(super) fn error_field(fields: &serde_json::Value) -> String {
         .and_then(|value| value.as_str())
         .unwrap_or_default()
         .to_string()
-}
-
-/// A query plane whose Release projections fail while `fail_release` is set.
-#[derive(Default)]
-pub(super) struct ReleaseProjectionFails {
-    /// Whether Release projection writes should fail.
-    pub(super) fail_release: AtomicBool,
-}
-
-#[async_trait::async_trait]
-impl QueryPlaneStore for ReleaseProjectionFails {
-    async fn upsert_projection(
-        &self,
-        _tenant: &str,
-        entity_type: &str,
-        _entity_id: &str,
-        _status: &str,
-        _fields: &serde_json::Value,
-        _state: &serde_json::Value,
-        _sequence_nr: u64,
-    ) -> Result<(), PersistenceError> {
-        if entity_type == "Release" && self.fail_release.load(Ordering::SeqCst) {
-            return Err(PersistenceError::Storage(
-                "release projection unavailable".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
-    async fn remove_projection(
-        &self,
-        _tenant: &str,
-        _entity_type: &str,
-        _entity_id: &str,
-    ) -> Result<(), PersistenceError> {
-        Ok(())
-    }
-
-    async fn query_field_index(
-        &self,
-        _tenant: &str,
-        _entity_type: &str,
-        _where_clause: &str,
-        _params: Vec<String>,
-    ) -> Result<Option<Vec<String>>, PersistenceError> {
-        Ok(None)
-    }
-
-    async fn load_projection_fields_many(
-        &self,
-        _tenant: &str,
-        _entity_type: &str,
-        _entity_ids: &[String],
-        _field_names: &[&str],
-    ) -> Result<Option<Vec<QueryProjectionFieldsRow>>, PersistenceError> {
-        Ok(None)
-    }
-
-    async fn projected_entity_counts_by_tenant(
-        &self,
-    ) -> Result<Option<Vec<(String, u64)>>, PersistenceError> {
-        Ok(None)
-    }
 }
 
 /// Asserts for two seconds that the Notice stays `Answered`: its composite's

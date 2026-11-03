@@ -23,6 +23,10 @@ pub(super) fn build_webhook_routes(
 }
 
 /// Build a relation graph from the CSDL and optional cross-invariant overrides.
+///
+/// A relation's delete policy is, in order: the tenant's `relation_override`
+/// for it, the policy its navigation property declares in the CSDL, then the
+/// tenant's `default_delete_policy` (`restrict` when there is none).
 pub(super) fn build_relation_graph(
     csdl: &CsdlDocument,
     cross_invariants: Option<&CrossInvariantSpec>,
@@ -49,6 +53,7 @@ pub(super) fn build_relation_graph(
                     let delete_policy = overrides
                         .get(&(et.name.clone(), nav.name.clone()))
                         .copied()
+                        .or(nav.delete_policy)
                         .unwrap_or(default_policy);
                     let edge = RelationEdge {
                         from_entity: et.name.clone(),
@@ -168,6 +173,7 @@ mod tests {
     fn synthesize_entity_trigger_emits_reaction_rule() {
         let trigger = temper_spec::automaton::ActionTrigger {
             name: "create_version".to_string(),
+            says: None,
             kind: TriggerKind::Entity,
             principal: Some("file-service".to_string()),
             guard: Some(temper_spec::predicate::parse("status == 'Ready'").unwrap()),
@@ -213,6 +219,7 @@ mod tests {
     fn synthesize_wasm_trigger_returns_none() {
         let trigger = temper_spec::automaton::ActionTrigger {
             name: "charge".to_string(),
+            says: None,
             kind: TriggerKind::Wasm,
             principal: None,
             guard: None,
@@ -241,6 +248,7 @@ mod tests {
     fn synthesize_webhook_trigger_returns_none() {
         let trigger = temper_spec::automaton::ActionTrigger {
             name: "notify".to_string(),
+            says: None,
             kind: TriggerKind::Webhook,
             principal: None,
             guard: None,

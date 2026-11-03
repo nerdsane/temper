@@ -1,12 +1,13 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use temper_runtime::persistence::PersistenceError;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use super::TursoEventStore;
 use super::instrumentation::WriteConnection;
+use crate::metrics::{record_turso_write_gate_hold, record_turso_write_gate_wait};
 
 /// Which writes go first when several wait for the gate's permit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +34,13 @@ impl WritePriority {
 /// the one looking, and is short against one commit on a slow drive (about
 /// 170 ms on a Tensorlake drive, roll3, 26 Oct 2026).
 const GIVE_WAY_RECHECK: Duration = Duration::from_millis(25);
+
+/// A wait at the gate this long is logged, and so is a hold this long that
+/// kept another writer waiting: the pair names who held the gate while others
+/// queued, and the hold says how much of it went to getting a connection and
+/// how much to the transaction. Metrics carry no Temper id in Datadog, so the
+/// logs are what tell one Temper's queue from another's.
+const SLOW_TURN: Duration = Duration::from_millis(100);
 
 /// The process-local queue for writes to one database: its one permit, and
 /// the writers waiting for it.
@@ -65,6 +73,56 @@ impl WriteGate {
     }
 }
 
+/// The gate's permit, held by one writer. Dropping it frees the gate and
+/// records how long the writer held it, which is how long every write that
+/// arrived meanwhile waited for it.
+#[derive(Debug)]
+pub(crate) struct GatePermit {
+    _permit: OwnedSemaphorePermit,
+    gate: Arc<WriteGate>,
+    operation: &'static str,
+    acquired: Instant,
+    /// When the writer's connection was ready. Getting one can wait behind a
+    /// push or a checkpoint, so a slow hold is split at this point into that
+    /// wait and the transaction.
+    connected: Option<Instant>,
+}
+
+impl GatePermit {
+    fn new(permit: OwnedSemaphorePermit, gate: &Arc<WriteGate>, operation: &'static str) -> Self {
+        Self {
+            _permit: permit,
+            gate: Arc::clone(gate),
+            operation,
+            acquired: Instant::now(),
+            connected: None,
+        }
+    }
+}
+
+impl Drop for GatePermit {
+    fn drop(&mut self) {
+        let held = self.acquired.elapsed();
+        record_turso_write_gate_hold(held, self.operation);
+        // The permit is still this writer's here: it is let go after `drop`.
+        let waiting = self.gate.waiting.load(Ordering::Acquire);
+        if held >= SLOW_TURN && waiting > 0 {
+            let held_ms = held.as_millis() as u64;
+            let connection_ms = self
+                .connected
+                .map_or(0, |at| at.duration_since(self.acquired).as_millis() as u64);
+            tracing::warn!(
+                operation = self.operation,
+                held_ms,
+                connection_ms,
+                transaction_ms = held_ms.saturating_sub(connection_ms),
+                waiting,
+                "turso.write_gate held"
+            );
+        }
+    }
+}
+
 impl TursoEventStore {
     /// A connection that may write, once the gate's permit is this writer's.
     /// Every write to the database goes through one.
@@ -80,12 +138,11 @@ impl TursoEventStore {
     /// A connection that may write on a permit already taken.
     pub(super) async fn write_connection_on(
         &self,
-        permit: OwnedSemaphorePermit,
+        mut permit: GatePermit,
     ) -> Result<WriteConnection, PersistenceError> {
-        Ok(WriteConnection::new(
-            self.configured_connection().await?,
-            permit,
-        ))
+        let conn = self.configured_connection().await?;
+        permit.connected = Some(Instant::now());
+        Ok(WriteConnection::new(conn, permit))
     }
 
     /// Acquire the process-local Turso write lane.
@@ -100,8 +157,24 @@ impl TursoEventStore {
         &self,
         operation: &'static str,
         priority: WritePriority,
+    ) -> Result<GatePermit, PersistenceError> {
+        let started = Instant::now();
+        let permit = self.wait_for_permit(operation, priority, started).await;
+        let outcome = if permit.is_ok() {
+            "acquired"
+        } else {
+            "timed_out"
+        };
+        record_turso_write_gate_wait(started.elapsed(), operation, priority.as_str(), outcome);
+        Ok(GatePermit::new(permit?, &self.write_gate, operation))
+    }
+
+    async fn wait_for_permit(
+        &self,
+        operation: &'static str,
+        priority: WritePriority,
+        started: Instant,
     ) -> Result<OwnedSemaphorePermit, PersistenceError> {
-        let started = std::time::Instant::now();
         let timeout = write_gate_wait_timeout();
         let waiting = Waiting::new(&self.write_gate, priority);
 
@@ -123,7 +196,7 @@ impl TursoEventStore {
         drop(waiting);
 
         let waited = started.elapsed();
-        if waited >= Duration::from_millis(100) {
+        if waited >= SLOW_TURN {
             tracing::warn!(
                 operation,
                 priority = priority.as_str(),
@@ -148,12 +221,14 @@ impl TursoEventStore {
     /// A batch must never keep a writer waiting, so it starts only when no
     /// writer waits at the gate, and it never queues there: a queued request
     /// would hold back writers that arrive behind it.
-    async fn trim_turn(&self) -> Result<OwnedSemaphorePermit, PersistenceError> {
+    async fn trim_turn(&self) -> Result<GatePermit, PersistenceError> {
         let gate = &self.write_gate;
         loop {
             if gate.waiting.load(Ordering::Acquire) == 0 {
                 match gate.permit.clone().try_acquire_owned() {
-                    Ok(turn) => return Ok(turn),
+                    Ok(turn) => {
+                        return Ok(GatePermit::new(turn, gate, "turso.trim_change_log"));
+                    }
                     Err(tokio::sync::TryAcquireError::Closed) => return Err(write_gate_closed()),
                     Err(tokio::sync::TryAcquireError::NoPermits) => {}
                 }
@@ -165,7 +240,7 @@ impl TursoEventStore {
     async fn wait_for_high_priority_writers(
         &self,
         operation: &'static str,
-        started: std::time::Instant,
+        started: Instant,
         timeout: Duration,
     ) -> Result<(), PersistenceError> {
         while self.write_gate.high_waiting.load(Ordering::Acquire) > 0 {
@@ -187,7 +262,7 @@ impl TursoEventStore {
 pub(super) struct TrimTurns<'a>(pub(super) &'a TursoEventStore);
 
 impl crate::driver::TrimWriters for TrimTurns<'_> {
-    type Turn = OwnedSemaphorePermit;
+    type Turn = GatePermit;
 
     fn turn(
         &self,

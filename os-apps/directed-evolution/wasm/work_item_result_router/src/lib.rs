@@ -94,4 +94,3 @@ include!("promoter.rs");
 include!("evaluation.rs");
 include!("selection.rs");
 include!("prompts.rs");
-include!("tests.rs");

@@ -4,16 +4,16 @@
 //! never passivated, so none has a snapshot; records in `gamma` start untimed.
 //! The process stays down longer than any budget, then boots under the second
 //! spec with `gamma` timed. `alpha`'s records replay into their stored
-//! `Waiting`, whose new budget replaces the timer their rows name, and every
-//! one of those timers is due at boot. `gamma`'s records have no row. A record's first append in
-//! the new process (its timer's fire) takes a minute, so fires that run
-//! together start at the same instant.
+//! `Waiting`, whose new budget replaces the timer their rows name. `gamma`'s
+//! records have no row, and the boot arms them from when they entered
+//! `Waiting`. Every one of those timers is due at boot. A record's first
+//! append in the new process (its timer's fire) takes a minute, so fires that
+//! run together start at the same instant.
 //!
 //! Invariants:
 //! - at most [`FIRES_AT_ONCE`] timers start firing at one instant;
-//! - every `alpha` record still reaches `Done` on exactly one timer fire;
-//! - no `gamma` record fires: with no row, each waits for its next action,
-//!   and the boot counts it.
+//! - the boot leaves no record waiting;
+//! - every record reaches `Done` on exactly one timer fire, `gamma`'s too.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -26,7 +26,10 @@ use temper_store_sim::SimEventStore;
 
 use super::process_clock::ProcessClock;
 use super::world::SimTimerRows;
-use super::{JOB_V1, Job, Process, Run, World, act, advance, check_seeds, job_untimed, job_v2};
+use super::{
+    JOB_V1, Job, Process, Run, World, act, advance, check_boot_counts, check_seeds, job_untimed,
+    job_v2,
+};
 
 /// How many due timers the server lets fire at once (`BOOT_FIRES_AT_ONCE`).
 const FIRES_AT_ONCE: usize = 8;
@@ -67,7 +70,7 @@ fn run_seed(seed: u64) -> Result<(), String> {
             state
                 .get_or_create_tenant_entity(&job.tenant, "Job", &job.id, json!({}))
                 .await
-                .map_err(|error| run.fail("records are created", error))?;
+                .map_err(|error| run.fail("records are created", error.to_string()))?;
             if !act(state, job, "Start").await {
                 return Err(run.fail("records start", format!("{}/{}", job.tenant, job.id)));
             }
@@ -91,20 +94,7 @@ fn run_seed(seed: u64) -> Result<(), String> {
     let second = Process::start(&world, &job_v2(), JOB_V1, &format!("burst-{seed}-b"));
     second.runtime.block_on(async {
         let state = &second.state;
-        let gamma = jobs
-            .iter()
-            .filter(|job| job.tenant.as_str() == "gamma")
-            .count();
-        let waiting = second
-            .booted
-            .get(&(TenantId::new("gamma"), "Job".to_string()))
-            .map_or(0, |counts| counts.waiting);
-        if waiting != gamma {
-            return Err(run.fail(
-                "the boot counts the records that wait without a row",
-                format!("gamma/Job: {gamma} records have no row, the boot counted {waiting}"),
-            ));
-        }
+        check_boot_counts(&second.booted, &run)?;
         for _ in 0..4 * jobs.len() / FIRES_AT_ONCE + 4 {
             advance(FIRE_APPEND).await;
         }
@@ -120,21 +110,6 @@ fn run_seed(seed: u64) -> Result<(), String> {
                 .iter()
                 .filter(|event| event.action == "Expire" || event.action == "Approve")
                 .collect();
-            if job.tenant.as_str() == "gamma" {
-                if record.status != "Waiting" || !fires.is_empty() {
-                    return Err(run.fail(
-                        "a record with no row waits for its next action",
-                        format!(
-                            "{}/{} is {} after {} timer fires",
-                            job.tenant,
-                            job.id,
-                            record.status,
-                            fires.len()
-                        ),
-                    ));
-                }
-                continue;
-            }
             if record.status != "Done" || fires.len() != 1 {
                 return Err(run.fail(
                     "every record leaves its timed state on its timer",

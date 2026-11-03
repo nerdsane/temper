@@ -289,6 +289,65 @@ params = ["title", "description", "plan_id"]
     }));
 }
 
+/// A param the spawn leaves unset that names a declared variable reads as the
+/// variable's initial value, so the spawn may leave it out; a param with no
+/// declaration is still missing.
+#[test]
+fn bundle_lint_lets_a_declared_variable_cover_an_unmapped_spawn_param() {
+    let parent = parse(
+        r#"
+[automaton]
+name = "Plan"
+states = ["Draft"]
+initial = "Draft"
+
+[[action]]
+name = "AddTask"
+from = ["Draft"]
+params = ["title"]
+effect = ["spawn('Task', 'Create')"]
+"#,
+    );
+    let child = |declared: &str| {
+        parse(&format!(
+            r#"
+[automaton]
+name = "Task"
+states = ["Open"]
+initial = "Open"
+{declared}
+[[action]]
+name = "Create"
+from = ["Open"]
+params = ["title", "description", "plan_id"]
+"#
+        ))
+    };
+    let unmapped = |task| {
+        let bundle = BTreeMap::from([
+            ("Plan".to_string(), parent.clone()),
+            ("Task".to_string(), task),
+        ]);
+        lint_automata_bundle(&bundle)
+            .into_iter()
+            .filter(|finding| finding.code == "spawn_initial_action_params_unmapped")
+            .collect::<Vec<_>>()
+    };
+
+    let declared = child(
+        r#"
+[[state]]
+name = "description"
+type = "string"
+initial = ""
+"#,
+    );
+    assert!(unmapped(declared).is_empty());
+    let findings = unmapped(child(""));
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(findings[0].message.contains("description"), "{findings:?}");
+}
+
 #[test]
 fn bundle_lint_accepts_valid_spawn_contract() {
     let parent = parse(

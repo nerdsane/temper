@@ -1,7 +1,21 @@
 //! Tests for the bounded composite verification entry point (ADR-0150).
 
 use super::*;
+use crate::composite::{Bytes, Progress};
 use temper_spec::automaton::parse_automaton;
+
+/// The composite check, in a room every fixture here fits.
+fn check(
+    automatons: &[&Automaton],
+    seed: &str,
+) -> Result<CompositeVerifyResult, CompositePlanError> {
+    let (room, progress) = (Bytes::new(1 << 30), Progress::default());
+    let bound = Bound {
+        room: &room,
+        progress: &progress,
+    };
+    verify_composite(automatons, seed, bound)
+}
 
 fn order_ioa() -> &'static str {
     r#"
@@ -83,7 +97,7 @@ fn seed_cover_includes_isolated_entities() {
 fn verify_composite_passes_clean_chain() {
     let order = parse_automaton(order_ioa()).unwrap();
     let payment = parse_automaton(payment_ioa()).unwrap();
-    let result = verify_composite(&[&order, &payment], "Order").unwrap();
+    let result = check(&[&order, &payment], "Order").unwrap();
     assert_eq!(result.outcome, CompositeOutcome::Verified, "{result:?}");
     assert!(result.passed());
     assert!(result.dropped_reactions.is_empty());
@@ -94,7 +108,12 @@ fn verify_all_covers_every_component() {
     let order = parse_automaton(order_ioa()).unwrap();
     let payment = parse_automaton(payment_ioa()).unwrap();
     let wiki = parse_automaton(wiki_ioa()).unwrap();
-    let results = verify_all(&[&order, &payment, &wiki]);
+    let (room, progress) = (Bytes::new(1 << 30), Progress::default());
+    let bound = Bound {
+        room: &room,
+        progress: &progress,
+    };
+    let results = verify_all(&[&order, &payment, &wiki], bound);
     assert_eq!(results.len(), 2);
     assert!(results.iter().all(|r| r.passed()));
     // Payment, though not a seed, is in Order's scope — covered.
@@ -158,7 +177,7 @@ to = "Frozen"
 fn no_dropped_reaction_catches_from_state_mismatch() {
     let file = parse_automaton(file_touch_increments_workspace()).unwrap();
     let workspace = parse_automaton(freezable_workspace()).unwrap();
-    let result = verify_composite(&[&file, &workspace], "File").unwrap();
+    let result = check(&[&file, &workspace], "File").unwrap();
     assert_eq!(result.outcome, CompositeOutcome::Violated, "{result:?}");
     assert!(!result.passed());
     let drop = result
@@ -209,7 +228,7 @@ id_field = "workspace_id"
 "#;
     let file = parse_automaton(file).unwrap();
     let workspace = parse_automaton(freezable_workspace()).unwrap();
-    let result = verify_composite(&[&file, &workspace], "File").unwrap();
+    let result = check(&[&file, &workspace], "File").unwrap();
     assert_eq!(
         result.outcome,
         CompositeOutcome::Verified,
@@ -257,7 +276,7 @@ id_field = "workspace_id"
 "#;
     let file = parse_automaton(file).unwrap();
     let workspace = parse_automaton(freezable_workspace()).unwrap();
-    let result = verify_composite(&[&file, &workspace], "File").unwrap();
+    let result = check(&[&file, &workspace], "File").unwrap();
     assert_eq!(
         result.outcome,
         CompositeOutcome::Verified,
@@ -317,7 +336,7 @@ to = "Superseded"
 "#;
     let file = parse_automaton(file).unwrap();
     let version = parse_automaton(version).unwrap();
-    let result = verify_composite(&[&file, &version], "File").unwrap();
+    let result = check(&[&file, &version], "File").unwrap();
     assert_eq!(
         result.outcome,
         CompositeOutcome::Verified,
@@ -355,7 +374,7 @@ id_field = "workspace_id"
 "#;
     let file = parse_automaton(file).unwrap();
     let workspace = parse_automaton(freezable_workspace()).unwrap();
-    let result = verify_composite(&[&file, &workspace], "File").unwrap();
+    let result = check(&[&file, &workspace], "File").unwrap();
     assert_eq!(
         result.outcome,
         CompositeOutcome::Verified,
@@ -365,7 +384,7 @@ id_field = "workspace_id"
 }
 
 #[test]
-fn incomplete_when_budget_exhausted() {
+fn incomplete_when_the_walk_does_not_fit() {
     // Six counter entities (each ranging 0..=3 under the per-entity
     // ceiling) give a joint space of 4^6 = 4096 states, well above
     // Stateright's 1500-state work-block granularity. Counter0 fans out a
@@ -390,6 +409,11 @@ allow_indefinite_states = ["Counting", "Idle"]
 name = "n"
 type = "counter"
 initial = 0
+
+# The model holds only a counter something reads.
+[[invariant]]
+name = "counted"
+assert = "n >= 0"
 
 [[action]]
 name = "Inc"
@@ -429,6 +453,11 @@ name = "n"
 type = "counter"
 initial = 0
 
+# The model holds only a counter something reads.
+[[invariant]]
+name = "counted"
+assert = "n >= 0"
+
 [[action]]
 name = "Inc"
 from = ["Counting"]
@@ -439,13 +468,26 @@ effect = ["n += 1"]
     }
     let parsed: Vec<_> = specs.iter().map(|s| parse_automaton(s).unwrap()).collect();
     let refs: Vec<&Automaton> = parsed.iter().collect();
-    let result = verify_composite_with_budget(&refs, "Counter0", 100).unwrap();
+    let (room, progress) = (Bytes::new(4 << 10), Progress::default());
+    let bound = Bound {
+        room: &room,
+        progress: &progress,
+    };
+    let result = verify_composite(&refs, "Counter0", bound).unwrap();
     assert_eq!(
         result.outcome,
         CompositeOutcome::Incomplete,
-        "exhausted budget must report INCOMPLETE: {result:?}"
+        "a walk that does not fit must report INCOMPLETE: {result:?}"
     );
     assert!(!result.passed(), "incomplete is never a pass");
+    assert!(
+        result
+            .incomplete
+            .as_deref()
+            .is_some_and(|why| why.contains("does not fit")),
+        "{result:?}"
+    );
+    assert_eq!(room.held(), 0, "the walk gives back what it took");
 }
 
 /// An entity whose action sends itself the next step.
@@ -485,7 +527,7 @@ to = "Working"
 #[test]
 fn reactions_land_before_the_next_request() {
     let agent = parse_automaton(self_starting_agent()).unwrap();
-    let result = verify_composite(&[&agent], "Agent").unwrap();
+    let result = check(&[&agent], "Agent").unwrap();
     assert_eq!(result.outcome, CompositeOutcome::Verified, "{result:?}");
     assert!(result.dropped_reactions.is_empty());
 }
@@ -516,6 +558,6 @@ target_action = "Go"
 kind = "same_id"
 "#;
     let looping = parse_automaton(looping).unwrap();
-    let result = verify_composite(&[&looping], "Loop").unwrap();
+    let result = check(&[&looping], "Loop").unwrap();
     assert_eq!(result.outcome, CompositeOutcome::Verified, "{result:?}");
 }

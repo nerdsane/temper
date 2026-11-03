@@ -233,7 +233,7 @@ fn cascade_stops_without_infinite_loop() {
 }
 
 // =========================================================================
-// A loop stops at MAX_REACTION_DEPTH and says so
+// A loop stops at its first repeated step and says so
 // =========================================================================
 
 /// `Tick` reacts to itself: a loop nothing else ends.
@@ -251,8 +251,6 @@ kind = "internal"
 
 #[test]
 fn looping_cascade_reports_the_reaction_it_stops() {
-    use temper_server::trigger::types::MAX_REACTION_DEPTH;
-
     let (_guard, clock, _id_gen) = install_deterministic_context(7);
     let mut reg = ReactionRegistry::new();
     reg.register_tenant_rules(
@@ -284,21 +282,21 @@ fn looping_cascade_reports_the_reaction_it_stops() {
     clock.advance();
     sys.step("ticker-1", "Tick", "{}").unwrap();
 
-    // Every reaction up to the bound ran; the one past it is a failed result,
-    // not a silent end of the list.
+    // Tick on t1 is the step the cascade started from, so the reaction is a
+    // repeat: it is a failed result naming the loop, not a silent end. The
+    // old depth bound ran Tick eight more times first.
     let results = sys.last_results();
-    let depth = MAX_REACTION_DEPTH as usize;
-    assert_eq!(results.len(), depth + 1, "{results:?}");
-    assert!(results[..depth].iter().all(|result| result.success));
-    let stopped = &results[depth];
+    assert_eq!(results.len(), 1, "{results:?}");
+    let stopped = &results[0];
     assert!(!stopped.success);
     assert_eq!(stopped.rule_name, "tick_again");
-    assert_eq!(stopped.depth, MAX_REACTION_DEPTH);
+    assert_eq!(stopped.depth, 0);
     assert!(
         stopped
             .error
             .as_deref()
-            .is_some_and(|e| e.contains("chain already ran"))
+            .is_some_and(|e| e.contains("Ticker(t1).Tick -> Ticker(t1).Tick")),
+        "{stopped:?}"
     );
 }
 
@@ -385,7 +383,7 @@ fn field_based_target_resolution() {
 }
 
 // =========================================================================
-// Multi-step cascade (Order → Payment → ... stops at depth)
+// Multi-step cascade (Order → Payment → Payment)
 // =========================================================================
 
 #[test]
@@ -728,4 +726,81 @@ field = "expected"
     );
     sys.assert_status("middle", "Recorded");
     sys.assert_status("leaf", "Recorded");
+}
+
+// =========================================================================
+// A long chain of distinct steps
+// =========================================================================
+
+/// A `Steps` automaton whose actions `A0..A{actions-1}` move it from `S0`
+/// through `S{actions}` one state at a time.
+fn stepping_ioa(actions: usize) -> String {
+    let states = (0..=actions)
+        .map(|index| format!("\"S{index}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut ioa = format!("[automaton]\nname = \"Steps\"\ninitial = \"S0\"\nstates = [{states}]\n");
+    for index in 0..actions {
+        ioa.push_str(&format!(
+            "\n[[action]]\nname = \"A{index}\"\nfrom = [\"S{index}\"]\nto = \"S{}\"\nkind = \"internal\"\n",
+            index + 1
+        ));
+    }
+    ioa
+}
+
+/// A chain of distinct steps never repeats one, so nothing stops it before
+/// its end, and the stack of the thread running it does not either. A thread
+/// that overflows its stack aborts the process, so this fails by crashing.
+#[test]
+fn a_long_chain_of_distinct_steps_runs_to_its_end_on_a_small_thread() {
+    const ACTIONS: usize = 2_000;
+    std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(|| {
+            let (_guard, clock, _id_gen) = install_deterministic_context(11);
+            let mut reg = ReactionRegistry::new();
+            reg.register_tenant_rules(
+                "steps",
+                (1..ACTIONS)
+                    .map(|index| ReactionRule {
+                        name: format!("then_a{index}"),
+                        when: ReactionTrigger {
+                            entity_type: "Steps".to_string(),
+                            action: Some(format!("A{}", index - 1)),
+                            guard: None,
+                        },
+                        then: ReactionTarget {
+                            entity_type: "Steps".to_string(),
+                            action: format!("A{index}"),
+                            args: std::collections::BTreeMap::new(),
+                        },
+                        resolve_target: TargetResolver::SameId,
+                        principal: None,
+                    })
+                    .collect(),
+            );
+            let mut sys = SimReactionSystem::new(sim_config(), reg, "steps");
+            sys.register_entity(
+                "steps-1",
+                "Steps",
+                "s1",
+                Arc::new(TransitionTable::from_ioa_source(&stepping_ioa(ACTIONS))),
+            );
+
+            clock.advance();
+            sys.step("steps-1", "A0", "{}").unwrap();
+
+            let results = sys.last_results();
+            assert_eq!(results.len(), ACTIONS - 1);
+            assert!(
+                results.iter().all(|result| result.success),
+                "{:?}",
+                results.iter().find(|result| !result.success)
+            );
+            sys.assert_status("steps-1", &format!("S{ACTIONS}"));
+        })
+        .expect("spawn the test thread")
+        .join()
+        .expect("the chain ran to its end");
 }

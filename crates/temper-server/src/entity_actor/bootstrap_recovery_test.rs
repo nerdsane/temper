@@ -336,8 +336,6 @@ async fn closed_cached_actor_recovers_once_after_journal_outage() {
             None,
             None,
             None,
-            None,
-            None,
         ),
     )
     .unwrap();

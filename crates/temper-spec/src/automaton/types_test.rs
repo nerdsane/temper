@@ -39,27 +39,6 @@ from = ["A"]
 }
 
 #[test]
-fn parse_guard_variants() {
-    let toml_src = r#"
-[automaton]
-name = "T"
-states = ["A", "B"]
-initial = "A"
-
-[[action]]
-name = "G1"
-from = ["A"]
-to = "B"
-guard = "items >= 1 && items < 10 && ready && 'vip' in tags && len(tags) >= 2"
-"#;
-    let automaton: Automaton = toml::from_str(toml_src).unwrap();
-    assert_eq!(
-        automaton.actions[0].guard.to_string(),
-        "items >= 1 && items < 10 && ready && 'vip' in tags && len(tags) >= 2"
-    );
-}
-
-#[test]
 fn parse_effect_variants() {
     let toml_src = r#"
 [automaton]

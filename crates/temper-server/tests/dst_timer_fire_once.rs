@@ -59,12 +59,25 @@ const TENANT: &str = "fleet";
 const CHECK_BUDGET: i64 = 60;
 const STEP: Duration = Duration::from_secs(5);
 
+/// `Check` and `Poke` count themselves, so each changes its record and is
+/// written: a machine's move that changes nothing writes nothing
+/// (`entity_actor::unrecorded`), and this test reads the journal.
 const SPEC: &str = r#"
 [automaton]
 name = "Computer"
 states = ["Idle", "Ready", "Waiting", "Done"]
 initial = "Idle"
 allow_indefinite_states = ["Idle", "Done"]
+
+[[state]]
+name = "checks"
+type = "counter"
+initial = 0
+
+[[state]]
+name = "pokes"
+type = "counter"
+initial = 0
 
 [[action]]
 name = "Open"
@@ -79,10 +92,12 @@ to = "Waiting"
 [[action]]
 name = "Poke"
 from = ["Ready", "Waiting"]
+effect = ["pokes += 1"]
 
 [[action]]
 name = "Check"
 from = ["Ready"]
+effect = ["checks += 1"]
 
 [[action]]
 name = "Expire"

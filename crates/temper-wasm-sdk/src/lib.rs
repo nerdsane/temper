@@ -150,7 +150,9 @@ pub mod http_stream {
     }
 }
 
-pub use context::{Context, HttpRequest, HttpResponse, SubWrite, SubWriteBuilder, WasmSpan};
+pub use context::{
+    Context, HttpRequest, HttpResponse, SubWrite, SubWriteBuilder, TriggerPrincipal, WasmSpan,
+};
 
 /// Re-export serde_json types for convenience.
 pub use serde_json::{self, Value, json};
@@ -241,7 +243,7 @@ macro_rules! temper_module {
 /// ```
 pub mod prelude {
     pub use crate::context::{
-        Context, HttpRequest, HttpResponse, SubWrite, SubWriteBuilder, WasmSpan,
+        Context, HttpRequest, HttpResponse, SubWrite, SubWriteBuilder, TriggerPrincipal, WasmSpan,
     };
     pub use crate::{Value, json, serde_json, set_error_result, set_success_result, temper_module};
 }

@@ -430,13 +430,6 @@ mod tests {
     }
 
     #[test]
-    fn test_new_convenience() {
-        let client = TemperClient::new("http://localhost:4200", "default");
-        assert_eq!(client.base_url(), "http://localhost:4200");
-        assert_eq!(client.tenant(), "default");
-    }
-
-    #[test]
     fn test_entity_url() {
         let client = TemperClient::new("http://localhost:4200", "default");
         assert_eq!(

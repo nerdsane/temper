@@ -190,11 +190,8 @@ fn check_args(
 pub(super) fn validate_timeout_args(automaton: &Automaton) -> Result<(), AutomatonParseError> {
     let state_names = state_names(automaton);
     for st in &automaton.state_timeouts {
-        check_args(
-            &format!("state_timeout for '{}' args", st.state),
-            &st.args,
-            &state_names,
-        )?;
+        let scope = format!("state_timeout for '{}'", st.state);
+        check_args(&format!("{scope} args"), &st.args, &state_names)?;
     }
     Ok(())
 }

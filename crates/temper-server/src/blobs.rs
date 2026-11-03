@@ -16,6 +16,7 @@ use crate::state::ServerState;
 mod descriptor;
 mod hydration;
 mod read_source;
+mod stored_fields;
 pub use descriptor::{
     FieldOverflowDescriptor, field_overflow_descriptor, field_overflow_sha256,
     is_valid_field_overflow_key,
@@ -27,6 +28,7 @@ pub(crate) use hydration::{
 #[cfg(test)]
 pub(crate) use hydration::{hydrate_blob_refs_in_value, hydrate_blob_refs_in_value_with_ceiling};
 pub(crate) use read_source::BlobReadSource;
+pub(crate) use stored_fields::resolve_stored_fields;
 
 pub(crate) const FIELD_OVERFLOW_BLOB_PREFIX: &str = "field-overflow/sha256/";
 pub(crate) const FIELD_OVERFLOW_REF_KEY: &str = "__temper_blob_ref";
@@ -182,7 +184,9 @@ mod tests {
             last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
             processed_idempotency_keys: std::collections::BTreeMap::new(),
+            last_event: Default::default(),
             status_clock: Default::default(),
+            spawn_reservations: Default::default(),
         }
     }
 

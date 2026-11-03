@@ -19,7 +19,9 @@ pub(super) fn slice(mut model: TemperModel, read: BTreeSet<String>) -> TemperMod
         let before = keep.len();
         for t in &model.transitions {
             let writes = t.effects.iter().any(|e| keep.contains(effect_var(e)))
-                || t.string_params.iter().any(|p| keep.contains(&p.name));
+                || t.string_params
+                    .iter()
+                    .any(|p| p.writes && keep.contains(&p.name));
             if !writes {
                 continue;
             }
@@ -51,9 +53,11 @@ pub(super) fn slice(mut model: TemperModel, read: BTreeSet<String>) -> TemperMod
         model.initial_booleans.remove(name);
         model.initial_lists.remove(name);
         model.counter_bounds.remove(name);
+        model.list_bounds.remove(name);
         model.list_literals.remove(name);
     }
     model.invariants.clear();
+    model.entry_rules.clear();
     model.liveness.clear();
     for t in &mut model.transitions {
         t.effects.retain(|e| !dropped.contains(effect_var(e)));
@@ -68,7 +72,9 @@ fn effect_var(effect: &ModelEffect) -> &str {
         | ModelEffect::AddCounter { var, .. }
         | ModelEffect::SubCounter { var, .. }
         | ModelEffect::SetBool { var, .. }
+        | ModelEffect::SetString { var, .. }
         | ModelEffect::ListAppend { var, .. }
+        | ModelEffect::ListRemove { var, .. }
         | ModelEffect::ListRemoveAt { var, .. } => var,
     }
 }
@@ -80,8 +86,10 @@ pub(super) fn effect_reads(effect: &ModelEffect) -> Option<&str> {
         | ModelEffect::AddCounter { value, .. }
         | ModelEffect::SubCounter { value, .. }
         | ModelEffect::SetBool { value, .. }
-        | ModelEffect::ListAppend { value, .. } => value,
+        | ModelEffect::ListAppend { value, .. }
+        | ModelEffect::ListRemove { value, .. } => value,
         ModelEffect::ListRemoveAt { index, .. } => index,
+        ModelEffect::SetString { .. } => return None,
     };
     match arg {
         Arg::Var(var) => Some(var),

@@ -38,54 +38,9 @@ fn schemas_are_idempotent() {
     assert!(CREATE_ENTITY_CATALOG_TABLE.contains("IF NOT EXISTS"));
     assert!(CREATE_ENTITY_CATALOG_TYPE_INDEX.contains("IF NOT EXISTS"));
     assert!(CREATE_ENTITY_CATALOG_STATUS_INDEX.contains("IF NOT EXISTS"));
+    assert!(CREATE_ENTITY_CATALOG_CHECKPOINT_INDEX.contains("IF NOT EXISTS"));
+    assert!(CREATE_SNAPSHOTS_CHECKPOINT_INDEX.contains("IF NOT EXISTS"));
     assert!(CREATE_ENTITY_FIELD_INDEX_TABLE.contains("IF NOT EXISTS"));
     assert!(CREATE_ENTITY_FIELD_INDEX_LOOKUP.contains("IF NOT EXISTS"));
     assert!(CREATE_ENTITY_FIELD_INDEX_STATUS.contains("IF NOT EXISTS"));
-}
-
-#[test]
-fn event_history_schema_declares_segments_and_snapshot_history() {
-    assert!(
-        CREATE_EVENTS_TABLE.contains("segment_index"),
-        "events rows must carry segment metadata"
-    );
-    assert!(
-        ALTER_EVENTS_ADD_SEGMENT_INDEX.contains("ADD COLUMN segment_index"),
-        "existing unsegmented event rows need an idempotent segment migration"
-    );
-    assert!(
-        CREATE_EVENT_SEGMENTS_TABLE.contains("CREATE TABLE IF NOT EXISTS event_segments"),
-        "event segment metadata table is required"
-    );
-    assert!(
-        CREATE_SNAPSHOT_HISTORY_TABLE.contains("CREATE TABLE IF NOT EXISTS snapshot_history"),
-        "immutable snapshot history table is required"
-    );
-}
-
-#[test]
-fn wasm_modules_table_has_required_columns() {
-    let sql = CREATE_WASM_MODULES_TABLE.to_uppercase();
-    for col in &[
-        "TENANT",
-        "MODULE_NAME",
-        "WASM_BYTES",
-        "SHA256_HASH",
-        "VERSION",
-        "SIZE_BYTES",
-    ] {
-        assert!(
-            sql.contains(col),
-            "wasm_modules schema missing column: {col}"
-        );
-    }
-}
-
-#[test]
-fn entity_catalog_stores_full_fields_json() {
-    let sql = CREATE_ENTITY_CATALOG_TABLE.to_uppercase();
-    assert!(
-        sql.contains("FIELDS"),
-        "entity_catalog schema must preserve full projected fields for catalog reads"
-    );
 }

@@ -11,7 +11,9 @@ use temper_odata::path::ODataPath;
 use temper_runtime::tenant::TenantId;
 
 use super::super::authz::{MutationResource, UPDATE_ACTION, authorize_mutation};
-use super::super::common::{check_has_stream_or_400, resolve_entity_type, resolve_value_parent};
+use super::super::common::{
+    authorized_snapshot_failure, check_has_stream_or_400, resolve_entity_type, resolve_value_parent,
+};
 use super::super::content_addressed::responses::{blob_store_error_response, stage_error_response};
 use super::{
     check_verification_gate_or_423, file_stream_content_error_response, stream_put_success_response,
@@ -19,6 +21,7 @@ use super::{
 use crate::blob_store::{BlobByteStream, BlobIngestAdmissionError, MAX_RAW_BLOB_BYTES};
 use crate::request_context::AgentContext;
 use crate::response::odata_error;
+use crate::state::redecide::Redecide;
 use crate::state::{ServerState, StoredFileContent, native_file_blob_key};
 
 /// The File a `$value` PUT names, when the server streams it: the TemperFS `File` type, a media entity, sent with
@@ -75,25 +78,14 @@ pub(in crate::odata) async fn handle_file_value_put(
         .into_response();
     };
 
-    // Who may write it, before a byte of the body is read.
+    // Decided before a byte of the body is read, so nothing is stored for a
+    // write that would be refused.
     let exists = state.ensure_entity_loaded(tenant, "File", file_id).await;
     let precondition =
-        match authorize_file_write(state, tenant, file_id, exists, agent_ctx, security_ctx).await {
+        match decide_file_write(state, tenant, file_id, exists, agent_ctx, security_ctx).await {
             Ok(precondition) => precondition,
             Err(response) => return *response,
         };
-    // A File that cannot take content now (an existing one written once, a frozen workspace) is refused before its
-    // body is read, so nothing is stored for a write that would be refused.
-    let writable = if exists {
-        state
-            .check_existing_file_writable(tenant, file_id, true)
-            .await
-    } else {
-        state.check_new_file_writable(tenant, file_id, "").await
-    };
-    if let Err(error) = writable {
-        return file_stream_content_error_response(error);
-    }
 
     let mut admission = match state.file_ingest_budget.try_reserve(tenant, declared_len) {
         Ok(permit) => permit,
@@ -156,29 +148,50 @@ pub(in crate::odata) async fn handle_file_value_put(
     drop(staged);
     drop(admission);
 
-    let committed = if exists {
-        state
-            .commit_file_stream_content(
-                tenant,
-                file_id,
-                &content,
-                &content_type,
-                agent_ctx,
-                precondition,
-            )
-            .await
-    } else {
-        state
-            .commit_new_file_content(
-                tenant,
-                file_id,
-                serde_json::json!({}),
-                &content,
-                &content_type,
-                agent_ctx,
-            )
-            .await
-    };
+    let committed =
+        if exists {
+            // The bytes are stored by now, so a File that changed while they
+            // streamed is decided again and its content committed again, without
+            // reading a byte twice. The deadline runs from here, not from the
+            // request: the upload was not a wait on the record.
+            let mut redecide = Redecide::start(state);
+            let mut decided_on = precondition;
+            loop {
+                redecide.dispatching().await;
+                let answer = state
+                    .commit_file_stream_content(
+                        tenant,
+                        file_id,
+                        &content,
+                        &content_type,
+                        agent_ctx,
+                        decided_on,
+                    )
+                    .await;
+                let stale = matches!(&answer, Ok(entity_resp) if entity_resp.is_record_changed());
+                if !redecide.again(stale, "file_value_put") {
+                    break answer;
+                }
+                decided_on =
+                    match decide_file_write(state, tenant, file_id, true, agent_ctx, security_ctx)
+                        .await
+                    {
+                        Ok(decided) => decided,
+                        Err(response) => return *response,
+                    };
+            }
+        } else {
+            state
+                .commit_new_file_content(
+                    tenant,
+                    file_id,
+                    serde_json::json!({}),
+                    &content,
+                    &content_type,
+                    agent_ctx,
+                )
+                .await
+        };
     match committed {
         Ok(entity_resp) => stream_put_success_response(&entity_resp),
         Err(error) => file_stream_content_error_response(error),
@@ -187,6 +200,31 @@ pub(in crate::odata) async fn handle_file_value_put(
 
 /// Cedar's `update` on the File, as the buffered `$value` PUT decides it: for a new File on the attributes it would
 /// be created with, for an existing one on its current state, whose authorization precondition the commit then holds.
+/// Every check a File's content write is decided on: who may write it, and
+/// whether the File can take content now (an existing one written once, a
+/// frozen workspace). The first decision and each one again on a changed File
+/// run this one function, so a check added here is decided again with the rest.
+async fn decide_file_write(
+    state: &ServerState,
+    tenant: &TenantId,
+    file_id: &str,
+    exists: bool,
+    agent_ctx: &AgentContext,
+    security_ctx: &SecurityContext,
+) -> Result<Option<String>, Box<axum::response::Response>> {
+    let precondition =
+        authorize_file_write(state, tenant, file_id, exists, agent_ctx, security_ctx).await?;
+    let writable = if exists {
+        state
+            .check_existing_file_writable(tenant, file_id, true)
+            .await
+    } else {
+        state.check_new_file_writable(tenant, file_id, "").await
+    };
+    writable.map_err(|error| Box::new(file_stream_content_error_response(error)))?;
+    Ok(precondition)
+}
+
 async fn authorize_file_write(
     state: &ServerState,
     tenant: &TenantId,
@@ -226,7 +264,12 @@ async fn authorize_file_write(
         .await
         .map_err(|error| {
             Box::new(
-                odata_error(StatusCode::INTERNAL_SERVER_ERROR, "ReadError", &error).into_response(),
+                odata_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "ReadError",
+                    &error.to_string(),
+                )
+                .into_response(),
             )
         })?;
     authorize_mutation(
@@ -247,17 +290,7 @@ async fn authorize_file_write(
     let snapshot = state
         .materialize_authorized_snapshot(tenant, "File", file_id, snapshot)
         .await
-        .map_err(|error| {
-            let status = if matches!(error, crate::state::DispatchError::Conflict(_)) {
-                StatusCode::CONFLICT
-            } else {
-                StatusCode::INTERNAL_SERVER_ERROR
-            };
-            Box::new(
-                odata_error(status, "AuthorizationStateChanged", &error.to_string())
-                    .into_response(),
-            )
-        })?;
+        .map_err(|error| Box::new(authorized_snapshot_failure(&error).into_response()))?;
     Ok(Some(
         crate::entity_actor::effects::entity_authorization_precondition(
             &snapshot.current_state.state,

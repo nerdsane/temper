@@ -15,7 +15,9 @@ use temper_spec::predicate::Truth;
 
 use crate::model::semantics::truth;
 
-use crate::model::{TemperModel, TemperModelAction, TemperModelState, build_model_from_ioa};
+use crate::model::{
+    TemperModel, TemperModelAction, TemperModelState, broken_by_action, build_model_from_ioa,
+};
 
 // ---------------------------------------------------------------------------
 // Public result types
@@ -41,6 +43,11 @@ pub struct PropTestFailure {
     pub action_sequence: Vec<String>,
     /// String representation of the state in which the violation was found.
     pub final_state: String,
+    /// Each state on the way and the action taken from it; the last, the
+    /// state that breaks the invariant, with none. Empty when the failure
+    /// could not be replayed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trace: Vec<(TemperModelState, Option<TemperModelAction>)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -68,6 +75,20 @@ fn check_invariants(model: &TemperModel, state: &TemperModelState) -> Result<(),
         }
     }
     Ok(())
+}
+
+/// Check the move `action` from `before` to `after`: the entry rules it
+/// must meet as it fires, then every invariant in `after`.
+fn check_step(
+    model: &TemperModel,
+    before: &TemperModelState,
+    action: &TemperModelAction,
+    after: &TemperModelState,
+) -> Result<(), String> {
+    if let Some(rule) = broken_by_action(model, action, before) {
+        return Err(rule.name.clone());
+    }
+    check_invariants(model, after)
 }
 
 /// Collect enabled actions for a state.
@@ -102,6 +123,7 @@ pub fn run_prop_tests_on_model(
 
         let mut state = init_state.clone();
         let mut action_seq: Vec<String> = Vec::new();
+        let mut trace = Vec::new();
 
         if let Err(inv) = check_invariants(model, &state) {
             return PropTestResult {
@@ -111,6 +133,7 @@ pub fn run_prop_tests_on_model(
                     invariant: inv,
                     action_sequence: action_seq,
                     final_state: format!("{state}"),
+                    trace: vec![(state, None)],
                 }),
             };
         }
@@ -128,21 +151,25 @@ pub fn run_prop_tests_on_model(
 
             let action = actions[idx].clone();
             action_seq.push(action.name.clone());
+            trace.push((state.clone(), Some(action.clone())));
 
-            if let Some(next) = model.next_state(&state, action) {
-                state = next;
-            } else {
+            let Some(next) = model.next_state(&state, action.clone()) else {
                 break;
-            }
+            };
+            let checked = check_step(model, &state, &action, &next);
+            state = next;
 
-            if let Err(inv) = check_invariants(model, &state) {
+            if let Err(inv) = checked {
+                let final_state = format!("{state}");
+                trace.push((state, None));
                 return PropTestResult {
                     total_cases: case_idx + 1,
                     passed: false,
                     failure: Some(PropTestFailure {
                         invariant: inv,
                         action_sequence: action_seq,
-                        final_state: format!("{state}"),
+                        final_state,
+                        trace,
                     }),
                 };
             }
@@ -204,13 +231,13 @@ pub fn run_prop_tests_with_shrinking_on_model(
             }
             let action = actions[idx % actions.len()].clone();
 
-            if let Some(next) = model.next_state(&state, action) {
-                state = next;
-            } else {
+            let Some(next) = model.next_state(&state, action.clone()) else {
                 break;
-            }
+            };
+            let checked = check_step(model, &state, &action, &next);
+            state = next;
 
-            check_invariants(model, &state).map_err(|inv| {
+            checked.map_err(|inv| {
                 proptest::test_runner::TestCaseError::Fail(
                     format!("invariant {inv} violated at state {state}").into(),
                 )
@@ -234,11 +261,11 @@ pub fn run_prop_tests_with_shrinking_on_model(
                 proptest::test_runner::TestError::Abort(reason) => (reason.to_string(), None),
             };
 
-            let (invariant, action_sequence, final_state) =
+            let (invariant, action_sequence, final_state, trace) =
                 if let Some(action_indices) = minimal_input {
                     replay_failure(model, &init_state, &action_indices)
                 } else {
-                    (failure_msg.clone(), vec![], String::new())
+                    (failure_msg.clone(), vec![], String::new(), vec![])
                 };
 
             PropTestResult {
@@ -248,24 +275,36 @@ pub fn run_prop_tests_with_shrinking_on_model(
                     invariant,
                     action_sequence,
                     final_state,
+                    trace,
                 }),
             }
         }
     }
 }
 
-/// Replay a failing action-index sequence to recover the action names and
-/// final state.
+/// A replayed failure: the invariant, the action names, the final state
+/// rendered, and the trace of states and actions.
+type Replayed = (
+    String,
+    Vec<String>,
+    String,
+    Vec<(TemperModelState, Option<TemperModelAction>)>,
+);
+
+/// Replay a failing action-index sequence to recover the action names, the
+/// final state and every state on the way.
 fn replay_failure(
     model: &TemperModel,
     init_state: &TemperModelState,
     action_indices: &[usize],
-) -> (String, Vec<String>, String) {
+) -> Replayed {
     let mut state = init_state.clone();
     let mut action_seq = Vec::new();
+    let mut trace = Vec::new();
 
     if let Err(inv) = check_invariants(model, &state) {
-        return (inv, action_seq, format!("{state}"));
+        let final_state = format!("{state}");
+        return (inv, action_seq, final_state, vec![(state, None)]);
     }
 
     for &idx in action_indices {
@@ -275,19 +314,24 @@ fn replay_failure(
         }
         let action = actions[idx % actions.len()].clone();
         action_seq.push(action.name.clone());
+        trace.push((state.clone(), Some(action.clone())));
 
-        if let Some(next) = model.next_state(&state, action) {
-            state = next;
-        } else {
+        let Some(next) = model.next_state(&state, action.clone()) else {
             break;
-        }
+        };
+        let checked = check_step(model, &state, &action, &next);
+        state = next;
 
-        if let Err(inv) = check_invariants(model, &state) {
-            return (inv, action_seq, format!("{state}"));
+        if let Err(inv) = checked {
+            let final_state = format!("{state}");
+            trace.push((state, None));
+            return (inv, action_seq, final_state, trace);
         }
     }
 
-    ("unknown".to_string(), action_seq, format!("{state}"))
+    let final_state = format!("{state}");
+    trace.push((state, None));
+    ("unknown".to_string(), action_seq, final_state, trace)
 }
 
 // ===========================================================================
@@ -406,11 +450,13 @@ mod tests {
                 effects: vec![],
                 params: BTreeMap::new(),
                 string_params: vec![],
+                constraints: vec![],
             }],
             invariants: vec![ResolvedInvariant {
                 name: "OnlyA".to_string(),
                 assert: parse("status == 'A'").unwrap(),
             }],
+            entry_rules: vec![],
             liveness: vec![],
             terminal: vec![],
             var_kinds: BTreeMap::new(),
@@ -420,6 +466,7 @@ mod tests {
             initial_lists: BTreeMap::new(),
             counter_bounds: BTreeMap::new(),
             default_max_counter: 2,
+            list_bounds: BTreeMap::new(),
             list_literals: BTreeMap::new(),
             initial_strings: BTreeMap::new(),
             tracked_strings: Default::default(),

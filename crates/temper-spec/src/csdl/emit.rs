@@ -159,7 +159,7 @@ fn emit_property(out: &mut String, prop: &Property) {
 }
 
 fn emit_navigation_property(out: &mut String, nav: &NavigationProperty) {
-    let has_children = !nav.referential_constraints.is_empty();
+    let has_children = !nav.referential_constraints.is_empty() || nav.delete_policy.is_some();
 
     out.push_str(&format!(
         "        <NavigationProperty Name=\"{}\" Type=\"{}\"",
@@ -178,6 +178,12 @@ fn emit_navigation_property(out: &mut String, nav: &NavigationProperty) {
             out.push_str(&format!(
                 "          <ReferentialConstraint Property=\"{}\" ReferencedProperty=\"{}\"/>\n",
                 rc.property, rc.referenced_property
+            ));
+        }
+        if let Some(policy) = nav.delete_policy {
+            out.push_str(&format!(
+                "          <Annotation Term=\"{DELETE_POLICY_TERM}\" String=\"{}\"/>\n",
+                policy.as_str()
             ));
         }
         out.push_str("        </NavigationProperty>\n");

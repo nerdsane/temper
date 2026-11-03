@@ -10,6 +10,8 @@ use opentelemetry::KeyValue;
 use opentelemetry::global;
 use opentelemetry::metrics::Histogram;
 
+use super::write_gate::GatePermit;
+
 fn turso_query_duration_histogram() -> &'static Histogram<f64> {
     static HISTOGRAM: OnceLock<Histogram<f64>> = OnceLock::new();
     HISTOGRAM.get_or_init(|| {
@@ -67,14 +69,11 @@ impl InstrumentedConnection {
 pub(crate) struct WriteConnection {
     // Declared before the permit, so it is closed before the permit is free.
     conn: InstrumentedConnection,
-    _permit: tokio::sync::OwnedSemaphorePermit,
+    _permit: GatePermit,
 }
 
 impl WriteConnection {
-    pub(super) fn new(
-        conn: InstrumentedConnection,
-        permit: tokio::sync::OwnedSemaphorePermit,
-    ) -> Self {
+    pub(super) fn new(conn: InstrumentedConnection, permit: GatePermit) -> Self {
         Self {
             conn,
             _permit: permit,

@@ -16,6 +16,10 @@ use serde::{Deserialize, Serialize};
 /// removes a variable or a field.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct EffectOutcome {
+    /// Spawn fields whose reservation owner changed, even if the child id did
+    /// not. Replay restores these identities instead of minting new ones.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub spawn_reservations: BTreeMap<String, String>,
     /// Counters the effects changed, with their new values.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub counters: BTreeMap<String, usize>,

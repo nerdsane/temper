@@ -1,6 +1,6 @@
 //! A record's timer is the one its committed row holds: it counts from the
-//! event that entered its state, and a row that cannot be read is not
-//! replaced by a guess.
+//! event that entered its state, a create commits it as its creator, and a
+//! row that cannot be read is not replaced by a guess.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -41,6 +41,17 @@ where
 async fn advance_to(at: tokio::time::Instant) {
     tokio::time::advance(at.saturating_duration_since(tokio::time::Instant::now())).await;
     settle().await;
+}
+
+/// How many times the record's timer fired: its `Expire` events.
+async fn expires(store: &SimEventStore, id: &str) -> usize {
+    store
+        .read_events(&journal_of(id), 0)
+        .await
+        .expect("the journal reads")
+        .iter()
+        .filter(|event| event.event_type == "Expire")
+        .count()
 }
 
 fn timer_row(store: &SimEventStore, id: &str) -> Option<StateTimerRecord> {
@@ -213,6 +224,123 @@ fn an_unreadable_timer_row_is_not_replaced() {
             assert_eq!(
                 expired[0].payload["params"]["Mark"], committed_params["Mark"],
                 "seed {seed}: the timer fired with arguments other than its committed ones"
+            );
+        });
+    }
+}
+
+/// The timer rows of a process that stops once its commit lands: it reads
+/// them, and no row it would write or delete after the commit lands.
+struct StoppedAfterCommit(rows::SimTimerRows);
+
+#[async_trait::async_trait]
+impl StateTimerStore for StoppedAfterCommit {
+    async fn upsert_state_timer(&self, _timer: &StateTimerRecord) -> Result<(), PersistenceError> {
+        Ok(())
+    }
+
+    async fn delete_state_timer(
+        &self,
+        _tenant: &str,
+        _entity_type: &str,
+        _entity_id: &str,
+        _arm_id: &str,
+    ) -> Result<(), PersistenceError> {
+        Ok(())
+    }
+
+    async fn list_state_timers(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<StateTimerRecord>, PersistenceError> {
+        self.0.list_state_timers(tenant).await
+    }
+}
+
+/// A server process's runtime: single-threaded, on a paused clock. Dropping
+/// it stops every task the process started.
+fn process_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .build()
+        .expect("runtime builds")
+}
+
+/// A record created in a timed state commits its timer row with its create,
+/// armed as its creator. A process that stops between the create and any row
+/// it writes after it leaves the timer to the next boot, which fires it a
+/// day after the create, as the row says.
+#[test]
+fn a_create_commits_its_timer_and_a_restart_fires_it() {
+    const DOWNTIME: Duration = Duration::from_secs(3600);
+    let tally = TALLY.replace("initial = \"Open\"", "initial = \"Busy\"");
+    let creator = AgentContext {
+        security_ctx: Some(temper_authz::SecurityContext::from_verified_jwt(
+            "creator",
+            temper_authz::PrincipalKind::Agent,
+            Some("test"),
+            None,
+            None,
+            None,
+        )),
+        ..Default::default()
+    };
+    let tenant = TenantId::new(TENANT);
+    for seed in 0..16 {
+        let clock = Arc::new(process_clock::ProcessClock::new());
+        let _guard = install_sim_context(clock.clone(), Arc::new(DeterministicIdGen::new(seed)));
+        let store = SimEventStore::no_faults(seed);
+
+        process_runtime().block_on(async {
+            clock.begin();
+            let mut first = server_with_tally(&store, seed, &tally);
+            first.state_timer_rows = Some(Arc::new(StoppedAfterCommit(rows::SimTimerRows(
+                store.clone(),
+            ))));
+            first
+                .get_or_create_tenant_entity_by(
+                    &tenant,
+                    "Tally",
+                    "made",
+                    json!({"Id": "made"}),
+                    &creator,
+                )
+                .await
+                .unwrap();
+            settle().await;
+            clock.end(DOWNTIME);
+        });
+        let row = timer_row(&store, "made");
+        let Some(row) = row.filter(|row| row.state == "Busy" && row.armed_by.contains("creator"))
+        else {
+            panic!("seed {seed}: the create committed no timer row armed as its creator");
+        };
+        let deadline = chrono::DateTime::parse_from_rfc3339(&row.started_at).unwrap()
+            + chrono::Duration::from_std(BUDGET).unwrap();
+
+        process_runtime().block_on(async {
+            clock.begin();
+            let second = server_with_tally(&store, seed, &tally);
+            let walk = second.start_runtime().await.expect("the first start");
+            walk.await.expect("the boot walk ends");
+            let until_deadline = (deadline.to_utc() - temper_runtime::scheduler::sim_now())
+                .to_std()
+                .expect("the deadline is after the restart");
+
+            // `journal` reads a record as `Open` until a `Hold`, and this one
+            // was created `Busy`: count the timer's own events instead.
+            advance_to(tokio::time::Instant::now() + until_deadline - Duration::from_secs(1)).await;
+            assert_eq!(
+                expires(&store, "made").await,
+                0,
+                "seed {seed}: the timer fired before a day after the create"
+            );
+            advance_to(tokio::time::Instant::now() + Duration::from_secs(2)).await;
+            assert_eq!(
+                expires(&store, "made").await,
+                1,
+                "seed {seed}: the restarted process fires the created record's timer once"
             );
         });
     }

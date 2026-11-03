@@ -182,7 +182,7 @@ impl TursoEventStore {
             .write_connection("turso.mark_ots_trajectory_failed", WritePriority::Low)
             .await?;
         conn.execute(
-            "UPDATE ots_trajectories \
+            "UPDATE ots_trajectories INDEXED BY sqlite_autoindex_ots_trajectories_1 \
              SET persistence_status = 'failed', persist_attempts = persist_attempts + 1, last_error = ?3, updated_at = datetime('now') \
              WHERE tenant = ?1 AND trajectory_id = ?2",
             params![
@@ -306,7 +306,8 @@ impl TursoEventStore {
         let mut rows = conn
             .query(
                 "SELECT agent_id, COALESCE(session_id, ''), outcome, data \
-                 FROM ots_trajectories WHERE tenant = ?1 AND trajectory_id = ?2",
+                 FROM ots_trajectories INDEXED BY sqlite_autoindex_ots_trajectories_1 \
+                 WHERE tenant = ?1 AND trajectory_id = ?2",
                 params![tenant.to_string(), trajectory_id.to_string()],
             )
             .await

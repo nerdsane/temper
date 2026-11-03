@@ -30,23 +30,6 @@ States == {"Active", "Inactive", "Deleted"}
     assert_eq!(states, vec!["Active", "Inactive", "Deleted"]);
 }
 
-#[test]
-fn debug_cancel() {
-    let tla = include_str!("../../../../../test-fixtures/specs/order.tla");
-    let sm = extract_state_machine(tla).unwrap();
-    for transition in &sm.transitions {
-        if transition.name.contains("Cancel") || transition.name.contains("Initiate") {
-            eprintln!(
-                "{}: from={:?} to={:?} has_params={}",
-                transition.name,
-                transition.from_states,
-                transition.to_state,
-                transition.has_parameters
-            );
-        }
-    }
-}
-
 fn assert_reference_states(sm: &StateMachine) {
     assert!(sm.states.contains(&"Draft".to_string()));
     assert!(sm.states.contains(&"Submitted".to_string()));

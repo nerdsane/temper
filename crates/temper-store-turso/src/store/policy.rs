@@ -223,6 +223,7 @@ impl TursoEventStore {
                 .query(
                     "SELECT count, first_seen, last_seen, distinct_resource_ids_json \
                      FROM policy_denial_patterns \
+                     INDEXED BY sqlite_autoindex_policy_denial_patterns_1 \
                      WHERE tenant = ?1 AND agent_type = ?2 AND action = ?3 AND resource_type = ?4",
                     params![tenant, agent_type_key, action, resource_type],
                 )

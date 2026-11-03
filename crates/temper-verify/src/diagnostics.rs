@@ -20,11 +20,13 @@
 //! The renderers here are deliberately dumb: they read the structured results
 //! and format them. They never re-run a level and never decide pass/fail.
 //!
-//! Output is capped. A broken invariant typically fails on most seeds and most
-//! actors, so the raw violation list is long and repetitive; it is grouped by
-//! `(invariant, action)` and the distinct groups are reported with a count.
-//! What localises a bug is the set of distinct ways it fails, not the
-//! multiplicity of any one of them.
+//! Simulation output is grouped. A broken invariant typically fails on most
+//! seeds and most actors, so the raw violation list is long and repetitive; it
+//! is grouped by `(invariant, action)` and the distinct groups are reported
+//! with a count. What localises a bug is the set of distinct ways it fails,
+//! not the multiplicity of any one of them. A model-check path is shown whole:
+//! every move on it is one the author has to see to reproduce the failure, and
+//! its length is the depth of the state that breaks the rule.
 
 use std::collections::BTreeMap;
 
@@ -36,12 +38,10 @@ use crate::smt::SmtResult;
 /// Maximum distinct violation groups reported per level.
 const MAX_GROUPS: usize = 8;
 
-/// Maximum trace steps rendered for one counterexample.
-const MAX_TRACE_STEPS: usize = 12;
-
 /// Diagnostics for L0 symbolic verification.
 ///
-/// L0 already names dead guards and non-inductive invariants in its summary.
+/// L0 already names dead guards and the invariants it did not prove in its
+/// summary.
 /// What the summary cannot carry is *why* a guard is dead, so this adds the
 /// one reading that distinguishes the two causes an author confuses: a guard
 /// unsatisfiable on its own terms, versus one satisfiable in principle but
@@ -55,9 +55,9 @@ pub fn smt_diagnostics(result: &SmtResult) -> Vec<String> {
         ));
     }
 
-    for (name, _) in result.inductive_invariants.iter().filter(|(_, ind)| !ind) {
+    for (name, why) in &result.not_proved {
         lines.push(format!(
-            "invariant '{name}' is not inductive: some action leaves a state satisfying it in a state violating it"
+            "invariant '{name}' not proved inductive: {why}; the model check decides whether a reachable state breaks it"
         ));
     }
 
@@ -80,18 +80,50 @@ pub fn smt_diagnostics(result: &SmtResult) -> Vec<String> {
 
 /// Diagnostics for L1 exhaustive model checking.
 ///
-/// Renders each counterexample as the shortest path Stateright found to the
-/// violation. The trace is the actionable part: a property name says what
-/// broke, the trace says how to reach it.
+/// Renders each counterexample as the path the model check found, ending at
+/// the first state on it that breaks the property, with the invariants false
+/// there. The trace is the actionable part: a property name says what broke,
+/// the trace says how to reach it.
 pub fn model_check_diagnostics(result: &VerificationResult) -> Vec<String> {
     let mut lines = Vec::new();
 
     for counterexample in result.counterexamples.iter().take(MAX_GROUPS) {
-        lines.push(format!(
-            "property '{}' violated; shortest path ({} step(s)):",
-            counterexample.property,
-            counterexample.trace.len().saturating_sub(1),
-        ));
+        let broken = if counterexample.violated.is_empty() {
+            String::new()
+        } else {
+            format!(" ({} false)", counterexample.violated.join(", "))
+        };
+        let steps = counterexample.trace.len().saturating_sub(1);
+        if counterexample.property == crate::reaches::REACHES {
+            let rule = counterexample.violated.join(", ");
+            let targets = crate::lost_places::either(&counterexample.never_reaches);
+            let back = counterexample
+                .trace
+                .split_last()
+                .and_then(|((last, _), rest)| rest.iter().rposition(|(state, _)| state == last));
+            lines.push(match back {
+                Some(back) => format!(
+                    "rule '{rule}' broken: this path comes back to step {back} without \
+                     reaching {targets}, so a record can go round it forever ({steps} step(s)):"
+                ),
+                None => format!(
+                    "rule '{rule}' broken: this path stops without reaching {targets} \
+                     after the rule starts ({steps} step(s)):"
+                ),
+            });
+        } else if counterexample.never_reaches.is_empty() {
+            lines.push(format!(
+                "property '{}' violated{broken}; path ({steps} step(s)):",
+                counterexample.property,
+            ));
+        } else {
+            lines.push(format!(
+                "rule '{}' broken: the record at the end of this path can never reach {} \
+                 ({steps} step(s)):",
+                counterexample.violated.join(", "),
+                crate::lost_places::either(&counterexample.never_reaches),
+            ));
+        }
         lines.extend(render_trace(&counterexample.trace));
     }
 
@@ -119,7 +151,8 @@ pub fn model_check_diagnostics(result: &VerificationResult) -> Vec<String> {
     lines
 }
 
-/// One `state -- action --> state` line per step, capped.
+/// One `state --action` line per step, from the initial state to the one
+/// that breaks the property.
 fn render_trace(
     trace: &[(
         crate::model::TemperModelState,
@@ -127,12 +160,7 @@ fn render_trace(
     )],
 ) -> Vec<String> {
     let mut lines = Vec::new();
-    let start = trace.len().saturating_sub(MAX_TRACE_STEPS);
-    if start > 0 {
-        lines.push(format!("    ... {start} earlier trace entries omitted"));
-    }
-    // Retain the final state and its incoming action: they locate the failure.
-    for (index, (state, action)) in trace.iter().enumerate().skip(start) {
+    for (index, (state, action)) in trace.iter().enumerate() {
         match action {
             Some(action) => lines.push(format!("    {index}. {state} --{action}")),
             None => lines.push(format!("    {index}. {state}")),
@@ -234,7 +262,8 @@ pub fn simulation_diagnostics(results: &[SimulationResult]) -> Vec<String> {
 /// Diagnostics for L3 property tests.
 ///
 /// The action sequence here has already been shrunk by proptest, so it is the
-/// minimal path to the violation and worth printing in full.
+/// minimal path to the violation and worth printing in full, with every
+/// state on it: when L1 stops on its budget, this is the only path.
 pub fn prop_test_diagnostics(result: &PropTestResult) -> Vec<String> {
     let Some(failure) = &result.failure else {
         return Vec::new();
@@ -246,13 +275,15 @@ pub fn prop_test_diagnostics(result: &PropTestResult) -> Vec<String> {
         failure.action_sequence.join(" -> ")
     };
 
-    vec![
+    let mut lines = vec![
         format!(
             "invariant '{}' violated in state {}",
             failure.invariant, failure.final_state
         ),
         format!("shrunk action sequence: {sequence}"),
-    ]
+    ];
+    lines.extend(render_trace(&failure.trace));
+    lines
 }
 
 #[cfg(test)]
@@ -350,7 +381,7 @@ mod tests {
     }
 
     #[test]
-    fn long_trace_keeps_the_failure_and_its_incoming_action() {
+    fn long_trace_is_shown_whole() {
         use crate::model::TemperModelAction;
         let mut trace: Vec<_> = (0..20)
             .map(|index| {
@@ -367,12 +398,16 @@ mod tests {
         trace.push((state("Broken", 20), None));
         let lines = render_trace(&trace);
         let output = lines.join("\n");
+        assert_eq!(lines.len(), 21, "{output}");
+        assert!(
+            output.contains("0. Running") && output.contains("--Action0"),
+            "{output}"
+        );
         assert!(
             output.contains("Action19") && output.contains("20. Broken"),
             "{output}"
         );
-        assert!(output.contains("omitted"), "{output}");
-        assert!(lines.len() <= MAX_TRACE_STEPS + 1);
+        assert!(!output.contains("omitted"), "{output}");
     }
 
     #[test]
@@ -401,6 +436,7 @@ mod tests {
                 invariant: "AnalyzedMeansCurrent".to_string(),
                 action_sequence: vec!["Observe".to_string(), "Succeed".to_string()],
                 final_state: "Analyzed(entry_count=2)".to_string(),
+                trace: Vec::new(),
             }),
         };
         let lines = prop_test_diagnostics(&result);

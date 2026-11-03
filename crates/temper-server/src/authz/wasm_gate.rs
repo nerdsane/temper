@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use temper_authz::{AuthzDecision, AuthzEngine, PrincipalKind, SecurityContext};
+use temper_authz::{AuthzDecision, AuthzEngine, PrincipalKind, SecurityContext, platform_keys};
 use temper_wasm::{WasmAuthzContext, WasmAuthzDecision, WasmAuthzGate};
 
 /// Cedar-backed authorization gate for WASM host function calls.
@@ -190,7 +190,7 @@ fn build_wasm_security_context(ctx: &WasmAuthzContext) -> SecurityContext {
         serde_json::Value::String(ctx.tenant.clone()),
     );
     context_attrs.insert(
-        "module".into(),
+        platform_keys::MODULE.into(),
         serde_json::Value::String(ctx.module_name.clone()),
     );
     context_attrs.insert(
@@ -202,7 +202,10 @@ fn build_wasm_security_context(ctx: &WasmAuthzContext) -> SecurityContext {
         serde_json::Value::String(ctx.trigger_action.clone()),
     );
     if let Some(ref aid) = ctx.agent_id {
-        context_attrs.insert("agentId".into(), serde_json::Value::String(aid.clone()));
+        context_attrs.insert(
+            platform_keys::AGENT_ID.into(),
+            serde_json::Value::String(aid.clone()),
+        );
     }
 
     SecurityContext {
@@ -212,10 +215,13 @@ fn build_wasm_security_context(ctx: &WasmAuthzContext) -> SecurityContext {
             role: Some("wasm_module".to_string()),
             acting_for: None,
             agent_type: None,
+            label: None,
             attributes: std::collections::HashMap::new(), // determinism-ok: Principal uses HashMap
         },
         context_attrs,
         correlation_id: uuid::Uuid::now_v7().to_string(), // determinism-ok: correlation_id for Cedar tracing only
+        cause: None,
+        credential: None,
     }
 }
 

@@ -78,22 +78,13 @@ const OUTBOUND_ERROR_KIND_MAX_CHARS: usize = 120;
 /// Log an outbound host call that failed before the guest got a response.
 ///
 /// The guest sees only `-1`, so this line is the one record of why. It names
-/// the method, host and path, and the error's leading phrase (the text before
-/// its first `": "`), which says what kind of failure it was. It never logs the
-/// query, headers, body or the rest of the error, which can quote a response
-/// body.
+/// the method, host and path as telemetry may show them, and the error's
+/// leading phrase (the text before its first `": "`), which says what kind of
+/// failure it was. It never logs the query, headers, body or the rest of the
+/// error, which can quote a response body.
 fn log_outbound_call_failure(host_fn: &'static str, method: &str, url: &str, error: &str) {
-    let (host, path) = match reqwest::Url::parse(url) {
-        Ok(parsed) => {
-            let host = match (parsed.host_str(), parsed.port()) {
-                (Some(host), Some(port)) => format!("{host}:{port}"),
-                (Some(host), None) => host.to_string(),
-                (None, _) => String::new(),
-            };
-            (host, parsed.path().to_string())
-        }
-        Err(_) => ("<unparsed url>".to_string(), String::new()),
-    };
+    let target = crate::host_trait::telemetry_url(url);
+    let (host, path) = target.split_at(target.find('/').unwrap_or(target.len()));
     let phrase = error.split(": ").next().unwrap_or(error).trim();
     let error_kind: String = phrase.chars().take(OUTBOUND_ERROR_KIND_MAX_CHARS).collect();
     tracing::warn!(
@@ -104,15 +95,6 @@ fn log_outbound_call_failure(host_fn: &'static str, method: &str, url: &str, err
         error_kind = %error_kind,
         "WASM host outbound call failed; returning error to guest"
     );
-}
-
-fn redact_url_for_log(url: &str) -> String {
-    let without_fragment = url.split('#').next().unwrap_or(url);
-    without_fragment
-        .split('?')
-        .next()
-        .unwrap_or(without_fragment)
-        .to_string()
 }
 
 /// Outcome of resolving an entity-state field against a `HostState`.
@@ -1951,7 +1933,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                     headers,
                 };
                 let method_for_log = head.method.clone();
-                let url_for_log = redact_url_for_log(&head.url);
+                let url_for_log = crate::host_trait::telemetry_url(&head.url);
                 let deadline = caller.data().remaining_host_call_timeout();
                 let Ok(result) = run_host_call_with_timeout(
                     "host_http_stream_begin_outbound",

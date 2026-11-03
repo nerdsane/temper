@@ -287,3 +287,36 @@ async fn parameter_refusals_name_the_parameter() {
         }),
     );
 }
+
+#[tokio::test]
+async fn a_checked_preview_preserves_the_interpreters_typed_refusal() {
+    let state = busy_lock().await;
+    let (status, original) = act(&state, "Pickup", json!({})).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(original["error"]["code"], "GuardFailed");
+    let verified = state
+        .registry
+        .read()
+        .unwrap()
+        .get_verification_status(&TenantId::default(), "Lock")
+        .cloned()
+        .unwrap();
+    // Adding a record constraint makes the same request take the outside
+    // preview path. Its refusal must retain the interpreter's structured data.
+    let ioa = format!(
+        "{LOCK_IOA}\n[[field_invariant]]\nname = 'NonnegativeHolders'\nassert = 'holders >= 0'\n"
+    );
+    state.registry.write().unwrap().register_tenant(
+        "default",
+        parse_csdl(CSDL_XML).unwrap(),
+        CSDL_XML.into(),
+        &[("Lock", &ioa)],
+    );
+    state
+        .registry
+        .write()
+        .unwrap()
+        .set_verification_status(&TenantId::default(), "Lock", verified);
+    let (status, previewed) = act(&state, "Pickup", json!({})).await;
+    assert_refusal(status, &previewed, original["error"].clone());
+}
