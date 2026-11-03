@@ -87,7 +87,7 @@ pub use model::DroppedReaction;
 pub(crate) use model::dropped_reactions;
 use model::{JointModel, Move, Sending};
 use state::render;
-pub use state::{Call, Dispatch, JointState, ReactionStep};
+pub use state::{Call, Committed, Dispatch, JointState, ReactionStep};
 
 /// What the joint check found for one invariant.
 #[derive(Debug, Clone)]
@@ -104,6 +104,8 @@ pub struct JointInvariantResult {
     pub states: usize,
     /// When the walk held a move back because it would have put more than
     /// this many dispatches in flight: what it found holds only up to that.
+    /// A commit whose reactions wait for their guards to be read counts as
+    /// one, however many wait.
     pub in_flight_bound: Option<usize>,
     /// Holds, broken (with a shortest path), or not fully checked.
     pub outcome: JointOutcome,
@@ -429,3 +431,11 @@ mod outside_count_tests;
 #[cfg(test)]
 #[path = "widen_test.rs"]
 mod widen_tests;
+
+#[cfg(test)]
+#[path = "trigger_guard_test.rs"]
+mod trigger_guard_tests;
+
+#[cfg(test)]
+#[path = "trigger_order_test.rs"]
+mod trigger_order_tests;

@@ -139,7 +139,8 @@ impl JointModel {
             return None;
         };
         let reaction = &self.reactions[dispatch.via?];
-        if reaction.may_drop {
+        // Reading its trigger's guard is no refusal.
+        if reaction.may_drop || dispatch.unread_guard.is_some() {
             return None;
         }
         let refused = if dispatch.read {

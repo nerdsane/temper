@@ -392,7 +392,7 @@ impl JointModel {
     pub(super) fn values(&self, state: &JointState) -> BTreeSet<ModelString> {
         let mut values = string_values(state.records.values());
         for dispatch in &state.inflight {
-            for value in dispatch.params.values() {
+            for value in dispatch.values() {
                 if let ParamValue::Str(text) = value
                     && !text.is_empty()
                 {
@@ -454,6 +454,8 @@ impl JointModel {
             state,
             owner,
             blind,
+            own: None,
+            unheld_unknown: false,
         }
     }
 }

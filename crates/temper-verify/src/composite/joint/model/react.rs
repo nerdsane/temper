@@ -4,17 +4,17 @@
 use std::collections::BTreeMap;
 
 use temper_spec::automaton::TargetResolver;
-use temper_spec::predicate::{Arg, Literal, ParamKind, Truth, eval};
+use temper_spec::predicate::{Arg, Expr, Literal, Name, ParamKind, Truth, VarKind, eval};
 
 use super::super::env::{Blind, Found, ID, resolve};
 use super::super::room::Heap;
 use super::super::senders::Senders;
 use super::super::state::ReactionStep;
-use super::super::{Call, Dispatch, JointState};
-use super::JointModel;
+use super::super::{Call, Committed, Dispatch, JointState};
 use super::commit::add;
 use super::read::Reaction;
 use super::step::Certainty;
+use super::{Delivery, JointModel};
 use crate::model::ParamValue;
 
 impl JointModel {
@@ -135,9 +135,22 @@ impl JointModel {
                     Some(guard) => eval(guard, &self.env_blind(source, &state, Blind::Related)),
                     None => Truth::True,
                 };
-                let known =
-                    known.then(Certainty::unless(fires != Truth::Unknown, Certainty::OneOf));
-                if fires != Truth::True && !self.keep(&mut after, state.clone(), known) {
+                // The runtime reads the related records a trigger's guard
+                // names after its source commits, one trigger after
+                // another, while other moves land. A guard that reads one
+                // in scope is read as its own move, on the source as it
+                // committed; one that reads none the model holds goes both
+                // ways now.
+                let unread_guard = match (&reaction.guard, fires) {
+                    (Some(guard), Truth::Unknown) => self.committed(guard, source, &state),
+                    _ => None,
+                };
+                let decided = fires != Truth::Unknown || unread_guard.is_some();
+                let known = known.then(Certainty::unless(decided, Certainty::OneOf));
+                if fires != Truth::True
+                    && unread_guard.is_none()
+                    && !self.keep(&mut after, state.clone(), known)
+                {
                     return Vec::new();
                 }
                 if fires == Truth::False {
@@ -215,6 +228,7 @@ impl JointModel {
                     read: !self.action_reads_related(&reaction.to, &reaction.target_action),
                     chain: next_chain,
                     via: Some(index),
+                    unread_guard,
                     by: self.senders.reaction(
                         reaction.principal.as_ref(),
                         by,
@@ -228,10 +242,90 @@ impl JointModel {
                 }
             }
             self.expansion.give(before);
-            outcomes = after;
+            outcomes = self.within_flight(after);
         }
         // Keep the states charged through module calls and next-state packing.
         outcomes
+    }
+
+    /// `ways` without those holding more in flight than the walk keeps
+    /// ([`Self::fits`]), but one: a later reaction or call only adds to
+    /// them, so the walk would hold each back, and the one kept says that it
+    /// did. Without it, `k` reactions whose guards the
+    /// model cannot decide make `2^k` ways, nearly all held back.
+    fn within_flight(
+        &self,
+        mut ways: Vec<(JointState, Certainty)>,
+    ) -> Vec<(JointState, Certainty)> {
+        if self.delivery != Delivery::Any {
+            return ways;
+        }
+        let before = ways.heap();
+        let mut over = false;
+        ways.retain(|(state, _)| {
+            if self.fits(state) {
+                return true;
+            }
+            !std::mem::replace(&mut over, true)
+        });
+        self.expansion.give(before.saturating_sub(ways.heap()));
+        ways
+    }
+
+    /// What `guard`, a trigger's guard on `source`, reads of `source` as it
+    /// holds it in `state`, when the related records in scope decide it: the
+    /// guard is then read later, on those records as they are then. `None`
+    /// when they do not (it reads a record the model does not hold, or a
+    /// field it does not track, and would read as unknown then too), or the
+    /// guard reads a list of its source.
+    fn committed(&self, guard: &Expr, source: &str, state: &JointState) -> Option<Committed> {
+        let model = &self.models[source];
+        let record = &state.records[source];
+        let mut env = self.env(source, state);
+        env.unheld_unknown = true;
+        if eval(guard, &env) == Truth::Unknown {
+            return None;
+        }
+        let mut fields = BTreeMap::new();
+        let mut lists = false;
+        let mut keep = |field: &str| {
+            let value = if matches!(field, "Id" | "id") {
+                record.strings.get(ID).cloned().map(ParamValue::Str)
+            } else {
+                match model.var_kinds.get(field) {
+                    Some(VarKind::Counter) => Some(ParamValue::Count(
+                        record.counters.get(field).copied().unwrap_or(0),
+                    )),
+                    Some(VarKind::Bool) => Some(ParamValue::Bool(
+                        record.booleans.get(field).copied().unwrap_or(false),
+                    )),
+                    Some(VarKind::Str) => record.strings.get(field).cloned().map(ParamValue::Str),
+                    Some(VarKind::List) => {
+                        lists = true;
+                        None
+                    }
+                    Some(VarKind::Num) | None => None,
+                }
+            };
+            if let Some(value) = value {
+                let field = if field == "id" { ID } else { field };
+                fields.insert(field.to_string(), value);
+            }
+        };
+        guard.for_each_name(&mut |name| match name {
+            Name::Var(field) => keep(field),
+            Name::CrossStatus { id_field, .. } | Name::CrossField { id_field, .. } => {
+                keep(id_field);
+            }
+            Name::Status | Name::Param(_) => {}
+        });
+        if let Some(id) = record.strings.get(ID) {
+            fields.insert(ID.to_string(), ParamValue::Str(id.clone()));
+        }
+        (!lists).then(|| Committed {
+            status: record.status.clone(),
+            fields,
+        })
     }
 
     /// Whether `reaction`'s target action reads its count parameter
