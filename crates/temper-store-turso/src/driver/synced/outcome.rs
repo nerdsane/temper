@@ -128,8 +128,8 @@ pub(super) fn record_changes_pushed(count: u64) {
                 .u64_counter("temper_turso_sync_changes_pushed")
                 .with_description(
                     "Changes a synced database's confirmed pushes sent to its remote copy: one per \
-                     change-log row above the remote's record. Turso bills rows written, about \
-                     three per change.",
+                     row change above the remote's record. Turso bills rows written, about three \
+                     per change.",
                 )
                 .build()
         })
