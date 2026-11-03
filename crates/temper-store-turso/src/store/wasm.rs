@@ -1,7 +1,9 @@
 //! WASM module storage and invocation log persistence.
 
 use crate::driver::params;
-use temper_runtime::persistence::{PersistenceError, storage_error};
+use temper_runtime::persistence::{
+    PersistenceError, WASM_INVOCATIONS_KEPT_PER_TENANT, storage_error,
+};
 use tracing::instrument;
 
 use super::{
@@ -237,6 +239,53 @@ impl TursoEventStore {
         )
         .await
         .map_err(storage_error)?;
+        drop(conn);
+
+        // The global id says nothing about this tenant's write frequency:
+        // alternating tenants can otherwise leave one unpruned forever.
+        // Find the cutoff on a read connection, outside the shared writer.
+        let cutoff = {
+            let conn = self.configured_connection().await?;
+            let mut rows = conn
+                .query(
+                    "SELECT id FROM wasm_invocation_logs \
+                     INDEXED BY idx_wasm_invocation_logs_tenant \
+                     WHERE tenant = ?1 ORDER BY id DESC LIMIT 1 OFFSET ?2",
+                    params![entry.tenant, WASM_INVOCATIONS_KEPT_PER_TENANT],
+                )
+                .await
+                .map_err(storage_error)?;
+            match rows.next().await.map_err(storage_error)? {
+                Some(row) => Some(row.get::<i64>(0).map_err(storage_error)?),
+                None => None,
+            }
+        };
+        if let Some(cutoff) = cutoff {
+            // Existing stores can have a large backlog. Each low-priority
+            // batch releases the writer so journal appends can land between
+            // batches, rather than waiting for the entire backlog to drain.
+            const BATCH_ROWS: i64 = 100;
+            loop {
+                let conn = self
+                    .write_connection("turso.prune_wasm_invocations", WritePriority::Low)
+                    .await?;
+                let deleted = conn
+                    .execute(
+                        "DELETE FROM wasm_invocation_logs WHERE id IN ( \
+                         SELECT id FROM wasm_invocation_logs \
+                         INDEXED BY idx_wasm_invocation_logs_tenant \
+                         WHERE tenant = ?1 AND id <= ?2 ORDER BY id LIMIT ?3)",
+                        params![entry.tenant, cutoff, BATCH_ROWS],
+                    )
+                    .await
+                    .map_err(storage_error)?;
+                drop(conn);
+                if deleted < BATCH_ROWS as u64 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        }
         Ok(())
     }
 

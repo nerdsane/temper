@@ -15,7 +15,7 @@ use p256::ecdsa::{Signature, SigningKey};
 
 use temper_platform::{PlatformState, bootstrap_agent_specs, bootstrap_system_tenant};
 use temper_runtime::tenant::TenantId;
-use temper_server::identity::IdentityResolver;
+use temper_server::identity::{IdentityError, IdentityResolver};
 use temper_server::request_context::AgentContext;
 
 const ISSUER: &str = "https://issuer.e2e.local";
@@ -111,6 +111,16 @@ async fn valid_token_resolves_to_verified_agent_acting_for_human() {
     assert_eq!(id.agent_instance_id, "kc_agent_e2e");
     assert_eq!(id.agent_type_name, "contributor");
     assert_eq!(id.acting_for.as_deref(), Some("human-e2e"));
+    // What the token was issued under rides on the agent's identity, so a
+    // timer it sets can ask whether the token would still be accepted.
+    assert_eq!(
+        id.credential,
+        Some(temper_authz::IssuedCredential {
+            subject: Some("human-e2e".to_string()),
+            auth_generation: 3,
+            grant_id: Some("grant-e2e".to_string()),
+        })
+    );
 }
 
 #[tokio::test]
@@ -250,6 +260,40 @@ async fn human_token_resolves_to_customer_with_role() {
     assert_eq!(id.agent_instance_id, "human-owner");
     assert_eq!(id.role.as_deref(), Some("owner"));
     assert!(id.acting_for.is_none());
+    // A person's timers outlive their sign-out, so nothing is kept to ask.
+    assert!(id.credential.is_none());
+}
+
+#[tokio::test]
+async fn a_token_cannot_claim_the_reserved_service_role() {
+    let sk = SigningKey::from_slice(&[7u8; 32]).unwrap();
+    let state = state_with_issuer(&sk).await;
+    let tenant = TenantId::new("default");
+    let resolver = IdentityResolver::new();
+
+    let agent = contributor_claims();
+    let person = serde_json::json!({
+        "iss": ISSUER, "aud": AUD, "sub": "human-owner", "auth_generation": 0,
+        "nbf": 0, "exp": 4_102_444_800i64,
+    });
+    for (who, mut claims) in [("agent", agent), ("person", person)] {
+        // The same token with an ordinary role resolves: only the role is refused.
+        claims["role"] = serde_json::json!("owner");
+        let ordinary = mint(&sk, header(), claims.clone());
+        let resolved = resolver.resolve(&state.server, &tenant, &ordinary).await;
+        assert!(
+            resolved.is_ok(),
+            "{who} token with role owner: {resolved:?}"
+        );
+
+        claims["role"] = serde_json::json!("service");
+        let service = mint(&sk, header(), claims);
+        let refused = resolver.resolve(&state.server, &tenant, &service).await;
+        assert!(
+            matches!(refused, Err(IdentityError::Invalid)),
+            "{who} token with role service must be refused: {refused:?}"
+        );
+    }
 }
 
 #[tokio::test]

@@ -24,6 +24,7 @@ use crate::state::PlatformState;
 
 mod apps;
 mod auth;
+mod pushed;
 pub(crate) use apps::{
     get_genesis_app_bundle, get_os_app_guide, install_genesis_app, list_app_installs,
     list_genesis_follow_updates, list_os_apps,
@@ -115,6 +116,7 @@ pub fn tenant_api_router() -> Router<PlatformState> {
         )
         .route("/os-apps", routing::get(list_os_apps))
         .route("/os-apps/{name}", routing::get(get_os_app_guide))
+        .merge(pushed::routes())
         .route("/genesis/apps/install", routing::post(install_genesis_app))
         .route("/genesis/apps/installs", routing::get(list_app_installs))
         .route(

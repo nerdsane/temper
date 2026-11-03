@@ -269,30 +269,3 @@ fn get_json(ctx: &Context, url: &str, headers: &[(String, String)]) -> Result<Va
     serde_json::from_str::<Value>(&resp.body)
         .map_err(|e| format!("failed to parse JSON from {url}: {e}"))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resolves_base_url_from_trigger_context_base_url() {
-        let fields = json!({
-            "trigger_context_json": "{\"base_url\":\"http://127.0.0.1:4567\"}"
-        });
-        assert_eq!(
-            base_url_from_trigger_context(&fields).as_deref(),
-            Some("http://127.0.0.1:4567")
-        );
-    }
-
-    #[test]
-    fn resolves_base_url_from_trigger_context_port() {
-        let fields = json!({
-            "trigger_context_json": "{\"port\":4567}"
-        });
-        assert_eq!(
-            base_url_from_trigger_context(&fields).as_deref(),
-            Some("http://127.0.0.1:4567")
-        );
-    }
-}

@@ -12,6 +12,8 @@
 //! `gamma`'s records may have no row at all.
 //!
 //! Invariants:
+//! - the boot arms every record it finds in a timed state with no row, and
+//!   leaves none waiting;
 //! - after a record rehydrates, it has exactly one armed timer row, for its
 //!   current state, when that state declares a timeout, and none otherwise
 //!   (none for a deleted record);
@@ -29,20 +31,33 @@
 //!
 //! Two more workloads share this world: `boot_burst` (the timers a boot finds
 //! due fire a few at a time) and `delete_race` (a delete while timer rows are
-//! still landing leaves no row).
+//! still landing leaves no row). So do two regressions: `read_failure` (an
+//! install walk retries a record it could not read) and `unanswered_fire` (a
+//! timer whose fire got no answer is tried again until it lands; a refused
+//! one is not).
 
 #[path = "dst_state_timers_follow_state/boot_burst.rs"]
 mod boot_burst;
+#[path = "dst_state_timers_follow_state/boot_listing_retry.rs"]
+mod boot_listing_retry;
 #[path = "dst_state_timers_follow_state/boot_logging.rs"]
 mod boot_logging;
 #[path = "dst_state_timers_follow_state/delete_race.rs"]
 mod delete_race;
 #[path = "dst_state_timers_follow_state/embedder.rs"]
 mod embedder;
+#[path = "dst_state_timers_follow_state/final_denials.rs"]
+mod final_denials;
 #[path = "dst_state_timers_follow_state/invariants.rs"]
 mod invariants;
+#[path = "dst_state_timers_follow_state/late_reconcile.rs"]
+mod late_reconcile;
 #[path = "dst_state_timers_follow_state/process_clock.rs"]
 mod process_clock;
+#[path = "dst_state_timers_follow_state/slow_store.rs"]
+mod slow_store;
+#[path = "dst_state_timers_follow_state/slow_store_env.rs"]
+mod slow_store_env;
 #[path = "dst_state_timers_follow_state/specs.rs"]
 mod specs;
 #[path = "dst_state_timers_follow_state/world.rs"]
@@ -183,7 +198,8 @@ struct Run {
     trace: Vec<String>,
     deleted: BTreeSet<(String, String)>,
     /// Records in a timed state that nothing armed: no dispatch since their
-    /// type gained its timeouts, and no install walk. They wait, with no row.
+    /// type gained its timeouts, and no install walk. They have no row until
+    /// their next action or the next boot arms them.
     unarmed: BTreeSet<(String, String)>,
 }
 
@@ -306,7 +322,7 @@ fn run_seed(seed: u64) -> Result<(), String> {
             state
                 .get_or_create_tenant_entity(&job.tenant, "Job", &job.id, json!({}))
                 .await
-                .map_err(|error| run.fail("records are created", error))?;
+                .map_err(|error| run.fail("records are created", error.to_string()))?;
             if !act(state, job, "Start").await {
                 return Err(run.fail("records start", format!("{}/{}", job.tenant, job.id)));
             }
@@ -348,7 +364,8 @@ fn run_seed(seed: u64) -> Result<(), String> {
             // The process stops before the install's walk reaches gamma.
             install(state, "gamma", JOB_V1);
             state.registry.write().unwrap().take_changed_types();
-            // Nothing armed gamma's records: they wait until their next action.
+            // Nothing armed gamma's records: they have no row until their next
+            // action or the next boot.
             for job in &jobs {
                 if job.tenant.as_str() == "gamma" && !run.is_deleted(job) {
                     run.unarmed.insert((job.tenant.to_string(), job.id.clone()));
@@ -398,12 +415,13 @@ fn run_seed(seed: u64) -> Result<(), String> {
     first.kill(&world, downtime);
 
     let second = Process::start(&world, &v2, JOB_V1, &format!("follow-{seed}-b"));
+    // The boot arms the records the install's walk never reached.
+    run.unarmed.clear();
     second.runtime.block_on(async {
         let state = &second.state;
-        check_boot_counts(&second.booted, &jobs, &run)?;
+        check_boot_counts(&second.booted, &run)?;
         check_rows_follow_state(state, &world, &jobs, &run, "after the restart").await?;
-        // A read rehydrates a record: one with a row follows its state, one
-        // without stays unarmed.
+        // A read rehydrates a record, which follows its state.
         let looked: Vec<Job> = jobs.iter().filter(|_| rng.chance(0.4)).cloned().collect();
         run.note(format!(
             "rehydrated {:?}",
@@ -428,6 +446,8 @@ fn run_seed(seed: u64) -> Result<(), String> {
 
 #[path = "dst_state_timers_follow_state/read_failure.rs"]
 mod read_failure;
+#[path = "dst_state_timers_follow_state/unanswered_fire.rs"]
+mod unanswered_fire;
 
 #[test]
 fn dst_state_timers_follow_the_current_state() {

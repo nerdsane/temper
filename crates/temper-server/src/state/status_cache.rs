@@ -74,20 +74,37 @@ impl ServerState {
         entity_type: &str,
         entity_id: &str,
     ) -> Option<String> {
+        self.try_resolve_entity_status(tenant, entity_type, entity_id)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// Resolve a context record without turning an unreadable record into
+    /// an absent status. Authorization must retry a failed read rather than
+    /// decide on an incomplete resource view. An ungoverned type has no status.
+    pub(crate) async fn try_resolve_entity_status(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<Option<String>, String> {
         let key = format!("{tenant}:{entity_type}:{entity_id}");
         if let Ok(mut cache) = self.entity_state_cache.lock()
             && let Some(held) = cache.get(&key)
         {
-            return Some(held.status.clone());
+            return Ok(Some(held.status.clone()));
         }
 
+        if !self.is_entity_type_governed(tenant, entity_type)? {
+            return Ok(None);
+        }
         let response = self
             .get_tenant_entity_state(tenant, entity_type, entity_id)
-            .await
-            .ok()?;
+            .await?;
         // Simulation runs other requests between this read and its backfill.
         temper_runtime::buggify::buggify_yield(STATUS_WRITE_YIELD_BUDGET).await;
         self.cache_entity_status(tenant, &response.state);
-        Some(response.state.status)
+        Ok(Some(response.state.status))
     }
 }

@@ -6,9 +6,12 @@
 //! Sharing. Each reaction now has a key of its own, derived from the caller's,
 //! so a retry of the whole request still runs nothing twice.
 
+use std::sync::Arc;
+
 use temper_runtime::ActorSystem;
 use temper_runtime::tenant::TenantId;
 use temper_server::ServerState;
+use temper_server::idempotency::IdempotencyCache;
 use temper_server::registry::SpecRegistry;
 use temper_server::request_context::AgentContext;
 use temper_spec::csdl::parse_csdl;
@@ -100,7 +103,8 @@ from = ["Shut"]
 effect = ["opened += 1"]
 "#;
 
-fn build_state(tenant: &str) -> ServerState {
+/// A server for `tenant`. `cache` replaces the reply cache when given.
+fn build_state(tenant: &str, cache: Option<IdempotencyCache>) -> ServerState {
     let mut registry = SpecRegistry::new();
     registry
         .try_register_tenant(
@@ -110,7 +114,10 @@ fn build_state(tenant: &str) -> ServerState {
             &[("Room", ROOM_IOA), ("Door", DOOR_IOA)],
         )
         .expect("tenant registration");
-    let state = ServerState::from_registry(ActorSystem::new("reaction-key"), registry);
+    let mut state = ServerState::from_registry(ActorSystem::new("reaction-key"), registry);
+    if let Some(cache) = cache {
+        state.idempotency_cache = Arc::new(cache);
+    }
     state
         .authz
         .reload_tenant_policies(
@@ -124,7 +131,9 @@ fn build_state(tenant: &str) -> ServerState {
 
 fn caller(key: &str) -> AgentContext {
     AgentContext {
-        idempotency_key: Some(key.to_string()),
+        idempotency_key: Some(temper_server::idempotency::IdempotencyKey::Request(
+            key.to_string(),
+        )),
         ..AgentContext::for_service(SERVICE)
     }
 }
@@ -147,7 +156,7 @@ async fn read(
 #[tokio::test(flavor = "multi_thread")]
 async fn a_same_record_reaction_runs_when_the_request_carries_an_idempotency_key() {
     let tenant = TenantId::new("rooms");
-    let state = build_state("rooms");
+    let state = build_state("rooms", None);
     let who = caller("request-1");
     let set_audience = || {
         state.dispatch_tenant_action(
@@ -176,4 +185,86 @@ async fn a_same_record_reaction_runs_when_the_request_carries_an_idempotency_key
     assert_eq!(read(&state, &tenant, "Room", "audiences").await.1, 1);
     assert_eq!(read(&state, &tenant, "Room", "guests").await.1, 1);
     assert_eq!(read(&state, &tenant, "Door", "opened").await.1, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_matches_the_reaction_key_its_target_already_recorded() {
+    // Target records keep reaction keys in their durable key sets in the form
+    // `{caller}:reaction:{rule}`, with the rule named `{entity}:{action}:{trigger}`,
+    // across restarts and upgrades. A retry of the source request must derive
+    // that same key, or the reaction runs twice. A cache that holds no replies
+    // leaves only the durable key set, as after the upgrade's restart.
+    let tenant = TenantId::new("rooms");
+    let state = build_state("rooms", Some(IdempotencyCache::with_budget_bytes(0)));
+    let recorded = state
+        .dispatch_tenant_action(
+            &tenant,
+            "Door",
+            "r1",
+            "Open",
+            serde_json::json!({}),
+            &caller("request-1:reaction:Room:SetAudience:audience_opens_the_door"),
+        )
+        .await
+        .expect("Open");
+    assert!(recorded.success, "{:?}", recorded.error);
+    let door_events = || async {
+        state
+            .get_tenant_entity_state(&tenant, "Door", "r1")
+            .await
+            .expect("door")
+            .state
+            .total_event_count
+    };
+    let recorded_events = door_events().await;
+
+    let retry = state
+        .dispatch_tenant_action(
+            &tenant,
+            "Room",
+            "r1",
+            "SetAudience",
+            serde_json::json!({}),
+            &caller("request-1"),
+        )
+        .await
+        .expect("SetAudience");
+    assert!(retry.success, "{:?}", retry.error);
+    assert_eq!(
+        read(&state, &tenant, "Door", "opened").await.1,
+        1,
+        "the door already recorded this reaction and did not open again"
+    );
+
+    // The reactions that retry starts, run again to read their results: the
+    // door's reaction is answered by its recorded key, not refused.
+    let dispatcher = state
+        .reaction_dispatcher
+        .read()
+        .expect("dispatcher lock")
+        .clone()
+        .expect("reaction dispatcher");
+    let results = dispatcher
+        .dispatch_reactions(
+            &state,
+            &tenant,
+            "Room",
+            "r1",
+            "SetAudience",
+            &retry.state.status,
+            &serde_json::to_value(&retry.state.fields).expect("fields"),
+            0,
+            &caller("request-1"),
+        )
+        .await;
+    let door = results
+        .iter()
+        .find(|result| result.rule_name.ends_with(":audience_opens_the_door"))
+        .expect("the door's reaction ran");
+    assert!(door.success, "{:?}", door.error);
+    assert_eq!(
+        door_events().await,
+        recorded_events,
+        "the door recorded no event for the replayed reaction"
+    );
 }

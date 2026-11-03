@@ -1,0 +1,23 @@
+# A child whose rule reads its parent: once done, it holds the word its
+# parent sends, unless the parent is still open.
+
+[automaton]
+name = "Child"
+states = ["Waiting", "Done"]
+initial = "Waiting"
+
+[[state]]
+name = "value"
+type = "string"
+initial = ""
+
+[[action]]
+name = "Copy"
+kind = "internal"
+from = ["Waiting"]
+to = "Done"
+params = [{ name = "value", type = "string" }]
+
+[[invariant]]
+name = "done_holds_the_word_of_a_closed_parent"
+assert = "status == 'Done' => value == 'shipped' || Parent[Id].status == 'Open'"

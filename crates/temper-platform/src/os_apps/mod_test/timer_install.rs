@@ -1,6 +1,6 @@
-//! An overdue install timer cannot dispatch while module storage is awaiting,
-//! not even when another tenant's install finishes in the meantime and starts
-//! a walk of its own.
+//! An overdue install timer cannot dispatch while module storage is awaiting
+//! after its spec went live (`Swap::SpecsFirst`), not even when another
+//! tenant's install finishes in the meantime and starts a walk of its own.
 use super::*;
 use std::sync::Arc;
 use temper_runtime::persistence::{EventStore, PersistenceError};
@@ -141,15 +141,22 @@ startup_loading = "lazy"
     )
     .expect("read echo fixture");
     fs::write(dir.join("wasm/echo/echo.wasm"), &wasm).expect("write echo module");
+    // `Poke` counts itself, so it changes the record and its event is
+    // written: a machine's move that changes nothing writes none.
     let spec = r#"
 [automaton]
 name = "Job"
 states = ["Waiting", "Done"]
 initial = "Waiting"
 allow_indefinite_states = ["Waiting", "Done"]
+[[state]]
+name = "pokes"
+type = "counter"
+initial = 0
 [[action]]
 name = "Poke"
 from = ["Waiting"]
+effect = ["pokes += 1"]
 [[action]]
 name = "Expire"
 from = ["Waiting"]
@@ -232,9 +239,18 @@ on_timeout = "Expire"
     )
     .expect("write timed spec");
     add_os_apps_dir(root.clone());
+    // Specs first, as a version put back goes in: its timers are live while
+    // its modules are still being stored, which the hold must cover.
     let install = INSTALLER.scope(
         true,
-        install_os_app_with_plan(&state, tenant.as_str(), app, plan),
+        install_os_app_swapping(
+            &state,
+            tenant.as_str(),
+            app,
+            plan,
+            InstallOrigin::Request,
+            Swap::SpecsFirst,
+        ),
     );
     tokio::pin!(install);
     tokio::select! {
@@ -243,7 +259,7 @@ on_timeout = "Expire"
     }
     if let Some(other) = &other {
         // B's install ends with a walk of its own while A's still waits.
-        install_os_app_with_plan(&state, other.as_str(), app, plan)
+        install_os_app_with_plan(&state, other.as_str(), app, plan, InstallOrigin::Request)
             .await
             .expect("tenant B installs while tenant A waits for module storage");
     }

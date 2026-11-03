@@ -2,25 +2,30 @@
 //!
 //! Implements `init_states`, `actions`, `next_state`, and `properties` to
 //! enable exhaustive model checking via Stateright. Supports multi-variable
-//! state (counters + booleans), safety invariants, and liveness properties.
+//! state (counters + booleans), safety invariants, and deadlock freedom.
+//! `reaches` and `can_reach` rules are checked on the whole walk instead.
 
 use stateright::{Model, Property};
 
-use super::semantics::{
-    apply_effects, apply_string_params, canonical_strings, evaluate_guard, guard_may_hold,
-    successors, truth,
-};
+use super::semantics::{canonical_state, guard_may_hold, rule_for, step, successors, truth};
 use temper_spec::predicate::Truth;
+
+use super::parameters::locally_enabled;
 
 use super::types::{
     LivenessKind, ResolvedTransition, TemperModel, TemperModelAction, TemperModelState,
 };
 
-/// The name of the one `eventually` property: found false only at the end of
-/// a walk, so a walk cut short can report it falsely.
-pub(crate) const REACHES_TERMINAL: &str = "ReachesTerminal";
+/// The property that no move breaks an entry rule. It is read in the state
+/// before the move, so its path ends with that move.
+pub(crate) const ENTRY_RULES: &str = "EntryRules";
 
 // -- Property condition functions (bare fn pointers) -------------------------
+
+/// Check that no move enabled here enters a place with its entry rule false.
+fn check_entry_rules(model: &TemperModel, state: &TemperModelState) -> bool {
+    super::entry::entry_broken(model, state).is_none()
+}
 
 /// Check that the current status is a declared state.
 fn check_status_in_set(model: &TemperModel, state: &TemperModelState) -> bool {
@@ -44,7 +49,7 @@ fn check_terminal(model: &TemperModel, state: &TemperModelState) -> bool {
     !model.transitions.iter().any(|t| {
         let status_ok =
             t.from_states.is_empty() || t.from_states.iter().any(|s| s == &state.status);
-        status_ok && evaluate_guard(&t.guard, &model.var_kinds, state)
+        status_ok && locally_enabled(model, t, state) == Some(true)
     })
 }
 
@@ -62,7 +67,7 @@ fn check_no_deadlock(model: &TemperModel, state: &TemperModelState) -> bool {
             for t in &model.transitions {
                 let status_ok =
                     t.from_states.is_empty() || t.from_states.iter().any(|s| s == &state.status);
-                if status_ok && evaluate_guard(&t.guard, &model.var_kinds, state) {
+                if status_ok && locally_enabled(model, t, state) != Some(false) {
                     has_action = true;
                     break;
                 }
@@ -75,56 +80,44 @@ fn check_no_deadlock(model: &TemperModel, state: &TemperModelState) -> bool {
     true
 }
 
-/// Check liveness: from the specified states, eventually reaches a target state.
-///
-/// Returns `true` when the current state is in any ReachesState target set.
-/// Stateright's `eventually` verifies that on every acyclic path, this
-/// predicate becomes true at some point.
-///
-/// Note: Stateright requires `fn` pointers, so we combine all ReachesState
-/// properties. For specs with multiple ReachesState targets, "eventually
-/// reaches any target" is verified.
-fn check_reaches_state(model: &TemperModel, state: &TemperModelState) -> bool {
-    for live in &model.liveness {
-        if let LivenessKind::ReachesState { targets, .. } = &live.kind
-            && !targets.is_empty()
-            && targets.contains(&state.status)
-        {
-            return true;
-        }
-    }
-    // No target state reached yet.
-    // If there are no ReachesState properties, return true (vacuously satisfied).
-    !model.liveness.iter().any(
-        |l| matches!(&l.kind, LivenessKind::ReachesState { targets, .. } if !targets.is_empty()),
-    )
-}
-
 // -- Model trait implementation ----------------------------------------------
 
 impl TemperModel {
-    /// Whether `transition` is enabled in `state`: status precondition, then guard.
+    /// Whether `transition` is enabled in `state`: it is the transition the
+    /// runtime takes for its action in this status ([`rule_for`]), and its
+    /// guard may hold.
     ///
     /// The single definition of "this edge may fire here", so that the action
-    /// generator and any caller that applies an action out of band cannot drift
-    /// apart on what the spec permits.
-    fn transition_enabled(
+    /// generator, the dead-transition walk and any caller that applies an
+    /// action out of band cannot drift apart on what the spec permits.
+    pub(crate) fn transition_enabled(
         &self,
         transition: &ResolvedTransition,
         state: &TemperModelState,
     ) -> bool {
-        let status_ok = transition.from_states.is_empty()
-            || transition.from_states.iter().any(|s| s == &state.status);
+        let taken = rule_for(self, &transition.name, &state.status)
+            .is_some_and(|rule| std::ptr::eq(rule, transition));
         // Guard checked for *fireability*: a cross-entity guard is a free
         // boolean, so `guard_may_hold` admits the gated edge rather than
         // pruning it. See `actions` for why that is the right direction.
-        status_ok && guard_may_hold(&transition.guard, &self.var_kinds, state)
+        taken && guard_may_hold(&transition.guard, &self.var_kinds, state)
+    }
+
+    /// Whether a record in `state` surely has a move open: one the walk
+    /// takes whose guard holds from the record alone. A move gated on
+    /// another record, or on a value the model does not track, is explored
+    /// as one that may fire, but it may never be open, so a record with no
+    /// other may wait where it is.
+    pub(crate) fn surely_moves(&self, state: &TemperModelState) -> bool {
+        self.transitions.iter().any(|t| {
+            self.transition_enabled(t, state) && locally_enabled(self, t, state) == Some(true)
+        })
     }
 
     /// Whether `action` may fire in `state`.
     ///
-    /// [`Model::next_state`] cannot answer this: it resolves a transition by
-    /// name and applies it unconditionally, which is sound under Stateright
+    /// [`Model::next_state`] cannot answer this: it resolves the transition
+    /// for the action's name and applies it unconditionally, which is sound under Stateright
     /// (every action it applies came from `actions` for that same state) but
     /// not for a caller that holds an action across a state change. The
     /// simulator does exactly that -- it chooses an action while an actor is in
@@ -133,10 +126,11 @@ impl TemperModel {
     ///
     /// An unknown action name is not enabled; there is no transition to fire.
     pub fn action_enabled(&self, state: &TemperModelState, action: &TemperModelAction) -> bool {
-        self.transitions
-            .iter()
-            .find(|t| t.name == action.name)
-            .is_some_and(|t| self.transition_enabled(t, state))
+        rule_for(self, &action.name, &state.status).is_some_and(|t| {
+            self.transition_enabled(t, state)
+                && (self.entry_rules.is_empty()
+                    || super::parameters::inputs_allow(self, t, state, &action.params))
+        })
     }
 }
 
@@ -180,14 +174,12 @@ impl Model for TemperModel {
     }
 
     fn next_state(&self, state: &Self::State, action: Self::Action) -> Option<Self::State> {
-        let resolved = self.transitions.iter().find(|t| t.name == action.name)?;
-
-        let new_status = action.target_state.unwrap_or_else(|| state.status.clone());
-        let mut next = state.clone();
-        next.status = new_status;
-        apply_effects(&resolved.effects, &mut next, &action.name, &action.params);
-        apply_string_params(&resolved.string_params, &mut next, &action.params);
-        canonical_strings(&mut [&mut next.strings]);
+        // The rule the runtime takes in this status gives both the effects
+        // and the target: an action chosen in one state and delivered in
+        // another (the simulator's late delivery) takes that state's rule.
+        let resolved = rule_for(self, &action.name, &state.status)?;
+        let mut next = step(resolved, state, &action.params);
+        canonical_state(&mut next);
         Some(next)
     }
 
@@ -197,6 +189,9 @@ impl Model for TemperModel {
         props.push(Property::always("TypeInvariant", check_status_in_set));
         if !self.invariants.is_empty() {
             props.push(Property::always("Invariants", check_invariants));
+        }
+        if !self.entry_rules.is_empty() {
+            props.push(Property::always(ENTRY_RULES, check_entry_rules));
         }
         if !self.terminal.is_empty() {
             props.push(Property::always("Terminal", check_terminal));
@@ -211,14 +206,10 @@ impl Model for TemperModel {
             props.push(Property::always("NoDeadlock", check_no_deadlock));
         }
 
-        // Liveness: ReachesState (Stateright's eventually — acyclic paths only)
-        let has_reaches = self
-            .liveness
-            .iter()
-            .any(|l| matches!(&l.kind, LivenessKind::ReachesState { targets, .. } if !targets.is_empty()));
-        if has_reaches {
-            props.push(Property::eventually(REACHES_TERMINAL, check_reaches_state));
-        }
+        // `reaches` rules are not Stateright properties: its `eventually`
+        // sees only acyclic paths, so a loop that never gets there passes,
+        // and it takes one fn for every rule. They are checked rule by rule
+        // on the whole walk (`crate::reaches`).
 
         props
     }

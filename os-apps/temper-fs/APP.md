@@ -56,6 +56,10 @@ Immutable record of a specific file version. Created on each content upload and 
 - **Create**: Record version with file ID, version number, content hash, mime type, size, previous version ID, and creator
 - **Supersede**: Mark as replaced by a newer version (terminal)
 
+**Belongs to its File**: a version's `file_id` must name a File that exists, and deleting a File deletes its versions
+with it. `File.LastVersionId` and `PreviousVersionId` are pointers between versions of one File and carry no delete
+rule.
+
 ## Setup
 
 ```

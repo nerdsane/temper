@@ -4,8 +4,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use super::senders;
-use crate::model::semantics::canonical_strings;
+use crate::model::semantics::canonical_values;
 use crate::model::{ModelString, ParamValue, TemperModelAction, TemperModelState};
 
 /// The records in scope, one per type, and the dispatches and module calls
@@ -45,8 +44,8 @@ pub struct Call {
     pub on_success: Vec<String>,
     /// The action sent when the call fails, if any.
     pub on_failure: Option<String>,
-    /// Who its answer runs as, by sender number: the runtime when the call
-    /// runs in the background, the caller when it runs inline.
+    /// Who its answer runs as, by sender number: whoever sent the move
+    /// that called the module.
     pub by: u32,
     /// The tracked fields its answers are tied to, as the record held them
     /// when the call started: the module answers about that record.
@@ -58,9 +57,6 @@ impl fmt::Display for Call {
         write!(f, "{} {} call", self.to, self.module)?;
         for (field, value) in &self.asked {
             write!(f, " for {field}='{value}'")?;
-        }
-        if self.by != senders::RUNTIME {
-            f.write_str(" (inline)")?;
         }
         Ok(())
     }
@@ -80,16 +76,65 @@ pub struct Dispatch {
     pub params: BTreeMap<String, ParamValue>,
     /// Whether the dispatch path has read the related records it needs.
     pub read: bool,
-    /// The reaction depth that sent it (0 for a request from outside).
-    pub depth: u32,
+    /// The steps this reaction chain has admitted, including this dispatch.
+    /// Empty for a request that starts a new chain.
+    pub chain: Vec<ReactionStep>,
     /// The reaction that sent it, by its place among the model's reactions;
     /// `None` for a request from outside.
     pub via: Option<usize>,
     /// Who sends it, by sender number; Cedar decides it as them.
     pub by: u32,
-    /// Its sender waits for the module calls it starts, so they run inline
-    /// and answer as the sender: an outside request may ask for that.
-    pub inline: bool,
+    /// For a reaction whose trigger's guard reads a related record in
+    /// scope: its source as it committed, until the guard is read. The
+    /// runtime reads the related records after the source commits, one
+    /// trigger at a time, so other moves can land first.
+    pub unread_guard: Option<Committed>,
+}
+
+impl Dispatch {
+    /// The values it carries: its parameters and its unread source's fields.
+    pub(super) fn values(&self) -> impl Iterator<Item = &ParamValue> {
+        let committed = self.unread_guard.iter().flat_map(|c| c.fields.values());
+        self.params.values().chain(committed)
+    }
+}
+
+/// What a trigger's guard reads of its source, as the source committed:
+/// its status and the fields the guard names.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Committed {
+    /// The source's status after its move.
+    pub status: String,
+    /// The fields the guard reads, by name.
+    pub fields: BTreeMap<String, ParamValue>,
+}
+
+impl Committed {
+    /// The source record as the guard reads it.
+    pub(super) fn record(&self) -> TemperModelState {
+        let mut record = TemperModelState {
+            status: self.status.clone(),
+            counters: BTreeMap::new(),
+            booleans: BTreeMap::new(),
+            lists: BTreeMap::new(),
+            strings: BTreeMap::new(),
+        };
+        for (field, value) in &self.fields {
+            match value {
+                ParamValue::Count(count) => {
+                    record.counters.insert(field.clone(), *count);
+                }
+                ParamValue::Bool(value) => {
+                    record.booleans.insert(field.clone(), *value);
+                }
+                ParamValue::Str(text) => {
+                    record.strings.insert(field.clone(), text.clone());
+                }
+                ParamValue::Fresh => {}
+            }
+        }
+        record
+    }
 }
 
 impl fmt::Display for Dispatch {
@@ -100,7 +145,9 @@ impl fmt::Display for Dispatch {
             params: self.params.clone(),
         };
         write!(f, "{}.{action}", self.to)?;
-        if !self.read {
+        if self.unread_guard.is_some() {
+            f.write_str(" (trigger guard unread)")?;
+        } else if !self.read {
             f.write_str(" (unread)")?;
         }
         Ok(())
@@ -143,14 +190,22 @@ pub(super) fn canonical(state: &mut JointState) -> BTreeMap<ModelString, ModelSt
         })
         .collect();
     let renamed = {
-        let mut maps: Vec<&mut BTreeMap<String, ModelString>> = state
+        let committed = dispatches
+            .iter_mut()
+            .filter_map(|d| d.unread_guard.as_mut())
+            .flat_map(|c| c.fields.values_mut())
+            .filter_map(|value| match value {
+                ParamValue::Str(text) => Some(text),
+                _ => None,
+            });
+        let values = state
             .records
             .values_mut()
-            .map(|s| &mut s.strings)
-            .chain(strings.iter_mut())
-            .chain(state.calls.iter_mut().map(|c| &mut c.asked))
-            .collect();
-        canonical_strings(&mut maps)
+            .flat_map(|s| s.strings.values_mut().chain(s.lists.values_mut().flatten()))
+            .chain(strings.iter_mut().flat_map(|s| s.values_mut()))
+            .chain(committed)
+            .chain(state.calls.iter_mut().flat_map(|c| c.asked.values_mut()));
+        canonical_values(values)
     };
     for (dispatch, renamed_strings) in dispatches.iter_mut().zip(strings) {
         for (name, text) in renamed_strings {
@@ -161,4 +216,26 @@ pub(super) fn canonical(state: &mut JointState) -> BTreeMap<ModelString, ModelSt
     state.inflight = dispatches;
     state.calls.sort();
     renamed
+}
+
+/// One admitted reaction step. The model holds one record per type, but
+/// distinguishes an entity the chain found from one it made.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ReactionStep {
+    /// The entity type the action runs on.
+    pub entity_type: String,
+    /// The action.
+    pub action: String,
+    /// The type for which this id was generated; `same_id` keeps its origin
+    /// even through other types. `None` means the chain read the id.
+    pub generated_for: Option<String>,
+}
+
+impl ReactionStep {
+    pub(super) fn repeats(&self, taken: &Self) -> bool {
+        let made = |step: &Self| step.generated_for.as_ref() == Some(&step.entity_type);
+        self.entity_type == taken.entity_type
+            && self.action == taken.action
+            && made(self) == made(taken)
+    }
 }

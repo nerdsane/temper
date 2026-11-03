@@ -156,6 +156,7 @@ async fn dst_actor_admission_tombstone_rejects_actions_without_stopping() {
         let deleted: EntityResponse = actor
             .ask(
                 EntityMsg::Delete {
+                    caller: None,
                     expected_authorization_precondition: None,
                 },
                 ASK_BUDGET,

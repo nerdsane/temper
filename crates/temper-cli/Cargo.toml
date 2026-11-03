@@ -67,4 +67,5 @@ pkg-url = "{ repo }/releases/download/{ name }-v{ version }/{ name }-{ target }{
 [dev-dependencies]
 temper-test-resource = { workspace = true }
 tempfile = "3"
+tracing-subscriber = { workspace = true }
 temper-wasm = { workspace = true }

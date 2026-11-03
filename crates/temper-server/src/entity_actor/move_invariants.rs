@@ -143,6 +143,27 @@ fn resolve_pending_fields(
     result
 }
 
+/// The first of the type's invariants `state` breaks, as its name and the
+/// failing part with the values read. Those that read another record's status
+/// are not checked: the record alone cannot answer them.
+pub(crate) fn broken_invariant(state: &EntityState, table: &TransitionTable) -> Option<String> {
+    let ctx = invariant_context(state, table, &RelatedMap::new());
+    let (invariant, failure) = table.broken_invariant(&state.status, &ctx)?;
+    let mut message = format!(
+        "invariant '{}': '{}' is false",
+        invariant.name, failure.expr
+    );
+    if !failure.found.is_empty() {
+        let found: Vec<String> = failure
+            .found
+            .iter()
+            .map(|(name, value)| format!("{name} = {value}"))
+            .collect();
+        message.push_str(&format!(" ({})", found.join(", ")));
+    }
+    Some(message)
+}
+
 /// The values the type's invariants read from `state`, and nothing else: a
 /// check costs what the invariants read, not what the record holds.
 fn invariant_context(

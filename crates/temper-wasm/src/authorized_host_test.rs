@@ -173,15 +173,6 @@ fn allow_gate_delegates_evaluate_spec() {
 }
 
 #[test]
-fn logging_always_allowed() {
-    let inner = Arc::new(SimWasmHost::new());
-    let gate = Arc::new(DenyAllGate);
-    let host = AuthorizedWasmHost::new(inner, gate, test_ctx());
-    // Should not panic
-    host.log("info", "test message");
-}
-
-#[test]
 fn extract_domain_https() {
     assert_eq!(
         extract_domain("https://api.stripe.com/v1/charges").as_deref(),

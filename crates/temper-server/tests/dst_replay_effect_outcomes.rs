@@ -60,7 +60,8 @@ to = "Raised"
 "#;
 
 /// `Ask` spawns a Note, stores the minted id in `notice`, and adds
-/// `asks_step` to `asks`. `Touch` changes nothing.
+/// `asks_step` to `asks`. `Touch` only counts itself: a move that changes
+/// nothing would write no event, and the conflict below needs an append.
 fn doc_ioa(asks_step: u32) -> String {
     format!(
         r#"
@@ -85,10 +86,16 @@ from = ["Open", "Asked"]
 to = "Asked"
 effect = ["spawn('Note', 'Raise', notice)", "asks += {asks_step}"]
 
+[[state]]
+name = "touches"
+type = "counter"
+initial = 0
+
 [[action]]
 name = "Touch"
 from = ["Asked"]
 to = "Asked"
+effect = ["touches += 1"]
 "#
     )
 }
@@ -376,10 +383,16 @@ from = ["Open"]
 to = "Asked"
 effect = ["items += 0"]
 
+[[state]]
+name = "touches"
+type = "counter"
+initial = 0
+
 [[action]]
 name = "Touch"
 from = ["Asked"]
 to = "Asked"
+effect = ["touches += 1"]
 "#;
     for seed in 0..NUM_SEEDS {
         let (_guard, _clock, _ids) = install_deterministic_context(seed);

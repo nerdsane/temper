@@ -1,4 +1,15 @@
-//! Runtime OTEL metrics sampling for server process health.
+//! Runtime OTEL metrics sampling for server process and host health.
+//!
+//! Settings, read once at startup:
+//! - `TEMPER_RUNTIME_METRICS_INTERVAL_SECS`: how often to sample (default 60).
+//! - `TEMPER_RUNTIME_METRICS_STORE_TIMEOUT_MS`: how long a durable-store count may take.
+//! - `TEMPER_RUNTIME_METRICS_DISK_PATHS`: comma-separated paths whose disk's used
+//!   share is reported (default `/`; empty for none).
+//! - `TEMPER_RUNTIME_METRICS_DIR_PATHS`: comma-separated directory patterns whose
+//!   trees' bytes on disk are reported; a segment that is exactly `*` matches
+//!   every entry of its directory (default none).
+//! - `TEMPER_RUNTIME_METRICS_DIR_TIMEOUT_MS`: how long the walk for one pattern
+//!   may take (default the sampling interval).
 
 use std::time::Duration;
 
@@ -7,6 +18,7 @@ use opentelemetry::global;
 use opentelemetry::metrics::Gauge;
 
 use super::ServerState;
+use super::host_metrics::{HostMetricInstruments, HostMetricSettings};
 
 struct RuntimeMetricInstruments {
     /// Canary: always 1; confirms the metric export pipeline is alive.
@@ -16,6 +28,7 @@ struct RuntimeMetricInstruments {
     indexed_entities: Gauge<u64>,
     projected_entities: Gauge<u64>,
     projection_coverage_ratio: Gauge<f64>,
+    host: HostMetricInstruments,
     durable_store_timeout: Duration,
 }
 
@@ -23,6 +36,7 @@ impl RuntimeMetricInstruments {
     fn new() -> Self {
         let meter = global::meter("temper-runtime");
         Self {
+            host: HostMetricInstruments::new(&meter, host_metric_settings(configured_interval())),
             up: meter
                 .u64_gauge("temper_up")
                 .with_description(
@@ -40,7 +54,7 @@ impl RuntimeMetricInstruments {
                 .build(),
             indexed_entities: meter
                 .u64_gauge("temper_indexed_entities")
-                .with_description("Number of entities currently present in the in-memory query-plane index.")
+                .with_description("Number of entities currently present in the in-memory query-plane index, reported globally and by tenant.")
                 .build(),
             projected_entities: meter
                 .u64_gauge("temper_projected_entities")
@@ -66,10 +80,19 @@ impl RuntimeMetricInstruments {
         if let Some(rss) = read_process_resident_memory_bytes() {
             self.process_resident_memory_bytes.record(rss, &[]);
         }
-        self.active_actors.record(state.active_actor_count(), &[]);
+        // Before the durable-store counts, which may wait up to their timeout.
+        self.host.record();
+        if let Ok(registry) = state.actor_registry.read() {
+            self.active_actors.record(registry.len() as u64, &[]);
+            crate::runtime_metrics::record_actor_mailbox_metrics(&registry);
+        }
         let indexed_by_tenant = state.active_entity_counts_by_tenant();
         let indexed_total: u64 = indexed_by_tenant.values().copied().sum();
         self.indexed_entities.record(indexed_total, &[]);
+        for (tenant, count) in &indexed_by_tenant {
+            self.indexed_entities
+                .record(*count, &[KeyValue::new("tenant", tenant.clone())]);
+        }
 
         if let Some(query_plane) = state.query_plane_store()
             && let Ok(Ok(Some(projected_by_tenant))) = tokio::time::timeout(
@@ -156,13 +179,13 @@ fn allow_indefinite_state_counts(state: &ServerState) -> Vec<(String, u64)> {
 impl ServerState {
     /// Start periodic runtime metric export for process + actor-system state.
     pub(super) fn spawn_runtime_metrics_loop(&self) {
-        let interval_secs = configured_u64("TEMPER_RUNTIME_METRICS_INTERVAL_SECS", 60, 1, 86_400);
+        let interval = configured_interval();
 
         let state = self.clone();
         tokio::spawn(async move {
             // determinism-ok: background metrics export loop
             let instruments = RuntimeMetricInstruments::new();
-            let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
+            let mut ticker = tokio::time::interval(interval);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             ticker.tick().await; // consume immediate tick
 
@@ -172,6 +195,46 @@ impl ServerState {
             }
         });
     }
+}
+
+fn configured_interval() -> Duration {
+    Duration::from_secs(configured_u64(
+        "TEMPER_RUNTIME_METRICS_INTERVAL_SECS",
+        60,
+        1,
+        86_400,
+    ))
+}
+
+fn host_metric_settings(interval: Duration) -> HostMetricSettings {
+    // A walk reads a tree of any size on a machine other programs share, so it
+    // stops at a time limit rather than hold a blocking thread and the disk for
+    // as long as the tree takes. The default limit is the sampling interval,
+    // because a walk that takes longer reports a size older than the next
+    // reading is due. No ceiling: a deadline too far off to represent never
+    // passes.
+    let default_limit_ms = u64::try_from(interval.as_millis()).unwrap_or(u64::MAX);
+    HostMetricSettings {
+        disk_paths: configured_list("TEMPER_RUNTIME_METRICS_DISK_PATHS", "/"),
+        dir_patterns: configured_list("TEMPER_RUNTIME_METRICS_DIR_PATHS", ""),
+        dir_time_limit: configured_duration(
+            "TEMPER_RUNTIME_METRICS_DIR_TIMEOUT_MS",
+            default_limit_ms,
+            0,
+            u64::MAX,
+        ),
+    }
+}
+
+/// A comma-separated list; an empty value is an empty list.
+fn configured_list(env_name: &str, default: &str) -> Vec<String> {
+    std::env::var(env_name) // determinism-ok: read once at startup
+        .unwrap_or_else(|_| default.to_string())
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn configured_duration(env_name: &str, default_ms: u64, min_ms: u64, max_ms: u64) -> Duration {
@@ -194,7 +257,7 @@ fn coverage_ratio(projected: u64, indexed: u64) -> f64 {
     }
 }
 
-fn read_process_resident_memory_bytes() -> Option<u64> {
+pub(crate) fn read_process_resident_memory_bytes() -> Option<u64> {
     #[cfg(target_os = "linux")]
     if let Some(bytes) = read_linux_vm_rss_bytes() {
         return Some(bytes);
@@ -260,3 +323,7 @@ fn read_macos_resident_memory_bytes() -> Option<u64> {
         None
     }
 }
+
+#[cfg(test)]
+#[path = "runtime_metrics_test.rs"]
+mod tests;

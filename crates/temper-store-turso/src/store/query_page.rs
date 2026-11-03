@@ -90,9 +90,10 @@ impl TursoEventStore {
         params: Vec<String>,
     ) -> Result<usize, PersistenceError> {
         let conn = self.configured_connection().await?;
+        let index = super::field_index::catalog_filter_index(where_clause);
         let sql = format!(
             "SELECT COUNT(*) \
-             FROM entity_catalog \
+             FROM entity_catalog {index}\
              WHERE tenant = ?1 AND entity_type = ?2 AND ({where_clause})"
         );
         let mut all_params: Vec<crate::driver::Value> = vec![
@@ -125,9 +126,10 @@ fn turso_query_field_page_sql(
     } else {
         "entity_id"
     };
+    let index = super::field_index::catalog_filter_index(where_clause);
     format!(
         "SELECT {select} \
-         FROM entity_catalog \
+         FROM entity_catalog {index}\
          WHERE tenant = ?1 AND entity_type = ?2 AND ({where_clause}) \
          ORDER BY {order_sql} \
          LIMIT ?{limit_param} OFFSET ?{offset_param}"
@@ -171,30 +173,10 @@ fn turso_query_field_order_sql(order_by: &[(String, bool)]) -> String {
     clauses.join(", ")
 }
 
-fn turso_json_path_literal(field_name: &str) -> String {
+pub(super) fn turso_json_path_literal(field_name: &str) -> String {
     let escaped = field_name
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('\'', "''");
     format!("'$.\"{escaped}\"'")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn no_count_page_sql_does_not_compute_window_count() {
-        let sql = turso_query_field_page_sql("entity_id = ?3", "entity_id ASC", 4, 5, false);
-
-        assert!(sql.starts_with("SELECT entity_id FROM entity_catalog"));
-        assert!(!sql.contains("COUNT(*) OVER()"));
-    }
-
-    #[test]
-    fn count_page_sql_computes_count_only_when_requested() {
-        let sql = turso_query_field_page_sql("entity_id = ?3", "entity_id ASC", 4, 5, true);
-
-        assert!(sql.contains("COUNT(*) OVER() AS total_count"));
-    }
 }

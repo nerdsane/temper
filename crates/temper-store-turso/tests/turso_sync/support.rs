@@ -1,14 +1,18 @@
 //! Helpers shared by the Turso Sync tests: a local sync server, a machine's
 //! data folder, and writes to count.
 
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use temper_runtime::persistence::{EventMetadata, EventStore, PersistenceEnvelope};
 use temper_store_turso::TursoEventStore;
+use tracing_subscriber::layer::Context;
+use tracing_subscriber::registry::LookupSpan;
 
 pub const TOKEN: &str = "local-sync-server-ignores-tokens";
 
@@ -311,4 +315,108 @@ pub async fn switch(upstream: &str) -> (String, std::sync::Arc<std::sync::atomic
         }
     });
     (url, on)
+}
+
+/// Forwards to the sync server, counting the HTTP requests sent through it.
+pub async fn counting(upstream: &str) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let requests = std::sync::Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("addr"));
+    let upstream = upstream.trim_start_matches("http://").to_string();
+    let counted = requests.clone();
+    tokio::spawn(async move {
+        while let Ok((client, _)) = listener.accept().await {
+            let Ok(server) = tokio::net::TcpStream::connect(&upstream).await else {
+                continue;
+            };
+            let (mut client_read, mut client_write) = client.into_split();
+            let (mut server_read, mut server_write) = server.into_split();
+            let counted = counted.clone();
+            tokio::spawn(async move {
+                // Each request line ends with its version; the last bytes of
+                // one read are kept so a line split across two reads counts.
+                const START: &[u8] = b" HTTP/1.1\r\n";
+                let mut seen: Vec<u8> = Vec::new();
+                let mut buf = vec![0; 64 * 1024];
+                while let Ok(n) = client_read.read(&mut buf).await {
+                    if n == 0 {
+                        break;
+                    }
+                    seen.extend_from_slice(&buf[..n]);
+                    let found = seen.windows(START.len()).filter(|w| *w == START).count();
+                    counted.fetch_add(found, Ordering::AcqRel);
+                    let keep = seen.len().min(START.len() - 1);
+                    seen.drain(..seen.len() - keep);
+                    if server_write.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                }
+            });
+            tokio::spawn(async move {
+                let mut buf = vec![0; 64 * 1024];
+                while let Ok(n) = server_read.read(&mut buf).await {
+                    if n == 0 || client_write.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    (url, requests)
+}
+
+/// One logged line: the span it was logged in, its message and its fields.
+#[derive(Clone, Debug)]
+pub struct Line {
+    pub span: Option<String>,
+    pub target: String,
+    pub message: String,
+    pub fields: BTreeMap<String, String>,
+}
+
+/// Every line logged on this thread while it listens.
+#[derive(Clone, Default)]
+pub struct Lines(Arc<Mutex<Vec<Line>>>);
+
+impl Lines {
+    pub fn find(&self, matches: impl Fn(&Line) -> bool) -> Option<Line> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|line| matches(line))
+            .cloned()
+    }
+}
+
+impl<S> tracing_subscriber::Layer<S> for Lines
+where
+    S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+{
+    fn on_event(&self, event: &tracing::Event<'_>, ctx: Context<'_, S>) {
+        #[derive(Default)]
+        struct Fields(BTreeMap<String, String>);
+        impl tracing::field::Visit for Fields {
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                self.0.insert(field.name().to_string(), value.to_string());
+            }
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0
+                    .insert(field.name().to_string(), format!("{value:?}"));
+            }
+        }
+        let mut fields = Fields::default();
+        event.record(&mut fields);
+        let message = fields.0.remove("message").unwrap_or_default();
+        self.0.lock().unwrap().push(Line {
+            span: ctx.event_span(event).map(|span| span.name().to_string()),
+            target: event.metadata().target().to_string(),
+            message,
+            fields: fields.0,
+        });
+    }
 }

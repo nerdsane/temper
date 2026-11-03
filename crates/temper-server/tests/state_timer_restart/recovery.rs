@@ -132,7 +132,9 @@ fn keyed_arm_fires(world: &World) {
     let server = Server::start(world, "keyed-arm");
     let t0 = server.now();
     let keyed = AgentContext {
-        idempotency_key: Some("request-1".to_string()),
+        idempotency_key: Some(temper_server::idempotency::IdempotencyKey::Request(
+            "request-1".to_string(),
+        )),
         ..person("alice")
     };
     server.act("Probe", "keyed", "Arm", &keyed);

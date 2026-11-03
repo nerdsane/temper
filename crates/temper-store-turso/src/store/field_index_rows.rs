@@ -31,7 +31,10 @@ pub(super) async fn sync_field_index(
     {
         let mut rows = tx
             .query(
-                "SELECT field_name, field_value FROM entity_field_index \
+                // The key's index: without it the planner may read every row
+                // of the type (driver/plan_check.rs).
+                "SELECT field_name, field_value \
+                 FROM entity_field_index INDEXED BY sqlite_autoindex_entity_field_index_1 \
                  WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
                 params![tenant, entity_type, entity_id],
             )

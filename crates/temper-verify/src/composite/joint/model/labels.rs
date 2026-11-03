@@ -22,7 +22,9 @@ pub(super) fn rename_label(
         }
     };
     let (before, after) = match mv {
-        Move::Take(entity, action) | Move::Send(entity, action) => {
+        Move::Take(entity, action, _)
+        | Move::Send(entity, action, _)
+        | Move::Reaction(entity, action, _) => {
             let mut new = action.clone();
             rename_params(&mut new.params);
             (format!("{entity}.{action}"), format!("{entity}.{new}"))
@@ -66,7 +68,7 @@ mod tests {
         let text = format!("T.{action} sent");
         let label = rename_label(
             &text,
-            &Move::Send("T".into(), action),
+            &Move::Send("T".into(), action, 0),
             &BTreeMap::from([(ModelString::Symbol(2), ModelString::Symbol(1))]),
         );
         assert_eq!(label, "T.Set(a='#2', b='#1') sent");

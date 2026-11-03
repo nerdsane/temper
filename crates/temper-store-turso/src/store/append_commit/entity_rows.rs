@@ -58,6 +58,11 @@ impl EntityRows {
         }
     }
 
+    /// Whether this commit already writes the entity's projection.
+    pub(super) fn projects_entity(&self) -> bool {
+        self.projection.is_some()
+    }
+
     /// Write the rows in `tx`, for the entity's journal at `sequence_nr`.
     pub(super) async fn write(
         &self,
@@ -102,7 +107,9 @@ impl EntityRows {
         }
         if let Some(vectors) = &self.vectors {
             tx.execute(
-                "DELETE FROM entity_vector_index \
+                // The entity's index: without it the planner may read every
+                // vector row of the type (driver/plan_check.rs).
+                "DELETE FROM entity_vector_index INDEXED BY idx_evi_entity \
                  WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
                 params![tenant, entity_type, entity_id],
             )

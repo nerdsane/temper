@@ -1,9 +1,10 @@
 //! OData v4 query options types and top-level parser.
 //!
 //! Parses `$filter`, `$select`, `$expand`, `$orderby`, `$top`, `$skip`, and `$count`
-//! from a URL query string into a structured [`QueryOptions`].
+//! from a URL query string, or from decoded pairs, into [`QueryOptions`].
 
 use super::filter::parse_filter;
+use super::query_string::{split_key_value, split_query_string};
 use crate::error::ODataError;
 
 // ---------------------------------------------------------------------------
@@ -154,40 +155,52 @@ pub enum ODataValue {
 // Top-level query string parser
 // ---------------------------------------------------------------------------
 
-/// Parse a URL query string (without leading `?`) into [`QueryOptions`].
+/// Parse a raw URL query string (without leading `?`) into [`QueryOptions`].
 ///
-/// Example: `$filter=Name eq 'foo'&$top=10&$select=Id,Name`
+/// The string is split into parameters before each key and value is
+/// percent-decoded, so an encoded `&` or `=` stays inside its value. Callers
+/// holding decoded pairs, such as an HTTP query extractor, use
+/// [`parse_query_options_from_pairs`].
+///
+/// Example: `$filter=Name%20eq%20'foo'&$top=10&$select=Id,Name`
 pub fn parse_query_options(query_string: &str) -> Result<QueryOptions, ODataError> {
-    let query_string = query_string.trim();
-    if query_string.is_empty() {
-        return Ok(QueryOptions::default());
-    }
+    let pairs = split_query_string(query_string.trim())?;
+    parse_query_options_from_pairs(pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+}
 
+/// Parse separated, already-decoded query parameters into [`QueryOptions`].
+///
+/// Each value reaches its option's parser exactly as given: nothing is joined,
+/// split or decoded again, so `&`, `=` and parentheses inside a `$filter`
+/// literal are data. Keys are trimmed; parameters that are not system query
+/// options are ignored.
+pub fn parse_query_options_from_pairs<'a>(
+    pairs: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Result<QueryOptions, ODataError> {
     let mut opts = QueryOptions::default();
 
-    for pair in split_query_params(query_string) {
-        let (key, value) = split_key_value(&pair)?;
-        match key.as_str() {
+    for (key, value) in pairs {
+        match key.trim() {
             "$filter" => {
-                opts.filter = Some(parse_filter(&value)?);
+                opts.filter = Some(parse_filter(value)?);
             }
             "$select" => {
-                opts.select = Some(parse_select(&value));
+                opts.select = Some(parse_select(value));
             }
             "$expand" => {
-                opts.expand = Some(parse_expand(&value, 1)?);
+                opts.expand = Some(parse_expand(value, 1)?);
             }
             "$orderby" => {
-                opts.orderby = Some(parse_orderby(&value)?);
+                opts.orderby = Some(parse_orderby(value)?);
             }
             "$top" => {
-                opts.top = Some(parse_usize("$top", &value)?);
+                opts.top = Some(parse_usize("$top", value)?);
             }
             "$skip" => {
-                opts.skip = Some(parse_usize("$skip", &value)?);
+                opts.skip = Some(parse_usize("$skip", value)?);
             }
             "$count" => {
-                opts.count = Some(parse_bool("$count", &value)?);
+                opts.count = Some(parse_bool("$count", value)?);
             }
             "$skiptoken" => {
                 let token = value.trim();
@@ -195,60 +208,12 @@ pub fn parse_query_options(query_string: &str) -> Result<QueryOptions, ODataErro
                     opts.skiptoken = Some(token.to_string());
                 }
             }
-            other => {
-                // Ignore non-system query options (custom options, $format, etc.)
-                if other.starts_with('$') {
-                    // Known system options we don't handle yet -- soft ignore.
-                    // For strict mode we could return UnsupportedOption.
-                }
-            }
+            // Custom options, $format and system options not handled yet are ignored.
+            _ => {}
         }
     }
 
     Ok(opts)
-}
-
-/// Split query string parameters, respecting parentheses (for nested $expand).
-fn split_query_params(qs: &str) -> Vec<String> {
-    let mut params = Vec::new();
-    let mut current = String::new();
-    let mut paren_depth: u32 = 0;
-
-    for ch in qs.chars() {
-        match ch {
-            '(' => {
-                paren_depth += 1;
-                current.push(ch);
-            }
-            ')' => {
-                paren_depth = paren_depth.saturating_sub(1);
-                current.push(ch);
-            }
-            '&' if paren_depth == 0 => {
-                if !current.is_empty() {
-                    params.push(std::mem::take(&mut current));
-                }
-            }
-            _ => current.push(ch),
-        }
-    }
-    if !current.is_empty() {
-        params.push(current);
-    }
-    params
-}
-
-fn split_key_value(pair: &str) -> Result<(String, String), ODataError> {
-    if let Some(eq_pos) = pair.find('=') {
-        let key = pair[..eq_pos].trim().to_string();
-        let value = pair[eq_pos + 1..].to_string();
-        Ok((key, value))
-    } else {
-        Err(ODataError::InvalidQueryOption {
-            option: pair.to_string(),
-            message: "missing '=' in query parameter".into(),
-        })
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -439,24 +404,24 @@ fn parse_expand_options(s: &str, level: usize) -> Result<ExpandOptions, ODataErr
             continue;
         }
         let (key, value) = split_key_value(part)?;
-        match key.as_str() {
+        match key {
             "$select" => {
-                opts.select = Some(parse_select(&value));
+                opts.select = Some(parse_select(value));
             }
             "$filter" => {
-                opts.filter = Some(parse_filter(&value)?);
+                opts.filter = Some(parse_filter(value)?);
             }
             "$orderby" => {
-                opts.orderby = Some(parse_orderby(&value)?);
+                opts.orderby = Some(parse_orderby(value)?);
             }
             "$top" => {
-                opts.top = Some(parse_usize("$top", &value)?);
+                opts.top = Some(parse_usize("$top", value)?);
             }
             "$skip" => {
-                opts.skip = Some(parse_usize("$skip", &value)?);
+                opts.skip = Some(parse_usize("$skip", value)?);
             }
             "$expand" => {
-                opts.expand = Some(parse_expand(&value, level + 1)?);
+                opts.expand = Some(parse_expand(value, level + 1)?);
             }
             _ => {
                 // Ignore unknown nested options
@@ -519,154 +484,14 @@ fn parse_bool(option: &str, value: &str) -> Result<bool, ODataError> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 #[path = "expand_depth_test.rs"]
 mod expand_depth_tests;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+#[path = "query_options_test.rs"]
+mod query_options_tests;
 
-    // -- $select tests -------------------------------------------------------
-
-    #[test]
-    fn select_multiple_properties() {
-        let opts = parse_query_options("$select=Id,Name,Total").unwrap();
-        assert_eq!(
-            opts.select,
-            Some(vec!["Id".into(), "Name".into(), "Total".into()])
-        );
-    }
-
-    // -- $orderby tests ------------------------------------------------------
-
-    #[test]
-    fn orderby_multiple_clauses() {
-        let opts = parse_query_options("$orderby=CreatedAt desc,Name asc").unwrap();
-        assert_eq!(
-            opts.orderby,
-            Some(vec![
-                OrderByClause {
-                    property: "CreatedAt".into(),
-                    direction: OrderDirection::Desc,
-                },
-                OrderByClause {
-                    property: "Name".into(),
-                    direction: OrderDirection::Asc,
-                },
-            ])
-        );
-    }
-
-    #[test]
-    fn orderby_default_direction_is_asc() {
-        let opts = parse_query_options("$orderby=Name").unwrap();
-        assert_eq!(
-            opts.orderby,
-            Some(vec![OrderByClause {
-                property: "Name".into(),
-                direction: OrderDirection::Asc,
-            }])
-        );
-    }
-
-    // -- $top, $skip, $count tests -------------------------------------------
-
-    #[test]
-    fn top_skip_count() {
-        let opts = parse_query_options("$top=10&$skip=20&$count=true").unwrap();
-        assert_eq!(opts.top, Some(10));
-        assert_eq!(opts.skip, Some(20));
-        assert_eq!(opts.count, Some(true));
-    }
-
-    // -- $expand tests -------------------------------------------------------
-
-    #[test]
-    fn expand_simple() {
-        let opts = parse_query_options("$expand=Items").unwrap();
-        assert_eq!(
-            opts.expand,
-            Some(vec![ExpandItem {
-                property: "Items".into(),
-                options: None,
-            }])
-        );
-    }
-
-    #[test]
-    fn expand_with_nested_options() {
-        let opts = parse_query_options("$expand=Items($select=Id,Quantity;$orderby=Quantity desc)")
-            .unwrap();
-        let expand = opts.expand.unwrap();
-        assert_eq!(expand.len(), 1);
-        assert_eq!(expand[0].property, "Items");
-        let nested = expand[0].options.as_ref().unwrap();
-        assert_eq!(nested.select, Some(vec!["Id".into(), "Quantity".into()]));
-        assert_eq!(
-            nested.orderby,
-            Some(vec![OrderByClause {
-                property: "Quantity".into(),
-                direction: OrderDirection::Desc,
-            }])
-        );
-    }
-
-    #[test]
-    fn expand_multiple_items() {
-        let opts = parse_query_options("$expand=Items,Customer").unwrap();
-        let expand = opts.expand.unwrap();
-        assert_eq!(expand.len(), 2);
-        assert_eq!(expand[0].property, "Items");
-        assert_eq!(expand[1].property, "Customer");
-    }
-
-    // -- Combined query test -------------------------------------------------
-
-    #[test]
-    fn combined_query_options() {
-        let opts = parse_query_options(
-            "$filter=Status eq 'Active'&$select=Id,Name&$orderby=Name asc&$top=50&$skip=0&$count=true",
-        )
-        .unwrap();
-
-        assert!(opts.filter.is_some());
-        assert_eq!(opts.select, Some(vec!["Id".into(), "Name".into()]));
-        assert_eq!(
-            opts.orderby,
-            Some(vec![OrderByClause {
-                property: "Name".into(),
-                direction: OrderDirection::Asc,
-            }])
-        );
-        assert_eq!(opts.top, Some(50));
-        assert_eq!(opts.skip, Some(0));
-        assert_eq!(opts.count, Some(true));
-    }
-
-    #[test]
-    fn empty_query_string() {
-        let opts = parse_query_options("").unwrap();
-        assert_eq!(opts, QueryOptions::default());
-    }
-
-    #[test]
-    fn skiptoken_is_parsed_and_blank_is_ignored() {
-        let opts =
-            parse_query_options("$filter=Status eq 'Published'&$skiptoken=Zm9vLTAx").unwrap();
-        assert_eq!(opts.skiptoken.as_deref(), Some("Zm9vLTAx"));
-
-        let blank = parse_query_options("$skiptoken=").unwrap();
-        assert_eq!(blank.skiptoken, None);
-    }
-
-    #[test]
-    fn invalid_top_value() {
-        let result = parse_query_options("$top=abc");
-        assert!(result.is_err());
-    }
-}
+#[cfg(test)]
+#[path = "types_test.rs"]
+mod tests;

@@ -2,10 +2,10 @@
 //! specs alone: Cedar on a reaction that finds its record through a field,
 //! and a count a reaction carries that its target must equal.
 
-use std::time::Duration;
-
 use temper_authz::SendAnalysis;
 use temper_spec::automaton::{Automaton, parse_automaton};
+
+use super::super::room::{Bytes, Progress};
 
 use super::*;
 
@@ -98,11 +98,12 @@ fn check(specs: [&str; 2], policy_text: &str) -> JointLivenessResult {
         .collect();
     let refs: Vec<&Automaton> = automatons.iter().collect();
     let analysis = SendAnalysis::new(policy_text).expect("fixture policies parse");
-    let budget = Budget {
-        time: Duration::from_secs(30),
-        states: 100_000,
+    let (room, progress) = (Bytes::new(1 << 30), Progress::default());
+    let bound = Bound {
+        room: &room,
+        progress: &progress,
     };
-    let mut results = verify_joint_liveness(&refs, Some(&analysis), budget);
+    let mut results = verify_joint_liveness(&refs, Some(&analysis), bound);
     assert_eq!(results.len(), 1);
     results.remove(0)
 }

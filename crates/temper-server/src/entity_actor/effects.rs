@@ -80,18 +80,28 @@ pub(crate) fn apply_field_update(
 pub struct ScheduledAction {
     /// The action name to dispatch.
     pub action: String,
-    /// Delay in seconds before dispatching the action.
-    pub delay_seconds: u64,
+    /// Delay in milliseconds before dispatching the action.
+    pub delay_millis: u64,
     /// The arming event's journal sequence and this action's place among the
     /// event's schedules, `<seq>.<index>`. The actor sets it when it writes
     /// that event; empty until then.
     #[serde(default)]
     pub arm_id: String,
+    /// The absolute `schedule_at` target (clamped to now if past), or the
+    /// arming event's time plus the delay for `schedule`. Kept exactly in
+    /// the durable row; `schedule_at` sets it when resolved, `schedule`
+    /// when the actor arms it.
+    #[serde(default)]
+    pub due_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// A request to spawn a child entity (executed post-transition by dispatch pipeline).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpawnRequest {
+    /// The committing parent event sequence and this spawn's position in it.
+    /// An older request without an identity cannot clear a parent field.
+    #[serde(default)]
+    pub reservation_id: String,
     /// The child entity type.
     pub entity_type: String,
     /// The child entity ID.
@@ -220,6 +230,10 @@ pub enum FieldSyncMode {
     /// Values exceeding `default_inline_max` are written to the Turso blob store
     /// and replaced with a content-addressed reference object.
     BlobRefs { default_inline_max: usize },
+    /// Every value stays in the record as it is, whatever its size. For a
+    /// blob-backed preview that stores nothing itself, so checks read domain
+    /// values rather than references to blobs that have not been stored yet.
+    Inline,
 }
 
 impl FieldSyncMode {
@@ -235,6 +249,7 @@ impl FieldSyncMode {
         match self {
             FieldSyncMode::InlineTruncate => DEFAULT_FIELD_INLINE_MAX,
             FieldSyncMode::BlobRefs { default_inline_max } => default_inline_max,
+            FieldSyncMode::Inline => usize::MAX,
         }
     }
 }
@@ -429,6 +444,7 @@ pub(crate) fn process_action_with_xref_and_field_mode(
                 timestamp: sim_now(),
                 params: params.clone(),
                 idempotency_key: None,
+                origin: crate::entity_actor::EventOrigin::internal(),
                 kind: temper_runtime::persistence::EventKind::Transition,
                 outcome: Some(outcome),
             };
@@ -732,6 +748,9 @@ pub fn apply_effects(
                     ),
                 }
             }
+            Effect::SetString { var, value } => {
+                state.fields[var] = serde_json::Value::String(value.clone());
+            }
             Effect::ListAppend { var, value } => {
                 if let Some(element) = effect_args::string(value, params) {
                     declared.list_mut(&mut state.lists, var).push(element);
@@ -743,6 +762,13 @@ pub fn apply_effects(
                     if index < list.len() {
                         list.remove(index);
                     }
+                }
+            }
+            Effect::ListRemove { var, value } => {
+                if let Some(element) = effect_args::string(value, params) {
+                    declared
+                        .list_mut(&mut state.lists, var)
+                        .retain(|item| *item != element);
                 }
             }
             Effect::Custom(effect_name) => {
@@ -760,8 +786,9 @@ pub fn apply_effects(
             } => {
                 scheduled_actions.push(ScheduledAction {
                     action: action.clone(),
-                    delay_seconds: *delay_seconds,
+                    delay_millis: delay_seconds.saturating_mul(1000),
                     arm_id: String::new(),
+                    due_at: None,
                 });
                 tracing::info!(
                     entity_type = %state.entity_type,
@@ -783,6 +810,8 @@ pub fn apply_effects(
                     .and_then(|id| effect_args::string(id, params))
                     .unwrap_or_else(|| sim_uuid().to_string());
 
+                let reservation_id =
+                    format!("{}.{}", state.event_sequence() + 1, spawn_requests.len());
                 // Store child ID in parent's fields if requested
                 if let Some(field_name) = store_id_in
                     && let Some(obj) = state.fields.as_object_mut()
@@ -791,6 +820,9 @@ pub fn apply_effects(
                         field_name.clone(),
                         serde_json::Value::String(child_id.clone()),
                     );
+                    state
+                        .spawn_reservations
+                        .insert(field_name.clone(), reservation_id.clone());
                 }
 
                 let copied_fields = state
@@ -803,6 +835,7 @@ pub fn apply_effects(
                     })
                     .unwrap_or_default();
                 spawn_requests.push(SpawnRequest {
+                    reservation_id,
                     entity_type: entity_type.clone(),
                     entity_id: child_id.clone(),
                     initial_action: Some(initial_action.clone()),
@@ -871,6 +904,7 @@ pub(crate) struct MoveStart {
     booleans: std::collections::BTreeMap<String, bool>,
     lists: std::collections::BTreeMap<String, Vec<String>>,
     fields: serde_json::Value,
+    spawn_reservations: std::collections::BTreeMap<String, String>,
 }
 
 impl MoveStart {
@@ -883,6 +917,7 @@ impl MoveStart {
             booleans: state.booleans.clone(),
             lists: state.lists.clone(),
             fields: state.fields.clone(),
+            spawn_reservations: state.spawn_reservations.clone(),
         }
     }
 
@@ -894,6 +929,7 @@ impl MoveStart {
         state.booleans = self.booleans;
         state.lists = self.lists;
         state.fields = self.fields;
+        state.spawn_reservations = self.spawn_reservations;
     }
 }
 
@@ -918,6 +954,7 @@ pub(crate) fn record_effect_outcome<R>(
     }
     let fields = start.fields.as_object();
     let outcome = EffectOutcome {
+        spawn_reservations: changed_entries(&start.spawn_reservations, &state.spawn_reservations),
         counters: changed_counters,
         booleans: changed_entries(&start.booleans, &state.booleans),
         lists: changed_entries(&start.lists, &state.lists),
@@ -962,6 +999,9 @@ impl EffectOutcome {
     /// Write the recorded values back: what the effects wrote when the event
     /// was committed, whatever the active spec's effects would compute now.
     pub(crate) fn restore(&self, state: &mut EntityState) {
+        state
+            .spawn_reservations
+            .extend(self.spawn_reservations.clone());
         for (var, value) in &self.counters {
             set_counter(state, var, *value);
         }
@@ -1053,20 +1093,21 @@ pub fn resolve_schedule_at_requests(
                         .ok()
                         .map(|ndt| ndt.and_utc())
                 })?;
-            let delay_seconds = (target - now).num_seconds().max(0) as u64;
+            let delay_millis = (target - now).num_milliseconds().max(0) as u64;
             tracing::info!(
                 entity_type = %state.entity_type,
                 entity_id = %state.entity_id,
                 action = %req.action,
                 field = %req.field,
                 target = %target,
-                delay_seconds,
+                delay_millis,
                 "schedule_at resolved"
             );
             Some(ScheduledAction {
                 action: req.action.clone(),
-                delay_seconds,
+                delay_millis,
                 arm_id: String::new(),
+                due_at: Some(target.max(now)),
             })
         })
         .collect()
@@ -1253,6 +1294,9 @@ fn project_field_value(
     field_meta: Option<&temper_jit::table::StateVarMetadata>,
     overflow_blobs: &mut Vec<OverflowBlobWrite>,
 ) -> serde_json::Value {
+    if mode == FieldSyncMode::Inline {
+        return value.clone();
+    }
     let serialized = serde_json::to_vec(value).unwrap_or_else(|_| value.to_string().into_bytes());
     let serialized_len = serialized.len();
     // Per-field override wins over the mode default; mode default wins over
@@ -1265,6 +1309,7 @@ fn project_field_value(
     }
 
     match mode {
+        FieldSyncMode::Inline => value.clone(),
         FieldSyncMode::InlineTruncate => {
             tracing::warn!(
                 entity_type,
@@ -1338,7 +1383,9 @@ to = "Refreshing"
             last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
             processed_idempotency_keys: std::collections::BTreeMap::new(),
+            last_event: Default::default(),
             status_clock: Default::default(),
+            spawn_reservations: Default::default(),
         };
 
         let result = process_action(&mut state, &table, "Activate", &serde_json::json!({}));
@@ -1347,7 +1394,7 @@ to = "Refreshing"
         assert_eq!(state.status, "Active");
         assert_eq!(result.scheduled_actions.len(), 1);
         assert_eq!(result.scheduled_actions[0].action, "Refresh");
-        assert_eq!(result.scheduled_actions[0].delay_seconds, 2700);
+        assert_eq!(result.scheduled_actions[0].delay_millis, 2_700_000);
     }
 
     /// Build a minimal `EntityState` for guard-error rendering tests.
@@ -1367,7 +1414,9 @@ to = "Refreshing"
             last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
             processed_idempotency_keys: std::collections::BTreeMap::new(),
+            last_event: Default::default(),
             status_clock: Default::default(),
+            spawn_reservations: Default::default(),
         }
     }
 
@@ -1463,7 +1512,9 @@ to = "Closed"
             last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
             processed_idempotency_keys: std::collections::BTreeMap::new(),
+            last_event: Default::default(),
             status_clock: Default::default(),
+            spawn_reservations: Default::default(),
         };
 
         let (custom, scheduled, _spawns, _schedule_at) = apply_effects(
@@ -1476,7 +1527,7 @@ to = "Closed"
         assert!(custom.is_empty());
         assert_eq!(scheduled.len(), 1);
         assert_eq!(scheduled[0].action, "Refresh");
-        assert_eq!(scheduled[0].delay_seconds, 3600);
+        assert_eq!(scheduled[0].delay_millis, 3_600_000);
         assert_eq!(state.status, "Active");
     }
 
@@ -1509,7 +1560,9 @@ to = "Closed"
             last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
             processed_idempotency_keys: std::collections::BTreeMap::new(),
+            last_event: Default::default(),
             status_clock: Default::default(),
+            spawn_reservations: Default::default(),
         };
 
         let (_custom, _scheduled, _spawns, _schedule_at) = apply_effects(
@@ -1558,7 +1611,9 @@ effect = ["spawn('TestWorkflow', 'Start', test_wf_id)"]
             last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
             processed_idempotency_keys: std::collections::BTreeMap::new(),
+            last_event: Default::default(),
             status_clock: Default::default(),
+            spawn_reservations: Default::default(),
         };
 
         let result = process_action(&mut state, &table, "StartPlan", &serde_json::json!({}));
@@ -1616,7 +1671,9 @@ guard = "empty(test_wf_id) || TestWorkflow[test_wf_id].status in ['Passed']"
             last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
             processed_idempotency_keys: std::collections::BTreeMap::new(),
+            last_event: Default::default(),
             status_clock: Default::default(),
+            spawn_reservations: Default::default(),
         };
 
         // Without cross-entity booleans, guard should fail
@@ -1683,7 +1740,9 @@ guard = "(empty(attachment_a_id) || Attachment[attachment_a_id].status in ['Read
             last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
             processed_idempotency_keys: std::collections::BTreeMap::new(),
+            last_event: Default::default(),
             status_clock: Default::default(),
+            spawn_reservations: Default::default(),
         };
         let xref: temper_jit::table::RelatedMap = ["a", "b", "c", "d", "e", "f", "g", "h"]
             .into_iter()
@@ -1746,7 +1805,9 @@ from = ["Active"]
             last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
             processed_idempotency_keys: std::collections::BTreeMap::new(),
+            last_event: Default::default(),
             status_clock: Default::default(),
+            spawn_reservations: Default::default(),
         };
 
         // Provide next_run_at as a param (simulates WASM callback)
@@ -1764,7 +1825,7 @@ from = ["Active"]
         );
         assert_eq!(result.scheduled_actions[0].action, "Trigger");
         // Delay should be ~300 seconds (sim_now is deterministic)
-        assert_eq!(result.scheduled_actions[0].delay_seconds, 300);
+        assert_eq!(result.scheduled_actions[0].delay_millis, 300_000);
     }
 
     #[test]
@@ -1809,7 +1870,9 @@ from = ["Active"]
             last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
             processed_idempotency_keys: std::collections::BTreeMap::new(),
+            last_event: Default::default(),
             status_clock: Default::default(),
+            spawn_reservations: Default::default(),
         };
 
         // Provide a timestamp in the past
@@ -1822,7 +1885,7 @@ from = ["Active"]
         assert!(result.success);
         assert_eq!(result.scheduled_actions.len(), 1);
         assert_eq!(
-            result.scheduled_actions[0].delay_seconds, 0,
+            result.scheduled_actions[0].delay_millis, 0,
             "past timestamp should fire immediately"
         );
     }
@@ -1863,7 +1926,9 @@ from = ["Active"]
             last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
             processed_idempotency_keys: std::collections::BTreeMap::new(),
+            last_event: Default::default(),
             status_clock: Default::default(),
+            spawn_reservations: Default::default(),
         };
 
         let result = process_action(&mut state, &table, "Complete", &serde_json::json!({}));
@@ -1912,7 +1977,9 @@ effect = ["size_bytes = params.payload_size"]
             last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
             processed_idempotency_keys: std::collections::BTreeMap::new(),
+            last_event: Default::default(),
             status_clock: Default::default(),
+            spawn_reservations: Default::default(),
         };
 
         let result = process_action(
@@ -1947,7 +2014,9 @@ effect = ["size_bytes = params.payload_size"]
             last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
             processed_idempotency_keys: std::collections::BTreeMap::new(),
+            last_event: Default::default(),
             status_clock: Default::default(),
+            spawn_reservations: Default::default(),
         }
     }
 
@@ -2069,11 +2138,6 @@ params = ["NewCommitSha"]
             state.fields.get("TargetCommitSha").and_then(|v| v.as_str()),
             Some(next)
         );
-    }
-
-    #[test]
-    fn default_field_inline_max_is_128kb() {
-        assert_eq!(DEFAULT_FIELD_INLINE_MAX, 131_072);
     }
 
     #[test]

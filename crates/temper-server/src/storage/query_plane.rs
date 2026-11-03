@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use temper_runtime::persistence::PersistenceError;
+use temper_runtime::persistence::{CatalogGroupRow, PersistenceError};
 
 /// Backend-neutral projection row returned by [`QueryPlaneStore`].
 #[derive(Clone, Debug, PartialEq)]
@@ -71,22 +71,84 @@ pub struct CatalogRowFreshness {
     pub wrapped_fields: Option<serde_json::Value>,
 }
 
-/// Backend-neutral durable projection upsert.
+/// Catalog rows of one entity type that hold the same status and the same
+/// value of each field asked for, from [`QueryPlaneStore::catalog_groups`].
 #[derive(Clone, Debug, PartialEq)]
-pub struct QueryProjectionUpsert {
-    pub entity_type: String,
-    pub entity_id: String,
+pub struct CatalogGroup {
     pub status: String,
-    pub fields: serde_json::Value,
-    pub state: serde_json::Value,
-    pub indexed_fields: serde_json::Value,
-    pub sequence_nr: u64,
-    pub known_new: bool,
+    /// The fields asked for that the rows hold, with their values.
+    pub values: BTreeMap<String, serde_json::Value>,
+    /// Their entity ids, in order.
+    pub ids: Vec<String>,
+}
+
+impl CatalogGroup {
+    /// A group from a store's row, whose values are those of `fields` in
+    /// order.
+    pub fn from_row(row: CatalogGroupRow, fields: &[String]) -> Self {
+        debug_assert_eq!(fields.len(), row.values.len());
+        Self {
+            status: row.status,
+            values: fields
+                .iter()
+                .zip(row.values)
+                .filter_map(|(field, value)| Some((field.clone(), value?)))
+                .collect(),
+            ids: row.ids,
+        }
+    }
+
+    /// Groups from a store's rows.
+    pub fn from_rows(rows: Vec<CatalogGroupRow>, fields: &[String]) -> Vec<Self> {
+        rows.into_iter()
+            .map(|row| Self::from_row(row, fields))
+            .collect()
+    }
 }
 
 /// Durable query-plane capability.
 #[async_trait::async_trait]
 pub trait QueryPlaneStore: Send + Sync {
+    /// Indexed equality candidates and every entity whose projection is not
+    /// authoritative, from one storage snapshot. The second vector identifies
+    /// candidates requiring an authoritative read. With `Some(budget)`, return
+    /// at most `budget + 1` candidates, prioritizing pending ids: an empty second
+    /// vector proves the entire gap is empty even when the probe overflows.
+    /// With no probe budget, read the complete union without truncation.
+    /// A `None` result means the backend cannot prove completeness (including
+    /// a separately stored journal).
+    async fn reconciled_equality_candidates(
+        &self,
+        _journal: &super::BoxedEventStore,
+        _tenant: &str,
+        _entity_type: &str,
+        _predicates: &[(String, String)],
+        _probe_budget: Option<usize>,
+    ) -> Result<Option<(Vec<String>, Vec<String>)>, PersistenceError> {
+        Ok(None)
+    }
+
+    /// Compare catalog checkpoints with the co-located journal in one query.
+    /// Called only when the stack verifies this is the journal itself.
+    async fn lagging_projections(
+        &self,
+        _tenant: &str,
+    ) -> Result<Option<Vec<temper_runtime::persistence::ProjectionRepairCandidate>>, PersistenceError>
+    {
+        Ok(None)
+    }
+
+    /// All catalog checkpoints, without entity bodies, for a query plane that
+    /// lives outside the journal. Combined with a batched journal-head read.
+    async fn projection_checkpoints(
+        &self,
+        _tenant: &str,
+    ) -> Result<Vec<temper_runtime::persistence::ProjectionCheckpoint>, PersistenceError> {
+        Err(PersistenceError::Storage(
+            "batched projection checkpoints unsupported".into(),
+        ))
+    }
+
     #[expect(clippy::too_many_arguments, reason = "projection upsert boundary")]
     async fn upsert_projection(
         &self,
@@ -99,25 +161,22 @@ pub trait QueryPlaneStore: Send + Sync {
         sequence_nr: u64,
     ) -> Result<(), PersistenceError>;
 
-    async fn upsert_projections(
+    /// Rewrite an existing catalog row and its field index, as
+    /// [`Self::upsert_projection`] does, and leave a record with no catalog row
+    /// alone. A background pass while the server serves uses this: only a
+    /// record's own commit creates its row then, and boot repair creates the
+    /// missing ones before serving.
+    #[expect(clippy::too_many_arguments, reason = "projection upsert boundary")]
+    async fn refresh_projection(
         &self,
         tenant: &str,
-        projections: &[QueryProjectionUpsert],
-    ) -> Result<(), PersistenceError> {
-        for projection in projections {
-            self.upsert_projection(
-                tenant,
-                &projection.entity_type,
-                &projection.entity_id,
-                &projection.status,
-                &projection.fields,
-                &projection.state,
-                projection.sequence_nr,
-            )
-            .await?;
-        }
-        Ok(())
-    }
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+        fields: &serde_json::Value,
+        state: &serde_json::Value,
+        sequence_nr: u64,
+    ) -> Result<(), PersistenceError>;
 
     async fn remove_projection(
         &self,
@@ -204,6 +263,20 @@ pub trait QueryPlaneStore: Send + Sync {
         _tenant: &str,
         _entity_type: &str,
     ) -> Result<Option<Vec<CatalogRowFreshness>>, PersistenceError> {
+        Ok(None)
+    }
+
+    /// The catalog rows of `entity_type` in one of `statuses` that
+    /// [`Self::projection_catalog_freshness`] reads as current and unwrapped,
+    /// grouped by status and by the value of each of `fields`, with their
+    /// ids, in one read. Returns `None` if the backend cannot group them.
+    async fn catalog_groups(
+        &self,
+        _tenant: &str,
+        _entity_type: &str,
+        _fields: &[String],
+        _statuses: &[String],
+    ) -> Result<Option<Vec<CatalogGroup>>, PersistenceError> {
         Ok(None)
     }
 }

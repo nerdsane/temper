@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use temper_server::platform_store::InstalledAppRecord;
 
 use crate::genesis_install::reconcile_materialized_app_closure;
-use crate::os_apps::{WasmModuleManifest, get_os_app, os_app_bundle_digest};
+use crate::os_apps::{Swap, WasmModuleManifest, tenant_os_app, tenant_os_app_bundle_digest};
 use crate::recovery::{InstalledAppRuntimeRecoveryOutcome, recover_installed_app_runtime_state};
 use crate::state::PlatformState;
 
@@ -29,18 +29,18 @@ pub(crate) enum InstallVerifyDecision {
 ///
 /// Pure and side-effect free so it is unit- and simulation-testable. `new_version_ready` is the
 /// verification verdict (runtime-ready AND every app-required wasm module compiles). A rollback
-/// target must itself be a Genesis install that was in the `installed` status — anything else
-/// (absent, a non-Genesis local install, or a prior failed install) is not a safe last-good state
-/// to revert to, so the install fails cleanly instead.
+/// target must itself be a Genesis or pushed install that was in the `installed` status — anything
+/// else (absent, a local install, or a prior failed install) is not a safe last-good state to
+/// revert to, so the install fails cleanly instead.
 pub(crate) fn classify_install_verify(
     new_version_ready: bool,
     prior_record: Option<&InstalledAppRecord>,
 ) -> InstallVerifyDecision {
     if new_version_ready {
         InstallVerifyDecision::Commit
-    } else if prior_record
-        .is_some_and(|record| record.source_kind == "genesis" && record.status == "installed")
-    {
+    } else if prior_record.is_some_and(|record| {
+        matches!(record.source_kind.as_str(), "genesis" | "pushed") && record.status == "installed"
+    }) {
         InstallVerifyDecision::RollBackToPrevious
     } else {
         InstallVerifyDecision::FailNoRollback
@@ -99,7 +99,7 @@ pub async fn verify_install_runtime_ready(
         return false;
     }
 
-    let Some(bundle) = get_os_app(app_name) else {
+    let Some(bundle) = tenant_os_app(tenant, app_name) else {
         tracing::warn!(
             tenant,
             app = %app_name,
@@ -161,7 +161,7 @@ pub(crate) fn platform_store(
 /// Re-reconcile the prior bundle and restore its provenance record — the network-free core of
 /// rollback, and the seam the deterministic simulator drives.
 ///
-/// `reconcile_os_app` overwrites the durable record with a local-provenance row, so after
+/// `reconcile_os_app` can replace a changed bundle's record with a local-provenance row. After
 /// re-reconciling the prior bundle this restores the prior Genesis provenance record. If the prior
 /// version itself does not reach runtime-ready, that is a hard both-broken error: neither the new
 /// nor the previous version is serviceable.
@@ -174,14 +174,15 @@ pub async fn restore_prior_install(
     tenant: &str,
     prior: &InstalledAppRecord,
 ) -> Result<(), String> {
-    reconcile_materialized_app_closure(platform, tenant, &prior.app_name)
-        .await
-        .map_err(|error| {
-            format!(
-                "rollback re-reconcile of {} failed: {error}",
-                prior.app_name
-            )
-        })?;
+    let result =
+        reconcile_materialized_app_closure(platform, tenant, &prior.app_name, Swap::SpecsFirst)
+            .await
+            .map_err(|error| {
+                format!(
+                    "rollback re-reconcile of {} failed: {error}",
+                    prior.app_name
+                )
+            })?;
     if !verify_install_runtime_ready(platform, ps, tenant, &prior.app_name).await {
         return Err(format!(
             "rollback target {} for app {} is also not runtime-ready (both new and previous versions are broken)",
@@ -192,7 +193,9 @@ pub async fn restore_prior_install(
     // actually IS the prior bundle. A corrupted cache or a concurrent catalog replacement could
     // reconcile different (ready) bytes; restoring the old digest onto them would be a lie.
     if !prior.bundle_digest.is_empty() {
-        match os_app_bundle_digest(&prior.app_name).map(|digest| digest.bundle_digest) {
+        match tenant_os_app_bundle_digest(tenant, &prior.app_name)
+            .map(|digest| digest.bundle_digest)
+        {
             Some(reconciled) if reconciled == prior.bundle_digest => {}
             other => {
                 return Err(format!(
@@ -210,6 +213,7 @@ pub async fn restore_prior_install(
                 prior.app_name
             )
         })?;
+    result.publish_reviews();
     Ok(())
 }
 
@@ -324,6 +328,7 @@ mod tests {
             startup_loading: Default::default(),
             provenance: None,
             import_class: None,
+            source: None,
         };
         let modules = |bytes: &Vec<u8>| {
             let mut m = BTreeMap::new();

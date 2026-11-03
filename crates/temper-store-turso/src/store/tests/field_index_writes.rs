@@ -165,6 +165,7 @@ async fn index_rows(
     let mut rows = conn
         .query(
             "SELECT field_name, field_value FROM entity_field_index \
+             INDEXED BY sqlite_autoindex_entity_field_index_1 \
              WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
             params![tenant, ENTITY_TYPE, entity_id],
         )
@@ -186,6 +187,7 @@ async fn rows_with_status(store: &TursoEventStore, [tenant, entity_id]: [&str; 2
     let mut rows = conn
         .query(
             "SELECT count(*) FROM entity_field_index \
+             INDEXED BY sqlite_autoindex_entity_field_index_1 \
              WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND status IS NOT NULL",
             params![tenant, ENTITY_TYPE, entity_id],
         )

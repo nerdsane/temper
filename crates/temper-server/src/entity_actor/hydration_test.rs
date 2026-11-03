@@ -122,3 +122,62 @@ async fn an_unreadable_journal_tail_fails_the_read_and_the_next_read_is_current(
     assert_eq!(recovered.state.status, "Cancelled");
     assert_eq!(recovered.state.sequence_nr, 3);
 }
+
+/// A write owed to a record whose journal cannot be read is kept to try
+/// again, whether its read meets the store itself (a record with no snapshot
+/// and no actor) or an actor whose starts all fail and that then stops (a
+/// record whose snapshot says it exists). Once reads return, the next read
+/// starts a stopped actor again and reads the record.
+#[tokio::test]
+async fn a_record_the_store_cannot_read_keeps_a_write_owed_to_it() {
+    const PLAIN_ID: &str = "no-snapshot";
+    const PLAIN_PERSISTENCE_ID: &str = "default:Order:no-snapshot";
+    let store = Arc::new(SimEventStore::no_faults(58));
+    journal_with_event_after_snapshot(&store).await;
+    let writer = ActorSystem::new("no-snapshot-writer").spawn(
+        EntityActor::with_persistence(
+            "Order",
+            PLAIN_ID,
+            Arc::new(RwLock::new(TransitionTable::from_ioa_source(ORDER_IOA))),
+            serde_json::json!({}),
+            BoxedEventStore::from_arc(store.clone()),
+            BackendLabel::Sim,
+        ),
+        PLAIN_ID,
+    );
+    act(&writer, "AddItem", serde_json::json!({"ProductId": "p-1"})).await;
+    let state = restarted_server(&store);
+    let tenant = TenantId::default();
+    let kept = |read: &Result<String, crate::state::DispatchError>| match read {
+        Ok(_) => false,
+        Err(error) => matches!(
+            crate::state::owed_writes::Attempt::of_error(error),
+            crate::state::owed_writes::Attempt::StoreFailed(_)
+        ),
+    };
+
+    // More failures than the actor's start attempts, so every attempt meets one.
+    store.fail_next_reads(PLAIN_PERSISTENCE_ID, 64);
+    store.fail_next_reads(PERSISTENCE_ID, 64);
+    for id in [PLAIN_ID, ENTITY_ID] {
+        let unreadable = state
+            .load_authz_resource_snapshot(&tenant, "Order", id)
+            .await
+            .map(|snapshot| snapshot.current_state.state.status);
+        assert!(
+            kept(&unreadable),
+            "{id}: a read the store failed must keep the write, got {unreadable:?}"
+        );
+    }
+
+    store.fail_next_reads(PLAIN_PERSISTENCE_ID, 0);
+    store.fail_next_reads(PERSISTENCE_ID, 0);
+    for (id, status) in [(PLAIN_ID, "Draft"), (ENTITY_ID, "Cancelled")] {
+        let read = state
+            .load_authz_resource_snapshot(&tenant, "Order", id)
+            .await
+            .unwrap_or_else(|error| panic!("{id}: the read after reads return: {error}"));
+        assert!(read.exists, "{id}");
+        assert_eq!(read.current_state.state.status, status, "{id}");
+    }
+}

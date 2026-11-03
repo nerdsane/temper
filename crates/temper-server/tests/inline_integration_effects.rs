@@ -8,14 +8,16 @@
 //! scheduled timer and the child-entity spawn.
 
 use temper_runtime::ActorSystem;
+use temper_runtime::persistence::EventStore;
 use temper_runtime::tenant::TenantId;
-use temper_server::ServerState;
 use temper_server::registry::SpecRegistry;
 use temper_server::request_context::AgentContext;
 use temper_server::state::DispatchExtOptions;
+use temper_server::{ServerState, StorageStack};
 use temper_spec::csdl::parse_csdl;
+use temper_store_sim::SimEventStore;
 use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 const CSDL_XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
@@ -193,5 +195,85 @@ async fn inline_integration_still_runs_scheduled_and_spawn_effects() {
     assert_eq!(
         child_status, "Initialized",
         "spawn request for child entity was dropped by the inline integration path (ARN-188)"
+    );
+}
+
+/// The adapter's answer, given once the request's own action has committed;
+/// from then on the store takes no write to the parent.
+struct AnswerAfterTheStoreStops {
+    store: SimEventStore,
+}
+
+impl Respond for AnswerAfterTheStoreStops {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        self.store
+            .fail_next_appends("default:Parent:parent-1", usize::MAX);
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "callback_params": { "result": "ok" }
+        }))
+    }
+}
+
+/// When the store does not take an inline integration's answer, the request's
+/// own action has already committed. The caller is answered committed with
+/// the refused answer named (ADR-0184), never that the store is unavailable:
+/// that answer (503, Retry-After) asks the caller to send the action again,
+/// and the action would apply twice.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_answer_the_store_does_not_take_does_not_ask_for_the_action_again() {
+    let mock_server = MockServer::start().await;
+    let store = SimEventStore::no_faults(41);
+    Mock::given(method("POST"))
+        .and(path("/execute"))
+        .respond_with(AnswerAfterTheStoreStops {
+            store: store.clone(),
+        })
+        .mount(&mock_server)
+        .await;
+
+    let spec = PARENT_SPEC.replace("{url}", &mock_server.uri());
+    let mut state = build_state(&spec);
+    state.set_storage_stack(StorageStack::from_sim(store.clone(), None));
+    let tenant = TenantId::default();
+    let agent_ctx = AgentContext::default();
+
+    let response = state
+        .dispatch_tenant_action_ext(
+            &tenant,
+            "Parent",
+            "parent-1",
+            "Trigger",
+            serde_json::json!({ "child_id": "child-1" }),
+            DispatchExtOptions {
+                agent_ctx: &agent_ctx,
+                await_integration: true,
+                await_reactions: true,
+            },
+        )
+        .await
+        .expect("Trigger should dispatch");
+
+    let journal = store
+        .read_events("default:Parent:parent-1", 0)
+        .await
+        .expect("the journal reads");
+    let actions: Vec<&str> = journal.iter().map(|e| e.event_type.as_str()).collect();
+    assert!(
+        actions.contains(&"Trigger") && !actions.contains(&"AdapterSucceeded"),
+        "the action committed and its answer did not: {actions:?}"
+    );
+    assert!(response.success, "the action committed: {response:?}");
+    assert!(
+        response
+            .trigger_failures
+            .iter()
+            .any(|failure| failure.starts_with("answer refused: ")),
+        "the answer the store did not take is named: {:?}",
+        response.trigger_failures
+    );
+    assert!(
+        !response.store_unavailable,
+        "the action committed, so the caller must not be asked to send it again: {:?}",
+        response.error
     );
 }

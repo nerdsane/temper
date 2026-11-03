@@ -6,7 +6,9 @@ use temper_runtime::tenant::TenantId;
 use temper_server::storage::StorageStack;
 use temper_store_turso::TursoEventStore;
 
-use super::bootstrap::{bootstrap_installed_apps, bootstrap_tenants, build_registry};
+use super::bootstrap::{
+    EarlierOperatorKeys, bootstrap_installed_apps, bootstrap_tenants, build_registry,
+};
 
 const ORDER_IOA: &str = include_str!("../../../../test-fixtures/specs/order.ioa.toml");
 const ORDER_CSDL: &str = include_str!("../../../../test-fixtures/specs/model.csdl.xml");
@@ -103,7 +105,7 @@ async fn startup_keeps_an_unavailable_tenants_stored_rows_unchanged() {
     );
     let mut state = PlatformState::with_registry(registry, None);
     state.server.set_storage_stack(stack);
-    bootstrap_tenants(&state, &[]).await;
+    bootstrap_tenants(&state, &[], EarlierOperatorKeys::Keep).await;
     bootstrap_installed_apps(&state, &[])
         .await
         .expect("startup continues past the unavailable tenant");

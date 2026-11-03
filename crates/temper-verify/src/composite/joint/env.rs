@@ -63,8 +63,28 @@ pub(super) fn resolve(
     id_field: &str,
     related: &str,
 ) -> Found {
-    let (Some(source), Some(target)) = (state.records.get(owner), state.records.get(related))
-    else {
+    resolve_from(
+        models,
+        records,
+        state,
+        state.records.get(owner),
+        owner,
+        id_field,
+        related,
+    )
+}
+
+/// [`resolve`], with `owner`'s record as `source` holds it.
+fn resolve_from(
+    models: &BTreeMap<String, TemperModel>,
+    records: Records,
+    state: &JointState,
+    source: Option<&TemperModelState>,
+    owner: &str,
+    id_field: &str,
+    related: &str,
+) -> Found {
+    let (Some(source), Some(target)) = (source, state.records.get(related)) else {
         return Found::Unknown;
     };
     if records == Records::One {
@@ -97,6 +117,12 @@ pub(super) struct JointEnv<'a> {
     pub(super) state: &'a JointState,
     pub(super) owner: &'a str,
     pub(super) blind: Blind,
+    /// The owner's record as this evaluation reads it, when not as the
+    /// joint state holds it now: a trigger's source as it committed.
+    pub(super) own: Option<&'a TemperModelState>,
+    /// A reference whose id field names another record than the one the
+    /// model holds of its type reads as unknown, not as no record.
+    pub(super) unheld_unknown: bool,
 }
 
 fn var_of<'a>(model: &TemperModel, state: &'a TemperModelState, name: &str) -> Val<'a> {
@@ -106,10 +132,10 @@ fn var_of<'a>(model: &TemperModel, state: &'a TemperModelState, name: &str) -> V
     match model.var_kinds.get(name) {
         Some(VarKind::Counter) => Val::Num(state.counters.get(name).copied().unwrap_or(0) as f64),
         Some(VarKind::Bool) => Val::Bool(state.booleans.get(name).copied().unwrap_or(false)),
-        Some(VarKind::List) => state
-            .lists
-            .get(name)
-            .map_or(Val::Strs(&[]), |items| Val::Strs(items)),
+        Some(VarKind::List) => state.lists.get(name).map_or_else(
+            || Val::Values(Vec::new()),
+            |items| Val::Values(items.iter().map(|s| s.val()).collect()),
+        ),
         Some(VarKind::Str) => state
             .strings
             .get(name)
@@ -119,21 +145,28 @@ fn var_of<'a>(model: &TemperModel, state: &'a TemperModelState, name: &str) -> V
 }
 
 impl JointEnv<'_> {
+    /// The owner's record as this evaluation reads it.
+    fn own_record(&self) -> Option<&TemperModelState> {
+        self.own.or_else(|| self.state.records.get(self.owner))
+    }
+
     /// The related record `id_field` names, if the reference finds one;
     /// `None` when it cannot be known here.
     fn related(&self, entity_type: &str, id_field: &str) -> Option<Option<&TemperModelState>> {
         if self.blind == Blind::Related {
             return None;
         }
-        match resolve(
+        match resolve_from(
             self.models,
             self.records,
             self.state,
+            self.own_record(),
             self.owner,
             id_field,
             entity_type,
         ) {
             Found::Yes => Some(self.state.records.get(entity_type)),
+            Found::Missing if self.unheld_unknown => None,
             Found::Missing => Some(None),
             Found::Unknown => None,
         }
@@ -145,7 +178,10 @@ impl Env for JointEnv<'_> {
         if self.blind == Blind::Own {
             return Val::Unknown;
         }
-        Val::Str(&self.state.records[self.owner].status)
+        match self.own_record() {
+            Some(record) => Val::Str(&record.status),
+            None => Val::Unknown,
+        }
     }
 
     fn var(&self, name: &str) -> Val<'_> {
@@ -159,11 +195,10 @@ impl Env for JointEnv<'_> {
         {
             return Val::Str(ONE_ID);
         }
-        var_of(
-            &self.models[self.owner],
-            &self.state.records[self.owner],
-            name,
-        )
+        match self.own_record() {
+            Some(record) => var_of(&self.models[self.owner], record, name),
+            None => Val::Unknown,
+        }
     }
 
     fn cross_statuses(&self, entity_type: &str, id_field: &str) -> Option<Vec<Val<'_>>> {

@@ -126,7 +126,9 @@ fn service_context_inherits_workflow_trace_context() {
         workflow_root_entity_type: Some("CurationJob".to_string()),
         workflow_root_entity_id: Some("job-1".to_string()),
         workflow_run_id: Some("wf-job-1".to_string()),
-        idempotency_key: Some("parent-key".to_string()),
+        idempotency_key: Some(crate::idempotency::IdempotencyKey::Request(
+            "parent-key".to_string(),
+        )),
         ..AgentContext::default()
     };
 

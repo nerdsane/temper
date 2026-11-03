@@ -94,6 +94,23 @@ impl TransitionTable {
         }
         result
     }
+
+    /// The first invariant that is false for a record in `status` with the
+    /// values in `ctx`, with its failing part. Those that read another
+    /// record's status are left out: the record alone cannot answer them.
+    pub fn broken_invariant(
+        &self,
+        status: &str,
+        ctx: &EvalContext,
+    ) -> Option<(&MoveInvariant, GuardFailure)> {
+        self.invariants
+            .iter()
+            .filter(|invariant| invariant.assert.cross_refs().is_empty())
+            .find_map(|invariant| {
+                guard::check_detailed(&invariant.assert, status, ctx, &self.initial_values)
+                    .map(|failure| (invariant, failure))
+            })
+    }
 }
 
 #[cfg(test)]

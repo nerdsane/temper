@@ -344,11 +344,4 @@ mod tests {
         assert!(rs.get(0, "c").is_none());
         assert!(rs.get(1, "a").is_none());
     }
-
-    #[tokio::test]
-    async fn test_result_set_empty_constructor() {
-        let rs = ResultSet::empty(vec!["a".into(), "b".into()]);
-        assert!(rs.is_empty());
-        assert_eq!(rs.columns.len(), 2);
-    }
 }

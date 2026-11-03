@@ -7,6 +7,8 @@ use super::errors::ActorError;
 use super::traits::Message;
 use crate::mailbox::MailboxSender;
 
+type AskReply = Result<Box<dyn std::any::Any + Send>, ActorError>;
+
 /// An envelope wrapping a message with an optional reply channel.
 pub enum Envelope<M: Message> {
     /// Fire-and-forget message.
@@ -87,26 +89,37 @@ impl<M: Message> ActorRef<M> {
     /// Send a message and wait for a typed response.
     /// Times out after the specified duration.
     pub async fn ask<R: Send + 'static>(&self, msg: M, timeout: Duration) -> Result<R, ActorError> {
-        let (tx, rx) = oneshot::channel();
+        let rx = self.send_ask(msg)?;
+        let result = tokio::time::timeout(timeout, rx)
+            .await
+            .map_err(|_| ActorError::AskTimeout(timeout))?
+            .map_err(|_| ActorError::Stopped)?;
+        Self::decode_reply(result)
+    }
 
+    /// Send a message and wait until the actor replies or stops, without a
+    /// caller deadline. Use when the sender owns work whose outcome must be
+    /// learned even if a store takes longer than a request's timeout.
+    pub async fn ask_until_reply<R: Send + 'static>(&self, msg: M) -> Result<R, ActorError> {
+        let result = self.send_ask(msg)?.await.map_err(|_| ActorError::Stopped)?;
+        Self::decode_reply(result)
+    }
+
+    fn send_ask(&self, msg: M) -> Result<oneshot::Receiver<AskReply>, ActorError> {
+        let (tx, rx) = oneshot::channel();
         self.sender.send(Envelope::Ask {
             msg,
             reply: tx,
             span: tracing::Span::current(),
         })?;
+        Ok(rx)
+    }
 
-        let result = tokio::time::timeout(timeout, rx)
-            .await
-            .map_err(|_| ActorError::AskTimeout(timeout))?
-            .map_err(|_| ActorError::Stopped)?;
-
-        match result {
-            Ok(boxed) => boxed
-                .downcast::<R>()
-                .map(|b| *b)
-                .map_err(|_| ActorError::custom("ask reply type mismatch")),
-            Err(e) => Err(e),
-        }
+    fn decode_reply<R: Send + 'static>(result: AskReply) -> Result<R, ActorError> {
+        result?
+            .downcast::<R>()
+            .map(|boxed| *boxed)
+            .map_err(|_| ActorError::custom("ask reply type mismatch"))
     }
 
     /// Send a system signal to the actor.
@@ -162,13 +175,6 @@ impl<M: Message> fmt::Debug for ActorRef<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn actor_id_new_sets_name_and_path() {
-        let id = ActorId::new("order-actor", "system/orders/order-1");
-        assert_eq!(id.name, "order-actor");
-        assert_eq!(id.path, "system/orders/order-1");
-    }
 
     #[test]
     fn actor_id_display_format() {

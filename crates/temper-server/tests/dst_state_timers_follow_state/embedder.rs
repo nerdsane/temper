@@ -60,7 +60,7 @@ fn run_seed(seed: u64) -> Result<(), String> {
             .state
             .get_or_create_tenant_entity(&job.tenant, "Job", &job.id, json!({}))
             .await
-            .map_err(|error| run.fail("records are created", error))?;
+            .map_err(|error| run.fail("records are created", error.to_string()))?;
         if !act(&first.state, &job, "Start").await {
             return Err(run.fail("records start", job.id.clone()));
         }
