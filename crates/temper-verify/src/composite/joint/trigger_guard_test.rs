@@ -240,12 +240,17 @@ to = "On"
 
 #[test]
 fn a_trigger_guard_on_a_type_outside_the_scope_may_hold() {
-    // C may be on, and then A is done with the box empty.
+    // C may be on, and then A is done with the box empty. The walk cannot
+    // tell whether it is, so the guard goes both ways: never false, so the
+    // rule does not hold, and the way it breaks rests on that guard, so it
+    // is not checked, naming the move.
     let result = invariant(&[START, BOX, SWITCH], None);
+    let text = result.to_string();
     assert!(
-        matches!(result.outcome, JointOutcome::Broken { .. }),
-        "{result}"
+        matches!(result.outcome, JointOutcome::Incomplete { .. }),
+        "{text}"
     );
+    assert!(text.contains("A.Start"), "{text}");
 }
 
 /// `Go` with `k` triggers that each tick `A` again when `C`, a type no rule
