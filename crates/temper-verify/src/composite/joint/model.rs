@@ -117,9 +117,6 @@ pub(super) struct JointModel {
     id_literals: BTreeMap<String, BTreeSet<String>>,
     models: BTreeMap<String, TemperModel>,
     reactions: Vec<Reaction>,
-    /// The most reactions one commit sends with a guard: each may wait to
-    /// be read at once ([`Self::fits`]).
-    fan_out: usize,
     records: Records,
     /// With one record of a type, each entity's id fields that references
     /// use: each holds that record's id.
@@ -293,13 +290,7 @@ impl JointModel {
             .collect();
         // Cedar is told which literals a made-up value may not be.
         let senders = senders.meeting(&classes, &models);
-        let mut guarded: BTreeMap<(&str, &str), usize> = BTreeMap::new();
-        for r in reactions.iter().filter(|r| r.guard.is_some()) {
-            *guarded.entry((&r.from, &r.source_action)).or_default() += 1;
-        }
-        let fan_out = guarded.into_values().max().unwrap_or(0);
         Self {
-            fan_out,
             expansion: Expansion::default(),
             id_literals,
             models,

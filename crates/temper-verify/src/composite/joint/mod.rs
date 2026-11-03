@@ -104,6 +104,8 @@ pub struct JointInvariantResult {
     pub states: usize,
     /// When the walk held a move back because it would have put more than
     /// this many dispatches in flight: what it found holds only up to that.
+    /// A commit whose reactions wait for their guards to be read counts as
+    /// one, however many wait.
     pub in_flight_bound: Option<usize>,
     /// Holds, broken (with a shortest path), or not fully checked.
     pub outcome: JointOutcome,

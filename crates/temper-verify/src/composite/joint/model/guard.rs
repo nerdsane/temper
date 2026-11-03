@@ -2,9 +2,11 @@
 //! read: the runtime evaluates it after its source commits, on the related
 //! records as they are then.
 
+use std::collections::BTreeMap;
+
 use temper_spec::predicate::{Truth, eval};
 
-use super::super::super::{Dispatch, JointState};
+use super::super::super::{Dispatch, JointState, ReactionStep};
 use super::super::JointModel;
 use super::super::commit::add;
 use super::{Certainty, MAX_IN_FLIGHT, remove};
@@ -60,17 +62,35 @@ impl JointModel {
     }
 
     /// Whether `state` holds no more in flight than the walk keeps: at most
-    /// [`MAX_IN_FLIGHT`] dispatches and calls the runtime has sent, and at
-    /// most one commit's worth of reactions whose guards are not read yet.
-    /// A guard not yet read sends nothing until it holds, so it is not a
-    /// dispatch in flight.
+    /// [`MAX_IN_FLIGHT`] things the runtime is working on at once. A
+    /// dispatch or call it has sent is one. A commit whose reactions wait
+    /// for their guards to be read is one too, however many wait: the
+    /// runtime reads them one trigger at a time for that commit
+    /// (`temper-server` `trigger::dispatcher`). Copies of one commit's
+    /// waiting reactions count as the most copies of any one of them.
     pub(in crate::composite::joint) fn fits(&self, state: &JointState) -> bool {
-        let unread = state
-            .inflight
-            .iter()
-            .filter(|dispatch| dispatch.unread_guard.is_some())
-            .count();
-        state.inflight.len() - unread + state.calls.len() <= MAX_IN_FLIGHT && unread <= self.fan_out
+        let mut busy = state.calls.len();
+        let mut waiting: BTreeMap<(&[ReactionStep], &str, &str, usize), usize> = BTreeMap::new();
+        for dispatch in &state.inflight {
+            match (
+                &dispatch.unread_guard,
+                dispatch.via,
+                dispatch.chain.split_last(),
+            ) {
+                (Some(_), Some(index), Some((_, parent))) => {
+                    let reaction = &self.reactions[index];
+                    let key = (parent, &*reaction.from, &*reaction.source_action, index);
+                    *waiting.entry(key).or_default() += 1;
+                }
+                _ => busy += 1,
+            }
+        }
+        let mut commits: BTreeMap<(&[ReactionStep], &str, &str), usize> = BTreeMap::new();
+        for ((parent, from, action, _), copies) in waiting {
+            let most = commits.entry((parent, from, action)).or_default();
+            *most = (*most).max(copies);
+        }
+        busy + commits.into_values().sum::<usize>() <= MAX_IN_FLIGHT
     }
 
     /// Whether reading or landing `dispatch` now may come before an earlier
