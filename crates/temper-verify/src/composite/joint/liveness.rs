@@ -16,8 +16,12 @@
 //! does.
 //!
 //! Three choices keep a pass sound. The walk offers an outside move wherever
-//! Cedar may let someone outside the kernel send it, which only adds starting
-//! states. Each entity is cut down to what the condition depends on, which
+//! Cedar may let someone outside the kernel send it, and a reaction from a
+//! type outside the scope wherever its target may take it, which only adds
+//! starting states. Such a reaction is the system's move, but nothing the
+//! model holds says it comes, so it is never counted on: a state only it may
+//! lead out of is neither stuck nor settled, and the property is not
+//! checked. Each entity is cut down to what the condition depends on, which
 //! only adds behaviour too. And the model counts on a system move only for
 //! what it knows of it. Where it cannot decide a guard, a constraint or
 //! Cedar, the move leads to one of the ways it can go (taken or refused),
@@ -236,11 +240,10 @@ pub(super) fn settle(
     explored: &model::Explored,
 ) -> (LivenessOutcome, bool) {
     let count = explored.len();
-    let mut good = vec![false; count];
-    let mut failing = vec![false; count];
-    let mut queue = VecDeque::new();
     let premise = super::premise(goal);
     let mut met = premise.is_none();
+    let mut failing = vec![false; count];
+    let mut done = vec![false; count];
     for index in 0..count {
         let state = explored.state(index);
         let env = model.env(owner, &state);
@@ -249,56 +252,37 @@ pub(super) fn settle(
             met = eval(premise, &env) != Truth::False;
         }
         failing[index] = truth != Truth::True;
-        if truth == Truth::True && state.settled() {
-            good[index] = true;
-            queue.push_back(index);
-        }
+        done[index] = truth == Truth::True && state.settled();
     }
-    let usable: Vec<bool> = explored
-        .made
-        .iter()
-        .map(|made| made.by_system || (made.relied && failing[made.from as usize]))
-        .collect();
-    // For each state, the states with a sure move to it, and the covered
-    // moves that may end in it; for each covered move, how many of the
-    // states it may end in do not reach the goal yet.
-    let mut sure_from: Vec<Vec<u32>> = vec![Vec::new(); count];
-    let mut covering: Vec<Vec<u32>> = vec![Vec::new(); count];
-    let mut open = vec![0u32; explored.made.len()];
-    // A move's edges are walked one after another, so the states it ends in
-    // are told apart with a short list.
-    let mut ends: (u32, Vec<u32>) = (u32::MAX, Vec::new());
-    for edge in &explored.edges {
-        let made = &explored.made[edge.made as usize];
-        if !usable[edge.made as usize] {
-            continue;
-        }
-        if edge.sure {
-            sure_from[edge.to as usize].push(made.from);
-        }
-        if ends.0 != edge.made {
-            ends = (edge.made, Vec::new());
-        }
-        if made.covered && !ends.1.contains(&edge.to) {
-            ends.1.push(edge.to);
-            covering[edge.to as usize].push(edge.made);
-            open[edge.made as usize] += 1;
-        }
+    let mut good = reach(explored, &done, &failing, false);
+    if good.iter().all(|&g| g) {
+        return (LivenessOutcome::Holds, met);
     }
-    while let Some(index) = queue.pop_front() {
-        let mut reached: Vec<u32> = sure_from[index].clone();
-        for &made in &covering[index] {
-            open[made as usize] -= 1;
-            if open[made as usize] == 0 {
-                reached.push(explored.made[made as usize].from);
-            }
+    // A reaction from a type outside the scope is a move the system makes,
+    // but nothing the model holds says it comes. A state it may lead out of
+    // may not be stuck in the runtime, so only the states that cannot reach
+    // the goal even through those are.
+    if explored.made.iter().any(|made| made.outside) {
+        let maybe = reach(explored, &done, &failing, true);
+        let left: BTreeSet<String> = (0..count)
+            .filter(|&index| !good[index] && maybe[index])
+            .flat_map(|index| outside_moves(model, &explored.state(index)))
+            .collect();
+        if maybe.iter().all(|&g| g) {
+            return (
+                LivenessOutcome::Incomplete {
+                    reason: format!(
+                        "from {} of {count} joint states the system's own moves do not reach the condition, \
+                         and a reaction from a type outside the rule's scope may lead out of each of them, \
+                         which the walk cannot tell comes: {}",
+                        good.iter().filter(|&&g| !g).count(),
+                        left.into_iter().collect::<Vec<_>>().join(", ")
+                    ),
+                },
+                met,
+            );
         }
-        for from in reached {
-            if !good[from as usize] {
-                good[from as usize] = true;
-                queue.push_back(from as usize);
-            }
-        }
+        good = maybe;
     }
     let stuck: Vec<usize> = (0..count).filter(|&index| !good[index]).collect();
     let Some(&first) = stuck.first() else {
@@ -344,6 +328,93 @@ pub(super) fn settle(
         },
         met,
     )
+}
+
+/// Which walked states reach the goal: those `done` (it holds with nothing
+/// in flight), and those with a move the system makes that either can lead
+/// to one that does, or always ends in a few states that all do. With
+/// `outside`, a reaction from a type outside the scope counts as such a
+/// move too, and any state it may lead to as one it can.
+fn reach(explored: &model::Explored, done: &[bool], failing: &[bool], outside: bool) -> Vec<bool> {
+    let count = explored.len();
+    let mut good = done.to_vec();
+    let mut queue: VecDeque<usize> = (0..count).filter(|&index| done[index]).collect();
+    let usable: Vec<bool> = explored
+        .made
+        .iter()
+        .map(|made| {
+            made.by_system
+                || (made.relied && failing[made.from as usize])
+                || (outside && made.outside)
+        })
+        .collect();
+    // For each state, the states with a sure move to it, and the covered
+    // moves that may end in it; for each covered move, how many of the
+    // states it may end in do not reach the goal yet.
+    let mut sure_from: Vec<Vec<u32>> = vec![Vec::new(); count];
+    let mut covering: Vec<Vec<u32>> = vec![Vec::new(); count];
+    let mut open = vec![0u32; explored.made.len()];
+    // A move's edges are walked one after another, so the states it ends in
+    // are told apart with a short list.
+    let mut ends: (u32, Vec<u32>) = (u32::MAX, Vec::new());
+    for edge in &explored.edges {
+        let made = &explored.made[edge.made as usize];
+        if !usable[edge.made as usize] {
+            continue;
+        }
+        if edge.sure || (outside && made.outside) {
+            sure_from[edge.to as usize].push(made.from);
+        }
+        if ends.0 != edge.made {
+            ends = (edge.made, Vec::new());
+        }
+        if made.covered && !ends.1.contains(&edge.to) {
+            ends.1.push(edge.to);
+            covering[edge.to as usize].push(edge.made);
+            open[edge.made as usize] += 1;
+        }
+    }
+    while let Some(index) = queue.pop_front() {
+        let mut reached: Vec<u32> = sure_from[index].clone();
+        for &made in &covering[index] {
+            open[made as usize] -= 1;
+            if open[made as usize] == 0 {
+                reached.push(explored.made[made as usize].from);
+            }
+        }
+        for from in reached {
+            if !good[from as usize] {
+                good[from as usize] = true;
+                queue.push_back(from as usize);
+            }
+        }
+    }
+    good
+}
+
+/// The reactions from types outside the scope that may be taken in `state`,
+/// as `Entity.Action (from Status) by a reaction from Type`.
+fn outside_moves(model: &JointModel, state: &super::JointState) -> Vec<String> {
+    model
+        .moves(state)
+        .into_iter()
+        .filter_map(|mv| match mv {
+            model::Move::Reaction(entity, action, _) => Some(format!(
+                "{entity}.{} (from {}) by a reaction from {}",
+                action.name,
+                state.records[&entity].status,
+                model
+                    .outside_from(&entity, &action.name)
+                    .map(|from| from
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>()
+                        .join(" or "))
+                    .unwrap_or_default()
+            )),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The bytes [`settle`] holds for `explored`: per state, its marks, its

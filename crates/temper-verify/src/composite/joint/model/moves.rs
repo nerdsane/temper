@@ -24,6 +24,12 @@ impl JointModel {
                 if !self.expansion.take() {
                     return out;
                 }
+                if self.outside_from(entity, &t.name).is_some()
+                    && self.enabled(entity, t, state, Blind::Nothing)
+                    && !self.outside_moves(entity, t, state, &values, &mut out)
+                {
+                    return out;
+                }
                 let senders = self.outside_senders(entity, &t.name);
                 if senders.is_empty() || !self.enabled(entity, t, state, Blind::Nothing) {
                     continue;
@@ -69,7 +75,7 @@ impl JointModel {
         let mut seen = BTreeSet::new();
         for dispatch in &state.inflight {
             if seen.insert(dispatch) {
-                let mv = if dispatch.read {
+                let mv = if dispatch.read && dispatch.unread_guard.is_none() {
                     Move::Arrive(dispatch.clone())
                 } else {
                     Move::Read(dispatch.clone())

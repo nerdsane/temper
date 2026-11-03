@@ -12,7 +12,7 @@ use super::super::env::Records;
 use super::super::room::Bound;
 use super::commit::Arrival;
 use super::step::{Move, remove};
-use super::{Delivery, JointModel, Sending, tracked};
+use super::{Delivery, JointModel, Keep, Sending, tracked};
 
 /// A reaction its target refused when it landed: the target was not in a
 /// state its action is allowed from, or a guard or constraint said no.
@@ -115,7 +115,7 @@ impl JointModel {
     /// landed, so the walk sees every order they can land in.
     pub(in crate::composite::joint) fn drops(&self, bound: Bound<'_>) -> Drops {
         let mut drops = BTreeSet::new();
-        let explored = self.walk_with(bound, false, |_, state| {
+        let explored = self.walk_with(bound, Keep::States, |_, state, _| {
             if !state.inflight.is_empty() {
                 drops.extend(
                     self.moves(state)
@@ -139,7 +139,8 @@ impl JointModel {
             return None;
         };
         let reaction = &self.reactions[dispatch.via?];
-        if reaction.may_drop {
+        // Reading its trigger's guard is no refusal.
+        if reaction.may_drop || dispatch.unread_guard.is_some() {
             return None;
         }
         let refused = if dispatch.read {

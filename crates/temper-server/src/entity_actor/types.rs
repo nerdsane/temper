@@ -95,6 +95,21 @@ pub enum EntityMsg {
     },
 }
 
+impl EntityMsg {
+    /// The message as its record's logs name it: an action's name, or the kind
+    /// of message.
+    pub(crate) fn name(&self) -> &str {
+        match self {
+            EntityMsg::Action { name, .. } => name,
+            EntityMsg::GetState => "GetState",
+            EntityMsg::UpdateFields { .. } => "UpdateFields",
+            EntityMsg::RecordSpawnRefusal { .. } => "RecordSpawnRefusal",
+            EntityMsg::RecordTimerNeedsPerson { .. } => "RecordTimerNeedsPerson",
+            EntityMsg::Delete { .. } => "Delete",
+        }
+    }
+}
+
 impl Message for EntityMsg {}
 
 /// The entity's runtime state.

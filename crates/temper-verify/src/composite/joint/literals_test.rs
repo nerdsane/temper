@@ -257,12 +257,19 @@ fn cedar_may_take_a_made_up_value_for_a_literal_its_field_never_meets() {
     // in the walk holds 'main'; the walk gives the tag a made-up value
     // instead. Once the box holds 'main' as its holder, that value must not
     // count as certainly not "main" to Cedar: the ping may finish the box.
+    // The walk cannot tell whether it does, so the rule is not checked.
     let sources = [PING_NOTE.to_string(), TAGGED_BOX.to_string()];
     let result = check(&sources, Some(FINISH_WHEN_TAGGED_MAIN));
-    assert!(
-        matches!(result.outcome, JointOutcome::Broken { .. }),
-        "{result}"
-    );
+    assert_may_finish(&result);
+}
+
+/// The walk reaches the box finished by a ping Cedar may let through, and
+/// so cannot check the rule: it neither holds nor surely breaks.
+fn assert_may_finish(result: &JointInvariantResult) {
+    let JointOutcome::Incomplete { reason } = &result.outcome else {
+        panic!("expected not checked, got {result}");
+    };
+    assert!(reason.contains("Box.Finish arrives"), "{result}");
 }
 
 /// Cedar lets the ping finish a box only when its tag equals its holder
@@ -296,10 +303,7 @@ fn cedar_comparing_two_fields_keeps_a_literal_one_holds_possible_for_the_other()
     // policy's tag == holder may hold.
     let sources = [PING_NOTE.to_string(), TAGGED_BOX.to_string()];
     let result = check(&sources, Some(FINISH_WHEN_TAG_IS_HOLDER));
-    assert!(
-        matches!(result.outcome, JointOutcome::Broken { .. }),
-        "{result}"
-    );
+    assert_may_finish(&result);
 }
 
 #[test]

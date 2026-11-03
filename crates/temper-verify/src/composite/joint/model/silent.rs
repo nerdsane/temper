@@ -34,7 +34,7 @@ impl JointModel {
                 }
             }
             if let Some(ways) = self.unsent.get_mut(entity) {
-                for (index, _) in ways.iter_mut() {
+                for index in ways.iter_mut() {
                     *index = kept
                         .iter()
                         .position(|old| old == index)

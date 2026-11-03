@@ -16,6 +16,9 @@ use super::labels::rename_label;
 use super::{Delivery, JointModel, MAX_IN_FLIGHT};
 use crate::model::{ModelString, TemperModelAction};
 
+#[path = "guard.rs"]
+mod guard;
+
 /// One move of the walk.
 #[derive(Debug, Clone)]
 pub(in crate::composite::joint) enum Move {
@@ -27,6 +30,10 @@ pub(in crate::composite::joint) enum Move {
     /// sender: the dispatch path read them and they allowed it; its actor
     /// takes it later.
     Send(String, TemperModelAction, u32),
+    /// A reaction from a type outside the scope, as the sender it runs as:
+    /// a move from outside the model, whenever its target's guard may let
+    /// it ([`from_outside::Outside`]).
+    Reaction(String, TemperModelAction, u32),
     /// A record's state timer fires its action, with no parameters, as
     /// whoever armed it.
     Timer(String, String),
@@ -48,7 +55,15 @@ impl Move {
     /// Whether the system makes this move (a timer, a module, or the
     /// kernel's dispatches) rather than someone outside or a restart.
     pub(in crate::composite::joint) fn by_system(&self) -> bool {
-        !matches!(self, Move::Take(..) | Move::Send(..) | Move::Lost(..))
+        !matches!(
+            self,
+            Move::Take(..) | Move::Send(..) | Move::Reaction(..) | Move::Lost(..)
+        )
+    }
+
+    /// Whether this is a reaction from a type outside the scope.
+    pub(in crate::composite::joint) fn is_outside_reaction(&self) -> bool {
+        matches!(self, Move::Reaction(..))
     }
 
     /// The entity and action an outside move sends.
@@ -116,8 +131,15 @@ impl JointModel {
         match mv {
             Move::Take(entity, action, by) => {
                 // An outside move the model cannot decide may also be
-                // refused, which leaves the state as it is.
-                let known = self.truth(entity, action, state) == Truth::True
+                // refused, which leaves the state as it is; one that does not
+                // exceed a counter it must is refused.
+                let exceeds =
+                    self.exceeds(entity, &action.name, &action.params, &state.records[entity]);
+                if exceeds == Truth::False {
+                    return (Vec::new(), false);
+                }
+                let known = exceeds == Truth::True
+                    && self.truth(entity, action, state) == Truth::True
                     && self.outside_may(*by, entity, &action.name) == May::Yes
                     && self.unchecked.meets(entity, &action.name)
                     && self.exact(entity, &action.name, state);
@@ -133,9 +155,11 @@ impl JointModel {
                 }
             }
             Move::Send(entity, action, by) => {
-                // Its record's guard is read on the dispatch path and in its
-                // actor, which decide it later.
-                let known = self.outside_may(*by, entity, &action.name) == May::Yes;
+                // Its record's guard is read on the dispatch path now, which
+                // may refuse it when the model cannot decide the guard, and
+                // in its actor later.
+                let known = self.outside_may(*by, entity, &action.name) == May::Yes
+                    && self.truth(entity, action, state) == Truth::True;
                 let mut next = state.clone();
                 add(&mut next, sent(entity, action, *by));
                 let text = format!("{entity}.{action} sent{}", self.as_sender(*by));
@@ -145,6 +169,13 @@ impl JointModel {
                 ) {
                     return (Vec::new(), false);
                 };
+            }
+            Move::Reaction(entity, action, by) => {
+                for outcome in self.outside_reaction(state, entity, action, *by) {
+                    if !self.expansion.push(&mut outcomes, outcome) {
+                        return (Vec::new(), false);
+                    }
+                }
             }
             Move::Timer(entity, name) => {
                 let armed = state.armed.get(entity).copied().unwrap_or(OUTSIDE);
@@ -172,16 +203,31 @@ impl JointModel {
                     self.senders.name(call.by)
                 );
                 if self.action_reads_related(&call.to, &action.name) {
+                    // The dispatch path reads its guard now, and may refuse
+                    // it when the model cannot decide the guard.
+                    let known = self.truth(&call.to, action, state) == Truth::True;
                     add(&mut next, sent(&call.to, action, call.by));
-                    if !self
-                        .expansion
-                        .push(&mut outcomes, (next, format!("{text} sent"), Sure))
-                    {
+                    if !self.expansion.push(
+                        &mut outcomes,
+                        (
+                            next,
+                            format!("{text} sent"),
+                            Certainty::unless(known, Unsure),
+                        ),
+                    ) {
                         return (Vec::new(), false);
                     };
-                } else if self.stale(call, &action.name, state) {
+                } else if self.stale(call, &action.name, state)
+                    || self.exceeds(
+                        &call.to,
+                        &action.name,
+                        &action.params,
+                        &state.records[&call.to],
+                    ) == Truth::False
+                {
                     // The module answers about the record as the call found
-                    // it, and the record has moved on from that.
+                    // it, and the record has moved on from that, or its count
+                    // does not exceed the counter it must.
                     if !self.expansion.push(
                         &mut outcomes,
                         (next, format!("{text} refused by its record"), Sure),
@@ -193,6 +239,12 @@ impl JointModel {
                     // do not hold, and the call ends there
                     // (`record_generated_callback_refusal`).
                     let known = self.truth(&call.to, action, state) == Truth::True
+                        && self.exceeds(
+                            &call.to,
+                            &action.name,
+                            &action.params,
+                            &state.records[&call.to],
+                        ) == Truth::True
                         && self.unchecked.meets(&call.to, &action.name)
                         && self.exact(&call.to, &action.name, state);
                     if !known {
@@ -236,6 +288,13 @@ impl JointModel {
                 let text = format!("{call} is lost: the server restarts");
                 let by = self.senders.timer(Senders::armer(call.by));
                 for outcome in self.end_call(next, call, text, by) {
+                    if !self.expansion.push(&mut outcomes, outcome) {
+                        return (Vec::new(), false);
+                    }
+                }
+            }
+            Move::Read(dispatch) if dispatch.unread_guard.is_some() => {
+                for outcome in self.read_trigger_guard(dispatch, state) {
                     if !self.expansion.push(&mut outcomes, outcome) {
                         return (Vec::new(), false);
                     }
@@ -311,11 +370,15 @@ impl JointModel {
                 }
             }
         }
+        let early = match mv {
+            Move::Read(dispatch) | Move::Arrive(dispatch) => self.overtakes(state, dispatch),
+            _ => false,
+        };
         let mut held_back = false;
         let mut nexts = Vec::new();
         for (mut outcome, text, certainty) in outcomes {
-            let fits = self.delivery == Delivery::BeforeNextRequest
-                || outcome.inflight.len() + outcome.calls.len() <= MAX_IN_FLIGHT;
+            let certainty = if early { Unsure } else { certainty };
+            let fits = self.delivery == Delivery::BeforeNextRequest || self.fits(&outcome);
             held_back |= !fits;
             if !fits {
                 continue;
@@ -399,7 +462,7 @@ impl JointModel {
 
 /// The dispatch an outside sender, or a module's answer, makes after the
 /// dispatch path read the related records and they allowed it.
-fn sent(entity: &str, action: &TemperModelAction, by: u32) -> Dispatch {
+pub(super) fn sent(entity: &str, action: &TemperModelAction, by: u32) -> Dispatch {
     Dispatch {
         to: entity.to_string(),
         action: action.name.clone(),
@@ -409,6 +472,7 @@ fn sent(entity: &str, action: &TemperModelAction, by: u32) -> Dispatch {
         chain: Vec::new(),
         via: None,
         by,
+        unread_guard: None,
     }
 }
 

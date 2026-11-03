@@ -659,9 +659,9 @@ fn initial_partitions_stop_within_a_tiny_room() {
 }
 
 /// A record whose one move sets off `reactions` reactions, each with a
-/// guard on another record that the model cannot decide, so the move goes
-/// two ways for each: what it builds doubles with every reaction, while the
-/// states it leads to are all the same one.
+/// guard on `Far`, a type outside the rule's scope, that the model cannot
+/// decide, so the move goes two ways for each: what it builds doubles with
+/// every reaction, while the states it leads to are all the same one.
 fn many_undecided(reactions: usize) -> Vec<String> {
     let mut many = String::from(
         "[automaton]\nname = 'Many'\nstates = ['Start', 'Done']\ninitial = 'Start'\n\n\
@@ -671,7 +671,7 @@ fn many_undecided(reactions: usize) -> Vec<String> {
         many.push_str(&format!(
             "\n[[action.triggers]]\nname = 'again{i}'\nkind = 'entity'\n\
              target_entity = 'Many'\ntarget_action = 'Go'\n\
-             guard = \"Other[Id].status == 'Open'\"\n\
+             guard = \"Far[Id].status == 'Open'\"\n\
              [action.triggers.resolve_target]\nkind = 'same_id'\n"
         ));
     }
@@ -681,7 +681,8 @@ fn many_undecided(reactions: usize) -> Vec<String> {
     );
     let other = "[automaton]\nname = 'Other'\nstates = ['Open']\ninitial = 'Open'\n\n\
                  [[action]]\nname = 'Stay'\nkind = 'input'\nfrom = ['Open']\nto = 'Open'\n";
-    vec![many, other.to_string()]
+    let far = "[automaton]\nname = 'Far'\nstates = ['Open']\ninitial = 'Open'\n";
+    vec![many, other.to_string(), far.to_string()]
 }
 
 fn check_in(sources: &[String], room: &Bytes) -> JointInvariantResult {

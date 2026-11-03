@@ -3,7 +3,7 @@
 //! check counts on from it finishes and [`settle`] finds a state there that
 //! cannot reach the condition.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use temper_spec::predicate::{Expr, Truth, eval};
 
@@ -14,7 +14,7 @@ use super::super::super::{JointState, LivenessOutcome, StuckCase};
 use super::super::JointModel;
 use super::super::held::Tables;
 use super::super::step::Certainty;
-use super::super::walk::{Edge, Explored, Made};
+use super::super::walk::{Edge, Explored, Made, Node};
 use super::{Budget, Engine, Look, could_not_start, plain, print, reads, seeds};
 
 /// What a confirming walk found.
@@ -40,6 +40,7 @@ impl Engine<'_, '_> {
             stopped: None,
             held_back: false,
             unwalked: BTreeSet::new(),
+            outside: BTreeMap::new(),
             held: Held::new(self.bound),
         };
         let mut seen: HashMap<Packed, u32> = HashMap::new();
@@ -52,7 +53,12 @@ impl Engine<'_, '_> {
             tables.states += block(size_of::<[usize; 2]>() + 4 * packed.len());
             seen.insert(packed.clone(), 0);
             queue.push_back(0);
-            sub.nodes.push((packed, None));
+            sub.nodes.push(Node {
+                packed,
+                parent: None,
+                sure: false,
+                queued: false,
+            });
             while let Some(index) = queue.pop_front() {
                 if steps == cap || self.left == 0 {
                     return Ok(false);
@@ -69,7 +75,9 @@ impl Engine<'_, '_> {
                     model.within(&mut sub.held, &mut tables, || model.moves(&state))?;
                 for mv in &moves {
                     let relied = model.relies(mv);
-                    if !(mv.by_system() || relied && failing) {
+                    // A reaction from outside the scope is kept too: `settle`
+                    // does not call a state stuck when one may lead out of it.
+                    if !(mv.by_system() || mv.is_outside_reaction() || relied && failing) {
                         continue;
                     }
                     let ((nexts, held), built) =
@@ -80,6 +88,7 @@ impl Engine<'_, '_> {
                         from: index as u32,
                         by_system: mv.by_system(),
                         relied,
+                        outside: mv.is_outside_reaction(),
                         covered: !held
                             && !nexts.is_empty()
                             && nexts.iter().all(|n| n.certainty != Certainty::Unsure),
@@ -95,7 +104,12 @@ impl Engine<'_, '_> {
                                 let label = sub.packer.id(&next.label);
                                 tables.states += block(size_of::<[usize; 2]>() + 4 * packed.len());
                                 seen.insert(packed.clone(), to);
-                                sub.nodes.push((packed, Some((index as u32, label))));
+                                sub.nodes.push(Node {
+                                    packed,
+                                    parent: Some((index as u32, label)),
+                                    sure: false,
+                                    queued: false,
+                                });
                                 queue.push_back(to as usize);
                                 to
                             }

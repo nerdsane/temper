@@ -1004,6 +1004,7 @@ impl ServerState {
                 .with_idempotency_cache(self.idempotency_cache.clone())
                 .with_blob_store(tenant_blob_store),
         }
+        .with_action_dispatch_timeout(self.action_dispatch_timeout)
         .with_legacy_blob_store(legacy_blob_store)
         .with_on_rehydrated(self.state_timer_rehydrate_hook(tenant, entity_type, entity_id))
         .with_entity_rows(Some(self.entity_rows_hook(tenant, entity_type)))

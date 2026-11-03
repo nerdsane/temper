@@ -25,6 +25,10 @@
 //! - an entity reaction is a dispatch of its own, sent after its source
 //!   commits with `args` copied from the source as committed, and taken by
 //!   its target later, in any order with other dispatches;
+//! - a reaction from a type outside the scope is a move from outside: it
+//!   comes whenever its target's guard may let it, with any parameters, as
+//!   a sender Cedar may answer either way for, in a chain that may already
+//!   hold any step that can come before it;
 //! - string variables are tracked as symbols (equality only) when an
 //!   invariant reads them, when a reference uses them as an id, or when
 //!   their value reaches one that is read
@@ -86,7 +90,7 @@ pub(crate) use model::dropped_reactions;
 pub use model::{Candidate, GUIDED_STEPS, Guide, GuidedSearch, guided_search, plain};
 use model::{JointModel, Move, Sending};
 use state::render;
-pub use state::{Call, Dispatch, JointState, ReactionStep};
+pub use state::{Call, Committed, Dispatch, JointState, ReactionStep};
 
 /// What the joint check found for one invariant.
 #[derive(Debug, Clone)]
@@ -103,6 +107,8 @@ pub struct JointInvariantResult {
     pub states: usize,
     /// When the walk held a move back because it would have put more than
     /// this many dispatches in flight: what it found holds only up to that.
+    /// A commit whose reactions wait for their guards to be read counts as
+    /// one, however many wait.
     pub in_flight_bound: Option<usize>,
     /// Holds, broken (with a shortest path), or not fully checked.
     pub outcome: JointOutcome,
@@ -416,3 +422,27 @@ mod literals_tests;
 #[cfg(test)]
 #[path = "guided_test.rs"]
 mod guided_tests;
+
+#[cfg(test)]
+#[path = "sure_test.rs"]
+mod sure_tests;
+
+#[cfg(test)]
+#[path = "outside_test.rs"]
+mod outside_tests;
+
+#[cfg(test)]
+#[path = "outside_count_test.rs"]
+mod outside_count_tests;
+
+#[cfg(test)]
+#[path = "widen_test.rs"]
+mod widen_tests;
+
+#[cfg(test)]
+#[path = "trigger_guard_test.rs"]
+mod trigger_guard_tests;
+
+#[cfg(test)]
+#[path = "trigger_order_test.rs"]
+mod trigger_order_tests;

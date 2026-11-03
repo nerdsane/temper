@@ -17,11 +17,12 @@
 //! - Never HOLDS. It sees some of the states, not all of them. When it finds
 //!   nothing the rule stays NOT CHECKED, and the reason says how far it got.
 //! - BROKEN for an invariant only on a real path: a settled state the rule
-//!   is false in, reached from one of the model's starting states by its
-//!   moves. Before it is reported, the trace is replayed step by step: its
-//!   first state must be one [`JointModel::inits`] makes, and each next
-//!   state one that a move of the model leads to from the one before. A
-//!   trace that does not replay is never reported as a break.
+//!   is false in, reached from one of the model's starting states by sure
+//!   moves alone, as for the breadth-first walk ([`super::walk`]). Before it
+//!   is reported, the trace is replayed step by step: its first state must
+//!   be one [`JointModel::inits`] makes, and each next state one that a move
+//!   of the model surely leads to from the one before. A trace that does not
+//!   replay is never reported as a break.
 //! - NEVER SETTLES for a liveness property only where a complete walk
 //!   proves it: from a settled state where the condition is false, a walk of
 //!   every move the liveness check counts on (the system's own, and those
@@ -62,7 +63,7 @@ use super::super::state::render;
 use super::super::{JointOutcome, JointState, JointStep};
 use super::JointModel;
 use super::held::Tables;
-use super::step::Move;
+use super::step::{Certainty, Move};
 use super::walk::Explored;
 
 /// Expansions phase two makes for one proof at install: each is one state's
@@ -114,8 +115,9 @@ const STARTS: usize = 8;
 const SCAN: usize = 4096;
 
 /// One state of a trace: the move that led to it (a name in the packer;
-/// `None` for a start) and the state, packed.
-type Step = (Option<u32>, Packed);
+/// `None` for a start), the state, packed, and whether sure moves alone
+/// reached it along this trace.
+type Step = (Option<u32>, Packed, bool);
 
 /// What an [`Guide`] sees of one state a walk may step to. [`plain`] reads
 /// only the flags; the states, the move and the depth are there for orders
@@ -292,6 +294,7 @@ fn kind(mv: &Move) -> (u8, String, String) {
         Move::Lost(call) => (5, call.to.clone(), call.module.clone()),
         Move::Read(dispatch) => (6, dispatch.to.clone(), dispatch.action.clone()),
         Move::Arrive(dispatch) => (7, dispatch.to.clone(), dispatch.action.clone()),
+        Move::Reaction(entity, action, _) => (8, entity.clone(), action.name.clone()),
     }
 }
 
@@ -304,7 +307,8 @@ fn words((variant, entity, name): &(u8, String, String)) -> String {
         4 => "failing",
         5 => "lost to a restart",
         6 => "read on its dispatch path",
-        _ => "arriving",
+        7 => "arriving",
+        _ => "by a reaction from outside the scope",
     };
     format!("{entity}.{name} {how}")
 }
@@ -408,14 +412,14 @@ impl<'m, 'a> Engine<'m, 'a> {
         random: &mut Random,
         state: &JointState,
         depth: usize,
-    ) -> Result<Option<(String, JointState, Packed)>, String> {
+    ) -> Result<Option<(String, JointState, Packed, Certainty)>, String> {
         let model = self.model;
         // One step in four goes anywhere, unscored, so a poor order still
         // walks everywhere.
         let anywhere = random.below(4) == 0;
         let (moves, room) =
             model.within(&mut self.held, &mut self.tables, || model.moves(state))?;
-        let mut kept: Vec<(u32, Packed, String)> = Vec::new();
+        let mut kept: Vec<(u32, Packed, String, Certainty)> = Vec::new();
         let mut bytes = 0;
         for mv in &moves {
             // A move whose states do not fit in the room is not taken: a
@@ -450,12 +454,12 @@ impl<'m, 'a> Engine<'m, 'a> {
                     })
                 };
                 let packed = self.packer.pack(&next.state);
-                let more = size_of::<(u32, Packed, String)>()
+                let more = size_of::<(u32, Packed, String, Certainty)>()
                     + block(4 * packed.len())
                     + block(next.label.capacity());
                 self.held.add(more)?;
                 bytes += more;
-                kept.push((score, packed, next.label));
+                kept.push((score, packed, next.label, next.certainty));
             }
             self.tables.give(&mut self.held, built);
         }
@@ -467,11 +471,11 @@ impl<'m, 'a> Engine<'m, 'a> {
         let best = kept.iter().map(|k| k.0).max().unwrap_or(0);
         let ties: Vec<usize> = (0..kept.len()).filter(|&i| kept[i].0 == best).collect();
         let pick = ties[random.below(ties.len())];
-        let (_, packed, label) = kept.swap_remove(pick);
+        let (_, packed, label, certainty) = kept.swap_remove(pick);
         drop(kept);
         self.held.sub(bytes);
         let next = self.packer.unpack(&packed);
-        Ok(Some((label, next, packed)))
+        Ok(Some((label, next, packed, certainty)))
     }
 
     /// Walk from the seeds until the steps run out or `look` says stop.
@@ -518,12 +522,13 @@ impl<'m, 'a> Engine<'m, 'a> {
             while !stopped && self.left > 0 && stale < STALE {
                 self.left -= 1;
                 self.stats.steps += 1;
-                let Some((label, next, packed)) =
+                let Some((label, next, packed, certainty)) =
                     self.step(order, &mut random, &state, trace.len() - 1)?
                 else {
                     break;
                 };
-                let step = (Some(self.packer.id(&label)), packed);
+                let sure = trace.last().is_some_and(|step| step.2) && certainty == Certainty::Sure;
+                let step = (Some(self.packer.id(&label)), packed, sure);
                 let more = Self::step_bytes(&step);
                 self.held.add(more)?;
                 bytes += more;
@@ -559,8 +564,8 @@ impl<'m, 'a> Engine<'m, 'a> {
 
     /// `trace` replayed through the model: its first state is one the model
     /// starts in, and each next one a state a move of the model leads to
-    /// from the one before, named as the trace names it. The path, or why it
-    /// does not replay.
+    /// from the one before, named as the trace names it, and surely where
+    /// the trace says so. The path, or why it does not replay.
     fn replay(&mut self, trace: &[Step]) -> Result<Vec<JointStep>, String> {
         let model = self.model;
         let first = self.packer.unpack(&trace[0].1);
@@ -572,7 +577,7 @@ impl<'m, 'a> Engine<'m, 'a> {
             state: render(&first),
         }];
         let mut state = first;
-        for (at, (label, packed)) in trace.iter().enumerate().skip(1) {
+        for (at, (label, packed, sure)) in trace.iter().enumerate().skip(1) {
             let want = self.packer.unpack(packed);
             let name = label.map(|id| self.packer.name(id).to_string());
             let (moves, room) =
@@ -588,9 +593,11 @@ impl<'m, 'a> Engine<'m, 'a> {
                 else {
                     continue;
                 };
-                found = nexts
-                    .iter()
-                    .any(|next| next.state == want && Some(&next.label) == name.as_ref());
+                found = nexts.iter().any(|next| {
+                    next.state == want
+                        && Some(&next.label) == name.as_ref()
+                        && (!sure || next.certainty == Certainty::Sure)
+                });
                 self.tables.give(&mut self.held, built);
                 if found {
                     break;
@@ -627,7 +634,7 @@ fn seeds(explored: &Explored<'_>, packer: &mut Packer) -> Vec<Vec<Step>> {
     }
     chosen.extend(
         (0..count)
-            .take_while(|&index| explored.nodes[index].1.is_none())
+            .take_while(|&index| explored.nodes[index].parent.is_none())
             .take(STARTS),
     );
     chosen
@@ -635,9 +642,10 @@ fn seeds(explored: &Explored<'_>, packer: &mut Packer) -> Vec<Vec<Step>> {
         .map(|mut index| {
             let mut path = Vec::new();
             loop {
-                let parent = explored.nodes[index].1;
+                let node = &explored.nodes[index];
+                let (parent, sure) = (node.parent, node.sure);
                 let label = parent.map(|(_, label)| packer.id(explored.packer.name(label)));
-                path.push((label, packer.pack(&explored.state(index))));
+                path.push((label, packer.pack(&explored.state(index)), sure));
                 match parent {
                     Some((from, _)) => index = from as usize,
                     None => break,
@@ -657,8 +665,8 @@ fn could_not_start(why: &str, reason: &str) -> String {
 impl JointModel {
     /// Phase two for `invariants` of `owner`, after the breadth-first walk
     /// `explored` stopped: an invariant it left NOT CHECKED is BROKEN when a
-    /// guided walk breaks it on a path that replays, and otherwise stays NOT
-    /// CHECKED, saying how far the walks got.
+    /// guided walk breaks it by sure moves alone on a path that replays, and
+    /// otherwise stays NOT CHECKED, saying how far the walks got.
     pub(super) fn guided_invariants(
         &self,
         owner: &str,
@@ -704,10 +712,13 @@ impl JointModel {
         drop(explored);
         let mut broken: Vec<Option<Vec<JointStep>>> = vec![None; invariants.len()];
         let mut unreplayed: Vec<String> = Vec::new();
+        // A rule was false where the walk went by a move it cannot be sure of.
+        let mut maybe = false;
         let ran = engine.run(&seeds, order, &mut |engine, trace, state| {
             if !state.settled() {
                 return Look::Go;
             }
+            let sure = trace.last().is_some_and(|step| step.2);
             let found: Vec<usize> = {
                 let env = engine.model.env(owner, state);
                 open.iter()
@@ -715,6 +726,10 @@ impl JointModel {
                     .filter(|&i| broken[i].is_none() && eval(invariants[i], &env) == Truth::False)
                     .collect()
             };
+            if !sure {
+                maybe |= !found.is_empty();
+                return Look::Go;
+            }
             for i in found {
                 match engine.replay(trace) {
                     Ok(path) => {
@@ -752,6 +767,11 @@ impl JointModel {
                                 text.push_str(&format!(
                                     "; a break it found did not replay ({failed}), so it is not reported"
                                 ));
+                            }
+                            if maybe {
+                                text.push_str(
+                                    "; a rule was false on a way the runtime may never take, so it is not reported",
+                                );
                             }
                             text
                         };

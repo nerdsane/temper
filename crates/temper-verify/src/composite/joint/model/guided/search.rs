@@ -7,6 +7,7 @@ use temper_spec::predicate::{Expr, Truth, eval};
 
 use super::super::super::JointOutcome;
 use super::super::super::room::{Bound, Bytes, Progress};
+use super::super::walk::Keep;
 use super::super::{JointModel, Sending};
 use super::{Budget, Guide, Stats};
 #[cfg(doc)]
@@ -83,9 +84,9 @@ pub fn guided_search(
     };
     let mut expanded = 0;
     let mut met = false;
-    let explored = model.walk_with(bound, false, |_, state| {
+    let explored = model.walk_with(bound, Keep::Sure, |_, state, sure| {
         expanded += 1;
-        if state.settled() {
+        if sure && state.settled() {
             let env = model.env(owner, state);
             met = invariants.iter().any(|inv| eval(inv, &env) == Truth::False);
         }

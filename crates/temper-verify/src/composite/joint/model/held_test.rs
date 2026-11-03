@@ -128,12 +128,14 @@ fn duplicate_outcomes_only_reserve_distinct_states() {
         ));
     }
     let many = parse_automaton(&source).unwrap();
+    // `Other` is outside the scope, so each trigger's guard is undecided and
+    // the commit goes every way: 2^9 outcomes onto a handful of states.
     let other =
         parse_automaton("[automaton]\nname = 'Other'\nstates = ['Open']\ninitial = 'Open'\n")
             .unwrap();
     let model = JointModel::whole(
         &BTreeMap::from([("Many", &many), ("Other", &other)]),
-        BTreeSet::from(["Many".into(), "Other".into()]),
+        BTreeSet::from(["Many".into()]),
     );
     let (room, progress) = (Bytes::new(1 << 28), Progress::default());
     let explored = model.walk_with(
@@ -141,8 +143,8 @@ fn duplicate_outcomes_only_reserve_distinct_states() {
             room: &room,
             progress: &progress,
         },
-        true,
-        |_, _| false,
+        super::super::Keep::Edges,
+        |_, _, _| false,
     );
     assert!(explored.stopped.is_none(), "{:?}", explored.stopped);
     assert!(explored.edges.len() >= 512, "exercise duplicate edges");

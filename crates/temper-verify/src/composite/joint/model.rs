@@ -5,6 +5,7 @@ mod classes;
 mod commit;
 mod drops;
 mod guided;
+mod from_outside;
 mod held;
 mod initial;
 mod labels;
@@ -35,13 +36,13 @@ pub(super) use classes::Classes;
 pub use drops::DroppedReaction;
 pub(crate) use drops::dropped_reactions;
 pub use guided::{Candidate, Guide, GuidedSearch, STEPS as GUIDED_STEPS, guided_search, plain};
+use from_outside::{Outside, outside_reactions};
 use order::{Order, Specs};
 pub(super) use read::Timeout;
-use read::{
-    Kernel, Reaction, Unchecked, named_literals, reactions_into, tracked, unchecked_constraints,
-};
+use read::{Kernel, Reaction, Unchecked, named_literals, tracked, unchecked_constraints};
 pub(super) use step::Move;
-pub(super) use walk::{Explored, Unwalked, unwalked_reason};
+pub(super) use walk::Keep;
+pub(super) use walk::{Explored, unwalked_reason};
 
 /// Counter ceiling for the joint models, as for the composite plans.
 const JOINT_MAX_COUNTER: usize = 3;
@@ -105,6 +106,9 @@ pub(super) struct Walk {
     pub(super) outcomes: Vec<JointOutcome>,
     /// Whether a move was held back for [`MAX_IN_FLIGHT`].
     pub(super) held_back: bool,
+    /// One per invariant: when it is false only where the walk went by a
+    /// reaction from types outside the scope, those types, else none.
+    pub(super) outside: Vec<BTreeSet<String>>,
 }
 
 /// The joint model of one entity's properties that read related entities.
@@ -136,35 +140,14 @@ pub(super) struct JointModel {
     /// model does not tell them apart.
     sender_matters: BTreeSet<String>,
     /// Each entity's transitions (by index) that nothing in the model sends
-    /// and something in the runtime does, with who.
-    unsent: BTreeMap<String, Vec<(usize, Unsent)>>,
-}
-
-/// Who in the runtime sends an action nothing in the model sends.
-#[derive(Debug, Clone)]
-enum Unsent {
-    /// A module whose trigger names no `on_success`, while its call is open:
-    /// the kernel takes whatever action the module's result names, and the
-    /// model answers only with internal actions. Only for an action nothing
-    /// else sends.
-    Answer,
-    /// Reactions from these types, outside the scope.
-    Reactions(BTreeSet<String>),
-}
-
-impl Unsent {
-    fn sender(&self) -> String {
-        match self {
-            Unsent::Answer => "a module whose trigger names no on_success".to_string(),
-            Unsent::Reactions(from) => format!(
-                "a reaction from {}",
-                from.iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>()
-                    .join(" or ")
-            ),
-        }
-    }
+    /// and a module may answer with: one whose trigger names no
+    /// `on_success`, while its call is open. The kernel takes whatever
+    /// action the module's result names, and the model answers only with
+    /// internal actions.
+    unsent: BTreeMap<String, Vec<usize>>,
+    /// The actions (entity, action) of types in scope that a reaction from
+    /// a type outside it sends ([`Outside`]).
+    outside: BTreeMap<(String, String), Outside>,
 }
 
 impl JointModel {
@@ -254,10 +237,12 @@ impl JointModel {
             &inheriting,
             sending.reserve,
         );
+        // A reaction from outside the scope chooses its parameters, as requests do.
+        let outside = outside_reactions(by_name, scope);
         let chosen = |entity: &str, action: &str| {
-            sending
-                .relies_on
-                .contains(&(entity.to_string(), action.to_string()))
+            let key = (entity.to_string(), action.to_string());
+            sending.relies_on.contains(&key)
+                || outside.contains_key(&key)
                 || senders.request(entity, action) != May::No
                 || kernel.chooses(entity, action)
         };
@@ -280,7 +265,6 @@ impl JointModel {
             })
             .collect();
         let unchecked = unchecked_constraints(by_name, &models, &order);
-        let into = reactions_into(by_name, scope);
         let open: BTreeSet<&String> = kernel
             .calls_on
             .iter()
@@ -289,8 +273,9 @@ impl JointModel {
             .collect();
         let unsent = models
             .iter()
+            .filter(|(entity, _)| open.contains(entity))
             .filter_map(|(entity, model)| {
-                let ways: Vec<(usize, Unsent)> = model
+                let ways: Vec<usize> = model
                     .transitions
                     .iter()
                     .enumerate()
@@ -300,10 +285,7 @@ impl JointModel {
                                 .iter()
                                 .any(|r| &r.to == entity && r.target_action == t.name)
                     })
-                    .filter_map(|(i, t)| match into.get(&(entity.clone(), t.name.clone())) {
-                        Some(from) => Some((i, Unsent::Reactions(from.clone()))),
-                        None => open.contains(entity).then_some((i, Unsent::Answer)),
-                    })
+                    .map(|(i, _)| i)
                     .collect();
                 (!ways.is_empty()).then(|| (entity.clone(), ways))
             })
@@ -326,6 +308,7 @@ impl JointModel {
             senders,
             sender_matters,
             unsent,
+            outside,
         }
     }
 
@@ -337,29 +320,6 @@ impl JointModel {
         }
         memory.set(self.senders.construction_bytes())?;
         Ok(self)
-    }
-
-    /// Note each move the runtime could make in `state` that the walk never
-    /// takes.
-    fn note_unwalked(&self, state: &JointState, unwalked: &mut BTreeSet<Unwalked>) {
-        for (entity, ways) in &self.unsent {
-            let open = state
-                .calls
-                .iter()
-                .any(|call| &call.to == entity && call.on_success.is_empty());
-            for (index, sender) in ways {
-                let t = &self.models[entity].transitions[*index];
-                if (open || !matches!(sender, Unsent::Answer))
-                    && self.enabled(entity, t, state, Blind::Nothing)
-                {
-                    unwalked.insert(Unwalked {
-                        action: format!("{entity}.{}", t.name),
-                        sender: sender.sender(),
-                        from: state.records[entity].status.clone(),
-                    });
-                }
-            }
-        }
     }
 
     /// The records as they start, without their ids.
@@ -434,7 +394,7 @@ impl JointModel {
     pub(super) fn values(&self, state: &JointState) -> BTreeSet<ModelString> {
         let mut values = string_values(state.records.values());
         for dispatch in &state.inflight {
-            for value in dispatch.params.values() {
+            for value in dispatch.values() {
                 if let ParamValue::Str(text) = value
                     && !text.is_empty()
                 {
@@ -496,6 +456,8 @@ impl JointModel {
             state,
             owner,
             blind,
+            own: None,
+            unheld_unknown: false,
         }
     }
 }

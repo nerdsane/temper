@@ -12,6 +12,9 @@ use super::model::{self, JointModel, Sending};
 use super::room::{Bound, Construction, MB, Room};
 use super::{JointInvariantResult, JointLivenessResult, JointOutcome, LivenessOutcome};
 
+mod widen;
+use widen::Wider;
+
 /// One walk of the joint checks: an entity's invariants that read related
 /// records, or one liveness property. It holds all its walk reads, so its
 /// verdict depends on nothing else.
@@ -79,6 +82,9 @@ pub struct InvariantProof<'room> {
     /// The model, or why there is none: a type the invariants read that the
     /// app does not declare.
     model: Result<JointModel, String>,
+    /// The model with the types reactions from outside the scope come from
+    /// taken in too, built when there are any, to walk once more.
+    wider: Option<Box<Wider<'room>>>,
     // Declared last so the model releases its allocations before its room.
     _memory: Construction<'room>,
 }
@@ -116,7 +122,8 @@ impl InvariantProof<'_> {
         };
         let exprs: Vec<&Expr> = self.invariants.iter().map(|inv| &inv.assert).collect();
         let walk = model.walk(&self.entity, &exprs, bound);
-        self.invariants
+        let mut results: Vec<JointInvariantResult> = self
+            .invariants
             .iter()
             .zip(walk.outcomes)
             .map(|(inv, outcome)| {
@@ -124,8 +131,54 @@ impl InvariantProof<'_> {
                 found.in_flight_bound = walk.held_back.then_some(model::MAX_IN_FLIGHT);
                 found
             })
-            .collect()
+            .collect();
+        if let Some(wider) = &self.wider
+            && walk.outside.iter().any(|from| !from.is_empty())
+        {
+            wider.walk(self, &walk.outside, &mut results, bound);
+        }
+        results
     }
+}
+
+/// The joint model that checks `invariants` of `name` with `scope`, cut to
+/// what they read, its senders decided by `policies` and charged to
+/// `memory`.
+fn invariant_model(
+    by_name: &BTreeMap<&str, &Automaton>,
+    scope: &BTreeSet<String>,
+    name: &str,
+    invariants: &[Invariant],
+    policies: Option<&SendAnalysis>,
+    memory: &Construction<'_>,
+) -> Result<JointModel, String> {
+    let reserve = |bytes| memory.set(bytes);
+    let exprs: Vec<&Expr> = invariants.iter().map(|inv| &inv.assert).collect();
+    // Code outside the specs sends what a liveness property relies on,
+    // whoever Cedar lets send it; a rule that must always hold has to hold
+    // through those moves too.
+    let relies_on = scope
+        .iter()
+        .flat_map(|entity| {
+            by_name[entity.as_str()]
+                .liveness
+                .iter()
+                .flat_map(move |live| {
+                    live.relies_on
+                        .iter()
+                        .map(move |action| (entity.clone(), action.clone()))
+                })
+        })
+        .collect();
+    let sending = Sending {
+        policies,
+        reserve: Some(&reserve),
+        kernel_moves: true,
+        relies_on,
+    };
+    JointModel::new(by_name, scope, name, &exprs, sending, true)
+        .without_silent(by_name)
+        .built(memory)
 }
 
 /// The walks that check every `[[invariant]]` in `automatons` that reads a
@@ -165,39 +218,26 @@ pub fn invariant_proofs<'room>(
             }
         }
         let memory = Construction::new(room);
-        let reserve = |bytes| memory.set(bytes);
         let model = if missing.is_empty() {
-            let exprs: Vec<&Expr> = invariants.iter().map(|inv| &inv.assert).collect();
-            // Code outside the specs sends what a liveness property relies
-            // on, whoever Cedar lets send it; a rule that must always hold
-            // has to hold through those moves too.
-            let relies_on = scope
-                .iter()
-                .flat_map(|entity| {
-                    by_name[entity.as_str()]
-                        .liveness
-                        .iter()
-                        .flat_map(move |live| {
-                            live.relies_on
-                                .iter()
-                                .map(move |action| (entity.clone(), action.clone()))
-                        })
-                })
-                .collect();
-            let sending = Sending {
-                policies,
-                reserve: Some(&reserve),
-                kernel_moves: true,
-                relies_on,
-            };
-            JointModel::new(&by_name, &scope, name, &exprs, sending, true)
-                .without_silent(&by_name)
-                .built(&memory)
+            invariant_model(&by_name, &scope, name, &invariants, policies, &memory)
         } else {
             Err(format!(
                 "it reads {}, which this app does not declare",
                 missing.join(", ")
             ))
+        };
+        let wider = match &model {
+            Ok(model) => Wider::new(
+                &by_name,
+                &scope,
+                model.outside_types(),
+                name,
+                &invariants,
+                policies,
+                room,
+            )
+            .map(Box::new),
+            Err(_) => None,
         };
         proofs.push(InvariantProof {
             _memory: memory,
@@ -205,6 +245,7 @@ pub fn invariant_proofs<'room>(
             invariants,
             scope,
             model,
+            wider,
         });
     }
     proofs
@@ -251,7 +292,7 @@ impl LivenessProof<'_> {
                 return result;
             }
         };
-        let mut explored = model.walk_with(bound, true, |_, _| false);
+        let mut explored = model.walk_with(bound, model::Keep::Edges, |_, _, _| false);
         result.states = explored.len();
         result.in_flight_bound = explored.held_back.then_some(model::MAX_IN_FLIGHT);
         result.unwalked = explored.unwalked();

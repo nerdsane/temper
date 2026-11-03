@@ -60,6 +60,8 @@ use table::reread;
 mod build;
 mod kinds;
 mod table;
+#[path = "senders_unknown.rs"]
+mod unknown;
 
 /// Someone outside the kernel, of no known kind, in a request's chain.
 pub(super) const OUTSIDE: u32 = 0;
@@ -227,7 +229,7 @@ impl Senders {
             .and_then(|actions| actions.get(action))
             .and_then(|answers| answers.get(by as usize))
             .copied()
-            .unwrap_or(May::No)
+            .unwrap_or_else(|| self.unknown_answer(by))
     }
 
     /// Whether Cedar lets sender `by` send `action` to the `entity` record
@@ -352,7 +354,7 @@ impl Senders {
             .map_or_else(
                 || {
                     let invoker = invoker / 2;
-                    if same_id {
+                    if same_id || invoker as usize >= self.detached.len() {
                         invoker
                     } else {
                         self.detached[invoker as usize]
@@ -385,7 +387,7 @@ impl Senders {
     pub(super) fn name(&self, by: u32) -> String {
         match self.names.get(by as usize / 2) {
             Some(name) => name.clone(),
-            None => format!("sender {by}"),
+            None => self.unknown_name(by),
         }
     }
 }

@@ -150,9 +150,9 @@ impl Heap for Next {
 impl Heap for Move {
     fn heap(&self) -> usize {
         match self {
-            Move::Take(entity, action, _) | Move::Send(entity, action, _) => {
-                entity.heap() + action.heap()
-            }
+            Move::Take(entity, action, _)
+            | Move::Send(entity, action, _)
+            | Move::Reaction(entity, action, _) => entity.heap() + action.heap(),
             Move::Timer(entity, name) => entity.heap() + name.heap(),
             Move::Answer(call, action) => call.heap() + action.heap(),
             Move::Fail(call) | Move::Lost(call) => call.heap(),

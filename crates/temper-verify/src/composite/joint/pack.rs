@@ -236,6 +236,19 @@ impl Pack for ReactionStep {
     }
 }
 
+impl Pack for super::state::Committed {
+    fn put(&self, packer: &mut Packer, out: &mut Vec<u32>) {
+        self.status.put(packer, out);
+        self.fields.put(packer, out);
+    }
+    fn take(packer: &Packer, input: &mut Iter<'_, u32>) -> Self {
+        Self {
+            status: Pack::take(packer, input),
+            fields: Pack::take(packer, input),
+        }
+    }
+}
+
 impl Pack for Dispatch {
     fn put(&self, packer: &mut Packer, out: &mut Vec<u32>) {
         self.to.put(packer, out);
@@ -246,6 +259,7 @@ impl Pack for Dispatch {
         self.chain.put(packer, out);
         self.via.put(packer, out);
         self.by.put(packer, out);
+        self.unread_guard.put(packer, out);
     }
     fn take(packer: &Packer, input: &mut Iter<'_, u32>) -> Self {
         Dispatch {
@@ -257,6 +271,7 @@ impl Pack for Dispatch {
             chain: Pack::take(packer, input),
             via: Pack::take(packer, input),
             by: Pack::take(packer, input),
+            unread_guard: Pack::take(packer, input),
         }
     }
 }

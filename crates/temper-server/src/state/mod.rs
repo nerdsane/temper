@@ -240,11 +240,14 @@ fn env_bool(name: &str, default: bool) -> bool {
     }
 }
 
+/// Default per-attempt ask deadline, also used for entity watchdog reports.
+pub(crate) const DEFAULT_ACTION_DISPATCH_TIMEOUT: Duration = Duration::from_secs(5);
+
 fn env_timeout() -> Duration {
     let secs: u64 = std::env::var("TEMPER_ACTION_TIMEOUT_SECS") // determinism-ok: read once at startup
         .ok()
         .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(5);
+        .unwrap_or(DEFAULT_ACTION_DISPATCH_TIMEOUT.as_secs());
     debug_assert!(secs > 0 && secs <= 300, "action timeout must be 1-300s");
     Duration::from_secs(secs)
 }
