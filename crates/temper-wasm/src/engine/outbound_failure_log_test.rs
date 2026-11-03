@@ -154,12 +154,8 @@ async fn failed_outbound_call_logs_target_and_kind_without_secrets() {
     );
     assert_eq!(line.get("http.method").map(String::as_str), Some("POST"));
     assert_eq!(
-        line.get("url.host").map(String::as_str),
-        Some("127.0.0.1:8080")
-    );
-    assert_eq!(
-        line.get("url.path").map(String::as_str),
-        Some("/paw/setup/secrets")
+        line.get("url").map(String::as_str),
+        Some("127.0.0.1:8080/paw/setup/secrets")
     );
     assert_eq!(
         line.get("error_kind").map(String::as_str),

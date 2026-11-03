@@ -253,6 +253,7 @@ impl EntityState {
             && self.sequence_nr <= 1
         {
             self.last_event.first_event_at = Some(event.timestamp);
+            self.last_event.record_first(&event.origin);
         }
         self.total_event_count = self.total_event_count.saturating_add(1);
         self.events_since_snapshot = self.events_since_snapshot.saturating_add(1);

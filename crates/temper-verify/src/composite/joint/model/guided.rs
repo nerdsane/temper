@@ -24,7 +24,8 @@
 //!   of the model surely leads to from the one before. A trace that does not
 //!   replay is never reported as a break.
 //! - NEVER SETTLES for a liveness property only where a complete walk
-//!   proves it: from a settled state where the condition is false, a walk of
+//!   proves it: from a settled state where the condition is false, reached
+//!   by sure moves alone on a path that replays, a walk of
 //!   every move the liveness check counts on (the system's own, and those
 //!   outside code is relied on to send while the condition is false), to
 //!   the last state they reach, decided by the same fixpoint

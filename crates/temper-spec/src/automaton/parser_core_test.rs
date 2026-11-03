@@ -189,6 +189,11 @@ params = ["Id", "ctx_owner_status"]
 fn last_event_properties_are_reserved_for_the_kernel() {
     for name in [
         "first_event_at",
+        "first_event_via",
+        "first_event_by",
+        "first_event_for",
+        "first_event_agent_type",
+        "first_event_label",
         "last_event_at",
         "last_event_via",
         "last_event_by",

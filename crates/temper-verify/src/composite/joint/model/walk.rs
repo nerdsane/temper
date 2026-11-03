@@ -26,6 +26,8 @@ pub(in crate::composite::joint) struct Made {
     /// It always ends in one of the states its edges reach: it leads
     /// somewhere, none of its states is unsure, and none was held back.
     pub(in crate::composite::joint) covered: bool,
+    /// The walk held back a way it may go, over the bound on what is in flight.
+    pub(in crate::composite::joint) held: bool,
 }
 
 /// A move's way from one walked state to another.
@@ -134,6 +136,33 @@ impl Explored<'_> {
         }
         steps.reverse();
         steps
+    }
+
+    /// For each state sure moves alone reach from a start, the state they
+    /// come to it from, a start naming itself. Only a walk that keeps its
+    /// edges knows this.
+    pub(in crate::composite::joint) fn sure_parents(&self) -> Vec<Option<u32>> {
+        let mut parents: Vec<Option<u32>> = vec![None; self.nodes.len()];
+        let mut out: Vec<Vec<u32>> = vec![Vec::new(); self.nodes.len()];
+        for edge in self.edges.iter().filter(|edge| edge.sure) {
+            out[self.made[edge.made as usize].from as usize].push(edge.to);
+        }
+        let mut queue = VecDeque::new();
+        for (index, node) in self.nodes.iter().enumerate() {
+            if node.parent.is_none() {
+                parents[index] = Some(index as u32);
+                queue.push_back(index);
+            }
+        }
+        while let Some(index) = queue.pop_front() {
+            for &to in &out[index] {
+                if parents[to as usize].is_none() {
+                    parents[to as usize] = Some(index as u32);
+                    queue.push_back(to as usize);
+                }
+            }
+        }
+        parents
     }
 
     /// The first move on the way to the state walked `index`th that the
@@ -373,6 +402,7 @@ impl JointModel {
                         covered: !held
                             && !nexts.is_empty()
                             && nexts.iter().all(|n| n.certainty != Certainty::Unsure),
+                        held,
                     });
                 }
                 let made = explored.made.len().saturating_sub(1) as u32;

@@ -305,7 +305,9 @@ impl LivenessProof<'_> {
         }
         result.outcome = match explored.held.add(settling) {
             Ok(()) => match settle(model, &self.entity, &self.goal, &explored) {
-                (LivenessOutcome::Holds, _) if !result.unwalked.is_empty() => {
+                (LivenessOutcome::Holds | LivenessOutcome::Stuck { .. }, _)
+                    if !result.unwalked.is_empty() =>
+                {
                     LivenessOutcome::Incomplete {
                         reason: model::unwalked_reason(&result.unwalked),
                     }

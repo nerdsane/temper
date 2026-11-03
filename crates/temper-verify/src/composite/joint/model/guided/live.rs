@@ -92,6 +92,7 @@ impl Engine<'_, '_> {
                         covered: !held
                             && !nexts.is_empty()
                             && nexts.iter().all(|n| n.certainty != Certainty::Unsure),
+                        held,
                     });
                     let made = (sub.made.len() - 1) as u32;
                     for next in nexts {
@@ -174,8 +175,17 @@ impl JointModel {
         let seeds = seeds(&explored, &mut engine.packer);
         drop(explored);
         let mut stuck: Option<LivenessOutcome> = None;
+        // The condition was false where the walk went by a move it cannot be
+        // sure of.
+        let mut maybe = false;
         let ran = engine.run(&seeds, order, &mut |engine, trace, state| {
             if !state.settled() || eval(goal, &engine.model.env(owner, state)) == Truth::True {
+                return Look::Go;
+            }
+            // A stuck verdict refuses an install, so the way here is sure too.
+            // Left untried, a sure way here later still gets its walk.
+            if !trace.last().is_some_and(|step| step.2) {
+                maybe = true;
                 return Look::Go;
             }
             let key = print(state);
@@ -239,9 +249,15 @@ impl JointModel {
             None if stats.walks == 0 => LivenessOutcome::Incomplete {
                 reason: could_not_start(&why, stats.stopped.as_deref().unwrap_or("no seeds")),
             },
-            None => LivenessOutcome::Incomplete {
-                reason: stats.describe(&why),
-            },
+            None => {
+                let mut reason = stats.describe(&why);
+                if maybe {
+                    reason.push_str(
+                        "; the condition was false on a way the runtime may never take, so it is not reported",
+                    );
+                }
+                LivenessOutcome::Incomplete { reason }
+            }
         }
     }
 }
