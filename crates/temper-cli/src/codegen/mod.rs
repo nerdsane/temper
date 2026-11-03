@@ -206,17 +206,6 @@ mod tests {
     fn test_codegen_from_reference_specs() {
         // Use the example specs that ship with the project
         let specs_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-fixtures/specs");
-        let specs_path = Path::new(specs_dir);
-
-        // Verify the reference specs exist before testing
-        if !specs_path.join("model.csdl.xml").exists() {
-            // If reference specs don't exist, skip (don't fail CI)
-            eprintln!(
-                "Skipping codegen test: reference specs not found at {}",
-                specs_dir
-            );
-            return;
-        }
 
         // Create a temp output directory
         let tmp = std::env::temp_dir().join(format!("temper_test_codegen_{}", std::process::id()));

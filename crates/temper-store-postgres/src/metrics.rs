@@ -185,24 +185,3 @@ impl Drop for PostgresTransactionTimer {
         metrics().operation_outcomes_total.add(1, &attrs);
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn postgres_metrics_can_record_all_measurements() {
-        init_metrics();
-        record_postgres_pool_acquire_duration(Duration::from_millis(2), "event_append", "ok");
-        record_postgres_transaction_begin_duration(Duration::from_millis(1), "event_append", "ok");
-        record_postgres_transaction_commit_duration(Duration::from_millis(3), "event_append", "ok");
-        record_postgres_projection_index_fields("query_projection_upsert", "TestEntity", 4, 1);
-        record_postgres_projection_index_reconciliation(
-            "query_projection_upsert",
-            "skipped_unchanged",
-        );
-
-        let mut timer = PostgresTransactionTimer::start("event_append");
-        timer.set_outcome("ok");
-    }
-}

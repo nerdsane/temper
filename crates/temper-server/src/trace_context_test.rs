@@ -39,56 +39,41 @@ async fn a_worker_span_with_nothing_to_continue_is_its_own_root() {
 }
 
 #[test]
-fn spans_of_two_traces_link_to_each_other() {
+fn runtime_work_is_its_own_trace_linked_to_the_move_that_started_it() {
     let spans = test_spans::capture();
     let request = tracing::info_span!(parent: None, "request");
-    let workflow = tracing::info_span!(parent: None, "workflow.step");
-    let (request_context, workflow_context) = (span_context(&request), span_context(&workflow));
-    assert_ne!(request_context.trace_id(), workflow_context.trace_id());
-    link_both(&request, &workflow);
-    drop((request, workflow));
+    let (started_by, work) = request.in_scope(|| {
+        let started_by = cause();
+        let work = runtime_work_span!(started_by.clone(), "work.item", work.kind = "timer");
+        (started_by, work)
+    });
+    drop(request);
+    work.in_scope(|| tracing::info_span!("work.step").in_scope(|| {}));
+    drop(work);
 
     let finished = spans.finished();
-    let linked = |name: &str| {
-        finished
-            .iter()
-            .find(|s| s.name == name)
-            .unwrap()
-            .links
-            .iter()
-            .map(|link| link.span_context.clone())
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(linked("request"), vec![workflow_context]);
-    assert_eq!(linked("workflow.step"), vec![request_context]);
+    let item = finished.iter().find(|s| s.name == "work.item").unwrap();
+    let step = finished.iter().find(|s| s.name == "work.step").unwrap();
+    assert_eq!(item.parent_span_id, SpanId::INVALID, "the work is a root");
+    assert_ne!(item.span_context.trace_id(), started_by.trace_id());
+    let links: Vec<_> = item.links.iter().map(|l| l.span_context.clone()).collect();
+    assert_eq!(
+        links,
+        vec![started_by],
+        "linked back to the move that started it"
+    );
+    assert_eq!(step.span_context.trace_id(), item.span_context.trace_id());
+    assert_eq!(step.parent_span_id, item.span_context.span_id());
 }
 
 #[test]
-fn a_context_from_the_same_trace_is_not_linked() {
+fn runtime_work_with_no_cause_is_an_unlinked_root() {
     let spans = test_spans::capture();
-    let request = tracing::info_span!("request");
-    let same = request.in_scope(capture);
-    let other_root = tracing::info_span!(parent: None, "other");
-    let other = other_root.context();
-    request.in_scope(|| {
-        let dispatch = tracing::info_span!("dispatch");
-        link_if_other_trace(&dispatch, &same);
-        link_if_other_trace(&dispatch, &other);
-    });
-    drop((request, other_root));
+    let work = runtime_work_span!(cause(), "work.item");
+    drop(work);
     let finished = spans.finished();
-    let dispatch = finished.iter().find(|s| s.name == "dispatch").unwrap();
-    let links: Vec<_> = dispatch
-        .links
-        .iter()
-        .map(|l| l.span_context.clone())
-        .collect();
-    assert_eq!(links, vec![other.span().span_context().clone()]);
-    assert_eq!(
-        dispatch.span_context.trace_id(),
-        same.span().span_context().trace_id(),
-        "a link never moves the span to another trace"
-    );
+    assert_eq!(finished[0].parent_span_id, SpanId::INVALID);
+    assert!(finished[0].links.is_empty());
 }
 
 #[test]

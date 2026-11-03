@@ -125,6 +125,18 @@ impl PolicyStore for FaultyPolicyStore {
             .await
     }
 
+    async fn replace_tenant_policies(
+        &self,
+        tenant: &str,
+        policy_id: &str,
+        cedar_text: &str,
+        created_by: &str,
+    ) -> Result<(), String> {
+        self.inner
+            .replace_tenant_policies(tenant, policy_id, cedar_text, created_by)
+            .await
+    }
+
     async fn delete_policy(&self, tenant: &str, policy_id: &str) -> Result<(), String> {
         self.inner.delete_policy(tenant, policy_id).await
     }

@@ -3,6 +3,7 @@ use temper_runtime::persistence::{PersistenceError, storage_error};
 use tracing::instrument;
 
 use super::TursoEventStore;
+use super::write_gate::WritePriority;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PublishedArtifactRow {
@@ -50,7 +51,9 @@ impl TursoEventStore {
         &self,
         artifact: &PublishedArtifactUpsert,
     ) -> Result<PublishedArtifactRow, PersistenceError> {
-        let conn = self.configured_connection().await?;
+        let conn = self
+            .write_connection("turso.upsert_published_artifact", WritePriority::High)
+            .await?;
         conn.execute(
             "INSERT INTO published_artifacts (
                 id, tenant, source_file_id, source_file_version_id, content_hash,

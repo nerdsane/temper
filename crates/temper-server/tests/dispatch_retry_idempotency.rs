@@ -123,7 +123,9 @@ fn order_state(storage: Option<SimEventStore>) -> ServerState {
 
 fn keyed(key: &str) -> AgentContext {
     AgentContext {
-        idempotency_key: Some(key.to_string()),
+        idempotency_key: Some(temper_server::idempotency::IdempotencyKey::Request(
+            key.to_string(),
+        )),
         ..AgentContext::default()
     }
 }

@@ -146,6 +146,8 @@ impl EntitySnapshot {
             // rather than evaluated against a missing status -- see
             // `audit_entity`, which says so in its findings.
             related: BTreeMap::new(),
+            // Invariants read no move's parameters.
+            params: serde_json::Map::new(),
         }
     }
 }

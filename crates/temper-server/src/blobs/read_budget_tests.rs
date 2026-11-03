@@ -184,3 +184,100 @@ async fn wasm_deferred_cache_has_a_hard_aggregate_budget() {
     assert!(value["b"].get(FIELD_OVERFLOW_REF_KEY).is_some());
     assert_eq!(budget.remaining(), (0, 500 - first_len));
 }
+
+/// Record checks must read all required values, regardless of response budgets.
+#[tokio::test]
+async fn record_validation_resolves_more_than_response_read_and_pointer_limits() {
+    let dir = tempfile::tempdir().expect("blob dir");
+    let store = BlobStore::local_fs(dir.path());
+    let (key, size) = store_json(&store, &json!(["item"])).await;
+    for count in [65, 1025] {
+        let fields = serde_json::Value::Object(
+            (0..count)
+                .map(|i| (format!("Items{i:04}"), blob_ref_value(&key, size)))
+                .collect(),
+        );
+        let names = fields.as_object().unwrap().keys().cloned().collect();
+        let resolved =
+            super::resolve_stored_fields(&BlobReadSource::Store(&store), &fields, &names)
+                .await
+                .expect("every healthy required value resolves")
+                .unwrap();
+        for i in 0..count {
+            assert_eq!(
+                resolved[format!("Items{i:04}")],
+                json!(["item"]),
+                "field {i} of {count}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn record_validation_is_not_limited_to_the_wasm_byte_budget() {
+    let dir = tempfile::tempdir().expect("blob dir");
+    let store = BlobStore::local_fs(dir.path());
+    let value = json!(["x".repeat(16 * 1024 * 1024)]);
+    let (key, size) = store_json(&store, &value).await;
+    let fields = json!({"Items": blob_ref_value(&key, size)});
+    let names = ["Items".to_string()].into_iter().collect();
+    let resolved = super::resolve_stored_fields(&BlobReadSource::Store(&store), &fields, &names)
+        .await
+        .expect("healthy required value resolves")
+        .unwrap();
+    assert_eq!(resolved["Items"], value);
+}
+
+#[tokio::test]
+async fn record_validation_rejects_missing_corrupt_wrong_size_and_invalid_json() {
+    let dir = tempfile::tempdir().expect("blob dir");
+    let store = BlobStore::local_fs(dir.path());
+    let (key, size) = store_json(&store, &json!(["valid"])).await;
+    let malformed = b"not json";
+    let malformed_key = format!("field-overflow/sha256/{:x}.json", Sha256::digest(malformed));
+    store
+        .put_if_absent(&malformed_key, malformed, None)
+        .await
+        .unwrap();
+    let corrupt_key = format!(
+        "field-overflow/sha256/{:x}.json",
+        Sha256::digest(b"different")
+    );
+    store
+        .put_if_absent(&corrupt_key, b"[]", None)
+        .await
+        .unwrap();
+    let missing_key = format!("field-overflow/sha256/{}.json", "0".repeat(64));
+    let names = ["Items".to_string()].into_iter().collect();
+    for reference in [
+        blob_ref_value(&missing_key, 2),
+        blob_ref_value(&corrupt_key, 2),
+        blob_ref_value(&key, size + 1),
+        blob_ref_value(&malformed_key, malformed.len()),
+    ] {
+        let fields = json!({"Items": reference});
+        assert!(
+            super::resolve_stored_fields(&BlobReadSource::Store(&store), &fields, &names)
+                .await
+                .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn record_validation_resolves_nested_selected_fields_and_ignores_others() {
+    let dir = tempfile::tempdir().expect("blob dir");
+    let store = BlobStore::local_fs(dir.path());
+    let (key, size) = store_json(&store, &json!(["valid"])).await;
+    let fields = json!({
+        "Items~/": [{"nested~/": blob_ref_value(&key, size)}],
+        "Unselected": blob_ref_value(&format!("field-overflow/sha256/{}.json", "0".repeat(64)), 2),
+    });
+    let names = ["Items~/".to_string()].into_iter().collect();
+    let resolved = super::resolve_stored_fields(&BlobReadSource::Store(&store), &fields, &names)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(resolved["Items~/"][0]["nested~/"], json!(["valid"]));
+    assert_eq!(resolved["Unselected"], fields["Unselected"]);
+}

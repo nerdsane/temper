@@ -5,6 +5,7 @@ use temper_runtime::persistence::{PersistenceError, storage_error};
 use tracing::instrument;
 
 use super::TursoEventStore;
+use super::write_gate::WritePriority;
 use crate::metrics::TursoQueryTimer;
 
 impl TursoEventStore {
@@ -92,7 +93,9 @@ impl TursoEventStore {
         data_json: &str,
     ) -> Result<(), PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.upsert_pending_decision");
-        let conn = self.configured_connection().await?;
+        let conn = self
+            .write_connection("turso.upsert_pending_decision", WritePriority::High)
+            .await?;
         let affected = conn
             .execute(
                 "INSERT INTO pending_decisions (id, tenant, status, data, updated_at) \
@@ -173,7 +176,9 @@ impl TursoEventStore {
         policy_text: &str,
     ) -> Result<(), PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.upsert_tenant_policy");
-        let conn = self.configured_connection().await?;
+        let conn = self
+            .write_connection("turso.upsert_tenant_policy", WritePriority::High)
+            .await?;
         conn.execute(
             "INSERT INTO tenant_policies (tenant, policy_text, updated_at) \
              VALUES (?1, ?2, datetime('now')) \

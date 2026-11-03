@@ -1,9 +1,14 @@
-//! The built-in system-platform Cedar policy (ADR-0046) that every
-//! [`AuthzEngine`](super::AuthzEngine) carries under the tenant's own policies.
+//! The platform's own Cedar: the built-in `system-platform` policy (ADR-0046)
+//! and the one condition that says which principals act with platform
+//! authority.
+
+use std::collections::HashMap;
 
 use cedar_policy::{PolicyId, PolicySet};
 
-use super::CompiledPolicies;
+use super::{AuthzEngine, CompiledPolicies};
+use crate::context::SecurityContext;
+use crate::metrics::CedarCheck;
 
 /// The single source of truth for "who is a verified platform operator" in
 /// Cedar. Shared by the built-in [`system_platform_policy`] identity-entity
@@ -24,10 +29,16 @@ use super::CompiledPolicies;
 /// the identity-entity clauses below.
 pub const VERIFIED_OPERATOR_WHEN: &str = "principal has agent_type && principal.agent_type == \"operator\" && principal has agentTypeVerified && principal.agentTypeVerified == true";
 
-/// Built the built-in system-platform Cedar policy, interpolating the shared
-/// [`VERIFIED_OPERATOR_WHEN`] predicate into its identity-entity clauses.
-/// Built-in Cedar in every [`AuthzEngine`](super::AuthzEngine) (ADR-0046): System's broad
-/// authority as an auditable policy instead of the old blanket bypass, and
+/// The Cedar condition for platform authority: System, Admin, or a verified
+/// operator. Every built-in platform clause grants with this condition, and
+/// [`AuthzEngine::has_platform_authority`] evaluates the same text, so kernel
+/// code that exempts platform callers cannot drift from what Cedar permits.
+fn platform_authority_when() -> String {
+    format!("principal is System || principal is Admin || ({VERIFIED_OPERATOR_WHEN})")
+}
+
+/// Built-in Cedar in every [`AuthzEngine`] (ADR-0046): System's broad
+/// authority as an auditable policy instead of an unchecked allow, and
 /// what only the platform may touch (issuers, generations, agent credentials
 /// and types, HTTP routes).
 fn system_platform_policy() -> String {
@@ -38,44 +49,78 @@ permit(principal is System, action, resource);
 
 @id("system-platform:identity-entities-permit-trusted-issuer")
 permit(principal, action, resource is TrustedIssuer)
-when {{ principal is System || principal is Admin || ({op}) }};
+when {{ {authority} }};
 
 @id("system-platform:identity-entities-permit-principal-generation")
 permit(principal, action, resource is PrincipalGeneration)
-when {{ principal is System || principal is Admin || ({op}) }};
+when {{ {authority} }};
 
 @id("system-platform:protect-trusted-issuer")
 forbid(principal, action, resource is TrustedIssuer)
-unless {{ principal is System || principal is Admin || ({op}) }};
+unless {{ {authority} }};
 
 @id("system-platform:protect-principal-generation")
 forbid(principal, action, resource is PrincipalGeneration)
-unless {{ principal is System || principal is Admin || ({op}) }};
+unless {{ {authority} }};
 
 // The bearer resolver takes an AgentCredential and its AgentType as a verified
 // identity, so only the platform writes them. Reading them is the tenant's to decide.
 // Each type is in the scope, not the condition, so other types' list reads stay one decision.
 @id("system-platform:protect-agent-credential")
 forbid(principal, action, resource is AgentCredential)
-unless {{ principal is System || principal is Admin || ({op})
+unless {{ {authority}
   || action in [Action::"read", Action::"list"] }};
 
 @id("system-platform:protect-agent-type")
 forbid(principal, action, resource is AgentType)
-unless {{ principal is System || principal is Admin || ({op})
+unless {{ {authority}
   || action in [Action::"read", Action::"list"] }};
 
 // ADR-0069: a route reshapes the tenant's HTTP surface, so only the platform manages one.
 @id("system-platform:http-endpoint-management-permit")
 permit(principal, action in [Action::"create", Action::"Create", Action::"update", Action::"delete", Action::"Pause", Action::"Resume", Action::"Delete"], resource is HttpEndpoint)
-when {{ principal is System || principal is Admin || ({op}) }};
+when {{ {authority} }};
 
 @id("system-platform:protect-http-endpoint-management")
 forbid(principal, action in [Action::"create", Action::"Create", Action::"update", Action::"delete", Action::"Pause", Action::"Resume", Action::"Delete"], resource is HttpEndpoint)
-unless {{ principal is System || principal is Admin || ({op}) }};
+unless {{ {authority} }};
 "#,
-        op = VERIFIED_OPERATOR_WHEN
+        authority = platform_authority_when()
     )
+}
+
+/// The action and resource type the platform-authority question is asked
+/// with. Only [`platform_authority_policy`] names them.
+const PLATFORM_AUTHORITY_ACTION: &str = "ActWithPlatformAuthority";
+const PLATFORM_AUTHORITY_RESOURCE: &str = "Platform";
+
+/// A one-statement policy set that permits exactly the principals with
+/// platform authority. If it fails to parse the set stays empty, so every
+/// principal is denied.
+pub(super) fn platform_authority_policy() -> CompiledPolicies {
+    let text = format!(
+        "permit(principal, action == Action::\"{PLATFORM_AUTHORITY_ACTION}\", resource) when {{ {} }};",
+        platform_authority_when()
+    );
+    CompiledPolicies::new(text.parse().unwrap_or_default())
+}
+
+impl AuthzEngine {
+    /// Whether the caller acts with platform authority (System, Admin, or a
+    /// verified operator), decided by Cedar with the same condition the
+    /// built-in platform policy grants with. Kernel rules that exempt the
+    /// platform ask this instead of reading the principal's fields.
+    pub fn has_platform_authority(&self, security_ctx: &SecurityContext) -> bool {
+        self.evaluate_request(
+            security_ctx,
+            PLATFORM_AUTHORITY_ACTION,
+            PLATFORM_AUTHORITY_RESOURCE,
+            &HashMap::new(),
+            &self.platform_authority_policy,
+            CedarCheck::PlatformAuthority,
+        )
+        .is_allowed()
+    }
 }
 
 /// PolicyId prefix used for the built-in system-platform policies
@@ -120,3 +165,7 @@ pub(super) fn count_user_policies(ps: &PolicySet) -> usize {
         })
         .count()
 }
+
+#[cfg(test)]
+#[path = "platform_policy_test.rs"]
+mod tests;

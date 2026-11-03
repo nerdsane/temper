@@ -53,7 +53,7 @@ pub(super) async fn dispatch_action_bridge_result(
             .or_else(|| action_params.get("client_request_id"))
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
-            .map(str::to_string);
+            .map(|key| crate::idempotency::IdempotencyKey::Request(key.to_string()));
     }
 
     tracing::info!(
@@ -65,14 +65,18 @@ pub(super) async fn dispatch_action_bridge_result(
         "HttpEndpoint action bridge dispatching configured action"
     );
 
-    let dispatch = state
-        .dispatch_tenant_action_ext_typed(
-            &tenant_id,
-            &bridge.entity_type,
-            &entity_id,
-            &bridge.action,
-            action_params,
-            crate::state::DispatchExtOptions {
+    // The record's checks run in the dispatch, on the record as it is. A
+    // dispatch decided on a record that changed first is decided again on it
+    // (`state::redecide`).
+    let mut redecide = crate::state::redecide::Redecide::start(&state);
+    let dispatch = loop {
+        let dispatch = state
+            .dispatch_outside_action(crate::state::DispatchCommand {
+                tenant: &tenant_id,
+                entity_type: &bridge.entity_type,
+                entity_id: &entity_id,
+                action: &bridge.action,
+                params: action_params.clone(),
                 agent_ctx: &agent_ctx,
                 await_integration: true,
                 // Await reactions like the OData action path
@@ -83,15 +87,19 @@ pub(super) async fn dispatch_action_bridge_result(
                 // the reaction is spawned in the background and its
                 // sub_writes are silently dropped.
                 await_reactions: true,
-            },
-        )
-        .await;
+            })
+            .await;
+        let stale = matches!(dispatch, Err(crate::state::DispatchError::StaleWrite(_)));
+        if !redecide.again(stale, "action_bridge") {
+            break dispatch;
+        }
+    };
 
     match dispatch {
         Ok(response) if response.success => {
             action_bridge_success_response(&bridge.response, &refs, sideband)
         }
-        Ok(response) => action_bridge_error_response(
+        Ok(response) => action_bridge_refusal_response(
             &bridge.response,
             &refs,
             sideband,
@@ -99,7 +107,17 @@ pub(super) async fn dispatch_action_bridge_result(
                 .error
                 .as_deref()
                 .unwrap_or("configured action failed"),
+            response.refusal.as_ref(),
         ),
+        Err(crate::state::DispatchError::StaleWrite(stale))
+            if bridge.response != "git-receive-pack" =>
+        {
+            axum::http::Response::builder()
+                .status(axum::http::StatusCode::CONFLICT)
+                .header("content-type", "application/json")
+                .body(Body::from(stale.body().to_string()))
+                .expect("response builder")
+        }
         Err(e) => action_bridge_error_response(&bridge.response, &refs, sideband, &e.to_string()),
     }
 }
@@ -307,19 +325,34 @@ pub(super) fn action_bridge_error_response(
     sideband: bool,
     reason: &str,
 ) -> Response {
+    action_bridge_refusal_response(response_kind, refs, sideband, reason, None)
+}
+
+/// The bridge's failure answer. A JSON answer carries the action's typed
+/// refusal (its `code` and fields) beside `error`, as the OData error does.
+pub(super) fn action_bridge_refusal_response(
+    response_kind: &str,
+    refs: &[String],
+    sideband: bool,
+    reason: &str,
+    refusal: Option<&temper_jit::table::Refusal>,
+) -> Response {
     match response_kind {
         "git-receive-pack" => git_receive_pack_response(refs, sideband, Some(reason)),
-        _ => axum::http::Response::builder()
-            .status(axum::http::StatusCode::BAD_GATEWAY)
-            .header("content-type", "application/json")
-            .body(Body::from(
-                serde_json::json!({
-                    "success": false,
-                    "error": reason,
-                })
-                .to_string(),
-            ))
-            .expect("response builder"),
+        _ => {
+            let mut body = serde_json::json!({
+                "success": false,
+                "error": reason,
+            });
+            if let Some(refusal) = refusal {
+                crate::response::merge_refusal(&mut body, refusal);
+            }
+            axum::http::Response::builder()
+                .status(axum::http::StatusCode::BAD_GATEWAY)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("response builder")
+        }
     }
 }
 
@@ -396,5 +429,42 @@ pub(super) fn sanitize_git_report_text(input: &str) -> String {
         "failed".to_string()
     } else {
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use temper_jit::table::{GuardCondition, Refusal};
+
+    #[tokio::test]
+    async fn a_json_bridge_refusal_carries_the_typed_reason_beside_error() {
+        let refusal = Refusal::GuardFailed {
+            guard: "holders <= 1".into(),
+            conditions: vec![GuardCondition {
+                field: "holders".into(),
+                op: "<=".into(),
+                wants: 1.into(),
+                value: 2.into(),
+            }],
+        };
+        let message =
+            "Action 'Acquire' blocked from state 'Free': guard 'holders <= 1' failed (holders = 2)";
+        let response = action_bridge_refusal_response("json", &[], false, message, Some(&refusal));
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_GATEWAY);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "success": false,
+                "error": message,
+                "code": "GuardFailed",
+                "guard": "holders <= 1",
+                "conditions": [{"field": "holders", "op": "<=", "wants": 1, "value": 2}],
+            })
+        );
     }
 }

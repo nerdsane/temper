@@ -181,7 +181,7 @@ module = "m"
     let trigger = &charge.triggers[0];
     assert_eq!(trigger.name, "charge");
     assert_eq!(trigger.module.as_deref(), Some("stripe"));
-    assert_eq!(trigger.on_success.as_deref(), Some("Done"));
+    assert_eq!(trigger.on_success, ["Done"]);
     assert_eq!(trigger.on_failure.as_deref(), Some("Failed"));
     assert_eq!(
         trigger.config.get("url").map(String::as_str),

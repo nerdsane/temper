@@ -6,6 +6,7 @@ use crate::driver::params;
 use temper_runtime::persistence::{PersistenceError, storage_error};
 use tracing::instrument;
 
+use super::instrumentation::InstrumentedConnection;
 use super::spec_versions::SPEC_VERSION_COLUMNS;
 use super::{TursoEventStore, TursoInstalledAppRow, TursoSpecRow, write_gate::WritePriority};
 use crate::TursoSpecVerificationUpdate;
@@ -34,10 +35,9 @@ impl TursoEventStore {
         content_hash: &str,
     ) -> Result<(), PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.upsert_spec");
-        let _write_permit = self
-            .acquire_write_permit("turso.upsert_spec", WritePriority::High)
+        let conn = self
+            .write_connection("turso.upsert_spec", WritePriority::High)
             .await?;
-        let conn = self.configured_connection().await?;
         let tx = conn.begin_immediate().await.map_err(storage_error)?;
         // A committed version about to be replaced is kept until the new one
         // commits, so startup recovery can put it back.
@@ -105,6 +105,13 @@ impl TursoEventStore {
     ///
     /// This eliminates the crash-vulnerability window where individual upserts
     /// leave specs with `committed=0` that get garbage-collected on restart.
+    ///
+    /// A row it changes is written verified, so it is written once. The caller
+    /// installs a prebuilt bundle it trusts (`TrustBundle`), which runs no check
+    /// that could say otherwise, and an update rewrites the whole row with the
+    /// tenant's schema in it: marking every row in a write of its own afterwards
+    /// took 72 commits and about 7 s on a Tensorlake drive (Arni Labs, 1 Nov 2026),
+    /// against 74 ms for this one transaction.
     #[instrument(skip_all, fields(tenant, app_name, otel.name = "turso.upsert_specs_and_commit"))]
     pub async fn upsert_specs_and_commit(
         &self,
@@ -125,8 +132,9 @@ impl TursoEventStore {
             return Ok(());
         }
 
-        let _write_permit = self
-            .acquire_write_permit("turso.upsert_specs_and_commit", WritePriority::High)
+        drop(conn);
+        let conn = self
+            .write_connection("turso.upsert_specs_and_commit", WritePriority::High)
             .await?;
         let tx = conn.begin_immediate().await.map_err(storage_error)?;
 
@@ -134,7 +142,7 @@ impl TursoEventStore {
             let (entity_type, ioa_source, csdl_xml, content_hash) = specs[index];
             tx.execute(
                 "INSERT INTO specs (tenant, entity_type, ioa_source, csdl_xml, content_hash, committed, version, verified, verification_status, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 1, 1, 0, 'pending', datetime('now'))
+                 VALUES (?1, ?2, ?3, ?4, ?5, 1, 1, 1, 'completed', datetime('now'))
                  ON CONFLICT (tenant, entity_type) DO UPDATE SET
                      ioa_source = CASE
                          WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml
@@ -151,10 +159,10 @@ impl TursoEventStore {
                          THEN specs.version + 1 ELSE specs.version END,
                      verified = CASE
                          WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml
-                         THEN 0 ELSE specs.verified END,
+                         THEN 1 ELSE specs.verified END,
                      verification_status = CASE
                          WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml
-                         THEN 'pending' ELSE specs.verification_status END,
+                         THEN 'completed' ELSE specs.verification_status END,
                      levels_passed = CASE
                          WHEN specs.content_hash IS NOT excluded.content_hash OR specs.csdl_xml IS NOT excluded.csdl_xml
                          THEN NULL ELSE specs.levels_passed END,
@@ -205,7 +213,7 @@ impl TursoEventStore {
 
     async fn spec_indices_requiring_upsert(
         &self,
-        conn: &crate::driver::Connection,
+        conn: &InstrumentedConnection,
         tenant: &str,
         specs: &[(&str, &str, &str, &str)],
     ) -> Result<Vec<usize>, PersistenceError> {
@@ -235,7 +243,7 @@ impl TursoEventStore {
     }
 
     async fn load_spec_fingerprints(
-        conn: &crate::driver::Connection,
+        conn: &InstrumentedConnection,
         tenant: &str,
         entity_types: &[&str],
     ) -> Result<BTreeMap<String, ExistingSpecFingerprint>, PersistenceError> {
@@ -286,7 +294,7 @@ impl TursoEventStore {
     }
 
     async fn tenant_policy_needs_write(
-        conn: &crate::driver::Connection,
+        conn: &InstrumentedConnection,
         tenant: &str,
         policy: Option<&str>,
     ) -> Result<bool, PersistenceError> {
@@ -309,7 +317,7 @@ impl TursoEventStore {
     }
 
     async fn installed_app_needs_write(
-        conn: &crate::driver::Connection,
+        conn: &InstrumentedConnection,
         tenant: &str,
         app_name: &str,
     ) -> Result<bool, PersistenceError> {
@@ -331,7 +339,9 @@ impl TursoEventStore {
         entity_type: &str,
     ) -> Result<(), PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.delete_spec");
-        let conn = self.configured_connection().await?;
+        let conn = self
+            .write_connection("turso.delete_spec", WritePriority::High)
+            .await?;
         let tx = conn.begin_immediate().await.map_err(storage_error)?;
         for sql in [
             "DELETE FROM specs WHERE tenant = ?1 AND entity_type = ?2",
@@ -353,7 +363,9 @@ impl TursoEventStore {
         update: TursoSpecVerificationUpdate<'_>,
     ) -> Result<(), PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.persist_spec_verification");
-        let conn = self.configured_connection().await?;
+        let conn = self
+            .write_connection("turso.persist_spec_verification", WritePriority::High)
+            .await?;
         conn.execute(
             "UPDATE specs SET
                  verified = ?3,
@@ -450,7 +462,9 @@ impl TursoEventStore {
         app_name: &str,
     ) -> Result<(), PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.record_installed_app");
-        let conn = self.configured_connection().await?;
+        let conn = self
+            .write_connection("turso.record_installed_app", WritePriority::High)
+            .await?;
         conn.execute(
             "INSERT OR IGNORE INTO tenant_installed_apps (tenant_id, app_name) VALUES (?1, ?2)",
             params![tenant_id, app_name],
@@ -467,7 +481,9 @@ impl TursoEventStore {
         record: &TursoInstalledAppRow,
     ) -> Result<(), PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.record_installed_app_metadata");
-        let conn = self.configured_connection().await?;
+        let conn = self
+            .write_connection("turso.record_installed_app_metadata", WritePriority::High)
+            .await?;
         conn.execute(
             "INSERT INTO tenant_installed_apps (
                  tenant_id, app_name, source_kind, app_ref, version_hash,
@@ -602,7 +618,9 @@ impl TursoEventStore {
     #[instrument(skip_all, fields(tenant_id, otel.name = "turso.remove_installed_apps"))]
     pub async fn remove_installed_apps(&self, tenant_id: &str) -> Result<(), PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.remove_installed_apps");
-        let conn = self.configured_connection().await?;
+        let conn = self
+            .write_connection("turso.remove_installed_apps", WritePriority::High)
+            .await?;
         conn.execute(
             "DELETE FROM tenant_installed_apps WHERE tenant_id = ?1",
             params![tenant_id],
@@ -677,7 +695,9 @@ impl TursoEventStore {
     #[instrument(skip_all, fields(tenant, otel.name = "turso.commit_specs"))]
     pub async fn commit_specs(&self, tenant: &str) -> Result<(), PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.commit_specs");
-        let conn = self.configured_connection().await?;
+        let conn = self
+            .write_connection("turso.commit_specs", WritePriority::High)
+            .await?;
         let tx = conn.begin_immediate().await.map_err(storage_error)?;
         tx.execute(
             "UPDATE specs SET committed = 1, updated_at = datetime('now') WHERE tenant = ?1 AND committed != 1",

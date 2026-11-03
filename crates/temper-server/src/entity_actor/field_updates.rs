@@ -15,41 +15,54 @@ use serde_json::Value;
 use temper_runtime::persistence::PersistenceError;
 use temper_runtime::scheduler::sim_now;
 
-use super::actor::{EntityActor, ReplayPolicy};
+use super::actor::{EntityActor, ReplayLogging, ReplayPolicy};
 use super::effects;
 use super::types::{EntityEvent, EntityState, MAX_EVENTS_SINCE_SNAPSHOT};
 
 /// Attempts allowed after the first, matching the `Action` arm's ADR-0046 budget.
 const MAX_RETRIES: u32 = 2;
 
+/// Why a field update is not in the journal. `state` has been restored (a
+/// refusal never leaves a partial write), except on `RecordChanged`, where it
+/// is caught up.
+pub(super) enum NotUpdated {
+    /// The update was decided on a state the journal had already moved past.
+    /// The record is caught up, and the route decides the update again on it.
+    RecordChanged,
+    /// Refused or failed before the store was asked; the caller replies with
+    /// the reason verbatim.
+    Failed(String),
+    /// The store did not take the update's event.
+    Store(PersistenceError),
+}
+
 /// Apply a field update and make it durable, or refuse it.
 ///
-/// `Ok(())` means the update is in the journal. `Err(reason)` means it is not,
-/// and `state` has been restored — a refusal never leaves a partial write. The
-/// caller replies with the reason verbatim.
+/// `Ok(())` means the update is in the journal. An error means it is not, and
+/// `state` has been restored (a refusal never leaves a partial write) or, on
+/// [`NotUpdated::RecordChanged`], caught up with the journal.
 pub(super) async fn commit_field_update(
     actor: &EntityActor,
     state: &mut EntityState,
     fields: Value,
     replace: bool,
-    expected_precondition: Option<String>,
-) -> Result<(), String> {
+    has_precondition: bool,
+    caller: Option<&crate::request_context::AgentContext>,
+) -> Result<(), NotUpdated> {
     if actor
         .table
         .read()
         .expect("table lock poisoned")
         .strict_action_params
     {
-        return Err("Strict entities require a declared action for field changes".to_owned());
-    }
-    let has_precondition = expected_precondition.is_some();
-    if let Some(expected) = expected_precondition
-        && effects::entity_authorization_precondition(state) != expected
-    {
-        return Err(STALE_AUTHORIZATION.to_string());
+        return Err(NotUpdated::Failed(
+            "Strict entities require a declared action for field changes".to_owned(),
+        ));
     }
     if state.status == "Deleted" {
-        return Err("cannot update fields after entity deletion".to_string());
+        return Err(NotUpdated::Failed(
+            "cannot update fields after entity deletion".to_string(),
+        ));
     }
     // `parse_json_body_or_400` accepts any valid JSON, so a `PUT` body of
     // `[1,2,3]` reaches here. With `replace`, `apply_field_update` would set
@@ -59,14 +72,16 @@ pub(super) async fn commit_field_update(
     // journaled that corruption was in-memory and healed on restart; persisting
     // it would make it permanent.
     if !fields.is_object() {
-        return Err("entity field update must be a JSON object".to_string());
+        return Err(NotUpdated::Failed(
+            "entity field update must be a JSON object".to_string(),
+        ));
     }
     // The same budget that gates spec actions. Field updates append journal
     // events too, so ungated they could grow the snapshot replay tail past
     // `MAX_EVENTS_SINCE_SNAPSHOT` while the snapshot path is stalled, after which
     // the entity can never rehydrate. Rejected before mutating.
     if let Some(reason) = budget_refusal(actor, state, replace) {
-        return Err(reason);
+        return Err(NotUpdated::Failed(reason));
     }
 
     // Sanitize once and use the same value for state and journal.
@@ -94,16 +109,25 @@ pub(super) async fn commit_field_update(
         "object-ness was checked above; the apply cannot decline"
     );
     let mut event = field_event(action, state, &fields);
+    event.origin = super::EventOrigin::from_caller(caller);
 
     let (Some(store), Some(backend)) = (actor.event_journal.as_ref(), actor.event_backend) else {
-        // No configured persistence: memory-only, as in every other handler.
+        // The same event metadata is visible without a journal.
+        state.push_event_bounded(event);
         return Ok(());
     };
 
     let mut attempt: u32 = 0;
     loop {
         match actor
-            .persist_event(store, backend, &actor.persistence_id(), state, &event)
+            .persist_event(
+                store,
+                backend,
+                state,
+                &event,
+                &super::scheduled_rows::ScheduledRows::default(),
+                None,
+            )
             .await
         {
             Ok(_) => break,
@@ -113,10 +137,14 @@ pub(super) async fn commit_field_update(
             // re-applying would commit against state the caller never saw and
             // Cedar never evaluated. `entity_ops` already caps preconditioned asks
             // at a single attempt for that reason; retrying here would reintroduce
-            // one layer down the retry the layer above forbids.
-            Err(PersistenceError::ConcurrencyViolation { .. }) if has_precondition => {
-                state.fields = previous_fields;
-                return Err(STALE_AUTHORIZATION.to_string());
+            // one layer down the retry the layer above forbids. The record is
+            // caught up instead, so the route decides the update again on it.
+            Err(PersistenceError::ConcurrencyViolation { actual, .. }) if has_precondition => {
+                if let Err(reason) = catch_up(actor, state, 1, actual, action).await {
+                    state.fields = previous_fields;
+                    return Err(NotUpdated::Failed(reason));
+                }
+                return Err(NotUpdated::RecordChanged);
             }
             Err(PersistenceError::ConcurrencyViolation { actual, .. }) if attempt < MAX_RETRIES => {
                 attempt += 1;
@@ -124,11 +152,11 @@ pub(super) async fn commit_field_update(
                     Ok(()) => {}
                     Err(reason) => {
                         state.fields = previous_fields;
-                        return Err(reason);
+                        return Err(NotUpdated::Failed(reason));
                     }
                 }
                 if let Some(reason) = post_replay_refusal(actor, state, replace) {
-                    return Err(reason);
+                    return Err(NotUpdated::Failed(reason));
                 }
                 // Re-apply onto the caught-up state and rebuild the event against
                 // its (possibly new) status.
@@ -139,10 +167,11 @@ pub(super) async fn commit_field_update(
                     "object-ness was checked above; the apply cannot decline"
                 );
                 event = field_event(action, state, &fields);
+                event.origin = super::EventOrigin::from_caller(caller);
             }
             Err(e) => {
                 state.fields = previous_fields;
-                return Err(super::actor::persistence_failure(&e));
+                return Err(NotUpdated::Store(e));
             }
         }
     }
@@ -150,13 +179,18 @@ pub(super) async fn commit_field_update(
     state.push_event_bounded(event);
 
     let persistence_id = actor.persistence_id();
-    if let Err(e) = EntityActor::maybe_save_snapshot(
-        store,
-        actor.snapshot_queue.as_ref(),
-        &persistence_id,
-        state,
-    )
-    .await
+    if let Err(e) = actor
+        .now
+        .during(
+            super::watchdog::Doing::Snapshotting,
+            EntityActor::maybe_save_snapshot(
+                store,
+                actor.snapshot_queue.as_ref(),
+                &persistence_id,
+                state,
+            ),
+        )
+        .await
     {
         tracing::warn!(
             entity = %state.entity_id,
@@ -169,10 +203,10 @@ pub(super) async fn commit_field_update(
     Ok(())
 }
 
-/// The refusal an update gets when the state it was authorized against moved.
-/// Shared by the entry check and the conflict path so a caller cannot tell the
-/// two apart — both mean "re-read and retry".
-const STALE_AUTHORIZATION: &str =
+/// The refusal an update gets when the state it was authorized against moved,
+/// whether the actor's entry check or a conflict on its append found it. The
+/// route then decides the update again on the record as it is now.
+pub(super) const STALE_AUTHORIZATION: &str =
     "field update authorization became stale; retry against current state";
 
 fn field_event(action: &str, state: &EntityState, fields: &Value) -> EntityEvent {
@@ -183,7 +217,9 @@ fn field_event(action: &str, state: &EntityState, fields: &Value) -> EntityEvent
         timestamp: sim_now(),
         params: fields.clone(),
         idempotency_key: None,
+        origin: crate::entity_actor::EventOrigin::internal(),
         kind: temper_runtime::persistence::EventKind::Transition,
+        outcome: None,
     }
 }
 
@@ -215,7 +251,8 @@ fn budget_refusal(actor: &EntityActor, state: &EntityState, replace: bool) -> Op
     ))
 }
 
-/// Rebuild `state` from the journal after a sequence conflict.
+/// Rebuild `state` from the journal after a sequence conflict. A field update
+/// and a delete that met one catch up through here before they answer.
 ///
 /// Rebuilds from a *fresh* initial state, exactly as
 /// `recover_entity_state_from_store` does. `replay_events` applies onto whatever
@@ -226,7 +263,7 @@ fn budget_refusal(actor: &EntityActor, state: &EntityState, replace: bool) -> Op
 /// the caller, upserted into the query projection, and made durable by the next
 /// snapshot. Rolling back `fields` alone cannot help — those other fields were
 /// never part of the speculative update.
-async fn catch_up(
+pub(super) async fn catch_up(
     actor: &EntityActor,
     state: &mut EntityState,
     attempt: u32,
@@ -235,18 +272,21 @@ async fn catch_up(
 ) -> Result<(), String> {
     // Back off first, or against a live concurrent writer the whole budget burns
     // in microseconds and the retry buys nothing.
-    super::actor::sleep_persistence_retry(std::time::Duration::from_millis(if attempt == 1 {
-        10
-    } else {
-        50
-    }))
-    .await;
+    actor
+        .now
+        .during(
+            super::watchdog::Doing::RetryPause,
+            super::actor::sleep_persistence_retry(std::time::Duration::from_millis(
+                if attempt == 1 { 10 } else { 50 },
+            )),
+        )
+        .await;
     tracing::warn!(
         entity = %state.entity_id,
         action = %action,
         actual_seq = actual,
         attempt,
-        "field update hit optimistic-concurrency violation; replaying and retrying"
+        "write hit an optimistic-concurrency violation; catching up with the journal"
     );
 
     let (Some(store), Some(backend)) = (actor.event_journal.as_ref(), actor.event_backend) else {
@@ -262,17 +302,22 @@ async fn catch_up(
     // A replay failure is returned as a refusal rather than propagated: bailing
     // out of the message handler would leave the caller's `ask` unanswered until
     // it times out, with the entity mid-rollback.
-    EntityActor::replay_events(
-        &table,
-        store,
-        backend,
-        &mut caught_up,
-        &actor.tenant,
-        actor.blob_store.as_ref(),
-        ReplayPolicy::LenientSnapshot,
-    )
-    .await
-    .map_err(|e| format!("conflict recovery replay failed: {e}"))?;
+    actor
+        .now
+        .during(
+            super::watchdog::Doing::Replaying,
+            EntityActor::replay_events(
+                &table,
+                store,
+                backend,
+                &mut caught_up,
+                &actor.tenant,
+                actor.blob_store.as_ref(),
+                (ReplayPolicy::StrictSnapshot, ReplayLogging::Actor),
+            ),
+        )
+        .await
+        .map_err(|e| format!("conflict recovery replay failed: {e}"))?;
     debug_assert!(
         caught_up.sequence_nr >= actual,
         "POSTCONDITION: field-update replay under-reached the authoritative sequence \

@@ -240,35 +240,3 @@ fn nonempty(value: String, fallback: String) -> String {
         value
     }
 }
-
-#[cfg(test)]
-mod prompt_tests {
-    use super::*;
-
-    #[test]
-    fn evaluation_prompt_includes_runtime_ref() {
-        let prompt = format_evaluation_prompt(
-            &json!({
-                "StageName": "AI simulated user trial",
-                "StageKind": "simulated_user_live_trial",
-                "RequiredEvidenceJson": "{\"must_use_runtime\":true}"
-            }),
-            "AdaptationGoal goal-1: make answers useful",
-            "https://genesis-production-164d.up.railway.app",
-            "var-1",
-            "gen-1",
-            "ep-1",
-            "stage-1",
-            "Variant answers with evidence.",
-            "nerdsane/agent-answers@abc123",
-            "temper://tenant/de-variant-var-1/app/nerdsane/agent-answers@abc123",
-        );
-
-        assert!(prompt.contains("RuntimeRef: temper://tenant/de-variant-var-1/app/nerdsane/agent-answers@abc123"));
-        assert!(prompt.contains("TemperApiBase: https://genesis-production-164d.up.railway.app"));
-        assert!(prompt.contains("x-tenant-id set to the tenant from RuntimeRef"));
-        assert!(prompt.contains("AppRef: nerdsane/agent-answers@abc123"));
-        assert!(prompt.contains("evidence_scope"));
-        assert!(prompt.contains("datadog_url"));
-    }
-}

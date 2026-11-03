@@ -11,11 +11,12 @@
 /// Handler for custom effects triggered by entity state machine transitions.
 ///
 /// Implementations registered on [`ServerState::custom_effect_handler`] are
-/// called by the post-dispatch effects pipeline for every custom effect name.
+/// called by the post-dispatch effects pipeline for each custom effect of a
+/// temper-system entity. Entities in other tenants never reach the handler.
 pub trait CustomEffectHandler: Send + Sync {
     /// Handle a custom effect.
     ///
-    /// - `effect_name`: the effect trigger name (e.g. "GenerateCedarPolicy")
+    /// - `effect_name`: the effect trigger name (e.g. "DispatchCallback")
     /// - `entity_type`: the entity type that transitioned
     /// - `entity_id`: the entity instance ID
     /// - `entity_fields`: merged entity state fields (includes all params from all prior actions)

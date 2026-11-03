@@ -39,6 +39,7 @@ async fn action(actor: &ActorRef<EntityMsg>, name: &str) -> EntityResponse {
     actor
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: name.to_string(),
                 params: serde_json::json!({}),
                 related: BTreeMap::new(),
@@ -155,6 +156,7 @@ async fn dst_actor_admission_tombstone_rejects_actions_without_stopping() {
         let deleted: EntityResponse = actor
             .ask(
                 EntityMsg::Delete {
+                    caller: None,
                     expected_authorization_precondition: None,
                 },
                 ASK_BUDGET,

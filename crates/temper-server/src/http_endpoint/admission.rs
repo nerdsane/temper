@@ -45,13 +45,25 @@ pub(super) fn resolve(value: &str, captures: &BTreeMap<String, String>) -> Resul
     }
 }
 
+/// The most of one admission action's answer held for the module. Its reason is memory: it is held per request
+/// before the module runs. An answer is the record as a read shows it (bindings/mod.rs), so only a record whose own
+/// fields approach this reaches it.
+const ANSWER_BUDGET_BYTES: usize = 8 * 1024 * 1024;
+
 pub(crate) async fn admit(
     state: &ServerState,
     authenticated: &AuthenticatedRequestContext,
+    endpoint_id: &str,
     captures: &BTreeMap<String, String>,
     actions: Vec<AdmissionAction>,
 ) -> Result<BTreeMap<String, Value>, Response<Body>> {
+    // A refusal here answers before the module runs, so this log is the only place that says why.
     let invalid = |message: &str| {
+        tracing::warn!(
+            endpoint_id,
+            reason = message,
+            "endpoint admission refused the request"
+        );
         odata_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "InvalidEndpoint",
@@ -124,7 +136,7 @@ pub(crate) async fn admit(
             State(state.clone()),
             Some(Extension(authenticated.clone())),
             HeaderMap::new(),
-            Path(path),
+            Path(path.clone()),
             Query(BTreeMap::new()),
             params,
         ))
@@ -134,11 +146,15 @@ pub(crate) async fn admit(
             return Err(requires_completion());
         }
         if !response.status().is_success() {
-            return Err(response);
+            return Err(log_refusal_response(endpoint_id, &name, &path, response).await);
         }
-        let bytes = match to_bytes(response.into_body(), 8 * 1024 * 1024).await {
+        let bytes = match to_bytes(response.into_body(), ANSWER_BUDGET_BYTES).await {
             Ok(v) => v,
-            Err(_) => return Err(invalid("admission response exceeds budget")),
+            Err(_) => {
+                return Err(invalid(&format!(
+                    "the answer of {path} exceeds {ANSWER_BUDGET_BYTES} bytes"
+                )));
+            }
         };
         let value = match serde_json::from_slice(&bytes) {
             Ok(v) => v,
@@ -154,3 +170,39 @@ fn requires_completion() -> Response {
         "endpoint admission requires completed OData actions; queued PostgreSQL actions are not supported")
         .into_response()
 }
+
+async fn log_refusal_response(
+    endpoint_id: &str,
+    name: &str,
+    path: &str,
+    response: Response,
+) -> Response {
+    let status = response.status();
+    let (parts, body) = response.into_parts();
+    // OData refusals can contain stored field values. Keep their original body,
+    // even when it is larger than a successful admission answer's budget.
+    let body = match to_bytes(body, usize::MAX).await {
+        Ok(body) => body,
+        Err(error) => {
+            tracing::warn!(endpoint_id, admission = %name, %path, %status, %error,
+                "endpoint admission refusal body could not be read");
+            // Keep the status, headers and body failure instead of turning an
+            // unreadable refusal into a successful read of an empty body.
+            let body =
+                Body::from_stream(futures_util::stream::once(
+                    async move { Err::<Bytes, _>(error) },
+                ));
+            return Response::from_parts(parts, body);
+        }
+    };
+    let reason = String::from_utf8_lossy(&body);
+    if status.is_server_error() {
+        tracing::warn!(endpoint_id, admission = %name, %path, %status, %reason, "endpoint admission action failed");
+    } else {
+        tracing::info!(endpoint_id, admission = %name, %path, %status, %reason, "endpoint admission action refused");
+    }
+    Response::from_parts(parts, Body::from(body))
+}
+
+#[cfg(test)]
+mod tests;

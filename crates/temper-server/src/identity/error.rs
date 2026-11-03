@@ -98,7 +98,7 @@ mod tests {
     // exact `what` string. The TrustedIssuer and PrincipalGeneration checks
     // first make their type's index complete from the store
     // (`ServerState::ensure_type_indexed`, a listing whose failure maps to
-    // `Unavailable` in `IdentityResolver::resolve_jwt`/`current_generation`),
+    // `Unavailable` in `IdentityResolver::resolve_jwt` and `revocation::current_generation`),
     // then read the row through `entity_state`. `SimEventStore` injects faults
     // into reads of one entity's events, not into listings, so the listing's
     // failure has no end-to-end fixture in this workspace; this is the

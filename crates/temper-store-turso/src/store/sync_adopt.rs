@@ -161,7 +161,9 @@ async fn copy_table(
         }
         if chunk.len() >= CHUNK_ROWS || bytes >= CHUNK_BYTES || (row.is_none() && !chunk.is_empty())
         {
-            let target = new.connection().await?;
+            let target = new
+                .write_connection("turso.adopt_copy_table", super::WritePriority::High)
+                .await?;
             let tx = target.begin_immediate().await.map_err(storage_error)?;
             for values in chunk.drain(..) {
                 tx.execute(&insert, params_from_iter(values))

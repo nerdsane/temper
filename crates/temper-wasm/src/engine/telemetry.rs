@@ -72,6 +72,7 @@ pub(super) fn empty_result(
         success: false,
         error: Some("module returned empty result".to_string()),
         duration_ms,
+        empty_answer: false,
     }
 }
 
@@ -147,6 +148,7 @@ pub(super) fn finalize_result(
         success,
         error,
         duration_ms,
+        empty_answer: parsed.get("empty").and_then(|v| v.as_bool()) == Some(true),
     }
 }
 

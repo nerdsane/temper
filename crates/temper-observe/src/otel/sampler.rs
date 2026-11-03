@@ -26,12 +26,12 @@ pub(super) const DISPATCH_BACKGROUND_SAMPLE_RATE_DEFAULT: u8 = 25;
 /// of their own (inside a trace they are always kept). Do not include
 /// tool/provider guest module boundaries or their background dispatch parents
 /// here: guest spans inherit parent sampling, so reducing those boundaries can
-/// sever traces operators need when following work through WASM.
+/// sever traces operators need when following work through WASM. Do not include
+/// the root span of runtime-started work either (a timer, a scheduled action, a
+/// spawn, a background reaction or integration): each such move is a trace of
+/// its own, and every one is kept.
 pub(super) const WASM_AUXILIARY_PREFIXES: &[&str] = &["wasm:workspace_fs"];
-pub(super) const DISPATCH_BACKGROUND_PREFIXES: &[&str] = &[
-    "dispatch.phase.query_projection",
-    "dispatch.scheduled_actions",
-];
+pub(super) const DISPATCH_BACKGROUND_PREFIXES: &[&str] = &["dispatch.phase.query_projection"];
 
 #[derive(Clone, Debug)]
 struct ReducedSampleRule {

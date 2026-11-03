@@ -103,7 +103,9 @@ fn credential_entity_state() -> EntityState {
         last_snapshot_sequence_nr: 0,
         sequence_nr: 0,
         processed_idempotency_keys: BTreeMap::new(),
+        last_event: Default::default(),
         status_clock: Default::default(),
+        spawn_reservations: Default::default(),
     }
 }
 
@@ -699,6 +701,7 @@ async fn strict_adapter_callbacks_keep_declared_values_in_both_modes() {
                     entity_type: "StrictJob",
                     entity_id: "job",
                 },
+                "fixture",
                 "Complete",
                 params,
                 &AgentContext::for_service("test-adapter"),
@@ -745,6 +748,7 @@ async fn strict_adapter_stale_callback_is_visible_without_requesting_compensatio
                     entity_type: "StrictJob",
                     entity_id: "job",
                 },
+                "fixture",
                 "Complete",
                 serde_json::json!({"observed":"stale", "expected_revision":1, "duration_ms":17}),
                 &agent,
@@ -786,6 +790,7 @@ name = "Rollover""#,
                 entity_type: "StrictJob",
                 entity_id: "job",
             },
+            "fixture",
             "Complete",
             serde_json::json!({"observed":"receipt","expected_revision":1}),
             &AgentContext::for_service("local-adapter"),

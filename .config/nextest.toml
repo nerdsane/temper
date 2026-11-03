@@ -1,3 +1,20 @@
+# The tests over a 300,000-row change log keep four periods for draining it
+# with production trim code, and so do the three that trim on a simulated
+# slow drive (their fixture and their seconds of trimming). The pinned release tursodb
+# builds the fixture so debug-build inserts do not consume that budget before
+# trimming starts. Their output is kept on success too: each trim's log line
+# shows the drain rate, the batch sizes and how long the trim held the lock.
+# This entry comes first because the first matching override sets each
+# setting.
+# These checks measure throughput and latency against wall-clock budgets.
+# Reserve all test slots so unrelated tests cannot consume their CPU or disk
+# time. Keep the row counts, trim-call bound and timing assertions unchanged.
+[[profile.default.overrides]]
+filter = 'binary(turso_sync) & (test(no_answer_waits_on_a_trim) | test(the_background_trim_clears_a_long_confirmed_log_in_budgeted_calls) | test(the_trim_outpaces_the_log_while_every_commit_is_slow) | test(a_write_waiting_during_a_trim_batch_goes_before_the_next_batch) | test(a_trim_batch_that_overruns_its_plan_gives_way_to_a_waiting_write))'
+threads-required = "num-test-threads"
+slow-timeout = { period = "60s", terminate-after = 4 }
+success-output = "final"
+
 # The Turso Sync tests talk to a local sync server; a hang there should fail
 # the test with its output, not hold the job until its own timeout.
 [[profile.default.overrides]]

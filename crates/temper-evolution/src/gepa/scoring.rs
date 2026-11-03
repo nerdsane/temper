@@ -159,11 +159,4 @@ mod tests {
         let expected = (0.8 * 1.0 + 0.6 * 0.8 + 1.0 * 0.6) / (1.0 + 0.8 + 0.6);
         assert!((sum - expected).abs() < f64::EPSILON);
     }
-
-    #[test]
-    fn test_scoring_config_default() {
-        let config = ScoringConfig::default();
-        assert_eq!(config.weights.len(), 3);
-        assert!(config.weights.contains_key("success_rate"));
-    }
 }

@@ -516,7 +516,7 @@ reaches = ["State3"]
 |---|---|
 | `x = 5`, `x = params.p`, `x += 1`, `x -= 1` | counter (`-=` stops at 0) |
 | `b = true`, `b = other_bool`, `b = params.p` | bool |
-| `append(tags, 'v')`, `append(tags, params.p)`, `remove_at(tags, params.i)` | list of strings |
+| `append(tags, 'v')`, `append(tags, params.p)`, `remove(tags, params.p)`, `remove_at(tags, params.i)` | list of strings |
 | `schedule('Action', 3600)`, `schedule_at('Action', field)` | a declared action on this entity |
 | `spawn('Type', 'Create', id_var)` (optional 4th arg: child id) | a new child entity |
 

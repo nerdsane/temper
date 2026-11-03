@@ -451,6 +451,32 @@ async fn a_replaced_module_leaves_the_compiled_cache() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_module_whose_stored_bytes_do_not_match_its_hash_is_not_loaded() {
+    let state = build_echo_test_state_with_turso().await;
+    let tenant = TenantId::default();
+    let turso = state
+        .platform_turso_store()
+        .expect("turso backend required");
+    let hash = temper_wasm::WasmEngine::hash_module(ECHO_WASM);
+
+    turso
+        .upsert_wasm_module("default", "echo_integration", ECHO_WASM, &hash, "bundled")
+        .await
+        .expect("persist metadata-only echo module");
+    turso
+        .put_blob(&format!("wasm-modules/{hash}"), b"other bytes")
+        .await
+        .expect("persist other bytes under the module's key");
+
+    let refused = state
+        .ensure_wasm_module_cached(&tenant, "echo_integration", &hash)
+        .await
+        .expect_err("bytes that are not the module's are not loaded");
+    assert!(refused.contains("does not match its hash"), "{refused}");
+    assert!(!state.wasm_engine.is_cached(&hash));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn persisted_wasm_modules_with_legacy_db_blob_fallback_execute_after_startup_restore() {
     let state = build_echo_test_state_with_turso().await;
     let tenant = TenantId::default();

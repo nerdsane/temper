@@ -78,6 +78,12 @@ impl fmt::Display for Operand {
                 entity_type,
                 id_field,
             } => write!(f, "{entity_type}[{id_field}].status"),
+            Operand::CrossField {
+                entity_type,
+                id_field,
+                field,
+            } => write!(f, "{entity_type}[{id_field}].{field}"),
+            Operand::Param(name) => write!(f, "params.{name}"),
             Operand::Lit(lit) => write!(f, "{lit}"),
         }
     }
@@ -87,7 +93,7 @@ impl fmt::Display for Literal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Literal::Int(value) => write!(f, "{value}"),
-            Literal::Str(value) => write!(f, "'{value}'"),
+            Literal::Str(value) => write!(f, "'{}'", value.replace('\'', "''")),
             Literal::Bool(value) => write!(f, "{value}"),
             Literal::Null => f.write_str("null"),
         }

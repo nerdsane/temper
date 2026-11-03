@@ -368,7 +368,10 @@ pub async fn handle_list_wasm_modules(
             .await;
         for store in store.iter() {
             if let Ok(rows) = store
-                .load_recent_wasm_invocations(tenant_scope.as_str(), 10_000)
+                .load_recent_wasm_invocations(
+                    tenant_scope.as_str(),
+                    temper_runtime::persistence::WASM_INVOCATIONS_KEPT_PER_TENANT,
+                )
                 .await
             {
                 for row in rows {
@@ -444,7 +447,10 @@ pub async fn handle_list_wasm_invocations(
 ) -> Result<Json<WasmInvocationResponse>, StatusCode> {
     let authenticated = require_authenticated_context(authenticated.as_deref())?;
     require_observe_auth(&state, authenticated, "read_wasm", "WasmModule")?;
-    let limit = params.limit.unwrap_or(100).min(10_000);
+    let limit = params
+        .limit
+        .unwrap_or(100)
+        .min(temper_runtime::persistence::WASM_INVOCATIONS_KEPT_PER_TENANT as usize);
 
     let mut all_filtered: Vec<serde_json::Value> = Vec::new();
     let store = state

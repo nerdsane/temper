@@ -22,6 +22,7 @@ use temper_runtime::tenant::parse_persistence_id_parts;
 
 use crate::TursoEventStore;
 use crate::schema;
+use crate::store::WritePriority;
 
 /// Routes storage operations to per-tenant Turso databases.
 ///
@@ -205,7 +206,10 @@ impl TenantStoreRouter {
         user_id: &str,
         role: &str,
     ) -> Result<(), PersistenceError> {
-        let conn = self.platform.connection().await.map_err(storage_error)?;
+        let conn = self
+            .platform
+            .write_connection("router.add_tenant_user", WritePriority::High)
+            .await?;
         conn.execute(
             "INSERT OR REPLACE INTO tenant_users (tenant_id, user_id, role) VALUES (?1, ?2, ?3)",
             crate::driver::params![tenant_id, user_id, role],
@@ -247,7 +251,10 @@ impl TenantStoreRouter {
     /// and evicts the in-memory store connection.
     #[instrument(skip_all, fields(tenant_id, otel.name = "router.remove_tenant"))]
     pub async fn remove_tenant(&self, tenant_id: &str) -> Result<bool, PersistenceError> {
-        let conn = self.platform.connection().await.map_err(storage_error)?;
+        let conn = self
+            .platform
+            .write_connection("router.remove_tenant", WritePriority::High)
+            .await?;
 
         // Delete associated users and installed apps first.
         conn.execute(
@@ -289,7 +296,10 @@ impl TenantStoreRouter {
         tenant_id: &str,
         user_id: &str,
     ) -> Result<(), PersistenceError> {
-        let conn = self.platform.connection().await.map_err(storage_error)?;
+        let conn = self
+            .platform
+            .write_connection("router.remove_tenant_user", WritePriority::High)
+            .await?;
         conn.execute(
             "DELETE FROM tenant_users WHERE tenant_id = ?1 AND user_id = ?2",
             crate::driver::params![tenant_id, user_id],
@@ -361,7 +371,10 @@ impl TenantStoreRouter {
         let store = TursoEventStore::new(&db_url, auth_token.as_deref()).await?;
 
         // Register in platform DB.
-        let conn = self.platform.connection().await.map_err(storage_error)?;
+        let conn = self
+            .platform
+            .write_connection("router.register_tenant", WritePriority::High)
+            .await?;
         conn.execute(
             "INSERT INTO tenant_registry (tenant_id, turso_db_url, turso_auth_token)
              VALUES (?1, ?2, ?3)",
@@ -382,7 +395,9 @@ impl TenantStoreRouter {
 
     /// Run platform-specific schema migrations.
     async fn migrate_platform(store: &TursoEventStore) -> Result<(), PersistenceError> {
-        let conn = store.connection().await.map_err(storage_error)?;
+        let conn = store
+            .write_connection("router.migrate_platform", WritePriority::High)
+            .await?;
         conn.execute(schema::CREATE_TENANT_REGISTRY_TABLE, ())
             .await
             .map_err(storage_error)?;
@@ -695,6 +710,34 @@ impl EventStore for TenantStoreRouter {
         store.read_events(persistence_id, from_sequence).await
     }
 
+    #[instrument(skip_all, fields(persistence_id, otel.name = "router.read_events_page"))]
+    async fn read_events_page(
+        &self,
+        persistence_id: &str,
+        before_sequence: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        let (tenant, _, _) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let store = self.store_for_tenant(tenant).await?;
+        store
+            .read_events_page(persistence_id, before_sequence, limit)
+            .await
+    }
+
+    #[instrument(skip_all, fields(persistence_id, otel.name = "router.first_event_at"))]
+    async fn first_event_at(
+        &self,
+        persistence_id: &str,
+    ) -> Result<Option<chrono::DateTime<chrono::Utc>>, PersistenceError> {
+        let (tenant, _, _) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        self.store_for_tenant(tenant)
+            .await?
+            .first_event_at(persistence_id)
+            .await
+    }
+
     #[instrument(skip_all, fields(persistence_id, otel.name = "router.save_snapshot"))]
     async fn save_snapshot(
         &self,
@@ -721,6 +764,26 @@ impl EventStore for TenantStoreRouter {
         store.load_snapshot(persistence_id).await
     }
 
+    async fn latest_sequence_nr(&self, persistence_id: &str) -> Result<u64, PersistenceError> {
+        let (tenant, _, _) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        self.store_for_tenant(tenant)
+            .await?
+            .latest_sequence_nr(persistence_id)
+            .await
+    }
+
+    #[instrument(skip_all, fields(tenant, otel.name = "router.journal_heads"))]
+    async fn journal_heads(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<temper_runtime::persistence::JournalHead>, PersistenceError> {
+        self.store_for_tenant(tenant)
+            .await?
+            .journal_heads(tenant)
+            .await
+    }
+
     #[instrument(skip_all, fields(tenant, otel.name = "router.list_entity_ids"))]
     async fn list_entity_ids(
         &self,
@@ -743,28 +806,75 @@ impl EventStore for TenantStoreRouter {
     // ADR-0155: forward the vector-index surface to the per-tenant store so kNN works
     // on the routed Turso deployment. (Keys deliberately fall through to the no-op
     // defaults — Turso does not maintain entity_key_index live; see event_store.rs.)
-    #[instrument(skip_all, fields(persistence_id, otel.name = "router.append_with_index_rows"))]
-    async fn append_with_index_rows(
+    #[instrument(skip_all, fields(persistence_id, otel.name = "router.append_with_rows"))]
+    async fn append_with_rows(
         &self,
         persistence_id: &str,
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
-        key_rows: &[temper_runtime::persistence::EntityKeyRow],
-        vector_rows: &[temper_runtime::persistence::EntityVectorRow],
-        reconcile_vectors: bool,
+        rows: temper_runtime::persistence::CommitRows<'_>,
     ) -> Result<u64, PersistenceError> {
         let (tenant, _, _) =
             parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
         let store = self.store_for_tenant(tenant).await?;
         store
-            .append_with_index_rows(
-                persistence_id,
-                expected_sequence,
-                events,
-                key_rows,
-                vector_rows,
-                reconcile_vectors,
-            )
+            .append_with_rows(persistence_id, expected_sequence, events, rows)
+            .await
+    }
+
+    /// Each tenant's store commits its entities' rows, and is also that
+    /// tenant's query plane and timer-row store.
+    fn commits_entity_rows(&self) -> bool {
+        true
+    }
+
+    #[instrument(skip_all, fields(tenant, otel.name = "router.list_scheduled_actions"))]
+    async fn list_scheduled_actions(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<temper_runtime::persistence::ScheduledActionRecord>, PersistenceError> {
+        let store = self.store_for_tenant(tenant).await?;
+        store.list_scheduled_actions(tenant).await
+    }
+
+    #[instrument(skip_all, fields(tenant, entity_type, otel.name = "router.list_entity_scheduled_actions"))]
+    async fn list_entity_scheduled_actions(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<Vec<temper_runtime::persistence::ScheduledActionRecord>, PersistenceError> {
+        let store = self.store_for_tenant(tenant).await?;
+        store
+            .list_entity_scheduled_actions(tenant, entity_type, entity_id)
+            .await
+    }
+
+    #[instrument(skip_all, fields(tenant, entity_type, otel.name = "router.cancel_scheduled_action"))]
+    async fn cancel_scheduled_action(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        arm_id: &str,
+    ) -> Result<(), PersistenceError> {
+        let store = self.store_for_tenant(tenant).await?;
+        store
+            .cancel_scheduled_action(tenant, entity_type, entity_id, arm_id)
+            .await
+    }
+
+    #[instrument(skip_all, fields(tenant, entity_type, otel.name = "router.delete_scheduled_action"))]
+    async fn delete_scheduled_action(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        arm_id: &str,
+    ) -> Result<(), PersistenceError> {
+        let store = self.store_for_tenant(tenant).await?;
+        store
+            .delete_scheduled_action(tenant, entity_type, entity_id, arm_id)
             .await
     }
 
@@ -900,6 +1010,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn routed_creation_time_survives_compaction_and_keeps_tenants_isolated() {
+        let dir = tempfile::tempdir().unwrap();
+        let router = TenantStoreRouter::new(
+            &format!("file:{}", dir.path().join("platform.db").display()),
+            None,
+            Some(dir.path().join("tenants").to_string_lossy().into_owned()),
+        )
+        .await
+        .unwrap();
+        // The same entity key in separate tenant stores must retain each
+        // catalog's known creation time even with only a later event left.
+        for (tenant, first) in [
+            ("alpha", "2026-01-01T00:00:00.100Z"),
+            ("beta", "2026-02-01T00:00:00.200Z"),
+        ] {
+            let store = router.register_tenant(tenant).await.unwrap();
+            store
+                .upsert_query_projection_with_state(
+                    tenant,
+                    "Order",
+                    "one",
+                    "Draft",
+                    &serde_json::json!({}),
+                    &serde_json::json!({"first_event_at": first}),
+                    2,
+                )
+                .await
+                .unwrap();
+            let conn = store
+                .write_connection("test", WritePriority::High)
+                .await
+                .unwrap();
+            conn.execute(
+                "INSERT INTO events (tenant, entity_type, entity_id, sequence_nr, event_type, payload) VALUES (?1, 'Order', 'one', 2, 'Moved', ?2)",
+                params![tenant, r#"{"timestamp":"2026-03-01T00:00:00.000Z"}"#],
+            ).await.unwrap();
+        }
+        for (tenant, first) in [
+            ("alpha", "2026-01-01T00:00:00.100Z"),
+            ("beta", "2026-02-01T00:00:00.200Z"),
+        ] {
+            assert_eq!(
+                router
+                    .first_event_at(&format!("{tenant}:Order:one"))
+                    .await
+                    .unwrap(),
+                Some(
+                    chrono::DateTime::parse_from_rfc3339(first)
+                        .unwrap()
+                        .with_timezone(&chrono::Utc)
+                ),
+            );
+            assert_eq!(
+                router
+                    .first_event_at(&format!("{tenant}:Order:missing"))
+                    .await
+                    .unwrap(),
+                None
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn test_tenant_user_management() {
         let dir = tempfile::tempdir().expect("tempdir");
         let platform_path = dir.path().join("platform.db");
@@ -955,7 +1128,11 @@ mod tests {
             .await
             .expect("router");
 
-        let conn = router.platform_store().connection().await.expect("conn");
+        let conn = router
+            .platform_store()
+            .write_connection("test", WritePriority::High)
+            .await
+            .expect("conn");
         conn.execute(
             "INSERT INTO tenant_registry (tenant_id, turso_db_url, turso_auth_token)
              VALUES (?1, ?2, ?3)",

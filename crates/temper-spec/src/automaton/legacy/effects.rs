@@ -25,6 +25,10 @@ pub(crate) enum Effect {
         var: String,
         value: bool,
     },
+    SetString {
+        var: String,
+        value: String,
+    },
     Emit {
         event: String,
     },
@@ -141,6 +145,23 @@ fn parse_effect_fields(fields: &Table) -> Result<Option<Effect>, AutomatonParseE
             var,
             value: get("value").is_some_and(|s| s == "true"),
         }),
+        "set_string" => {
+            let required = |key: &str| {
+                fields
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        AutomatonParseError::Validation(format!(
+                            "set_string '{key}' must be a string"
+                        ))
+                    })
+            };
+            Some(Effect::SetString {
+                var: required("var")?,
+                value: required("value")?,
+            })
+        }
         "emit" | "emit_event" => get("event").map(|event| Effect::Emit { event }),
         "trigger" => get("name").map(|name| Effect::Trigger { name }),
         "list_append" => list_var(fields).map(|var| Effect::ListAppend { var }),

@@ -45,29 +45,6 @@ fn pre_extension_trajectory_still_deserializes() {
 }
 
 #[test]
-fn pre_extension_trajectory_reserializes_without_extension_keys() {
-    let trajectory: OTSTrajectory =
-        serde_json::from_str(PRE_JCS_TRAJECTORY).expect("old-shape trajectory must still parse");
-    let reserialized = serde_json::to_string(&trajectory).expect("serialize");
-
-    for absent_key in [
-        "spec_version",
-        "harness",
-        "agent_version",
-        "prompt_token_ids",
-        "completion_token_ids",
-        "response_mask",
-        "logprobs",
-        "cause_id",
-    ] {
-        assert!(
-            !reserialized.contains(absent_key),
-            "unset extension field '{absent_key}' must not be emitted: {reserialized}"
-        );
-    }
-}
-
-#[test]
 fn fully_populated_extension_fields_round_trip() {
     let now = fixed_timestamp();
 

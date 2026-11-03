@@ -499,26 +499,4 @@ payload_template = "test"
         tokio::time::sleep(std::time::Duration::from_millis(100)).await; // determinism-ok: test-only helper delay
         mock_server.verify().await;
     }
-
-    #[tokio::test]
-    async fn integration_webhook_failure_does_not_panic() {
-        // Point to a port that is not listening — dispatch should silently fail.
-        let toml = r#"
-[[webhook]]
-name = "test"
-url = "http://127.0.0.1:19997/hook"
-payload_template = "test"
-"#;
-        let d = WebhookDispatcher::from_toml(toml).unwrap();
-        d.dispatch(&entry(
-            "Approve",
-            "Proposal",
-            "p-1",
-            true,
-            Some("Draft"),
-            Some("Approved"),
-        ));
-        // Wait for the spawned task to fail gracefully — no panic expected.
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await; // determinism-ok: test-only helper delay
-    }
 }

@@ -22,10 +22,13 @@ fn test_security_context() -> temper_authz::SecurityContext {
             role: None,
             acting_for: None,
             agent_type: None,
+            label: None,
             attributes: Default::default(),
         },
         context_attrs: Default::default(),
         correlation_id: "router-test".to_string(),
+        cause: None,
+        credential: None,
     }
 }
 
@@ -37,10 +40,13 @@ fn claimed_admin_security_context() -> temper_authz::SecurityContext {
             role: None,
             acting_for: None,
             agent_type: None,
+            label: None,
             attributes: Default::default(),
         },
         context_attrs: Default::default(),
         correlation_id: "router-admin-side-channel-test".to_string(),
+        cause: None,
+        credential: None,
     }
 }
 
@@ -88,6 +94,52 @@ fn authenticated_router(state: ServerState) -> Router {
             .expect("functional router tests should install an explicit policy");
     }
     super::build_router(state).layer(axum::middleware::from_fn(authenticate_test_request))
+}
+
+/// A router whose requests are authenticated as the principal named by their
+/// `X-Temper-Principal-Id` and `X-Temper-Principal-Kind` headers. It stands in
+/// for the credential that resolves to that principal, for tests where who
+/// the caller is decides the outcome (commons accounts are charged and
+/// verified as the caller). A request without the header is the default
+/// test customer.
+fn named_principal_router(state: ServerState) -> Router {
+    authenticated_router(state).layer(axum::middleware::from_fn(authenticate_named_principal))
+}
+
+fn header_text(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
+}
+
+async fn authenticate_named_principal(
+    mut request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let id = header_text(request.headers(), "x-temper-principal-id");
+    let kind = header_text(request.headers(), "x-temper-principal-kind");
+    let tenant = header_text(request.headers(), "x-tenant-id")
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| TenantId::try_new(value.trim()).expect("test tenant header should be valid"))
+        .unwrap_or_default();
+    if let Some(id) = id {
+        let mut security_ctx = test_security_context();
+        security_ctx.principal.id = id;
+        security_ctx.principal.kind = match kind.as_deref() {
+            Some("admin") => temper_authz::PrincipalKind::Admin,
+            Some("agent") => temper_authz::PrincipalKind::Agent,
+            Some("system") => temper_authz::PrincipalKind::System,
+            _ => temper_authz::PrincipalKind::Customer,
+        };
+        request
+            .extensions_mut()
+            .insert(temper_authz::AuthenticatedRequestContext::new(
+                tenant,
+                security_ctx,
+            ));
+    }
+    next.run(request).await
 }
 
 fn git_blob_id(body: &[u8]) -> String {
@@ -958,6 +1010,25 @@ async fn test_data_only_entity_create_fast_path_persists_projection_without_acto
     let create_json: serde_json::Value = serde_json::from_slice(&create_body).unwrap();
     assert_eq!(create_json["status"], "Recorded");
     assert_eq!(create_json["fields"]["Body"], "created through fast path");
+    assert!(create_json["last_event_at"].is_string());
+    assert_eq!(create_json["last_event_via"], "request");
+    assert_eq!(create_json["last_event_by"], "test-customer");
+
+    // The native query plane has no app field-index entries for kernel metadata.
+    // Filtering must use the catalog state rather than discard this record.
+    let filtered = app.clone().oneshot(
+        Request::get("/tdata/LogEntries?$filter=last_event_by%20eq%20'test-customer'&$orderby=last_event_at%20desc")
+            .body(Body::empty()).unwrap()
+    ).await.unwrap();
+    assert_eq!(filtered.status(), StatusCode::OK);
+    let filtered: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(filtered.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(filtered["value"].as_array().unwrap().len(), 1);
+    assert_eq!(filtered["value"][0]["last_event_by"], "test-customer");
 
     let actor_key = "default:LogEntry:entry-1";
     assert!(
@@ -982,6 +1053,15 @@ async fn test_data_only_entity_create_fast_path_persists_projection_without_acto
     assert_eq!(hydrated.state.status, "Recorded");
     assert_eq!(hydrated.state.sequence_nr, 1);
     assert_eq!(hydrated.state.fields["Body"], "created through fast path");
+    let restored = serde_json::to_value(&hydrated.state).unwrap();
+    for name in [
+        "first_event_at",
+        "last_event_at",
+        "last_event_via",
+        "last_event_by",
+    ] {
+        assert_eq!(restored[name], create_json[name]);
+    }
     assert!(state.actor_registry.read().unwrap().contains_key(actor_key));
 }
 
@@ -1012,7 +1092,7 @@ async fn commons_rate_limit_returns_429_per_owner_bucket() {
         .expect("beta functional test policy should parse");
     state.enable_commons_guardrails("default");
     state.enable_commons_guardrails("beta");
-    let app = authenticated_router(state.clone());
+    let app = named_principal_router(state.clone());
 
     let alice_bucket = ServerState::commons_rate_limit_entity_id("alice", "write");
     let response = app
@@ -1088,7 +1168,11 @@ async fn commons_rate_limit_returns_429_per_owner_bucket() {
         .oneshot(claimed_admin_request)
         .await
         .expect("claimed-admin request should run");
-    assert_eq!(claimed_admin.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        claimed_admin.status(),
+        StatusCode::CREATED,
+        "a write naming alice is charged to the caller's own bucket, not alice's"
+    );
 
     let bob_bucket = ServerState::commons_rate_limit_entity_id("bob", "write");
     let response = app
@@ -1288,7 +1372,7 @@ async fn test_blob_ingest_raw_applies_cedar_create_policy() {
 async fn commons_storage_cap_blocks_raw_blob_ingest_per_owner() {
     let state = test_state_with_storage_cap_ioa();
     state.enable_commons_guardrails("default");
-    let app = authenticated_router(state.clone());
+    let app = named_principal_router(state.clone());
 
     let alice_owner = app
         .clone()
@@ -1434,7 +1518,7 @@ async fn commons_storage_cap_blocks_raw_blob_ingest_per_owner() {
 async fn commons_storage_projection_cache_invalidates_after_blob_write() {
     let state = test_state_with_storage_cap_ioa();
     state.enable_commons_guardrails("default");
-    let app = authenticated_router(state.clone());
+    let app = named_principal_router(state.clone());
 
     let owner = app
         .clone()
@@ -1536,7 +1620,7 @@ async fn commons_storage_reservation_allows_other_writers_and_prevents_overreser
         ),
     );
     state.enable_commons_guardrails("default");
-    let app = authenticated_router(state.clone());
+    let app = named_principal_router(state.clone());
 
     let owner = app
         .clone()
@@ -1586,6 +1670,7 @@ async fn commons_storage_reservation_allows_other_writers_and_prevents_overreser
                 .header("Content-Length", "4")
                 .header("X-Expected-Object-Id", git_blob_id(b"abcd"))
                 .header("X-Repository-Id", "rp-dana")
+                .header("X-Temper-Principal-Id", "dana")
                 .body(slow_body)
                 .unwrap(),
         ),
@@ -1622,6 +1707,7 @@ async fn commons_storage_reservation_allows_other_writers_and_prevents_overreser
                 .header("Content-Length", "4")
                 .header("X-Expected-Object-Id", git_blob_id(b"wxyz"))
                 .header("X-Repository-Id", "rp-dana")
+                .header("X-Temper-Principal-Id", "dana")
                 .body(counted_body(b"wxyz", second_body_polls.clone()))
                 .unwrap(),
         )
@@ -1639,6 +1725,7 @@ async fn commons_storage_reservation_allows_other_writers_and_prevents_overreser
                 .header("Content-Length", "4")
                 .header("X-Expected-Object-Id", git_blob_id(b"abcd"))
                 .header("X-Repository-Id", "rp-dana")
+                .header("X-Temper-Principal-Id", "dana")
                 .body(Body::from("abcd"))
                 .unwrap(),
         )
@@ -1661,7 +1748,7 @@ async fn commons_storage_reservation_allows_other_writers_and_prevents_overreser
 async fn commons_account_verification_blocks_owner_scoped_writes_until_verified() {
     let state = test_state_with_account_verification_ioa();
     state.enable_commons_guardrails("default");
-    let app = authenticated_router(state.clone());
+    let app = named_principal_router(state.clone());
 
     let owner = app
         .clone()
@@ -1758,10 +1845,81 @@ async fn commons_account_verification_blocks_owner_scoped_writes_until_verified(
 }
 
 #[tokio::test]
+async fn commons_account_verification_checks_the_caller_not_the_owner_it_names() {
+    let state = test_state_with_account_verification_ioa();
+    state.enable_commons_guardrails("default");
+    let app = named_principal_router(state.clone());
+
+    for (id, principal) in [("alice", "alice"), ("bob", "bob")] {
+        let owner = app
+            .clone()
+            .oneshot(
+                Request::post("/tdata/Owners")
+                    .header("Content-Type", "application/json")
+                    .header("X-Temper-Principal-Id", principal)
+                    .header("X-Temper-Principal-Kind", "customer")
+                    .body(Body::from(format!(
+                        r#"{{"Id":"{id}","AccountId":"{id}","DisplayName":"{id}","Contact":"{id}@example.test","StorageCapBytes":1024,"RateLimitTier":"free","VerificationProvider":"email","VerificationSubject":"{id}@example.test"}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(owner.status(), StatusCode::CREATED);
+    }
+    let verify_alice = app
+        .clone()
+        .oneshot(
+            Request::post(
+                "/tdata/Owners('alice')/Temper.AccountVerificationTest.MarkVerified",
+            )
+            .header("Content-Type", "application/json")
+            .header("X-Temper-Principal-Id", "operator")
+            .header("X-Temper-Principal-Kind", "admin")
+            .body(Body::from(
+                r#"{"VerificationProvider":"email","VerificationSubject":"alice@example.test","VerifiedAt":"2026-05-19T00:00:00Z"}"#,
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(verify_alice.status(), StatusCode::OK);
+
+    // bob is not verified; naming verified alice as the owner does not change
+    // whose verification the write needs.
+    let named_alice = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/Repositories")
+                .header("Content-Type", "application/json")
+                .header("X-Temper-Principal-Id", "bob")
+                .header("X-Temper-Principal-Kind", "customer")
+                .body(Body::from(
+                    r#"{"Id":"rp-bob-as-alice","OwnerAccountId":"alice","Name":"named","Description":"","DefaultBranch":"refs/heads/main","Visibility":"public"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(named_alice.status(), StatusCode::FORBIDDEN);
+    let body = axum::body::to_bytes(named_alice.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"]["code"], "AccountVerificationRequired");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("'bob'")),
+        "the caller is the account checked: {json}"
+    );
+}
+
+#[tokio::test]
 async fn commons_app_name_unique_per_owner_on_create_and_patch() {
     let state = test_state_with_owner_app_ioa();
     state.enable_commons_guardrails("default");
-    let app = authenticated_router(state);
+    let app = named_principal_router(state);
 
     let owner = app
         .clone()
@@ -2865,3 +3023,6 @@ async fn a_request_with_a_traceparent_is_one_trace_with_one_root() {
         );
     }
 }
+
+#[path = "router_test/write_keys_test.rs"]
+mod write_keys;

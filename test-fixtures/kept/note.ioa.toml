@@ -1,0 +1,47 @@
+# A note that says why it closed, in words no rule reads: the check of a
+# copy of it with other words keeps this one's verdict.
+
+[automaton]
+name = "Note"
+states = ["Open", "Closed"]
+initial = "Open"
+
+[[state]]
+name = "count"
+type = "counter"
+initial = 0
+
+[[action]]
+name = "Add"
+kind = "input"
+from = ["Open"]
+guard = "count < 2"
+effect = ["count += 1"]
+
+[[action]]
+name = "Close"
+kind = "input"
+from = ["Open"]
+to = "Closed"
+
+[[action.triggers]]
+name = "say_why"
+kind = "entity"
+target_entity = "Note"
+target_action = "Record"
+
+[action.triggers.args]
+reason = "'Closed by its owner'"
+
+[action.triggers.resolve_target]
+kind = "same_id"
+
+[[action]]
+name = "Record"
+kind = "internal"
+from = ["Closed"]
+params = [{ name = "reason", type = "string" }]
+
+[[invariant]]
+name = "bounded"
+assert = "count <= 2"

@@ -186,8 +186,64 @@ to = "Failed"
     let trigger = &confirm.triggers[0];
     assert_eq!(trigger.kind, TriggerKind::Wasm);
     assert_eq!(trigger.module.as_deref(), Some("stripe_charge"));
-    assert_eq!(trigger.on_success.as_deref(), Some("ChargeSucceeded"));
+    assert_eq!(trigger.on_success, ["ChargeSucceeded"]);
     assert_eq!(trigger.on_failure.as_deref(), Some("ChargeFailed"));
+}
+
+/// A trigger and a state timer may say, in `says`, words for people reading the app, such as the answer a branch
+/// gives or what a timer does. It is optional, and a spec without it parses as before.
+#[test]
+fn test_trigger_and_state_timeout_says_parse() {
+    let spec = r#"
+[automaton]
+name = "Order"
+states = ["Draft", "Confirmed", "Charged", "Failed"]
+initial = "Draft"
+
+[[action]]
+name = "ConfirmOrder"
+from = ["Draft"]
+to = "Confirmed"
+
+[[action.triggers]]
+name = "charge_payment"
+says = "Charge the card"
+kind = "wasm"
+module = "stripe_charge"
+on_success = "ChargeSucceeded"
+on_failure = "ChargeFailed"
+
+[[action]]
+name = "ChargeSucceeded"
+from = ["Confirmed"]
+to = "Charged"
+
+[[action]]
+name = "ChargeFailed"
+from = ["Confirmed", "Draft"]
+to = "Failed"
+
+[[state_timeout]]
+state = "Confirmed"
+after_seconds = 60
+on_timeout = "ChargeFailed"
+says = "give up on the charge"
+
+[[state_timeout]]
+state = "Draft"
+after_seconds = 3600
+on_timeout = "ChargeFailed"
+"#;
+    let automaton =
+        parse_automaton(spec).expect("words on a trigger and a state timer should parse");
+    // Read through the serialized spec, so this test compiles whatever the structs hold.
+    let spec = serde_json::to_value(&automaton).expect("the spec serializes");
+    assert_eq!(spec["action"][0]["triggers"][0]["says"], "Charge the card");
+    assert_eq!(spec["state_timeout"][0]["says"], "give up on the charge");
+    assert!(
+        spec["state_timeout"][1].get("says").is_none(),
+        "a timer that says nothing has no says"
+    );
 }
 
 #[test]
@@ -234,7 +290,7 @@ to = "Failed"
         .find(|ig| ig.trigger == "__trigger__:RecordDataset:propose_mutation")
         .expect("adapter trigger should synthesize integration");
     assert_eq!(integration.integration_type, "adapter");
-    assert_eq!(integration.on_success.as_deref(), Some("RecordMutation"));
+    assert_eq!(integration.on_success, ["RecordMutation"]);
     assert_eq!(integration.on_failure.as_deref(), Some("Fail"));
     assert_eq!(
         integration.config.get("adapter").map(String::as_str),
@@ -706,7 +762,7 @@ to = "Failed"
         .expect("synthesized integration");
     assert_eq!(ig.integration_type, "wasm");
     assert_eq!(ig.module.as_deref(), Some("stripe_charge"));
-    assert_eq!(ig.on_success.as_deref(), Some("ChargeSucceeded"));
+    assert_eq!(ig.on_success, ["ChargeSucceeded"]);
     assert_eq!(ig.on_failure.as_deref(), Some("ChargeFailed"));
 
     // The source action dispatches the synthesized record by name.
@@ -902,3 +958,79 @@ kind = "same_id"
 // ADR-0046 deleted the [[agent_trigger]] section. The equivalent
 // invariant ([[action.triggers]] body doesn't leak into action fields) is
 // covered by the action-triggers parser tests above.
+
+/// The umbrella app: a forecast module computes the chance of rain, and the
+/// spec decides the move from it.
+const UMBRELLA: &str = r#"
+[automaton]
+name = "Day"
+states = ["Asked", "Wet", "Dry"]
+initial = "Asked"
+
+[[action]]
+name = "Ask"
+from = ["Asked"]
+
+[[action.triggers]]
+name = "forecast"
+kind = "wasm"
+module = "forecast"
+on_success = ["TakeUmbrella", "LeaveUmbrella"]
+
+[[action]]
+name = "TakeUmbrella"
+from = ["Asked"]
+to = "Wet"
+params = [{ name = "rain", type = "int" }]
+guard = "params.rain >= 50"
+
+[[action]]
+name = "LeaveUmbrella"
+from = ["Asked"]
+to = "Dry"
+params = [{ name = "rain", type = "int" }]
+"#;
+
+#[test]
+fn a_wasm_trigger_lists_its_answers_and_their_guards_read_its_values() {
+    let automaton = parse_automaton(UMBRELLA).expect("a list of answers should parse");
+    let trigger = &automaton.actions[0].triggers[0];
+    assert_eq!(trigger.on_success, ["TakeUmbrella", "LeaveUmbrella"]);
+    assert_eq!(automaton.integrations[0].on_success, trigger.on_success);
+    assert_eq!(automaton.actions[1].guard.params_read(), ["rain"]);
+}
+
+#[test]
+fn an_answer_listed_twice_is_refused() {
+    let spec = UMBRELLA.replace(
+        r#"["TakeUmbrella", "LeaveUmbrella"]"#,
+        r#"["TakeUmbrella", "TakeUmbrella"]"#,
+    );
+    let error = parse_automaton(&spec).unwrap_err().to_string();
+    assert!(
+        error.contains("on_success names 'TakeUmbrella' twice"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_guard_reads_only_the_params_its_action_declares() {
+    let spec = UMBRELLA.replace("params.rain >= 50", "params.wind >= 50");
+    let error = parse_automaton(&spec).unwrap_err().to_string();
+    assert!(
+        error.contains("`params.wind` is not a parameter of 'TakeUmbrella'"),
+        "{error}"
+    );
+}
+
+#[test]
+fn only_an_action_guard_reads_a_param() {
+    let spec = format!(
+        "{UMBRELLA}\n[[invariant]]\nname = \"wet_means_rain\"\nassert = \"status == 'Wet' => params.rain >= 50\"\n"
+    );
+    let error = parse_automaton(&spec).unwrap_err().to_string();
+    assert!(
+        error.contains("`params.rain` is a parameter of a move; only an action's guard reads one"),
+        "{error}"
+    );
+}

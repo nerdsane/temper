@@ -38,7 +38,8 @@ use crate::query_eval::resolve_property;
 pub(super) const ID_PROPERTY: &str = "entity_id";
 
 /// One key of a decoded cursor: the boundary row's value for a pagination
-/// clause. `present == false` means the row had no value there (SQL NULL).
+/// clause. `present == false` means the row had no value there (SQL NULL),
+/// including an explicit JSON null.
 #[derive(Clone, Debug, PartialEq)]
 struct CursorKey {
     present: bool,
@@ -79,11 +80,11 @@ pub(super) fn cursor_for_row(row: &serde_json::Value, order: &[OrderByClause]) -
     let keys = order
         .iter()
         .map(|clause| match resolve_property(row, &clause.property) {
-            Some(value) => CursorKey {
+            Some(value) if !value.is_null() => CursorKey {
                 present: true,
                 value,
             },
-            None => CursorKey {
+            _ => CursorKey {
                 present: false,
                 value: serde_json::Value::Null,
             },
@@ -126,7 +127,9 @@ pub(super) fn decode_cursor(token: &str) -> Option<Cursor> {
         if pair.len() != 2 {
             return None;
         }
-        let present = pair[0].as_bool()?;
+        // Tokens issued before null keys were marked absent must resume
+        // with the same null semantics as newly generated cursors.
+        let present = pair[0].as_bool()? && !pair[1].is_null();
         keys.push(CursorKey {
             present,
             value: pair[1].clone(),

@@ -11,8 +11,6 @@
 #![allow(clippy::type_complexity)]
 
 use std::collections::BTreeMap;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -38,440 +36,50 @@ use crate::platform_store::PlatformStore;
 use crate::platform_store::SimPlatformStore;
 use crate::state::trajectory::TrajectoryEntry;
 
+mod commit_writes;
+pub use commit_writes::QueryPlaneRefused;
+mod dyn_event_store;
 mod event_size;
 mod metadata_impls;
 mod observe_read;
 mod policy_impls;
+mod policy_router_impls;
 mod published_artifacts;
 mod query_plane_impls;
 mod query_plane_read;
+mod query_plane_router_impls;
 mod redaction;
 mod state_timers;
 mod trajectory_row;
+mod write_room;
+pub use dyn_event_store::{DynEventStore, EventStoreFuture};
 pub use event_size::EventSizeLimits;
 pub use published_artifacts::{
     PublishedArtifactStore, PublishedArtifactStoreRow, PublishedArtifactStoreUpsert,
 };
-pub use state_timers::StateTimerStore;
+pub use state_timers::{MetadataTimerRows, StateTimerStore};
+pub use write_room::{STORAGE_FLOOR_BYTES, StorageRoom, WriteHealth};
 mod query_plane;
 pub use query_plane::{
-    EntityCatalogRow, QueryFieldIndexOrder, QueryFieldIndexOrderDirection, QueryFieldIndexPage,
-    QueryPlaneStore, QueryProjectionFieldsRow, QueryProjectionUpsert,
+    CatalogGroup, CatalogRowFreshness, EntityCatalogRow, QueryFieldIndexOrder,
+    QueryFieldIndexOrderDirection, QueryFieldIndexPage, QueryPlaneStore, QueryProjectionFieldsRow,
 };
 pub(crate) use query_plane_read::{
     CatalogRowsLoad, load_catalog_rows_by_id, load_selected_catalog_rows_by_id,
 };
 
-pub type EventStoreFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
-
-/// Object-safe adapter for the runtime event journal.
-pub trait DynEventStore: Send + Sync {
-    fn append<'a>(
-        &'a self,
-        persistence_id: &'a str,
-        expected_sequence: u64,
-        events: &'a [PersistenceEnvelope],
-    ) -> EventStoreFuture<'a, Result<u64, PersistenceError>>;
-
-    fn append_batch<'a>(
-        &'a self,
-        appends: &'a [PersistenceAppend],
-    ) -> EventStoreFuture<'a, Result<Vec<PersistenceAppendResult>, PersistenceError>>;
-
-    fn read_events<'a>(
-        &'a self,
-        persistence_id: &'a str,
-        from_sequence: u64,
-    ) -> EventStoreFuture<'a, Result<Vec<PersistenceEnvelope>, PersistenceError>>;
-
-    fn append_with_keys<'a>(
-        &'a self,
-        persistence_id: &'a str,
-        expected_sequence: u64,
-        events: &'a [PersistenceEnvelope],
-        key_rows: &'a [temper_runtime::persistence::EntityKeyRow],
-    ) -> EventStoreFuture<'a, Result<u64, PersistenceError>>;
-
-    fn append_with_index_rows<'a>(
-        &'a self,
-        persistence_id: &'a str,
-        expected_sequence: u64,
-        events: &'a [PersistenceEnvelope],
-        key_rows: &'a [temper_runtime::persistence::EntityKeyRow],
-        vector_rows: &'a [temper_runtime::persistence::EntityVectorRow],
-        reconcile_vectors: bool,
-    ) -> EventStoreFuture<'a, Result<u64, PersistenceError>>;
-
-    fn backfill_entity_vectors<'a>(
-        &'a self,
-        tenant: &'a str,
-        entity_type: &'a str,
-        entity_id: &'a str,
-        vector_rows: &'a [temper_runtime::persistence::EntityVectorRow],
-    ) -> EventStoreFuture<'a, Result<(), PersistenceError>>;
-
-    fn vector_candidates<'a>(
-        &'a self,
-        tenant: &'a str,
-        entity_type: &'a str,
-        decl_name: &'a str,
-        model_tag: &'a str,
-        limit: usize,
-    ) -> EventStoreFuture<
-        'a,
-        Result<Vec<temper_runtime::persistence::EntityVectorCandidate>, PersistenceError>,
-    >;
-
-    fn mark_vector_index_backfilled<'a>(
-        &'a self,
-        tenant: &'a str,
-        entity_type: &'a str,
-        vector_set: &'a str,
-    ) -> EventStoreFuture<'a, Result<(), PersistenceError>>;
-
-    fn vector_index_backfilled_types<'a>(
-        &'a self,
-        tenant: &'a str,
-    ) -> EventStoreFuture<'a, Result<Vec<(String, String)>, PersistenceError>>;
-
-    fn vectored_entity_ids_for_type<'a>(
-        &'a self,
-        tenant: &'a str,
-        entity_type: &'a str,
-    ) -> EventStoreFuture<'a, Result<Vec<String>, PersistenceError>>;
-
-    fn lookup_by_key<'a>(
-        &'a self,
-        tenant: &'a str,
-        entity_type: &'a str,
-        key_name: &'a str,
-        key_hash: &'a str,
-    ) -> EventStoreFuture<'a, Result<Option<String>, PersistenceError>>;
-
-    fn backfill_entity_keys<'a>(
-        &'a self,
-        tenant: &'a str,
-        entity_type: &'a str,
-        entity_id: &'a str,
-        key_rows: &'a [temper_runtime::persistence::EntityKeyRow],
-    ) -> EventStoreFuture<'a, Result<(), PersistenceError>>;
-
-    fn mark_key_index_backfilled<'a>(
-        &'a self,
-        tenant: &'a str,
-        entity_type: &'a str,
-        key_set: &'a str,
-    ) -> EventStoreFuture<'a, Result<(), PersistenceError>>;
-
-    fn key_index_backfilled_types<'a>(
-        &'a self,
-        tenant: &'a str,
-    ) -> EventStoreFuture<'a, Result<Vec<(String, String)>, PersistenceError>>;
-
-    fn keyed_entity_ids_for_type<'a>(
-        &'a self,
-        tenant: &'a str,
-        entity_type: &'a str,
-    ) -> EventStoreFuture<'a, Result<Vec<String>, PersistenceError>>;
-
-    fn save_snapshot<'a>(
-        &'a self,
-        persistence_id: &'a str,
-        sequence_nr: u64,
-        snapshot: &'a [u8],
-    ) -> EventStoreFuture<'a, Result<(), PersistenceError>>;
-
-    fn load_snapshot<'a>(
-        &'a self,
-        persistence_id: &'a str,
-    ) -> EventStoreFuture<'a, Result<Option<(u64, Vec<u8>)>, PersistenceError>>;
-
-    fn list_entity_ids<'a>(
-        &'a self,
-        tenant: &'a str,
-    ) -> EventStoreFuture<'a, Result<Vec<(String, String)>, PersistenceError>>;
-
-    fn list_entity_ids_by_type<'a>(
-        &'a self,
-        tenant: &'a str,
-        entity_type: &'a str,
-    ) -> EventStoreFuture<'a, Result<Vec<String>, PersistenceError>>;
-
-    fn list_entity_ids_limited<'a>(
-        &'a self,
-        tenant: &'a str,
-        entity_type: Option<&'a str>,
-        limit: usize,
-    ) -> EventStoreFuture<'a, Result<Vec<(String, String)>, PersistenceError>>;
-}
-
-impl<T> DynEventStore for T
-where
-    T: EventStore,
-{
-    fn append<'a>(
-        &'a self,
-        persistence_id: &'a str,
-        expected_sequence: u64,
-        events: &'a [PersistenceEnvelope],
-    ) -> EventStoreFuture<'a, Result<u64, PersistenceError>> {
-        Box::pin(EventStore::append(
-            self,
-            persistence_id,
-            expected_sequence,
-            events,
-        ))
-    }
-
-    fn append_batch<'a>(
-        &'a self,
-        appends: &'a [PersistenceAppend],
-    ) -> EventStoreFuture<'a, Result<Vec<PersistenceAppendResult>, PersistenceError>> {
-        Box::pin(EventStore::append_batch(self, appends))
-    }
-
-    fn read_events<'a>(
-        &'a self,
-        persistence_id: &'a str,
-        from_sequence: u64,
-    ) -> EventStoreFuture<'a, Result<Vec<PersistenceEnvelope>, PersistenceError>> {
-        Box::pin(EventStore::read_events(self, persistence_id, from_sequence))
-    }
-
-    fn append_with_keys<'a>(
-        &'a self,
-        persistence_id: &'a str,
-        expected_sequence: u64,
-        events: &'a [PersistenceEnvelope],
-        key_rows: &'a [temper_runtime::persistence::EntityKeyRow],
-    ) -> EventStoreFuture<'a, Result<u64, PersistenceError>> {
-        Box::pin(EventStore::append_with_keys(
-            self,
-            persistence_id,
-            expected_sequence,
-            events,
-            key_rows,
-        ))
-    }
-
-    fn append_with_index_rows<'a>(
-        &'a self,
-        persistence_id: &'a str,
-        expected_sequence: u64,
-        events: &'a [PersistenceEnvelope],
-        key_rows: &'a [temper_runtime::persistence::EntityKeyRow],
-        vector_rows: &'a [temper_runtime::persistence::EntityVectorRow],
-        reconcile_vectors: bool,
-    ) -> EventStoreFuture<'a, Result<u64, PersistenceError>> {
-        Box::pin(EventStore::append_with_index_rows(
-            self,
-            persistence_id,
-            expected_sequence,
-            events,
-            key_rows,
-            vector_rows,
-            reconcile_vectors,
-        ))
-    }
-
-    fn backfill_entity_vectors<'a>(
-        &'a self,
-        tenant: &'a str,
-        entity_type: &'a str,
-        entity_id: &'a str,
-        vector_rows: &'a [temper_runtime::persistence::EntityVectorRow],
-    ) -> EventStoreFuture<'a, Result<(), PersistenceError>> {
-        Box::pin(EventStore::backfill_entity_vectors(
-            self,
-            tenant,
-            entity_type,
-            entity_id,
-            vector_rows,
-        ))
-    }
-
-    fn vector_candidates<'a>(
-        &'a self,
-        tenant: &'a str,
-        entity_type: &'a str,
-        decl_name: &'a str,
-        model_tag: &'a str,
-        limit: usize,
-    ) -> EventStoreFuture<
-        'a,
-        Result<Vec<temper_runtime::persistence::EntityVectorCandidate>, PersistenceError>,
-    > {
-        Box::pin(EventStore::vector_candidates(
-            self,
-            tenant,
-            entity_type,
-            decl_name,
-            model_tag,
-            limit,
-        ))
-    }
-
-    fn mark_vector_index_backfilled<'a>(
-        &'a self,
-        tenant: &'a str,
-        entity_type: &'a str,
-        vector_set: &'a str,
-    ) -> EventStoreFuture<'a, Result<(), PersistenceError>> {
-        Box::pin(EventStore::mark_vector_index_backfilled(
-            self,
-            tenant,
-            entity_type,
-            vector_set,
-        ))
-    }
-
-    fn vector_index_backfilled_types<'a>(
-        &'a self,
-        tenant: &'a str,
-    ) -> EventStoreFuture<'a, Result<Vec<(String, String)>, PersistenceError>> {
-        Box::pin(EventStore::vector_index_backfilled_types(self, tenant))
-    }
-
-    fn vectored_entity_ids_for_type<'a>(
-        &'a self,
-        tenant: &'a str,
-        entity_type: &'a str,
-    ) -> EventStoreFuture<'a, Result<Vec<String>, PersistenceError>> {
-        Box::pin(EventStore::vectored_entity_ids_for_type(
-            self,
-            tenant,
-            entity_type,
-        ))
-    }
-
-    fn lookup_by_key<'a>(
-        &'a self,
-        tenant: &'a str,
-        entity_type: &'a str,
-        key_name: &'a str,
-        key_hash: &'a str,
-    ) -> EventStoreFuture<'a, Result<Option<String>, PersistenceError>> {
-        Box::pin(EventStore::lookup_by_key(
-            self,
-            tenant,
-            entity_type,
-            key_name,
-            key_hash,
-        ))
-    }
-
-    fn backfill_entity_keys<'a>(
-        &'a self,
-        tenant: &'a str,
-        entity_type: &'a str,
-        entity_id: &'a str,
-        key_rows: &'a [temper_runtime::persistence::EntityKeyRow],
-    ) -> EventStoreFuture<'a, Result<(), PersistenceError>> {
-        Box::pin(EventStore::backfill_entity_keys(
-            self,
-            tenant,
-            entity_type,
-            entity_id,
-            key_rows,
-        ))
-    }
-
-    fn mark_key_index_backfilled<'a>(
-        &'a self,
-        tenant: &'a str,
-        entity_type: &'a str,
-        key_set: &'a str,
-    ) -> EventStoreFuture<'a, Result<(), PersistenceError>> {
-        Box::pin(EventStore::mark_key_index_backfilled(
-            self,
-            tenant,
-            entity_type,
-            key_set,
-        ))
-    }
-
-    fn key_index_backfilled_types<'a>(
-        &'a self,
-        tenant: &'a str,
-    ) -> EventStoreFuture<'a, Result<Vec<(String, String)>, PersistenceError>> {
-        Box::pin(EventStore::key_index_backfilled_types(self, tenant))
-    }
-
-    fn keyed_entity_ids_for_type<'a>(
-        &'a self,
-        tenant: &'a str,
-        entity_type: &'a str,
-    ) -> EventStoreFuture<'a, Result<Vec<String>, PersistenceError>> {
-        Box::pin(EventStore::keyed_entity_ids_for_type(
-            self,
-            tenant,
-            entity_type,
-        ))
-    }
-
-    fn save_snapshot<'a>(
-        &'a self,
-        persistence_id: &'a str,
-        sequence_nr: u64,
-        snapshot: &'a [u8],
-    ) -> EventStoreFuture<'a, Result<(), PersistenceError>> {
-        Box::pin(EventStore::save_snapshot(
-            self,
-            persistence_id,
-            sequence_nr,
-            snapshot,
-        ))
-    }
-
-    fn load_snapshot<'a>(
-        &'a self,
-        persistence_id: &'a str,
-    ) -> EventStoreFuture<'a, Result<Option<(u64, Vec<u8>)>, PersistenceError>> {
-        Box::pin(EventStore::load_snapshot(self, persistence_id))
-    }
-
-    fn list_entity_ids<'a>(
-        &'a self,
-        tenant: &'a str,
-    ) -> EventStoreFuture<'a, Result<Vec<(String, String)>, PersistenceError>> {
-        Box::pin(EventStore::list_entity_ids(self, tenant))
-    }
-
-    fn list_entity_ids_by_type<'a>(
-        &'a self,
-        tenant: &'a str,
-        entity_type: &'a str,
-    ) -> EventStoreFuture<'a, Result<Vec<String>, PersistenceError>> {
-        Box::pin(EventStore::list_entity_ids_by_type(
-            self,
-            tenant,
-            entity_type,
-        ))
-    }
-
-    fn list_entity_ids_limited<'a>(
-        &'a self,
-        tenant: &'a str,
-        entity_type: Option<&'a str>,
-        limit: usize,
-    ) -> EventStoreFuture<'a, Result<Vec<(String, String)>, PersistenceError>> {
-        Box::pin(EventStore::list_entity_ids_limited(
-            self,
-            tenant,
-            entity_type,
-            limit,
-        ))
-    }
-}
-
 /// Cloneable boxed event store handle.
 ///
 /// Every event the server journals is appended through this handle, so it is
-/// where the per-event size limits hold (`with_event_size_limits`).
+/// where the per-event size limits hold (`with_event_size_limits`), where a
+/// disk under the floor refuses appends (`with_storage_room`), and where every
+/// append's outcome is kept for `/healthz` (`write_health`).
 #[derive(Clone)]
 pub struct BoxedEventStore {
     store: Arc<dyn DynEventStore>,
     limits: EventSizeLimits,
+    room: Option<StorageRoom>,
+    health: write_room::HealthCell,
 }
 
 impl BoxedEventStore {
@@ -489,6 +97,8 @@ impl BoxedEventStore {
         Self {
             store,
             limits: EventSizeLimits::default(),
+            room: None,
+            health: write_room::HealthCell::default(),
         }
     }
 
@@ -503,9 +113,16 @@ impl BoxedEventStore {
         events: &[PersistenceEnvelope],
     ) -> Result<u64, PersistenceError> {
         self.check_event_sizes(persistence_id, events)?;
-        self.store
+        self.check_room()?;
+        let result = self
+            .store
             .append(persistence_id, expected_sequence, events)
-            .await
+            .await;
+        let result = self.record_append(result);
+        if result.is_ok() {
+            count_written(persistence_id, events.len());
+        }
+        result
     }
 
     pub async fn append_batch(
@@ -518,7 +135,15 @@ impl BoxedEventStore {
                 .iter()
                 .map(|event| (append.persistence_id.as_str(), event))
         }))?;
-        self.store.append_batch(appends).await
+        self.check_room()?;
+        let result = self.store.append_batch(appends).await;
+        let result = self.record_append(result);
+        if result.is_ok() {
+            for append in appends {
+                count_written(&append.persistence_id, append.events.len());
+            }
+        }
+        result
     }
 
     pub async fn read_events(
@@ -529,6 +154,27 @@ impl BoxedEventStore {
         self.store.read_events(persistence_id, from_sequence).await
     }
 
+    /// The newest `limit` events below `before_sequence`, ascending
+    /// ([`EventStore::read_events_page`]).
+    pub async fn read_events_page(
+        &self,
+        persistence_id: &str,
+        before_sequence: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        self.store
+            .read_events_page(persistence_id, before_sequence, limit)
+            .await
+    }
+
+    /// The kernel's saved creation time, or sequence one's time if still held.
+    pub async fn first_event_at(
+        &self,
+        persistence_id: &str,
+    ) -> Result<Option<chrono::DateTime<chrono::Utc>>, PersistenceError> {
+        self.store.first_event_at(persistence_id).await
+    }
+
     pub async fn append_with_keys(
         &self,
         persistence_id: &str,
@@ -537,30 +183,87 @@ impl BoxedEventStore {
         key_rows: &[temper_runtime::persistence::EntityKeyRow],
     ) -> Result<u64, PersistenceError> {
         self.check_event_sizes(persistence_id, events)?;
-        self.store
+        self.check_room()?;
+        let result = self
+            .store
             .append_with_keys(persistence_id, expected_sequence, events, key_rows)
-            .await
+            .await;
+        let result = self.record_append(result);
+        if result.is_ok() {
+            count_written(persistence_id, events.len());
+        }
+        result
     }
 
-    pub async fn append_with_index_rows(
+    pub async fn append_with_rows(
         &self,
         persistence_id: &str,
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
-        key_rows: &[temper_runtime::persistence::EntityKeyRow],
-        vector_rows: &[temper_runtime::persistence::EntityVectorRow],
-        reconcile_vectors: bool,
+        rows: temper_runtime::persistence::CommitRows<'_>,
     ) -> Result<u64, PersistenceError> {
         self.check_event_sizes(persistence_id, events)?;
+        self.check_room()?;
+        let result = self
+            .store
+            .append_with_rows(persistence_id, expected_sequence, events, rows)
+            .await;
+        let result = self.record_append(result);
+        if result.is_ok() {
+            count_written(persistence_id, events.len());
+        }
+        result
+    }
+
+    /// Whether an append writes the entity's query-plane row and timer row
+    /// in its own transaction (`EventStore::commits_entity_rows`).
+    pub fn commits_entity_rows(&self) -> bool {
+        self.store.commits_entity_rows()
+    }
+
+    /// Every pending scheduled action of `tenant`, kept with its journal.
+    pub async fn list_scheduled_actions(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<temper_runtime::persistence::ScheduledActionRecord>, PersistenceError> {
+        self.store.list_scheduled_actions(tenant).await
+    }
+
+    /// The pending scheduled actions of one record.
+    pub async fn list_entity_scheduled_actions(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<Vec<temper_runtime::persistence::ScheduledActionRecord>, PersistenceError> {
         self.store
-            .append_with_index_rows(
-                persistence_id,
-                expected_sequence,
-                events,
-                key_rows,
-                vector_rows,
-                reconcile_vectors,
-            )
+            .list_entity_scheduled_actions(tenant, entity_type, entity_id)
+            .await
+    }
+
+    /// Durably cancel a scheduled action before deleting its row.
+    pub async fn cancel_scheduled_action(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        arm_id: &str,
+    ) -> Result<(), PersistenceError> {
+        self.store
+            .cancel_scheduled_action(tenant, entity_type, entity_id, arm_id)
+            .await
+    }
+
+    /// Remove one scheduled action's row once it has fired.
+    pub async fn delete_scheduled_action(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        arm_id: &str,
+    ) -> Result<(), PersistenceError> {
+        self.store
+            .delete_scheduled_action(tenant, entity_type, entity_id, arm_id)
             .await
     }
 
@@ -687,6 +390,19 @@ impl BoxedEventStore {
         self.store.load_snapshot(persistence_id).await
     }
 
+    /// The journal's last sequence without loading entity bodies on SQL stores.
+    pub async fn latest_sequence_nr(&self, persistence_id: &str) -> Result<u64, PersistenceError> {
+        self.store.latest_sequence_nr(persistence_id).await
+    }
+
+    /// Every durable record's sequence in a single metadata read.
+    pub async fn journal_heads(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<temper_runtime::persistence::JournalHead>, PersistenceError> {
+        self.store.journal_heads(tenant).await
+    }
+
     pub async fn list_entity_ids(
         &self,
         tenant: &str,
@@ -778,41 +494,6 @@ impl From<PostgresPolicyRow> for PolicyStoreRow {
     }
 }
 
-/// Inputs for a native brand-new data-only entity create.
-///
-/// This capability is only valid for entities whose first durable event and
-/// first query projection row can be inserted atomically by a storage backend.
-pub struct DataOnlyCreateRecord<'a> {
-    /// Tenant that owns the entity.
-    pub tenant: &'a str,
-    /// Entity type being created.
-    pub entity_type: &'a str,
-    /// Entity id being created.
-    pub entity_id: &'a str,
-    /// Initial entity status.
-    pub status: &'a str,
-    /// Projection fields to store in the query catalog and scalar index.
-    pub fields: &'a serde_json::Value,
-    /// Full response projection to store in the query catalog.
-    pub state: &'a serde_json::Value,
-    /// First event envelope to append at sequence number 1.
-    pub event: &'a PersistenceEnvelope,
-}
-
-/// Optional native storage capability for brand-new data-only creates.
-#[async_trait::async_trait]
-pub trait DataOnlyCreateStore: Send + Sync {
-    /// Persist the first event and initial projection atomically.
-    ///
-    /// Returns the new sequence number on success. Duplicate first events or
-    /// duplicate projection rows should return [`PersistenceError::ConcurrencyViolation`]
-    /// so the caller can decline the fast path and use the generic path.
-    async fn create_data_only_entity(
-        &self,
-        record: DataOnlyCreateRecord<'_>,
-    ) -> Result<u64, PersistenceError>;
-}
-
 /// Durable observe trajectory sink.
 #[async_trait::async_trait]
 pub trait TrajectorySink: Send + Sync {
@@ -864,6 +545,17 @@ pub trait PolicyStore: Send + Sync {
         cedar_text: &str,
         created_by: &str,
     ) -> Result<bool, String>;
+
+    /// Make `policy_id` the tenant's only enabled entry, holding `cedar_text`, in one
+    /// transaction. Every other entry stays listed, disabled, so a reload activates
+    /// exactly this text.
+    async fn replace_tenant_policies(
+        &self,
+        tenant: &str,
+        policy_id: &str,
+        cedar_text: &str,
+        created_by: &str,
+    ) -> Result<(), String>;
 
     async fn delete_policy(&self, tenant: &str, policy_id: &str) -> Result<(), String>;
 }
@@ -1092,6 +784,15 @@ pub trait BlobStore: Send + Sync {
 
     async fn get_blob(&self, key: &str) -> Result<Option<Vec<u8>>, String>;
 
+    /// Read at most `max_bytes` at a zero-based offset, returning the actual
+    /// total length and this chunk without materializing the entire value.
+    async fn get_blob_chunk(
+        &self,
+        key: &str,
+        offset: u64,
+        max_bytes: usize,
+    ) -> Result<Option<(u64, Vec<u8>)>, String>;
+
     /// Read a legacy database blob only when its stored size is within the
     /// caller's allocation budget. `None` means missing or over budget.
     async fn get_blob_if_size_at_most(
@@ -1304,10 +1005,14 @@ pub struct StorageStack {
     pub turso: Option<Arc<dyn TursoStoreProvider>>,
     pub platform: Option<Arc<dyn PlatformStore>>,
     pub policies: Option<Arc<dyn PolicyStore>>,
-    pub query_plane: Option<Arc<dyn QueryPlaneStore>>,
-    pub data_only_create: Option<Arc<dyn DataOnlyCreateStore>>,
+    /// The store records are read from: the journal's own, whose commits
+    /// write its rows ([`StorageStack::with_query_plane`]).
+    query_plane: Option<Arc<dyn QueryPlaneStore>>,
     pub trajectory: Option<Arc<dyn TrajectorySink>>,
     pub metadata: Option<Arc<dyn MetadataStoreProvider>>,
+    /// Reads go through a test's probe ([`StorageStack::with_read_probe`]).
+    #[cfg(test)]
+    read_probe: bool,
 }
 
 impl StorageStack {
@@ -1319,8 +1024,6 @@ impl StorageStack {
         turso: Option<Arc<dyn TursoStoreProvider>>,
         platform: Option<Arc<dyn PlatformStore>>,
         policies: Option<Arc<dyn PolicyStore>>,
-        query_plane: Option<Arc<dyn QueryPlaneStore>>,
-        data_only_create: Option<Arc<dyn DataOnlyCreateStore>>,
         trajectory: Option<Arc<dyn TrajectorySink>>,
         metadata: Option<Arc<dyn MetadataStoreProvider>>,
     ) -> Self {
@@ -1331,10 +1034,11 @@ impl StorageStack {
             turso,
             platform,
             policies,
-            query_plane,
-            data_only_create,
+            query_plane: None,
             trajectory,
             metadata,
+            #[cfg(test)]
+            read_probe: false,
         }
     }
 
@@ -1352,6 +1056,20 @@ impl StorageStack {
         self
     }
 
+    /// Refuse appends and trajectory rows while the disk holding `room` has
+    /// less than [`STORAGE_FLOOR_BYTES`] available
+    /// (`BoxedEventStore::with_storage_room`, `RoomCheckedTrajectories`).
+    pub fn with_storage_room(mut self, room: StorageRoom) -> Self {
+        tracing::info!(dir = %room.dir().display(), floor_bytes = STORAGE_FLOOR_BYTES,
+            "appends and trajectory rows refused while this disk has less room than the floor");
+        self.trajectory = self.trajectory.map(|inner| {
+            let room = room.clone();
+            Arc::new(write_room::RoomCheckedTrajectories { inner, room }) as Arc<dyn TrajectorySink>
+        });
+        self.events = self.events.with_storage_room(room);
+        self
+    }
+
     pub fn from_postgres(store: PostgresEventStore) -> Self {
         let store = Arc::new(store);
         Self::new(
@@ -1361,11 +1079,13 @@ impl StorageStack {
             None,
             Some(store.clone() as Arc<dyn PlatformStore>),
             Some(store.clone() as Arc<dyn PolicyStore>),
-            Some(store.clone() as Arc<dyn QueryPlaneStore>),
-            Some(store.clone() as Arc<dyn DataOnlyCreateStore>),
             Some(store.clone() as Arc<dyn TrajectorySink>),
-            Some(Arc::new(SingleMetadataStoreProvider::new_postgres(store))),
+            Some(Arc::new(SingleMetadataStoreProvider::new_postgres(
+                store.clone(),
+            ))),
         )
+        .with_query_plane(store as Arc<dyn QueryPlaneStore>)
+        .expect("the Postgres journal writes its query plane in its commit")
     }
 
     pub fn from_turso(store: TursoEventStore) -> Self {
@@ -1377,11 +1097,11 @@ impl StorageStack {
             Some(Arc::new(SingleTursoStoreProvider::new(store.clone()))),
             Some(store.clone() as Arc<dyn PlatformStore>),
             Some(store.clone() as Arc<dyn PolicyStore>),
-            Some(store.clone() as Arc<dyn QueryPlaneStore>),
-            None,
             Some(store.clone() as Arc<dyn TrajectorySink>),
-            Some(Arc::new(SingleMetadataStoreProvider::new(store))),
+            Some(Arc::new(SingleMetadataStoreProvider::new(store.clone()))),
         )
+        .with_query_plane(store as Arc<dyn QueryPlaneStore>)
+        .expect("the Turso journal writes its query plane in its commit")
     }
 
     pub fn from_tenant_router(router: TenantStoreRouter) -> Self {
@@ -1396,13 +1116,13 @@ impl StorageStack {
             ))),
             Some(platform_store),
             Some(router.clone() as Arc<dyn PolicyStore>),
-            Some(router.clone() as Arc<dyn QueryPlaneStore>),
-            None,
             Some(router.clone() as Arc<dyn TrajectorySink>),
             Some(Arc::new(TenantRoutedMetadataStoreProvider::new(
                 router.as_ref().clone(),
             ))),
         )
+        .with_query_plane(router as Arc<dyn QueryPlaneStore>)
+        .expect("the routed Turso journal writes its query plane in its commit")
     }
 
     pub fn from_redis(store: temper_store_redis::RedisEventStore) -> Self {
@@ -1410,8 +1130,6 @@ impl StorageStack {
         Self::new(
             BackendLabel::Redis,
             BoxedEventStore::from_arc(store),
-            None,
-            None,
             None,
             None,
             None,
@@ -1434,8 +1152,6 @@ impl StorageStack {
             None,
             None,
             platform,
-            None,
-            None,
             None,
             None,
             None,
@@ -1938,6 +1654,15 @@ impl BlobStore for PostgresEventStore {
         self.get_blob(key).await
     }
 
+    async fn get_blob_chunk(
+        &self,
+        key: &str,
+        offset: u64,
+        max_bytes: usize,
+    ) -> Result<Option<(u64, Vec<u8>)>, String> {
+        self.get_blob_chunk(key, offset, max_bytes).await
+    }
+
     async fn get_blob_if_size_at_most(
         &self,
         key: &str,
@@ -1968,6 +1693,15 @@ impl BlobStore for TursoEventStore {
 
     async fn get_blob(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
         self.get_blob(key).await
+    }
+
+    async fn get_blob_chunk(
+        &self,
+        key: &str,
+        offset: u64,
+        max_bytes: usize,
+    ) -> Result<Option<(u64, Vec<u8>)>, String> {
+        self.get_blob_chunk(key, offset, max_bytes).await
     }
 
     async fn get_blob_if_size_at_most(
@@ -2444,25 +2178,6 @@ fn pg_wasm_invocation_to_turso(
     }
 }
 
-#[async_trait::async_trait]
-impl DataOnlyCreateStore for PostgresEventStore {
-    async fn create_data_only_entity(
-        &self,
-        record: DataOnlyCreateRecord<'_>,
-    ) -> Result<u64, PersistenceError> {
-        self.create_data_only_entity_native_with_state(
-            record.tenant,
-            record.entity_type,
-            record.entity_id,
-            record.status,
-            record.fields,
-            record.state,
-            record.event,
-        )
-        .await
-    }
-}
-
 pub(crate) use redaction::redact_secrets;
 pub(crate) use trajectory_row::bounded_request_body;
 use trajectory_row::{
@@ -2591,4 +2306,15 @@ impl TrajectorySink for TenantStoreRouter {
                 )
             })
     }
+}
+
+/// Count the events an append wrote, by the tenant and entity type its
+/// journal belongs to (`temper_events_written_total`).
+fn count_written(persistence_id: &str, events: usize) {
+    let (tenant, entity_type) =
+        match temper_runtime::tenant::parse_persistence_id_parts(persistence_id) {
+            Ok((tenant, entity_type, _)) => (tenant, entity_type),
+            Err(_) => ("unknown", "unknown"),
+        };
+    crate::runtime_metrics::record_events_written(tenant, entity_type, events as u64);
 }

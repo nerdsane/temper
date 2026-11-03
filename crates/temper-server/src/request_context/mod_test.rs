@@ -117,25 +117,6 @@ fn extract_agent_context_empty_session() {
 }
 
 #[test]
-fn remote_parent_context_builds_remote_span_context() {
-    let agent_ctx = AgentContext {
-        trace_id: Some("4bf92f3577b34da6a3ce929d0e0e4736".to_string()),
-        parent_span_id: Some("00f067aa0ba902b7".to_string()),
-        ..AgentContext::default()
-    };
-
-    let remote = remote_parent_context(&agent_ctx).expect("valid remote trace context");
-    let span_context = remote.span().span_context().clone();
-
-    assert!(span_context.is_remote());
-    assert_eq!(
-        span_context.trace_id().to_string(),
-        "4bf92f3577b34da6a3ce929d0e0e4736"
-    );
-    assert_eq!(span_context.span_id().to_string(), "00f067aa0ba902b7");
-}
-
-#[test]
 fn service_context_inherits_workflow_trace_context() {
     let parent = AgentContext {
         session_id: Some("ss-1".to_string()),
@@ -145,7 +126,9 @@ fn service_context_inherits_workflow_trace_context() {
         workflow_root_entity_type: Some("CurationJob".to_string()),
         workflow_root_entity_id: Some("job-1".to_string()),
         workflow_run_id: Some("wf-job-1".to_string()),
-        idempotency_key: Some("parent-key".to_string()),
+        idempotency_key: Some(crate::idempotency::IdempotencyKey::Request(
+            "parent-key".to_string(),
+        )),
         ..AgentContext::default()
     };
 

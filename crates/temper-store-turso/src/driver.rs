@@ -17,8 +17,11 @@ mod database;
 pub(crate) use database::Database;
 mod handle;
 use handle::DriverHandle;
+#[cfg(debug_assertions)]
+mod plan_check;
 mod synced;
 use synced::ConnectionPool;
+pub(crate) use synced::TrimWriters;
 pub use synced::{CopyState, SyncCopy};
 
 /// Driver failures retain the original engine or transport error.
@@ -132,6 +135,8 @@ impl Connection {
             let params = params.into_params()?;
             match self {
                 Self::Local { conn, .. } => {
+                    #[cfg(debug_assertions)]
+                    plan_check::check(conn, sql).await;
                     Rows::local(conn.query(sql, local_params(params)).await?, conn).await
                 }
                 Self::Remote(conn) => Ok(Rows::Remote(conn.query(sql, params).await?)),
@@ -147,7 +152,11 @@ impl Connection {
         async move {
             let params = params.into_params()?;
             match self {
-                Self::Local { conn, .. } => Ok(conn.execute(sql, local_params(params)).await?),
+                Self::Local { conn, .. } => {
+                    #[cfg(debug_assertions)]
+                    plan_check::check(conn, sql).await;
+                    Ok(conn.execute(sql, local_params(params)).await?)
+                }
                 Self::Remote(conn) => Ok(conn.execute(sql, params).await?),
             }
         }
@@ -199,6 +208,8 @@ impl Transaction<'_> {
             let params = params.into_params()?;
             match self {
                 Self::Local(tx, conn) => {
+                    #[cfg(debug_assertions)]
+                    plan_check::check(conn, sql).await;
                     Rows::local(tx.query(sql, local_params(params)).await?, conn).await
                 }
                 Self::Remote(tx) => Ok(Rows::Remote(tx.query(sql, params).await?)),
@@ -214,7 +225,11 @@ impl Transaction<'_> {
         async move {
             let params = params.into_params()?;
             match self {
-                Self::Local(tx, _) => Ok(tx.execute(sql, local_params(params)).await?),
+                Self::Local(tx, _conn) => {
+                    #[cfg(debug_assertions)]
+                    plan_check::check(_conn, sql).await;
+                    Ok(tx.execute(sql, local_params(params)).await?)
+                }
                 Self::Remote(tx) => Ok(tx.execute(sql, params).await?),
             }
         }

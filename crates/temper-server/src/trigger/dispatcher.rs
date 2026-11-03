@@ -7,22 +7,40 @@
 
 use std::sync::Arc;
 
+use futures_util::FutureExt;
+use futures_util::future::BoxFuture;
+
+use crate::odata::read_defaults::ReadDefaults;
 use crate::request_context::AgentContext;
-use temper_authz::SecurityContext;
 use temper_runtime::tenant::TenantId;
 use tracing;
 use tracing::instrument;
 
+use super::owed_reactions::{Reaction, ReactionTry};
+use super::principal::{effective_trigger_security_context, resolve_trigger_principal};
 use super::registry::ReactionRegistry;
-use super::types::{MAX_REACTION_DEPTH, ReactionResult};
+use super::repeat_stop::RepeatStop;
+use super::types::ReactionResult;
+use crate::state::owed_writes::OwedMove;
 
 /// Async reaction dispatcher for production use.
 ///
 /// Holds a shared [`ReactionRegistry`] and dispatches target actions through
-/// the server state. Cascade is bounded by [`MAX_REACTION_DEPTH`]; a reaction
-/// past it is reported, not dropped.
+/// the server state. A chain stops the first time a reaction would repeat a
+/// step it is already inside of ([`InlineChain`](crate::request_context::InlineChain)
+/// says why); the reaction it stops is reported, not dropped.
 pub struct ReactionDispatcher {
     registry: Arc<ReactionRegistry>,
+}
+
+/// The action whose reactions one level of a chain runs, `depth` levels in.
+struct Level<'a> {
+    entity_type: &'a str,
+    entity_id: &'a str,
+    action: &'a str,
+    to_state: &'a str,
+    fields: &'a serde_json::Value,
+    depth: u32,
 }
 
 impl ReactionDispatcher {
@@ -36,36 +54,75 @@ impl ReactionDispatcher {
     /// This is called after the source action has been committed and the SSE
     /// broadcast sent. Reactions are fire-and-forget: failures are logged but
     /// do not roll back the source transition.
+    ///
+    /// A chain is as deep as its data, so every level, the first included, is
+    /// boxed and polled on a stack that grows: a caller's future holds a
+    /// pointer, not the level, and a deep chain gets more stack instead of
+    /// overflowing its thread. The named return type is what lets the
+    /// recursive future be `Send`.
     #[allow(clippy::too_many_arguments)]
+    pub fn dispatch_reactions<'a>(
+        &'a self,
+        state: &'a crate::ServerState,
+        tenant: &'a TenantId,
+        entity_type: &'a str,
+        entity_id: &'a str,
+        action: &'a str,
+        to_state: &'a str,
+        fields: &'a serde_json::Value,
+        depth: u32,
+        invoking_ctx: &'a AgentContext,
+    ) -> BoxFuture<'a, Vec<ReactionResult>> {
+        crate::growable_stack::on_growable_stack(move || {
+            let level = Level {
+                entity_type,
+                entity_id,
+                action,
+                to_state,
+                fields,
+                depth,
+            };
+            self.dispatch_level(state, tenant, level, invoking_ctx)
+                .boxed()
+        })
+    }
+
+    /// One level of a chain: the reactions of one action.
     #[instrument(skip_all, fields(
         otel.name = "reaction.dispatch",
         tenant = %tenant,
-        entity_type,
-        entity_id,
-        action_name = action,
-        depth,
+        entity_type = level.entity_type,
+        entity_id = level.entity_id,
+        action_name = level.action,
+        depth = level.depth,
         reaction.rule_count = tracing::field::Empty,
         reaction.fired_count = tracing::field::Empty,
         reaction.guard_skipped_count = tracing::field::Empty,
         reaction.target_resolve_error_count = tracing::field::Empty,
         reaction.authz_denied_count = tracing::field::Empty,
         reaction.dispatch_error_count = tracing::field::Empty,
-        reaction.depth_stopped_count = tracing::field::Empty,
+        reaction.repeat_stopped_count = tracing::field::Empty,
         reaction.success_count = tracing::field::Empty,
         reaction.result_count = tracing::field::Empty,
     ))]
-    pub async fn dispatch_reactions(
+    async fn dispatch_level(
         &self,
         state: &crate::ServerState,
         tenant: &TenantId,
-        entity_type: &str,
-        entity_id: &str,
-        action: &str,
-        to_state: &str,
-        fields: &serde_json::Value,
-        depth: u32,
+        level: Level<'_>,
         invoking_ctx: &AgentContext,
     ) -> Vec<ReactionResult> {
+        let Level {
+            entity_type,
+            entity_id,
+            action,
+            to_state,
+            fields,
+            depth,
+        } = level;
+        // The source action is the step these reactions continue from.
+        let source_ctx = invoking_ctx.entering(entity_type, entity_id, action);
+        let invoking_ctx = &source_ctx;
         let rules: Vec<_> = self
             .registry
             .lookup(tenant, entity_type, action, to_state)
@@ -84,24 +141,31 @@ impl ReactionDispatcher {
         let mut target_resolve_error_count = 0usize;
         let mut authz_denied_count = 0usize;
         let mut dispatch_error_count = 0usize;
-        let mut depth_stopped_count = 0usize;
+        let mut repeat_stopped_count = 0usize;
         let mut success_count = 0usize;
         let mut results = Vec::new();
+        // Guards and args read the source record as every guard does: a
+        // variable it stores no value for reads as its declared initial value.
+        let reads_record = rules
+            .iter()
+            .any(|rule| rule.when.guard.is_some() || !rule.then.args.is_empty());
+        let read = reads_record
+            .then(|| ReadDefaults::for_entity(state, tenant, entity_type).fields_as_read(fields));
 
         for rule in rules {
             // Guard evaluation: skip rules whose guard evaluates to false.
             // Guard-skipped rules do not produce a `ReactionResult` — they
             // never fired.
-            if let Some(guard) = &rule.when.guard {
+            if let (Some(guard), Some(read)) = (&rule.when.guard, &read) {
                 let mut related = temper_jit::table::RelatedMap::new();
-                for (reference, ids) in super::guard::related_ids(guard, fields) {
+                for (reference, ids) in super::guard::related_ids(guard, read) {
                     let mut statuses = Vec::with_capacity(ids.len());
                     for id in &ids {
                         statuses.push(state.resolve_entity_status(tenant, &reference.0, id).await);
                     }
                     related.insert(reference, temper_jit::table::Related::Statuses(statuses));
                 }
-                if !super::guard::guard_holds(guard, fields, to_state, &related) {
+                if !super::guard::guard_holds(guard, read, to_state, &related) {
                     guard_skipped_count += 1;
                     tracing::debug!(
                         rule = rule.name,
@@ -132,21 +196,33 @@ impl ReactionDispatcher {
                     }
                 };
 
-            if depth >= MAX_REACTION_DEPTH {
-                depth_stopped_count += 1;
-                CascadeStop {
-                    tenant,
-                    entity_type,
-                    entity_id,
-                    action,
-                    rule: &rule,
-                    target_entity_id: &target_entity_id,
-                    depth,
-                }
-                .record(state);
-                results.push(ReactionResult::stopped_at_depth(&rule.name, depth));
-                continue;
+            // A target the rule makes is new, and the chain knows it as made.
+            let mut chain = invoking_ctx.inline_chain.clone();
+            if super::resolver::mints_target_id(&rule.resolve_target, fields) {
+                chain = chain.making(&rule.then.entity_type, &target_entity_id);
             }
+            let step = chain.step(&rule.then.entity_type, &target_entity_id, &rule.then.action);
+            let chain = match chain.then(step) {
+                Ok(chain) => chain,
+                Err(repeat) => {
+                    repeat_stopped_count += 1;
+                    RepeatStop {
+                        tenant,
+                        entity_type,
+                        entity_id,
+                        action,
+                        rule: &rule,
+                        target_entity_id: &target_entity_id,
+                        repeat: &repeat,
+                        depth,
+                    }
+                    .record(state);
+                    results.push(ReactionResult::stopped_on_repeat(
+                        &rule.name, depth, &repeat,
+                    ));
+                    continue;
+                }
+            };
 
             tracing::info!(
                 rule = rule.name,
@@ -159,28 +235,52 @@ impl ReactionDispatcher {
                 "Dispatching reaction"
             );
 
-            let effective_params =
-                super::params::build_effective_params(&rule.then, entity_id, fields, &rule.name);
+            let effective_params = super::params::build_effective_params(
+                &rule.then,
+                entity_id,
+                read.as_ref().unwrap_or(fields),
+                &rule.name,
+            );
 
             // ADR-0046: resolve the dispatch principal. If the rule declares
             // an explicit `principal`, build a synthetic service identity;
             // otherwise inherit the invoking principal's exact
-            // `SecurityContext` when available.
-            let dispatch_ctx = resolve_trigger_principal(
+            // `SecurityContext` when available. Either way it carries how this
+            // move comes about: this rule, set off by the invoking move. Cedar
+            // sees it as `context.via` and the rest, so an app can tell a move
+            // the spec makes follow another from a principal's own pick. The
+            // principal itself stays the true one.
+            let (mut dispatch_ctx, cause) = resolve_trigger_principal(
                 rule.principal.as_deref(),
                 invoking_ctx,
                 &rule.name,
                 entity_type,
                 entity_id,
                 action,
+                depth,
             );
+            dispatch_ctx.inline_chain = chain;
 
-            let authz_snapshot = match state
-                .load_authz_resource_snapshot(tenant, &rule.then.entity_type, &target_entity_id)
-                .await
-            {
-                Ok(snapshot) => snapshot,
-                Err(e) => {
+            // Read the target, authorize the move on it as it is now, and fire
+            // it via the core dispatch (no reaction cascade to avoid infinite
+            // async recursion — we handle cascading ourselves). A try whose
+            // read or send the store failed is kept and tried again, read and
+            // authorization included (`owed_reactions`).
+            let security_ctx = effective_trigger_security_context(&dispatch_ctx, &cause);
+            let reaction = Reaction {
+                sent: OwedMove {
+                    tenant: tenant.clone(),
+                    entity_type: rule.then.entity_type.clone(),
+                    entity_id: target_entity_id.clone(),
+                    action: rule.then.action.clone(),
+                    params: effective_params,
+                    agent_ctx: dispatch_ctx.clone(),
+                },
+                authorized_as: security_ctx.clone(),
+            };
+            let tried = state.dispatch_reaction(reaction, depth).await;
+            let dispatch_result = match tried {
+                ReactionTry::Unread(e) => {
                     tracing::warn!(
                         rule = rule.name,
                         target_entity = %rule.then.entity_type,
@@ -192,57 +292,28 @@ impl ReactionDispatcher {
                         rule_name: rule.name.clone(),
                         success: false,
                         target_status: None,
-                        error: Some(e),
+                        error: Some(e.to_string()),
                         depth,
                     });
                     continue;
                 }
+                ReactionTry::Denied {
+                    reason,
+                    target_status,
+                } => {
+                    authz_denied_count += 1;
+                    results.push(ReactionResult {
+                        rule_name: rule.name.clone(),
+                        success: false,
+                        target_status: Some(target_status),
+                        error: Some(reason),
+                        depth,
+                    });
+                    continue;
+                }
+                ReactionTry::Sent(reply) => *reply,
             };
-
-            let security_ctx = effective_trigger_security_context(&dispatch_ctx);
-            if let Err(denial) = state.authorize_with_context(
-                &security_ctx,
-                &rule.then.action,
-                &rule.then.entity_type,
-                &authz_snapshot.resource_attrs,
-                tenant.as_str(),
-            ) {
-                let reason = denial.to_string();
-                authz_denied_count += 1;
-                tracing::warn!(
-                    rule = rule.name,
-                    target_entity = %rule.then.entity_type,
-                    target_id = %target_entity_id,
-                    target_action = %rule.then.action,
-                    principal_id = %security_ctx.principal.id,
-                    principal_kind = ?security_ctx.principal.kind,
-                    "Reaction authorization denied: {reason}"
-                );
-                results.push(ReactionResult {
-                    rule_name: rule.name.clone(),
-                    success: false,
-                    target_status: Some(authz_snapshot.current_state.state.status.clone()),
-                    error: Some(reason),
-                    depth,
-                });
-                continue;
-            }
-
-            // Fire the target action via the core dispatch (no reaction cascade
-            // to avoid infinite async recursion — we handle cascading ourselves).
             fired_count += 1;
-            let dispatch_result = state
-                .dispatch_tenant_action_core(
-                    tenant,
-                    &rule.then.entity_type,
-                    &target_entity_id,
-                    &rule.then.action,
-                    effective_params,
-                    &dispatch_ctx,
-                    false,
-                    None,
-                )
-                .await;
 
             match dispatch_result {
                 Ok(response) => {
@@ -264,20 +335,30 @@ impl ReactionDispatcher {
 
                     // Recurse if the target action succeeded. The cascade
                     // fires under the same dispatch context as this rule —
-                    // elevation propagates down the chain.
+                    // elevation propagates down the chain — and knows the
+                    // children the action spawned as entities it made. A
+                    // chain is as deep as its data, so each level is polled
+                    // on a stack that grows.
                     if response.success {
-                        let cascade_results = Box::pin(self.dispatch_reactions(
-                            state,
-                            tenant,
-                            &rule.then.entity_type,
-                            &target_entity_id,
-                            &rule.then.action,
-                            &target_status,
-                            &serde_json::to_value(&response.state.fields).unwrap_or_default(),
-                            depth + 1,
-                            &dispatch_ctx,
-                        ))
-                        .await;
+                        let cascade_ctx =
+                            dispatch_ctx.having_made(response.spawn_requests.iter().map(|spawn| {
+                                (spawn.entity_type.as_str(), spawn.entity_id.as_str())
+                            }));
+                        let target_fields =
+                            serde_json::to_value(&response.state.fields).unwrap_or_default();
+                        let cascade_results = self
+                            .dispatch_reactions(
+                                state,
+                                tenant,
+                                &rule.then.entity_type,
+                                &target_entity_id,
+                                response.action(&rule.then.action),
+                                &target_status,
+                                &target_fields,
+                                depth + 1,
+                                &cascade_ctx,
+                            )
+                            .await;
                         results.extend(cascade_results);
                     }
                 }
@@ -306,7 +387,7 @@ impl ReactionDispatcher {
             target_resolve_error_count,
             authz_denied_count,
             dispatch_error_count,
-            depth_stopped_count,
+            repeat_stopped_count,
             success_count,
             result_count: results.len(),
         });
@@ -323,7 +404,7 @@ struct ReactionFanoutCounts {
     target_resolve_error_count: usize,
     authz_denied_count: usize,
     dispatch_error_count: usize,
-    depth_stopped_count: usize,
+    repeat_stopped_count: usize,
     success_count: usize,
     result_count: usize,
 }
@@ -339,146 +420,9 @@ fn record_reaction_fanout_span(counts: ReactionFanoutCounts) {
     );
     span.record("reaction.authz_denied_count", counts.authz_denied_count);
     span.record("reaction.dispatch_error_count", counts.dispatch_error_count);
-    span.record("reaction.depth_stopped_count", counts.depth_stopped_count);
+    span.record("reaction.repeat_stopped_count", counts.repeat_stopped_count);
     span.record("reaction.success_count", counts.success_count);
     span.record("reaction.result_count", counts.result_count);
-}
-
-/// A reaction that was not run because its chain reached
-/// [`MAX_REACTION_DEPTH`], on the entity whose action would have fired it.
-struct CascadeStop<'a> {
-    tenant: &'a TenantId,
-    entity_type: &'a str,
-    entity_id: &'a str,
-    action: &'a str,
-    rule: &'a super::types::ReactionRule,
-    target_entity_id: &'a str,
-    depth: u32,
-}
-
-impl CascadeStop<'_> {
-    /// Say so on the source entity's observe stream, where the app and its
-    /// agents watch it, as well as in the log.
-    fn record(self, state: &crate::ServerState) {
-        let seq = state.next_entity_event_sequence(
-            self.tenant.as_str(),
-            self.entity_type,
-            self.entity_id,
-        );
-        state.record_entity_observe_event_with_seq(
-            self.tenant.as_str(),
-            self.entity_type,
-            self.entity_id,
-            seq,
-            "reaction_cascade_stopped",
-            serde_json::json!({
-                "action": self.action,
-                "rule": self.rule.name,
-                "target_entity_type": self.rule.then.entity_type,
-                "target_entity_id": self.target_entity_id,
-                "target_action": self.rule.then.action,
-                "depth": self.depth,
-                "max_depth": MAX_REACTION_DEPTH,
-            }),
-        );
-        tracing::warn!(
-            tenant = %self.tenant,
-            entity_type = self.entity_type,
-            entity_id = self.entity_id,
-            action = self.action,
-            rule = self.rule.name,
-            target_entity = %self.rule.then.entity_type,
-            target_id = self.target_entity_id,
-            depth = self.depth,
-            "reaction not run: the chain reached {MAX_REACTION_DEPTH} reactions"
-        );
-    }
-}
-
-// Target resolver logic consolidated in super::resolver::resolve_target_id.
-
-/// ADR-0046: resolve the dispatch context for a reaction.
-///
-/// - When the rule declares a principal (`Some(service_name)`), build a
-///   synthetic `AgentContext` identifying the named service. Cedar policies
-///   can match on `principal.role`, `principal.agent_type`, or
-///   `principal.id == Service::"<name>"` — whichever style the tenant
-///   prefers. The `agent_type` slot carries the name so the Cedar request
-///   sees it via `principal.agent_type == "<name>"`.
-/// - When the rule has no principal (`None`), inherit the invoking context
-///   directly — the trigger runs as whoever called the source action.
-///
-/// Either way the reaction carries its own idempotency key, derived from the
-/// caller's and the rule's name ([`reaction_idempotency_key`]).
-fn resolve_trigger_principal(
-    declared_principal: Option<&str>,
-    invoking_ctx: &AgentContext,
-    rule_name: &str,
-    source_entity_type: &str,
-    source_entity_id: &str,
-    source_action: &str,
-) -> AgentContext {
-    let mut ctx = match declared_principal {
-        Some(service_name) if !service_name.is_empty() => {
-            let mut ctx = AgentContext::for_service_inheriting(service_name, invoking_ctx);
-            if let Some(security_ctx) = ctx.security_ctx.as_mut() {
-                security_ctx.context_attrs.insert(
-                    "triggerRule".to_string(),
-                    serde_json::Value::String(rule_name.to_string()),
-                );
-                security_ctx.context_attrs.insert(
-                    "triggerSourceEntityType".to_string(),
-                    serde_json::Value::String(source_entity_type.to_string()),
-                );
-                security_ctx.context_attrs.insert(
-                    "triggerSourceEntityId".to_string(),
-                    serde_json::Value::String(source_entity_id.to_string()),
-                );
-                security_ctx.context_attrs.insert(
-                    "triggerSourceAction".to_string(),
-                    serde_json::Value::String(source_action.to_string()),
-                );
-                security_ctx.context_attrs.insert(
-                    "triggerDeclaredPrincipal".to_string(),
-                    serde_json::Value::Bool(true),
-                );
-            }
-            ctx
-        }
-        _ => invoking_ctx.clone(),
-    };
-    ctx.idempotency_key = reaction_idempotency_key(invoking_ctx, rule_name);
-    ctx
-}
-
-/// A reaction's idempotency key: the caller's, made the rule's own (ADR-0048).
-/// A retry of the source action carries the same caller key, so its reactions
-/// are deduplicated too. The caller's key itself would make a reaction on the
-/// source's own record (`same_id`) a duplicate of the source action, which
-/// that record has just recorded under the key, and the reaction would be
-/// answered as done without running.
-fn reaction_idempotency_key(invoking_ctx: &AgentContext, rule_name: &str) -> Option<String> {
-    invoking_ctx
-        .idempotency_key
-        .as_ref()
-        .map(|key| format!("{key}:reaction:{rule_name}"))
-}
-
-fn effective_trigger_security_context(agent_ctx: &AgentContext) -> SecurityContext {
-    if let Some(security_ctx) = &agent_ctx.security_ctx {
-        return security_ctx.clone();
-    }
-
-    let mut security_ctx = SecurityContext::anonymous().with_agent_context(
-        agent_ctx.agent_id.as_deref(),
-        agent_ctx.session_id.as_deref(),
-        agent_ctx.agent_type.as_deref(),
-    );
-    security_ctx.context_attrs.insert(
-        "triggerInheritedContextApproximate".to_string(),
-        serde_json::Value::Bool(true),
-    );
-    security_ctx
 }
 
 #[cfg(test)]

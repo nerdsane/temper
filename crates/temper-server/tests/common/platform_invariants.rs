@@ -379,7 +379,7 @@ pub async fn assert_p9_rollback_completeness(harness: &SimPlatformHarness) -> Re
 
 /// Every indexed entity's events are replayable and reconstruct a consistent
 /// state. Specifically: events can be read from the store, the sequence is
-/// valid (P8), and the first event carries a `to_state` that matches the
+/// valid (P8), and the first event carries a `to_status` that matches the
 /// spec's initial state (P15). This is the foundation of event-sourcing
 /// correctness — if replay produces a valid state, the entity survives restart.
 ///
@@ -605,7 +605,7 @@ pub async fn assert_p14_tenant_isolation(harness: &SimPlatformHarness) -> Result
 /// A newly created entity's status matches the spec's `initial_state`.
 ///
 /// This checks by reading the first event for each indexed entity and
-/// verifying the `to_state` field matches the TransitionTable initial state.
+/// verifying the `to_status` field matches the TransitionTable initial state.
 pub async fn assert_p15_initial_state_correctness(
     harness: &SimPlatformHarness,
 ) -> Result<(), String> {
@@ -641,14 +641,14 @@ pub async fn assert_p15_initial_state_correctness(
                 .map_err(|e| format!("P15: read_events failed for {persistence_id}: {e}"))?;
 
             if let Some(first) = events.first()
-                && let Some(to_state) = first
+                && let Some(to_status) = first
                     .payload
-                    .get("to_state")
+                    .get("to_status")
                     .and_then(serde_json::Value::as_str)
-                && to_state != expected_initial
+                && to_status != expected_initial
             {
                 return Err(format!(
-                    "P15: entity {persistence_id} initial state is '{to_state}' \
+                    "P15: entity {persistence_id} initial state is '{to_status}' \
                      but spec says '{expected_initial}'"
                 ));
             }
@@ -659,99 +659,133 @@ pub async fn assert_p15_initial_state_correctness(
 
 // ── P16: Event Replay Through TransitionTable ───────────────────────────
 
-/// For each indexed entity, replays its event journal through the
-/// `TransitionTable` and verifies that each event's `to_state` is a valid
-/// transition from the previous state via the named action.
+/// For each indexed entity, walks its durable journal and checks the replay
+/// contract: an event's stored `to_status` is a fact.
 ///
-/// This is a **structural check**: it verifies that the TransitionTable
-/// has a rule where the action name matches, the `from_states` contains
-/// the current state, and the `to_state` matches the recorded `to_state`.
-/// It does NOT re-evaluate guards (since `EvalContext` is not stored in
-/// events) — the guard passed at dispatch time, which is sufficient.
+/// 1. **Chain:** each transition event's stored `from_status` is the status
+///    the previous event stored. Replay picks each rule by that stored
+///    `from_status`, so a broken chain is what would let one event's drift
+///    decide which rule a later event matches.
+/// 2. **Structure:** the active `TransitionTable` has a rule for the action
+///    from the stored `from_status` whose target is the stored `to_status`.
+///    Guards are not re-evaluated (their `EvalContext` is not journaled); the
+///    guard passed at dispatch. The harness never changes a spec under
+///    existing records, so the active table is the one each event ran under.
+/// 3. **Served state:** the status the platform serves for the entity, which
+///    after a restart is rebuilt by replay, is the last stored `to_status`.
 pub async fn assert_p16_event_replay_fidelity(harness: &SimPlatformHarness) -> Result<(), String> {
-    let index = harness.platform_state.server.entity_index.read().unwrap(); // ci-ok: infallible lock
+    // (tenant, entity_type, entity_id, last stored to_status)
+    let mut expected_status: Vec<(String, String, String, String)> = Vec::new();
+    {
+        let index = harness.platform_state.server.entity_index.read().unwrap(); // ci-ok: infallible lock
+        let registry = harness.platform_state.registry.read().unwrap(); // ci-ok: infallible lock
 
-    let store = match event_store(harness) {
-        Some(store) => store,
-        None => return Ok(()),
-    };
-
-    let registry = harness.platform_state.registry.read().unwrap(); // ci-ok: infallible lock
-
-    for (index_key, entity_ids) in index.iter() {
-        let parts: Vec<&str> = index_key.splitn(2, ':').collect();
-        if parts.len() != 2 {
-            continue;
-        }
-        let (tenant, entity_type) = (parts[0], parts[1]);
-        let tid = TenantId::new(tenant);
-
-        let table = match registry.get_table(&tid, entity_type) {
-            Some(t) => t,
-            None => continue,
-        };
-
-        for entity_id in entity_ids {
-            let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
-            let events = store
-                .read_events(&persistence_id, 0)
-                .await
-                .map_err(|e| format!("P16: read_events failed for {persistence_id}: {e}"))?;
-
-            if events.is_empty() {
+        for (index_key, entity_ids) in index.iter() {
+            let Some((tenant, entity_type)) = index_key.split_once(':') else {
                 continue;
-            }
+            };
+            let Some(table) = registry.get_table(&TenantId::new(tenant), entity_type) else {
+                continue;
+            };
 
-            let mut current_state = table.initial_state.clone();
+            for entity_id in entity_ids {
+                let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
+                // The durable journal itself, read without simulated faults.
+                let events = harness.sim_event_store.dump_journal(&persistence_id);
+                let mut status: Option<String> = None;
+                let mut tombstoned = false;
 
-            for event in &events {
-                let action = event
-                    .payload
-                    .get("action")
-                    .and_then(serde_json::Value::as_str)
-                    .or((!event.event_type.is_empty()).then_some(event.event_type.as_str()));
+                for event in &events {
+                    // Match replay's tombstone discriminator, not a spec state name.
+                    tombstoned |= event.is_tombstone();
+                    let field =
+                        |key: &str| event.payload.get(key).and_then(serde_json::Value::as_str);
+                    // Events without a stored transition (composite
+                    // records) carry no status.
+                    let (Some(action), Some(from), Some(to)) =
+                        (field("action"), field("from_status"), field("to_status"))
+                    else {
+                        continue;
+                    };
 
-                let to_state = event
-                    .payload
-                    .get("to_state")
-                    .and_then(serde_json::Value::as_str);
-
-                // If event doesn't carry action/to_state, skip (metadata event).
-                let (action, to_state) = match (action, to_state) {
-                    (Some(a), Some(ts)) => (a, ts),
-                    _ => continue,
-                };
-
-                // Verify the TransitionTable has a valid rule for this transition.
-                let valid = table.rules.iter().any(|rule| {
-                    if rule.name != action {
-                        return false;
+                    let bootstrap = action == "Created" && from.is_empty();
+                    if !bootstrap {
+                        let previous = status.as_deref().unwrap_or(&table.initial_state);
+                        if from != previous {
+                            return Err(format!(
+                                "P16: entity {persistence_id} seq {} breaks the journal chain: \
+                                 action='{action}' stored from='{from}' but the previous event \
+                                 stored to='{previous}'",
+                                event.sequence_nr
+                            ));
+                        }
                     }
-                    let state_ok = rule.from_states.is_empty()
-                        || rule.from_states.iter().any(|s| s == &current_state);
-                    if !state_ok {
-                        return false;
-                    }
-                    match &rule.to_state {
-                        Some(rule_to) => rule_to == to_state,
-                        None => to_state == current_state, // self-loop
-                    }
-                });
 
-                if !valid {
-                    return Err(format!(
-                        "P16: entity {persistence_id} seq {} has invalid transition: \
-                         action='{action}', from='{current_state}', to='{to_state}' — \
-                         no matching rule in TransitionTable",
-                        event.sequence_nr
-                    ));
+                    // Only kernel events are exempt from spec structure checks.
+                    // A spec action can share any of these names; in particular,
+                    // `Deleted` alone does not identify the kernel tombstone.
+                    let field_update = matches!(action, "FieldsUpdated" | "FieldsReplaced")
+                        && event.event_type == action
+                        && from == to
+                        && !table.rules.iter().any(|rule| rule.name == action);
+                    if !bootstrap && !event.is_tombstone() && !field_update {
+                        let valid = table.rules.iter().any(|rule| {
+                            rule.name == action
+                                && (rule.from_states.is_empty()
+                                    || rule.from_states.iter().any(|s| s == from))
+                                && rule.to_state.as_deref().unwrap_or(from) == to
+                        });
+                        if !valid {
+                            return Err(format!(
+                                "P16: entity {persistence_id} seq {} has invalid transition: \
+                                 action='{action}', from='{from}', to='{to}' — \
+                                 no matching rule in TransitionTable",
+                                event.sequence_nr
+                            ));
+                        }
+                    }
+
+                    status = Some(to.to_string());
                 }
 
-                current_state = to_state.to_string();
+                if let Some(status) = status
+                    && !tombstoned
+                {
+                    expected_status.push((
+                        tenant.to_string(),
+                        entity_type.to_string(),
+                        entity_id.clone(),
+                        status,
+                    ));
+                }
             }
         }
     }
-    Ok(())
+
+    // Reading the served state may start actors that replay the journal;
+    // simulated read faults there would be harness noise, not a violation.
+    let prev_faults = harness.sim_event_store.disable_faults();
+    let mut result = Ok(());
+    for (tenant, entity_type, entity_id, stored) in &expected_status {
+        let served = harness
+            .platform_state
+            .server
+            .get_tenant_entity_state(&TenantId::new(tenant), entity_type, entity_id)
+            .await;
+        let violation = match served {
+            Ok(response) if &response.state.status == stored => continue,
+            Ok(response) => format!(
+                "P16: entity {tenant}:{entity_type}:{entity_id} serves status '{}' \
+                 but its last event stored '{stored}'",
+                response.state.status
+            ),
+            Err(e) => format!("P16: entity {tenant}:{entity_type}:{entity_id} unreadable: {e}"),
+        };
+        result = Err(violation);
+        break;
+    }
+    harness.sim_event_store.restore_faults(prev_faults);
+    result
 }
 
 // ── P17: Spec Roundtrip Equivalence ─────────────────────────────────────

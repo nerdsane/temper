@@ -41,6 +41,8 @@ to = "Archived"
 hint = "Move this report to historical archives."
 
 [[liveness]]
-name = "EventuallyReady"
+# A collecting report can always still become ready. Not `reaches`: a fetch
+# can fail and be retried forever.
+name = "CanBeReady"
 from = ["Collecting"]
-reaches = ["Ready", "Archived"]
+can_reach = ["Ready", "Archived"]
