@@ -358,3 +358,6 @@ async fn create_policy_replaces_what_its_id_held() {
 
 #[path = "policy_authorization/create_regressions.rs"]
 mod create_regressions;
+
+#[path = "policy_authorization/read_policies.rs"]
+mod read_policies;
