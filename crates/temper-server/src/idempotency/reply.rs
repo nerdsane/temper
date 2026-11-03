@@ -128,6 +128,10 @@ pub(super) fn estimated_entry_bytes(
         + state.entity_id.len()
         + state.status.len()
         + [
+            &state.last_event.first_event_by,
+            &state.last_event.first_event_for,
+            &state.last_event.first_event_agent_type,
+            &state.last_event.first_event_label,
             &state.last_event.last_event_by,
             &state.last_event.last_event_for,
             &state.last_event.last_event_agent_type,
