@@ -193,8 +193,16 @@ impl EntityActor {
         let Some(store) = self.event_journal.as_ref() else {
             return Vec::new();
         };
-        match store
-            .list_entity_scheduled_actions(&self.tenant, &state.entity_type, &state.entity_id)
+        match self
+            .now
+            .during(
+                super::watchdog::Doing::ReadingTimers,
+                store.list_entity_scheduled_actions(
+                    &self.tenant,
+                    &state.entity_type,
+                    &state.entity_id,
+                ),
+            )
             .await
         {
             Ok(rows) => rows

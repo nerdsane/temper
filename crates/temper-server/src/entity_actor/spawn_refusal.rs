@@ -205,13 +205,18 @@ pub(super) async fn commit(
     state.push_event_bounded(event);
 
     let persistence_id = actor.persistence_id();
-    if let Err(e) = EntityActor::maybe_save_snapshot(
-        store,
-        actor.snapshot_queue.as_ref(),
-        &persistence_id,
-        state,
-    )
-    .await
+    if let Err(e) = actor
+        .now
+        .during(
+            super::watchdog::Doing::Snapshotting,
+            EntityActor::maybe_save_snapshot(
+                store,
+                actor.snapshot_queue.as_ref(),
+                &persistence_id,
+                state,
+            ),
+        )
+        .await
     {
         tracing::warn!(entity = %state.entity_id, seq = state.sequence_nr, error = %e,
             "failed to persist snapshot");
