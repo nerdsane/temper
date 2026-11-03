@@ -28,7 +28,7 @@ pub mod types;
 
 pub use builder::{build_model_from_automaton, build_model_from_ioa, build_model_tracking};
 pub(crate) use entry::{broken_by_action, entry_broken};
-pub(crate) use stateright_impl::{ENTRY_RULES, REACHES_TERMINAL};
+pub(crate) use stateright_impl::ENTRY_RULES;
 pub(crate) use types::ExploreLimit;
 pub use types::{
     LivenessKind, ModelEffect, ModelString, ParamValue, ResolvedEntryRule, ResolvedInvariant,

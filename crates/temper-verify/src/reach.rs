@@ -15,7 +15,7 @@ use crate::model::TemperModelState;
 #[derive(Debug, Default)]
 pub(crate) struct Graph {
     pub(crate) place: Vec<u32>,
-    cut: Vec<bool>,
+    pub(crate) cut: Vec<bool>,
     pub(crate) parent: Vec<Option<(u32, u32)>>,
     pub(crate) depth: Vec<u32>,
     offsets: Vec<u32>,

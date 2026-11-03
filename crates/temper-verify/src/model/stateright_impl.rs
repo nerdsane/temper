@@ -2,7 +2,8 @@
 //!
 //! Implements `init_states`, `actions`, `next_state`, and `properties` to
 //! enable exhaustive model checking via Stateright. Supports multi-variable
-//! state (counters + booleans), safety invariants, and liveness properties.
+//! state (counters + booleans), safety invariants, and deadlock freedom.
+//! `reaches` and `can_reach` rules are checked on the whole walk instead.
 
 use stateright::{Model, Property};
 
@@ -14,10 +15,6 @@ use super::parameters::locally_enabled;
 use super::types::{
     LivenessKind, ResolvedTransition, TemperModel, TemperModelAction, TemperModelState,
 };
-
-/// The name of the one `eventually` property: found false only at the end of
-/// a walk, so a walk cut short can report it falsely.
-pub(crate) const REACHES_TERMINAL: &str = "ReachesTerminal";
 
 /// The property that no move breaks an entry rule. It is read in the state
 /// before the move, so its path ends with that move.
@@ -83,31 +80,6 @@ fn check_no_deadlock(model: &TemperModel, state: &TemperModelState) -> bool {
     true
 }
 
-/// Check liveness: from the specified states, eventually reaches a target state.
-///
-/// Returns `true` when the current state is in any ReachesState target set.
-/// Stateright's `eventually` verifies that on every acyclic path, this
-/// predicate becomes true at some point.
-///
-/// Note: Stateright requires `fn` pointers, so we combine all ReachesState
-/// properties. For specs with multiple ReachesState targets, "eventually
-/// reaches any target" is verified.
-fn check_reaches_state(model: &TemperModel, state: &TemperModelState) -> bool {
-    for live in &model.liveness {
-        if let LivenessKind::ReachesState { targets, .. } = &live.kind
-            && !targets.is_empty()
-            && targets.contains(&state.status)
-        {
-            return true;
-        }
-    }
-    // No target state reached yet.
-    // If there are no ReachesState properties, return true (vacuously satisfied).
-    !model.liveness.iter().any(
-        |l| matches!(&l.kind, LivenessKind::ReachesState { targets, .. } if !targets.is_empty()),
-    )
-}
-
 // -- Model trait implementation ----------------------------------------------
 
 impl TemperModel {
@@ -129,6 +101,17 @@ impl TemperModel {
         // boolean, so `guard_may_hold` admits the gated edge rather than
         // pruning it. See `actions` for why that is the right direction.
         taken && guard_may_hold(&transition.guard, &self.var_kinds, state)
+    }
+
+    /// Whether a record in `state` surely has a move open: one the walk
+    /// takes whose guard holds from the record alone. A move gated on
+    /// another record, or on a value the model does not track, is explored
+    /// as one that may fire, but it may never be open, so a record with no
+    /// other may wait where it is.
+    pub(crate) fn surely_moves(&self, state: &TemperModelState) -> bool {
+        self.transitions.iter().any(|t| {
+            self.transition_enabled(t, state) && locally_enabled(self, t, state) == Some(true)
+        })
     }
 
     /// Whether `action` may fire in `state`.
@@ -223,14 +206,10 @@ impl Model for TemperModel {
             props.push(Property::always("NoDeadlock", check_no_deadlock));
         }
 
-        // Liveness: ReachesState (Stateright's eventually — acyclic paths only)
-        let has_reaches = self
-            .liveness
-            .iter()
-            .any(|l| matches!(&l.kind, LivenessKind::ReachesState { targets, .. } if !targets.is_empty()));
-        if has_reaches {
-            props.push(Property::eventually(REACHES_TERMINAL, check_reaches_state));
-        }
+        // `reaches` rules are not Stateright properties: its `eventually`
+        // sees only acyclic paths, so a loop that never gets there passes,
+        // and it takes one fn for every rule. They are checked rule by rule
+        // on the whole walk (`crate::reaches`).
 
         props
     }

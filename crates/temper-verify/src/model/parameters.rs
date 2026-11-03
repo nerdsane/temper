@@ -224,7 +224,7 @@ pub(super) fn locally_enabled(
     t: &ResolvedTransition,
     state: &TemperModelState,
 ) -> Option<bool> {
-    if model.entry_rules.is_empty() {
+    if !checks_inputs(model, t) {
         return Some(evaluate_guard(&t.guard, &model.var_kinds, state));
     }
     let values = super::strings::string_values(std::iter::once(state));

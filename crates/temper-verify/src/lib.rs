@@ -20,6 +20,7 @@ pub mod model;
 pub mod paths;
 pub mod proptest_gen;
 mod reach;
+pub mod reaches;
 pub mod simulation;
 pub mod smt;
 

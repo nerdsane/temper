@@ -270,6 +270,11 @@ assert = "a == '' || a != ''"
             initial.strings.insert("a".into(), value.into());
             let next = successors(&model, t, &initial);
             assert_eq!(next.len(), usize::from(allowed), "{name} = {value:?}");
+            assert_eq!(
+                crate::model::parameters::locally_enabled(&model, t, &initial),
+                Some(allowed),
+                "input availability: {name} = {value:?}"
+            );
             if allowed {
                 assert_eq!(next[0].0[name], ParamValue::Str(value.into()));
                 assert_eq!(next[0].1.strings, initial.strings);
@@ -376,5 +381,49 @@ fn string_choices_and_successor_states_count_against_the_room() {
     assert!(
         budget.short(),
         "successor records must consume room before cloning"
+    );
+}
+
+#[test]
+fn an_allowed_input_still_enables_a_move_past_an_exploration_bound() {
+    let spec = r#"
+[automaton]
+name = "BoundedInput"
+states = ["Open", "Done"]
+initial = "Open"
+[[state]]
+name = "count"
+type = "counter"
+initial = 2
+[[state]]
+name = "token"
+type = "string"
+initial = "ok"
+[[action]]
+name = "Finish"
+from = ["Open"]
+to = "Done"
+params = [{ name = "proof", type = "string" }]
+effect = ["count += 1"]
+guard = "count >= 0"
+[[action.constraints]]
+kind = "param_nonempty"
+param = "proof"
+[[action.constraints]]
+kind = "param_equals_field"
+param = "proof"
+field = "token"
+[[invariant]]
+name = "TrackToken"
+assert = "token == '' || token != ''"
+"#;
+    let model = crate::model::build_model_from_ioa(spec, 2).unwrap();
+    let initial = stateright::Model::init_states(&model).remove(0);
+    let transition = &model.transitions[0];
+    assert!(successors(&model, transition, &initial).is_empty());
+    assert_eq!(
+        crate::model::parameters::locally_enabled(&model, transition, &initial),
+        Some(true),
+        "effects past the bound do not prevent an allowed runtime input"
     );
 }

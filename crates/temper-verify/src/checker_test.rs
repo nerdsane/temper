@@ -304,9 +304,10 @@ guard = "empty(file_id) || File[file_id].status in ['Ready']"
 
 #[test]
 fn test_liveness_reaches_state_through_cross_entity_gate() {
-    // A liveness "eventually reaches Published" property can only be proven
-    // if the gated edge is explored. With the free-boolean treatment the
-    // ReachesTerminal property holds.
+    // The gated edge is explored (the free boolean), so Published is
+    // reachable. But a record whose file never becomes Ready waits in Draft
+    // forever, so "every path reaches Published" cannot be proved from this
+    // record alone: not proved, with no path named.
     let src = r#"
 [automaton]
 name = "DesignLanguage"
@@ -317,7 +318,7 @@ initial = "Draft"
 name = "Publish"
 from = ["Draft"]
 to = "Published"
-guard = "empty(file_id) || File[file_id].status in ['Ready']"
+guard = "File[file_id].status in ['Ready']"
 
 [[liveness]]
 name = "EventuallyPublished"
@@ -326,10 +327,52 @@ reaches = ["Published"]
 "#;
     let model = build_model_from_ioa(src, 2).unwrap();
     let result = check_model(&model);
+    assert!(states_contains_status(&model, "Published"));
+    assert!(result.is_complete, "{result:?}");
     assert!(
-        result.all_properties_hold,
-        "liveness toward a cross-entity gated state must be provable: {result:?}"
+        !result.all_properties_hold,
+        "a reaches rule that rests on a gate that may never open is not proved: {result:?}"
     );
+    assert!(result.counterexamples.is_empty(), "{result:?}");
+    assert!(
+        result
+            .unproved_can_reach
+            .iter()
+            .any(|why| why.contains("EventuallyPublished") && why.contains("Draft")),
+        "{:?}",
+        result.unproved_can_reach
+    );
+}
+
+#[test]
+fn test_liveness_reaches_state_beside_a_cross_entity_gate() {
+    // A record that may not wait in Draft (it can always withdraw) gets to
+    // one of the targets on every path, gate open or not.
+    let src = r#"
+[automaton]
+name = "DesignLanguage"
+states = ["Draft", "Published", "Withdrawn"]
+initial = "Draft"
+
+[[action]]
+name = "Publish"
+from = ["Draft"]
+to = "Published"
+guard = "File[file_id].status in ['Ready']"
+
+[[action]]
+name = "Withdraw"
+from = ["Draft"]
+to = "Withdrawn"
+
+[[liveness]]
+name = "Settles"
+from = ["Draft"]
+reaches = ["Published", "Withdrawn"]
+"#;
+    let model = build_model_from_ioa(src, 2).unwrap();
+    let result = check_model(&model);
+    assert!(result.all_properties_hold, "{result:?}");
 }
 
 #[test]

@@ -241,8 +241,10 @@ pub struct ResolvedEntryRule {
 /// The kind of liveness property.
 #[derive(Clone, Debug)]
 pub enum LivenessKind {
-    /// From any `from` state, eventually reaches one of `targets`.
-    /// Checked via Stateright's `Property::eventually` (acyclic paths only).
+    /// From every reachable state in one of `from` (a new record when it is
+    /// empty), every path gets to one of `targets`: none stops short or
+    /// loops forever without them. Checked on the model check's whole walk,
+    /// after a complete exploration ([`crate::reaches`]).
     ReachesState {
         from: Vec<String>,
         targets: Vec<String>,

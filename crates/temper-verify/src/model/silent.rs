@@ -15,9 +15,9 @@ impl TemperModel {
     /// reachable (a move no reachable state enables is dead), whether one
     /// is terminal (a move enabled there breaks `Terminal`), and whether it
     /// is the only way out of a reachable state (`NoDeadlock`). A spec with
-    /// a `reaches` liveness has none: its simulation counts walks that end
-    /// short of the target, and a move that stays in place makes more of
-    /// them.
+    /// a `reaches` liveness has none: a move that stays in place is a loop
+    /// a record can take forever, which breaks the rule, and its simulation
+    /// counts walks that end short of the target.
     pub fn is_silent(&self, index: usize) -> bool {
         let t = &self.transitions[index];
         let stays = t.to_state.is_none()

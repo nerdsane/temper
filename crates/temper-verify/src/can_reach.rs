@@ -21,10 +21,12 @@ use crate::reach::{Graph, NO_PLACE, Reach};
 pub const CAN_REACH: &str = "CanReach";
 
 /// A possible edge through an unmodeled local numeric value or an unchecked
-/// input guard or constraint cannot prove that a route exists. Conservatively
-/// leave the rules unproved when exploration does not enforce one. This does
-/// not suppress a concrete refusal found in the overapproximated graph, nor
-/// change how cross-entity guards are explored.
+/// input guard or constraint cannot prove that a route exists, nor that a
+/// record is not stuck where every move it has is such an edge (which breaks
+/// a `reaches` rule). Conservatively leave `can_reach` and `reaches` rules
+/// unproved when exploration does not enforce one. This does not suppress a
+/// concrete refusal found in the overapproximated graph, nor change how
+/// cross-entity guards are explored.
 pub(crate) fn unproved_rules(model: &TemperModel) -> Vec<String> {
     let mut unmodeled = BTreeSet::new();
     let mut unchecked = BTreeSet::new();
@@ -98,7 +100,11 @@ pub(crate) fn unproved_rules(model: &TemperModel) -> Vec<String> {
     model
         .liveness
         .iter()
-        .filter(|live| matches!(live.kind, LivenessKind::CanReach { .. }))
+        .filter(|live| match &live.kind {
+            LivenessKind::CanReach { .. } => true,
+            LivenessKind::ReachesState { targets, .. } => !targets.is_empty(),
+            LivenessKind::NoDeadlock { .. } => false,
+        })
         .map(|live| format!("rule '{}' not proved: {reasons}", live.name))
         .collect()
 }
@@ -173,7 +179,7 @@ pub(crate) fn broken_rules(
 
 /// The states on `path` with the action taken from each: the transition's
 /// name and the parameter values that step to the next state.
-fn trace(
+pub(crate) fn trace(
     model: &TemperModel,
     states: &BTreeMap<usize, &TemperModelState>,
     path: &[(usize, Option<usize>)],
