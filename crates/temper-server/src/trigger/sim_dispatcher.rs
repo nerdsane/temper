@@ -13,6 +13,7 @@ use temper_runtime::tenant::TenantId;
 
 use super::registry::ReactionRegistry;
 use super::types::ReactionResult;
+use crate::odata::read_defaults::ReadDefaults;
 use crate::request_context::{ChainStep, RepeatedStep, StepEntity};
 
 /// Maps actor IDs to their (entity_type, entity_id) for target resolution.
@@ -37,6 +38,8 @@ pub struct SimReactionSystem {
     entity_to_actor: BTreeMap<String, String>,
     /// Collected reaction results from the last cascade.
     last_results: Vec<ReactionResult>,
+    /// Each entity type's declarations, for types registered from a table.
+    declared: BTreeMap<String, ReadDefaults>,
 }
 
 impl SimReactionSystem {
@@ -53,6 +56,7 @@ impl SimReactionSystem {
             actor_meta: BTreeMap::new(),
             entity_to_actor: BTreeMap::new(),
             last_results: Vec::new(),
+            declared: BTreeMap::new(),
         }
     }
 
@@ -89,6 +93,8 @@ impl SimReactionSystem {
         table: Arc<TransitionTable>,
     ) {
         use crate::entity_actor::EntityActorHandler;
+        self.declared
+            .insert(entity_type.to_string(), ReadDefaults::from_table(&table));
         let handler = EntityActorHandler::new(entity_type, entity_id, table);
         self.register_actor(actor_id, entity_type, entity_id, Box::new(handler));
     }
@@ -157,12 +163,19 @@ impl SimReactionSystem {
             .cloned()
             .collect();
 
+        // Guards and args read the source record as every guard does: a
+        // variable it stores no value for reads as its declared initial value.
+        let read = match self.declared.get(entity_type) {
+            Some(declared) => declared.fields_as_read(fields),
+            None => fields.clone(),
+        };
+
         for rule in rules {
             // Guard evaluation: skip rules whose guard fails. Guard-skipped
             // rules do not emit a `ReactionResult` — they never fired.
             if let Some(guard) = &rule.when.guard {
                 let mut related = temper_jit::table::RelatedMap::new();
-                for (reference, ids) in super::guard::related_ids(guard, fields) {
+                for (reference, ids) in super::guard::related_ids(guard, &read) {
                     let statuses = ids
                         .iter()
                         .map(|id| {
@@ -173,7 +186,7 @@ impl SimReactionSystem {
                         .collect();
                     related.insert(reference, temper_jit::table::Related::Statuses(statuses));
                 }
-                if !super::guard::guard_holds(guard, fields, to_state, &related) {
+                if !super::guard::guard_holds(guard, &read, to_state, &related) {
                     continue;
                 }
             }
@@ -218,7 +231,7 @@ impl SimReactionSystem {
 
             // Execute the target action
             let effective_params =
-                super::params::build_effective_params(&rule.then, entity_id, fields, &rule.name);
+                super::params::build_effective_params(&rule.then, entity_id, &read, &rule.name);
             let params_str = match serde_json::to_string(&effective_params) {
                 Ok(s) => s,
                 Err(e) => {

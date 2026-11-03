@@ -10,7 +10,7 @@ use std::path::Path;
 use temper_runtime::tenant::TenantId;
 
 use super::{
-    APP_DOCS_ROOT_DIR_ID, APP_DOCS_WORKSPACE_ID, DirectoryBootstrapTarget,
+    APP_DOCS_ROOT_DIR_ID, APP_DOCS_WORKSPACE_ID, AppFileSource, DirectoryBootstrapTarget,
     MarkdownFileBootstrapTarget, ensure_directory, ensure_markdown_file, slug_fragment,
 };
 use crate::state::PlatformState;
@@ -25,57 +25,32 @@ pub struct SystemFileEntry {
     pub mime_type: String,
 }
 
-/// Discover system files from the `system/` directory tree.
-/// Recursively walks the directory and collects all files.
-pub fn find_system_files(app_dir: &Path) -> Vec<SystemFileEntry> {
-    let system_dir = app_dir.join("system");
-    if !system_dir.is_dir() {
-        return Vec::new();
-    }
+/// Every file under the app's `system/` folder, by its path inside it.
+pub(super) fn find_system_files(files: &AppFileSource) -> Result<Vec<SystemFileEntry>, String> {
     let mut results = Vec::new();
-    collect_recursive(&system_dir, &system_dir, &mut results);
-    results.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
-    results
-}
-
-fn collect_recursive(base_dir: &Path, current_dir: &Path, results: &mut Vec<SystemFileEntry>) {
-    let Ok(entries) = std::fs::read_dir(current_dir) else {
-        return;
-    };
-    for entry in entries.filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_recursive(base_dir, &path, results);
-        } else if path.is_file() {
-            let Ok(content) = std::fs::read(&path) else {
-                continue;
-            };
-            let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
-                continue;
-            };
-            let relative = path
-                .strip_prefix(base_dir)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .to_string();
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            let mime_type = match ext {
-                "md" => "text/markdown",
-                "json" => "application/json",
-                "toml" => "application/toml",
-                "yaml" | "yml" => "text/yaml",
-                "txt" => "text/plain",
-                _ => "application/octet-stream",
-            }
-            .to_string();
-            results.push(SystemFileEntry {
-                relative_path: relative,
-                file_name: file_name.to_string(),
-                content,
-                mime_type,
-            });
+    for relative in files.files_under("system") {
+        let path = Path::new(&relative);
+        let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let mime_type = match ext {
+            "md" => "text/markdown",
+            "json" => "application/json",
+            "toml" => "application/toml",
+            "yaml" | "yml" => "text/yaml",
+            "txt" => "text/plain",
+            _ => "application/octet-stream",
         }
+        .to_string();
+        results.push(SystemFileEntry {
+            file_name: file_name.to_string(),
+            content: files.read(&format!("system/{relative}"))?,
+            mime_type,
+            relative_path: relative,
+        });
     }
+    Ok(results)
 }
 
 /// Bootstrap system files into TemperFS under `/system/{relative_path}`.

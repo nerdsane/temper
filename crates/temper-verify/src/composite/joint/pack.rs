@@ -18,6 +18,8 @@ pub(super) type Packed = Rc<[u32]>;
 pub(super) struct Packer {
     ids: HashMap<String, u32>,
     names: Vec<String>,
+    /// Bytes the strings take on the heap, each held twice.
+    pub(super) heap: usize,
 }
 
 impl Packer {
@@ -39,11 +41,20 @@ impl Packer {
         let id = u32::try_from(self.names.len()).expect("fewer than 2^32 strings");
         self.ids.insert(name.to_string(), id);
         self.names.push(name.to_string());
+        self.heap += 2 * super::room::block(name.len());
         id
     }
 
     pub(super) fn name(&self, id: u32) -> &str {
         &self.names[id as usize]
+    }
+
+    /// Bytes the table holds: its strings, and its list and index at their
+    /// capacity.
+    pub(super) fn bytes(&self) -> usize {
+        self.heap
+            + self.names.capacity() * size_of::<String>()
+            + super::room::map_bytes::<String, u32>(self.ids.capacity())
     }
 }
 
@@ -106,12 +117,18 @@ impl Pack for ModelString {
                 out.push(1);
                 n.put(packer, out);
             }
+            ModelString::BlankSymbol(n) => {
+                out.push(2);
+                n.put(packer, out);
+            }
         }
     }
     fn take(packer: &Packer, input: &mut Iter<'_, u32>) -> Self {
         match next(input) {
             0 => Self::Literal(String::take(packer, input)),
-            _ => Self::Symbol(usize::take(packer, input)),
+            1 => Self::Symbol(usize::take(packer, input)),
+            2 => Self::BlankSymbol(usize::take(packer, input)),
+            _ => unreachable!("unknown packed string kind"),
         }
     }
 }
@@ -219,6 +236,19 @@ impl Pack for ReactionStep {
     }
 }
 
+impl Pack for super::state::Committed {
+    fn put(&self, packer: &mut Packer, out: &mut Vec<u32>) {
+        self.status.put(packer, out);
+        self.fields.put(packer, out);
+    }
+    fn take(packer: &Packer, input: &mut Iter<'_, u32>) -> Self {
+        Self {
+            status: Pack::take(packer, input),
+            fields: Pack::take(packer, input),
+        }
+    }
+}
+
 impl Pack for Dispatch {
     fn put(&self, packer: &mut Packer, out: &mut Vec<u32>) {
         self.to.put(packer, out);
@@ -229,7 +259,7 @@ impl Pack for Dispatch {
         self.chain.put(packer, out);
         self.via.put(packer, out);
         self.by.put(packer, out);
-        self.inline.put(packer, out);
+        self.unread_guard.put(packer, out);
     }
     fn take(packer: &Packer, input: &mut Iter<'_, u32>) -> Self {
         Dispatch {
@@ -241,7 +271,7 @@ impl Pack for Dispatch {
             chain: Pack::take(packer, input),
             via: Pack::take(packer, input),
             by: Pack::take(packer, input),
-            inline: Pack::take(packer, input),
+            unread_guard: Pack::take(packer, input),
         }
     }
 }
@@ -302,6 +332,7 @@ mod tests {
                 asked: BTreeMap::from([
                     ("literal".into(), ModelString::from("#1")),
                     ("fresh".into(), ModelString::Symbol(1)),
+                    ("blank".into(), ModelString::BlankSymbol(2)),
                 ]),
             }],
             armed: BTreeMap::new(),

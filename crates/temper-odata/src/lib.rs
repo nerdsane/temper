@@ -10,4 +10,5 @@ pub use path::{KeyValue, ODataPath, parse_path};
 pub use query::{
     BinaryOperator, ExpandItem, ExpandOptions, FilterExpr, ODataValue, OrderByClause,
     OrderDirection, QueryOptions, UnaryOperator, parse_filter, parse_query_options,
+    parse_query_options_from_pairs,
 };

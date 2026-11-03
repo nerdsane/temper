@@ -149,6 +149,15 @@ pub(super) async fn write_append(
         .await
         .map_err(storage_error)?;
     }
+    if !append.entity_rows.projects_entity() {
+        super::super::projection_delta::mark_pending(
+            tx,
+            [tenant, entity_type, entity_id],
+            new_seq,
+            append.events.iter().any(|event| event.is_tombstone()),
+        )
+        .await?;
+    }
     append
         .entity_rows
         .write(tx, [tenant, entity_type, entity_id], new_seq)
@@ -345,6 +354,22 @@ pub(super) async fn write_batch(
             tracing::error!(error = %e, "event batch insert failed");
             return Err(PersistenceError::Storage(msg));
         }
+    }
+    // Each record's query-plane row commits with its events, as in a single
+    // append; a record the batch does not project is marked pending instead.
+    for ((append, key), result) in appends.iter().zip(&parsed).zip(&results) {
+        let rows = super::EntityRows::new(&append.commit_rows());
+        let record = [key.0.as_str(), key.1.as_str(), key.2.as_str()];
+        if !rows.projects_entity() && !append.events.is_empty() {
+            super::super::projection_delta::mark_pending(
+                tx,
+                record,
+                result.sequence_nr,
+                append.events.iter().any(|event| event.is_tombstone()),
+            )
+            .await?;
+        }
+        rows.write(tx, record, result.sequence_nr).await?;
     }
     Ok(results)
 }

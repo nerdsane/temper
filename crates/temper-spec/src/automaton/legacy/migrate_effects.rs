@@ -177,6 +177,14 @@ fn statement(
             }
             format!("{var} = {value}")
         }
+        Old::SetString { var, value } => {
+            if kinds.get(&var) != Some(&VarKind::Str) {
+                return Err(fail(format!(
+                    "set_string writes '{var}', which is not a declared string"
+                )));
+            }
+            format!("{var} = {}", crate::predicate::Literal::Str(value))
+        }
         Old::ListAppend { var } => format!("append({var}, params.{var})"),
         Old::ListRemoveAt { var } => format!("remove_at({var}, params.{var}_index)"),
         Old::Schedule {

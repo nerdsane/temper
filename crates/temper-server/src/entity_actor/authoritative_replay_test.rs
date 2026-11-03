@@ -128,6 +128,7 @@ fn envelope(
         params: serde_json::json!({}),
         idempotency_key: None,
         outcome: None,
+        origin: Default::default(),
         kind: if action == "Deleted" {
             temper_runtime::persistence::EventKind::Tombstone
         } else {
@@ -376,6 +377,7 @@ async fn authoritative_replay_rejects_non_object_field_update_payloads() {
         timestamp: sim_now(),
         params: serde_json::json!([1, 2, 3]),
         idempotency_key: None,
+        origin: Default::default(),
         kind: temper_runtime::persistence::EventKind::Transition,
         outcome: None,
     };

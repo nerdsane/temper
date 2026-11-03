@@ -304,6 +304,10 @@ impl IdempotencyCache {
             return;
         }
 
+        // Check the two inserts locally. Recounting every actor's replies here
+        // makes each debug-build write linear in the live actor count. Tests
+        // check the whole-cache indexes across replacement, eviction and expiry.
+        let replies_before_insert = entries.len();
         let seq = entries.next_seq;
         entries.next_seq += 1;
         let order = if effects_applied {
@@ -312,7 +316,7 @@ impl IdempotencyCache {
             &mut entries.pending
         };
         order.insert(seq, (actor_key.to_string(), idem_key.to_string()));
-        entries
+        let inserted_new_reply = entries
             .by_actor
             .entry(actor_key.to_string())
             .or_default()
@@ -326,7 +330,10 @@ impl IdempotencyCache {
                     bytes,
                     seq,
                 },
-            );
+            )
+            .is_none();
+        debug_assert!(inserted_new_reply);
+        debug_assert_eq!(entries.len(), replies_before_insert + 1);
         entries.bytes += bytes;
 
         while entries.bytes > self.budget_bytes {
@@ -335,10 +342,6 @@ impl IdempotencyCache {
             }
         }
         debug_assert!(entries.bytes <= self.budget_bytes);
-        debug_assert_eq!(
-            entries.len(),
-            entries.by_actor.values().map(BTreeMap::len).sum::<usize>()
-        );
     }
 }
 

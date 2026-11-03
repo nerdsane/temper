@@ -34,6 +34,8 @@ test-helpers = []
 test-shared-compilation = []
 
 [dev-dependencies]
+proc-macro2 = { workspace = true }
+syn = { workspace = true }
 base64 = "0.22"
 tokio-test = { workspace = true }
 # `testing` gives the in-memory span exporter used by the ARN-243 behavioral

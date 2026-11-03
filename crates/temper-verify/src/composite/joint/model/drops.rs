@@ -1,7 +1,7 @@
 //! The drop check (ADR-0150) on the joint model: a reaction whose target
 //! refuses it when it lands is dropped, and the runtime says nothing.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use temper_spec::automaton::{Automaton, TargetResolver};
@@ -9,9 +9,10 @@ use temper_spec::predicate::Truth;
 
 use super::super::JointState;
 use super::super::env::Records;
+use super::super::room::Bound;
 use super::commit::Arrival;
 use super::step::{Move, remove};
-use super::{Delivery, JointModel, Sending, tracked};
+use super::{Delivery, JointModel, Keep, Sending, tracked};
 
 /// A reaction its target refused when it landed: the target was not in a
 /// state its action is allowed from, or a guard or constraint said no.
@@ -55,8 +56,8 @@ pub(crate) struct Drops {
     pub(crate) drops: Vec<DroppedReaction>,
     /// Distinct joint states walked.
     pub(crate) states: usize,
-    /// Whether every reachable joint state was walked.
-    pub(crate) complete: bool,
+    /// Why the walk stopped before seeing every joint state.
+    pub(crate) stopped: Option<String>,
 }
 
 impl JointModel {
@@ -96,7 +97,7 @@ impl JointModel {
         }
         let mut model = Self::compose(
             by_name,
-            scope,
+            &scope,
             (models, reactions),
             &BTreeMap::new(),
             Sending::anyone(),
@@ -108,84 +109,27 @@ impl JointModel {
         model
     }
 
-    /// Walk the settled joint states (nothing in flight) breadth first, at
-    /// most `states` of them, naming each distinct reaction a target refuses
-    /// when it lands. A move from outside settles through every order its
-    /// dispatches can land in before the next one.
-    pub(in crate::composite::joint) fn drops(&self, states: usize) -> Drops {
-        // `states` bounds distinct settled states, not the work needed to
-        // reach them. Give the default 250,000-state walk 10M expansion
-        // steps, the install check's work cap; scale smaller requests down.
-        // Parameter products, reaction branches and settling still spend
-        // this finite allowance and exhaustion still refuses proof.
-        let work = states.saturating_mul(40).min(10_000_000);
-        self.expansion.reset(work, None);
-        let mut seen: HashSet<JointState> = HashSet::new();
-        let mut queue = VecDeque::new();
-        for init in self.inits() {
-            if !self.expansion.take() {
-                break;
-            }
-            if seen.insert(init.clone()) {
-                queue.push_back(init);
-            }
-        }
+    /// Walk every joint state breadth first, in the memory `bound` gives
+    /// the walk, naming each distinct reaction a target refuses when it
+    /// lands. A move from outside waits until every dispatch in flight has
+    /// landed, so the walk sees every order they can land in.
+    pub(in crate::composite::joint) fn drops(&self, bound: Bound<'_>) -> Drops {
         let mut drops = BTreeSet::new();
-        let mut complete = true;
-        while let Some(state) = queue.pop_front() {
-            if seen.len() >= states || self.expansion.exhausted.get() {
-                complete = false;
-                break;
+        let explored = self.walk_with(bound, Keep::States, |_, state, _| {
+            if !state.inflight.is_empty() {
+                drops.extend(
+                    self.moves(state)
+                        .iter()
+                        .filter_map(|mv| self.dropped(state, mv)),
+                );
             }
-            for mv in self.moves(&state) {
-                if self.expansion.exhausted.get() {
-                    break;
-                }
-                for next in self.next(&state, &mv).0 {
-                    for settled in self.settle(next.state, &mut drops) {
-                        if seen.insert(settled.clone()) {
-                            queue.push_back(settled);
-                        }
-                    }
-                }
-            }
-        }
+            false
+        });
         Drops {
             drops: drops.into_iter().collect(),
-            states: seen.len(),
-            complete: complete && !self.expansion.exhausted.get(),
+            states: explored.len(),
+            stopped: explored.stopped,
         }
-    }
-
-    /// The settled states `state` reaches as its dispatches land, in every
-    /// order, adding to `drops` each reaction refused on the way.
-    fn settle(&self, state: JointState, drops: &mut BTreeSet<DroppedReaction>) -> Vec<JointState> {
-        let mut settled = Vec::new();
-        let mut seen: HashSet<JointState> = HashSet::new();
-        let mut stack = vec![state];
-        while let Some(state) = stack.pop() {
-            if !self.expansion.take() {
-                break;
-            }
-            if state.inflight.is_empty() {
-                settled.push(state);
-                continue;
-            }
-            for mv in self.moves(&state) {
-                if self.expansion.exhausted.get() {
-                    break;
-                }
-                if let Some(drop) = self.dropped(&state, &mv) {
-                    drops.insert(drop);
-                }
-                for next in self.next(&state, &mv).0 {
-                    if seen.insert(next.state.clone()) {
-                        stack.push(next.state);
-                    }
-                }
-            }
-        }
-        settled
     }
 
     /// The reaction `mv` drops: a dispatch a reaction sent that its target
@@ -195,7 +139,8 @@ impl JointModel {
             return None;
         };
         let reaction = &self.reactions[dispatch.via?];
-        if reaction.may_drop {
+        // Reading its trigger's guard is no refusal.
+        if reaction.may_drop || dispatch.unread_guard.is_some() {
             return None;
         }
         let refused = if dispatch.read {
@@ -217,60 +162,17 @@ impl JointModel {
 }
 
 /// Walk the joint model of the types in `scope`, whole, one record of each,
-/// at most `states` joint states, and name every reaction a target refuses
+/// in the memory `bound` gives it, and name every reaction a target refuses
 /// when it lands (ADR-0150). The dispatches a move sends land, in any order,
 /// before the next move from outside: the check claims no more than that.
 pub(crate) fn dropped_reactions(
     automatons: &[&Automaton],
     scope: BTreeSet<String>,
-    states: usize,
+    bound: Bound<'_>,
 ) -> Drops {
     let by_name: BTreeMap<&str, &Automaton> = automatons
         .iter()
         .map(|a| (a.automaton.name.as_str(), *a))
         .collect();
-    JointModel::whole(&by_name, scope).drops(states)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::composite::joint::Dispatch;
-
-    #[test]
-    fn settling_stops_inside_its_expansion_budget() {
-        let a = temper_spec::automaton::parse_automaton(
-            r#"
-[automaton]
-name = "T"
-states = ["Ready"]
-initial = "Ready"
-[[action]]
-name = "Stay"
-kind = "input"
-from = ["Ready"]
-to = "Ready"
-"#,
-        )
-        .unwrap();
-        let model = JointModel::whole(&BTreeMap::from([("T", &a)]), BTreeSet::from(["T".into()]));
-        let mut state = model.inits().next().unwrap();
-        state.inflight = (0..4)
-            .map(|_| Dispatch {
-                to: "T".into(),
-                action: "Stay".into(),
-                target_state: None,
-                params: BTreeMap::new(),
-                read: true,
-                chain: Vec::new(),
-                via: None,
-                by: super::super::super::senders::OUTSIDE,
-                inline: false,
-            })
-            .collect();
-        model.expansion.reset(3, None);
-        let settled = model.settle(state, &mut BTreeSet::new());
-        assert!(settled.is_empty());
-        assert!(model.expansion.exhausted.get());
-    }
+    JointModel::whole(&by_name, scope).drops(bound)
 }

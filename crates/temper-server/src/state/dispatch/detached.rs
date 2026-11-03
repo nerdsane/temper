@@ -17,6 +17,7 @@ use super::{DispatchCommand, DispatchError};
 use crate::entity_actor::EntityResponse;
 use crate::request_context::AgentContext;
 use crate::state::ServerState;
+use crate::state::write_record::WriteCaller;
 use temper_runtime::tenant::TenantId;
 
 /// A [`DispatchCommand`] that owns its values, so its task outlives the
@@ -74,13 +75,14 @@ impl ServerState {
     pub(super) fn dispatch_typed_checked<'a>(
         &'a self,
         cmd: DispatchCommand<'a>,
+        caller: WriteCaller,
         expected_authorization_precondition: Option<String>,
     ) -> DispatchAnswer<'a> {
         let job = OwnedDispatch::new(cmd);
         let server = self.clone();
         let work = async move {
             server
-                .dispatch_typed_attached(job.command(), expected_authorization_precondition)
+                .dispatch_typed_attached(job.command(), caller, expected_authorization_precondition)
                 .await
         }
         .instrument(tracing::Span::current());

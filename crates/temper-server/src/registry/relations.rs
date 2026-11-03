@@ -173,6 +173,7 @@ mod tests {
     fn synthesize_entity_trigger_emits_reaction_rule() {
         let trigger = temper_spec::automaton::ActionTrigger {
             name: "create_version".to_string(),
+            says: None,
             kind: TriggerKind::Entity,
             principal: Some("file-service".to_string()),
             guard: Some(temper_spec::predicate::parse("status == 'Ready'").unwrap()),
@@ -218,6 +219,7 @@ mod tests {
     fn synthesize_wasm_trigger_returns_none() {
         let trigger = temper_spec::automaton::ActionTrigger {
             name: "charge".to_string(),
+            says: None,
             kind: TriggerKind::Wasm,
             principal: None,
             guard: None,
@@ -246,6 +248,7 @@ mod tests {
     fn synthesize_webhook_trigger_returns_none() {
         let trigger = temper_spec::automaton::ActionTrigger {
             name: "notify".to_string(),
+            says: None,
             kind: TriggerKind::Webhook,
             principal: None,
             guard: None,

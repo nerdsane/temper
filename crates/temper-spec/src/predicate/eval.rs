@@ -44,7 +44,7 @@ impl Truth {
 }
 
 /// A value read from the evaluation environment.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum Val<'a> {
     /// The evaluator cannot know this value.
     Unknown,
@@ -60,6 +60,8 @@ pub enum Val<'a> {
     Symbol(usize),
     /// A list of strings (IOA list/set state variables).
     Strs(&'a [String]),
+    /// A verifier list whose elements can include equality symbols.
+    Values(Vec<Val<'a>>),
     /// A JSON array or object from an entity field.
     Json(&'a serde_json::Value),
 }
@@ -79,6 +81,7 @@ impl<'a> Val<'a> {
     fn list_len(self) -> Option<usize> {
         match self {
             Val::Strs(items) => Some(items.len()),
+            Val::Values(items) => Some(items.len()),
             Val::Json(serde_json::Value::Array(items)) => Some(items.len()),
             _ => None,
         }
@@ -152,7 +155,7 @@ pub fn eval(expr: &Expr, env: &dyn Env) -> Truth {
             },
         },
         Expr::Compare { lhs, op, rhs } => for_each_value(lhs, env, |a| {
-            for_each_value(rhs, env, |b| compare(a, *op, b))
+            for_each_value(rhs, env, |b| compare(a.clone(), *op, b))
         }),
         Expr::In {
             value,
@@ -258,6 +261,12 @@ fn equal(lhs: Val<'_>, rhs: Val<'_>) -> bool {
         (Val::Str(a), Val::Str(b)) => a == b,
         (Val::Symbol(a), Val::Symbol(b)) => a == b,
         (Val::Strs(a), Val::Strs(b)) => a == b,
+        (Val::Values(a), Val::Values(b)) => {
+            a.len() == b.len() && a.into_iter().zip(b).all(|(a, b)| equal(a, b))
+        }
+        (Val::Values(a), Val::Strs(b)) | (Val::Strs(b), Val::Values(a)) => {
+            a.len() == b.len() && a.into_iter().zip(b).all(|(a, b)| equal(a, Val::Str(b)))
+        }
         (Val::Json(a), Val::Json(b)) => a == b,
         _ => false,
     }
@@ -268,15 +277,22 @@ fn contains(env: &dyn Env, set: &Set, value: Val<'_>) -> Truth {
         return Truth::Unknown;
     }
     match set {
-        Set::List(items) => Truth::from_bool(items.iter().any(|item| equal(value, literal(item)))),
+        Set::List(items) => {
+            Truth::from_bool(items.iter().any(|item| equal(value.clone(), literal(item))))
+        }
         Set::Var(name) => match env.var(name) {
             Val::Unknown => Truth::Unknown,
+            Val::Values(items) => {
+                Truth::from_bool(items.into_iter().any(|item| equal(value.clone(), item)))
+            }
             Val::Strs(items) => {
                 Truth::from_bool(matches!(value, Val::Str(s) if items.iter().any(|item| item == s)))
             }
-            Val::Json(serde_json::Value::Array(items)) => {
-                Truth::from_bool(items.iter().any(|item| equal(value, Val::json(item))))
-            }
+            Val::Json(serde_json::Value::Array(items)) => Truth::from_bool(
+                items
+                    .iter()
+                    .any(|item| equal(value.clone(), Val::json(item))),
+            ),
             _ => Truth::False,
         },
     }

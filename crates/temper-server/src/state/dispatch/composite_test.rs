@@ -666,11 +666,13 @@ async fn composite_app_create_sub_write_authorization_can_enforce_owner_scope() 
                 role: None,
                 acting_for: None,
                 agent_type: None,
+                label: None,
                 attributes: std::collections::HashMap::new(),
             },
             context_attrs: std::collections::HashMap::new(),
             correlation_id: "composite-owner-scope".to_string(),
             cause: None,
+            credential: None,
         }),
         ..Default::default()
     };
@@ -1484,14 +1486,22 @@ async fn composite_atomic_batch_allows_existing_sub_write_to_delete_target() {
             &agent,
         )
         .await
-        .expect("composite delete sub-write should commit without reloading a tombstone");
+        .expect("composite delete sub-write should commit");
     assert!(applied);
 
+    // Child's Delete is a spec move into a state named Deleted, not the
+    // kernel's tombstone: the record stays, read and listed as Deleted.
+    let child = state
+        .get_tenant_entity_state(&tenant, "Child", child_id)
+        .await
+        .expect("read the child after the batch");
+    assert_eq!(child.state.status, "Deleted");
     assert!(
-        !state.ensure_entity_loaded(&tenant, "Child", child_id).await,
-        "deleted composite sub-write target should not be reloaded as a live entity"
+        state
+            .list_entity_ids(&tenant, "Child")
+            .contains(&child_id.to_string()),
+        "a spec-Deleted batch target stays listed"
     );
-    assert!(!state.entity_exists(&tenant, "Child", child_id));
 
     let child_journal = store.dump_journal(&format!("default:Child:{child_id}"));
     assert_eq!(

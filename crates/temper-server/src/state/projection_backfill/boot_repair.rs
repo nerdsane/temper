@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 use temper_runtime::persistence::{PersistenceError, ProjectionRepairCandidate};
 use temper_runtime::tenant::TenantId;
+use tracing::{Instrument, instrument};
 
 impl ServerState {
     /// Repair every serving tenant, including apps restored from the store.
@@ -14,6 +15,7 @@ impl ServerState {
     /// withholds its tenant from serving while other tenants continue booting.
     /// Other failed repairs keep boot pending; a server must not expose a row
     /// it knows is behind its journal.
+    #[instrument(skip_all, fields(otel.name = "boot.projection_repair"))]
     pub(crate) async fn repair_query_projections_at_boot(&self) -> Vec<(TenantId, EntityState)> {
         if self.query_plane_store().is_none() || self.event_journal().is_none() {
             return Vec::new();
@@ -81,29 +83,35 @@ impl ServerState {
             }
             // Only lagging records load snapshots/events. Healthy records never
             // acquire actors, replay their history or rewrite their projections.
-            while !pending.is_empty() {
-                let mut retry = Vec::new();
-                for candidate in pending {
-                    match self.repair_query_projection(&tenant, &candidate).await {
-                        Ok(current) => repaired.push((tenant.clone(), current)),
-                        Err(error) => {
-                            tracing::error!(%tenant, entity_type = %candidate.journal.entity_type,
-                                entity_id = %candidate.journal.entity_id, %error,
-                                "boot projection repair failed; tenant cannot serve yet");
-                            retry.push(candidate);
+            let replay = tracing::info_span!("boot.projection_replay", tenant = %tenant, records = pending.len());
+            async {
+                while !pending.is_empty() {
+                    let mut retry = Vec::new();
+                    for candidate in pending {
+                        match self.repair_query_projection(&tenant, &candidate).await {
+                            Ok(current) => repaired.push((tenant.clone(), current)),
+                            Err(error) => {
+                                tracing::error!(%tenant, entity_type = %candidate.journal.entity_type,
+                                    entity_id = %candidate.journal.entity_id, %error,
+                                    "boot projection repair failed; tenant cannot serve yet");
+                                retry.push(candidate);
+                            }
                         }
                     }
-                }
-                pending = retry;
-                if !pending.is_empty() {
-                    tokio::time::sleep(delay).await; // determinism-ok: boot retry on runtime clock
-                    delay = (delay * 2).min(Duration::from_secs(60));
+                    pending = retry;
+                    if !pending.is_empty() {
+                        tokio::time::sleep(delay).await; // determinism-ok: boot retry on runtime clock
+                        delay = (delay * 2).min(Duration::from_secs(60));
+                    }
                 }
             }
+            .instrument(replay)
+            .await;
         }
         repaired
     }
 
+    #[instrument(skip_all, fields(otel.name = "boot.projection_compare", tenant = %tenant))]
     async fn projection_repair_candidates(
         &self,
         tenant: &TenantId,
@@ -146,6 +154,8 @@ impl ServerState {
             .collect())
     }
 
+    #[instrument(skip_all, fields(otel.name = "boot.projection_replay_record", tenant = %tenant,
+        entity_type = %candidate.journal.entity_type, entity_id = %candidate.journal.entity_id))]
     async fn repair_query_projection(
         &self,
         tenant: &TenantId,
@@ -177,7 +187,7 @@ impl ServerState {
         let plane = self
             .query_plane_store()
             .expect("repair requires a query plane");
-        if current.status == "Deleted" {
+        if current.is_tombstoned() {
             plane
                 .remove_projection(tenant.as_str(), &head.entity_type, &head.entity_id)
                 .await

@@ -9,8 +9,8 @@
 //! a strict type, which only a declared action deletes.
 
 mod common;
-#[path = "delete_cascade/moved_rows.rs"]
-mod moved_rows;
+#[path = "delete_cascade/recovery.rs"]
+mod recovery;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -152,7 +152,7 @@ fn server_on(name: &str, stack: StorageStack) -> ServerState {
 fn memory_only(name: &str) -> ServerState {
     let (album, track, entry, folder) = (
         ioa("Album"),
-        ioa("Track"),
+        recovery::TRACK_IOA.to_string(),
         ioa("PlaylistEntry"),
         ioa("Folder"),
     );

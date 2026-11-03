@@ -1,6 +1,5 @@
 //! Resolve spec-declared trusted inputs before action validation and persistence.
 use serde_json::Value;
-use temper_authz::PrincipalKind;
 use temper_jit::table::TransitionTable;
 use temper_runtime::tenant::TenantId;
 use temper_spec::automaton::ParameterSource;
@@ -22,6 +21,16 @@ impl ServerState {
         let table = self.transition_table_for_dispatch(tenant, entity_type)?;
         bind_authenticated_params(&table, action, params, agent)
     }
+}
+
+/// The refusal of a move whose caller is no one a credential stands for.
+const NO_CONTEXT: &str = "Authenticated parameter requires a security context";
+const NO_CALLER: &str = "Authenticated subject requires a caller identity";
+
+/// Whether `error` refused a move because nothing names its caller, as opposed
+/// to something its caller did.
+pub(super) fn refused_for_no_caller(error: &DispatchError) -> bool {
+    matches!(error, DispatchError::AuthzDenied(reason) if reason == NO_CONTEXT || reason == NO_CALLER)
 }
 
 /// [`ServerState::resolve_authenticated_params`] under `table`: a version not
@@ -48,29 +57,28 @@ pub(crate) fn bind_authenticated_params(
                 "Parameter '{name}' is bound by the runtime and cannot be supplied"
             )));
         }
-        let context = agent.security_ctx.as_ref().ok_or_else(|| {
-            DispatchError::AuthzDenied("Authenticated parameter requires a security context".into())
-        })?;
-        let principal = &context.principal;
-        if principal.id.is_empty()
-            || principal.id == "anonymous"
-            || principal.kind == PrincipalKind::System
-            || principal.role.as_deref() == Some("service")
-        {
-            return Err(DispatchError::AuthzDenied(
-                "Authenticated subject requires a caller identity".into(),
-            ));
+        let context = agent
+            .security_ctx
+            .as_ref()
+            .ok_or_else(|| DispatchError::AuthzDenied(NO_CONTEXT.into()))?;
+        if !crate::request_context::names_a_caller(context) {
+            return Err(DispatchError::AuthzDenied(NO_CALLER.into()));
         }
+        let principal = &context.principal;
         let value = match source {
             ParameterSource::AuthenticatedSubject => {
-                principal.acting_for.as_deref().unwrap_or(&principal.id)
+                let subject = principal.acting_for.as_deref().unwrap_or(&principal.id);
+                if subject.is_empty() {
+                    return Err(DispatchError::AuthzDenied(
+                        "Authenticated subject is empty".into(),
+                    ));
+                }
+                subject
+            }
+            ParameterSource::AuthenticatedAgentLabel => {
+                principal.label.as_deref().unwrap_or_default()
             }
         };
-        if value.is_empty() {
-            return Err(DispatchError::AuthzDenied(
-                "Authenticated subject is empty".into(),
-            ));
-        }
         fields.insert(name.clone(), Value::String(value.to_owned()));
     }
     Ok(params)

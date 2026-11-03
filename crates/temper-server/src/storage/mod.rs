@@ -37,6 +37,7 @@ use crate::platform_store::SimPlatformStore;
 use crate::state::trajectory::TrajectoryEntry;
 
 mod commit_writes;
+pub use commit_writes::QueryPlaneRefused;
 mod dyn_event_store;
 mod event_size;
 mod metadata_impls;
@@ -62,7 +63,6 @@ mod query_plane;
 pub use query_plane::{
     CatalogGroup, CatalogRowFreshness, EntityCatalogRow, QueryFieldIndexOrder,
     QueryFieldIndexOrderDirection, QueryFieldIndexPage, QueryPlaneStore, QueryProjectionFieldsRow,
-    QueryProjectionUpsert,
 };
 pub(crate) use query_plane_read::{
     CatalogRowsLoad, load_catalog_rows_by_id, load_selected_catalog_rows_by_id,
@@ -118,7 +118,11 @@ impl BoxedEventStore {
             .store
             .append(persistence_id, expected_sequence, events)
             .await;
-        self.record_append(result)
+        let result = self.record_append(result);
+        if result.is_ok() {
+            count_written(persistence_id, events.len());
+        }
+        result
     }
 
     pub async fn append_batch(
@@ -133,7 +137,13 @@ impl BoxedEventStore {
         }))?;
         self.check_room()?;
         let result = self.store.append_batch(appends).await;
-        self.record_append(result)
+        let result = self.record_append(result);
+        if result.is_ok() {
+            for append in appends {
+                count_written(&append.persistence_id, append.events.len());
+            }
+        }
+        result
     }
 
     pub async fn read_events(
@@ -157,6 +167,14 @@ impl BoxedEventStore {
             .await
     }
 
+    /// The kernel's saved creation time, or sequence one's time if still held.
+    pub async fn first_event_at(
+        &self,
+        persistence_id: &str,
+    ) -> Result<Option<chrono::DateTime<chrono::Utc>>, PersistenceError> {
+        self.store.first_event_at(persistence_id).await
+    }
+
     pub async fn append_with_keys(
         &self,
         persistence_id: &str,
@@ -170,7 +188,11 @@ impl BoxedEventStore {
             .store
             .append_with_keys(persistence_id, expected_sequence, events, key_rows)
             .await;
-        self.record_append(result)
+        let result = self.record_append(result);
+        if result.is_ok() {
+            count_written(persistence_id, events.len());
+        }
+        result
     }
 
     pub async fn append_with_rows(
@@ -186,7 +208,11 @@ impl BoxedEventStore {
             .store
             .append_with_rows(persistence_id, expected_sequence, events, rows)
             .await;
-        self.record_append(result)
+        let result = self.record_append(result);
+        if result.is_ok() {
+            count_written(persistence_id, events.len());
+        }
+        result
     }
 
     /// Whether an append writes the entity's query-plane row and timer row
@@ -201,6 +227,31 @@ impl BoxedEventStore {
         tenant: &str,
     ) -> Result<Vec<temper_runtime::persistence::ScheduledActionRecord>, PersistenceError> {
         self.store.list_scheduled_actions(tenant).await
+    }
+
+    /// The pending scheduled actions of one record.
+    pub async fn list_entity_scheduled_actions(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<Vec<temper_runtime::persistence::ScheduledActionRecord>, PersistenceError> {
+        self.store
+            .list_entity_scheduled_actions(tenant, entity_type, entity_id)
+            .await
+    }
+
+    /// Durably cancel a scheduled action before deleting its row.
+    pub async fn cancel_scheduled_action(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        arm_id: &str,
+    ) -> Result<(), PersistenceError> {
+        self.store
+            .cancel_scheduled_action(tenant, entity_type, entity_id, arm_id)
+            .await
     }
 
     /// Remove one scheduled action's row once it has fired.
@@ -441,41 +492,6 @@ impl From<PostgresPolicyRow> for PolicyStoreRow {
             enabled: row.enabled,
         }
     }
-}
-
-/// Inputs for a native brand-new data-only entity create.
-///
-/// This capability is only valid for entities whose first durable event and
-/// first query projection row can be inserted atomically by a storage backend.
-pub struct DataOnlyCreateRecord<'a> {
-    /// Tenant that owns the entity.
-    pub tenant: &'a str,
-    /// Entity type being created.
-    pub entity_type: &'a str,
-    /// Entity id being created.
-    pub entity_id: &'a str,
-    /// Initial entity status.
-    pub status: &'a str,
-    /// Projection fields to store in the query catalog and scalar index.
-    pub fields: &'a serde_json::Value,
-    /// Full response projection to store in the query catalog.
-    pub state: &'a serde_json::Value,
-    /// First event envelope to append at sequence number 1.
-    pub event: &'a PersistenceEnvelope,
-}
-
-/// Optional native storage capability for brand-new data-only creates.
-#[async_trait::async_trait]
-pub trait DataOnlyCreateStore: Send + Sync {
-    /// Persist the first event and initial projection atomically.
-    ///
-    /// Returns the new sequence number on success. Duplicate first events or
-    /// duplicate projection rows should return [`PersistenceError::ConcurrencyViolation`]
-    /// so the caller can decline the fast path and use the generic path.
-    async fn create_data_only_entity(
-        &self,
-        record: DataOnlyCreateRecord<'_>,
-    ) -> Result<u64, PersistenceError>;
 }
 
 /// Durable observe trajectory sink.
@@ -768,6 +784,15 @@ pub trait BlobStore: Send + Sync {
 
     async fn get_blob(&self, key: &str) -> Result<Option<Vec<u8>>, String>;
 
+    /// Read at most `max_bytes` at a zero-based offset, returning the actual
+    /// total length and this chunk without materializing the entire value.
+    async fn get_blob_chunk(
+        &self,
+        key: &str,
+        offset: u64,
+        max_bytes: usize,
+    ) -> Result<Option<(u64, Vec<u8>)>, String>;
+
     /// Read a legacy database blob only when its stored size is within the
     /// caller's allocation budget. `None` means missing or over budget.
     async fn get_blob_if_size_at_most(
@@ -978,13 +1003,14 @@ pub struct StorageStack {
     pub turso: Option<Arc<dyn TursoStoreProvider>>,
     pub platform: Option<Arc<dyn PlatformStore>>,
     pub policies: Option<Arc<dyn PolicyStore>>,
-    pub query_plane: Option<Arc<dyn QueryPlaneStore>>,
-    pub data_only_create: Option<Arc<dyn DataOnlyCreateStore>>,
+    /// The store records are read from: the journal's own, whose commits
+    /// write its rows ([`StorageStack::with_query_plane`]).
+    query_plane: Option<Arc<dyn QueryPlaneStore>>,
     pub trajectory: Option<Arc<dyn TrajectorySink>>,
     pub metadata: Option<Arc<dyn MetadataStoreProvider>>,
-    /// Which of this stack's rows the event store's commit writes
-    /// ([`StorageStack::entity_rows_in_commit`]).
-    commit_writes: commit_writes::CommitWrites,
+    /// Reads go through a test's probe ([`StorageStack::with_read_probe`]).
+    #[cfg(test)]
+    read_probe: bool,
 }
 
 impl StorageStack {
@@ -996,8 +1022,6 @@ impl StorageStack {
         turso: Option<Arc<dyn TursoStoreProvider>>,
         platform: Option<Arc<dyn PlatformStore>>,
         policies: Option<Arc<dyn PolicyStore>>,
-        query_plane: Option<Arc<dyn QueryPlaneStore>>,
-        data_only_create: Option<Arc<dyn DataOnlyCreateStore>>,
         trajectory: Option<Arc<dyn TrajectorySink>>,
         metadata: Option<Arc<dyn MetadataStoreProvider>>,
     ) -> Self {
@@ -1008,11 +1032,11 @@ impl StorageStack {
             turso,
             platform,
             policies,
-            query_plane,
-            data_only_create,
+            query_plane: None,
             trajectory,
             metadata,
-            commit_writes: commit_writes::CommitWrites::Nothing,
+            #[cfg(test)]
+            read_probe: false,
         }
     }
 
@@ -1028,15 +1052,6 @@ impl StorageStack {
         }
         self.events = self.events.with_event_size_limits(limits);
         self
-    }
-
-    /// Whether the query plane and journal are the very same store allocation.
-    /// A wrapper or a separately supplied store must use the batch comparison
-    /// against this stack's actual journal, never its own unrelated events.
-    pub(crate) fn query_plane_is_journal(&self) -> bool {
-        self.query_plane.as_ref().is_some_and(|plane| {
-            std::ptr::addr_eq(Arc::as_ptr(&self.events.store), Arc::as_ptr(plane))
-        })
     }
 
     /// Refuse appends and trajectory rows while the disk holding `room` has
@@ -1062,11 +1077,13 @@ impl StorageStack {
             None,
             Some(store.clone() as Arc<dyn PlatformStore>),
             Some(store.clone() as Arc<dyn PolicyStore>),
-            Some(store.clone() as Arc<dyn QueryPlaneStore>),
-            Some(store.clone() as Arc<dyn DataOnlyCreateStore>),
             Some(store.clone() as Arc<dyn TrajectorySink>),
-            Some(Arc::new(SingleMetadataStoreProvider::new_postgres(store))),
+            Some(Arc::new(SingleMetadataStoreProvider::new_postgres(
+                store.clone(),
+            ))),
         )
+        .with_query_plane(store as Arc<dyn QueryPlaneStore>)
+        .expect("the Postgres journal writes its query plane in its commit")
     }
 
     pub fn from_turso(store: TursoEventStore) -> Self {
@@ -1078,12 +1095,11 @@ impl StorageStack {
             Some(Arc::new(SingleTursoStoreProvider::new(store.clone()))),
             Some(store.clone() as Arc<dyn PlatformStore>),
             Some(store.clone() as Arc<dyn PolicyStore>),
-            Some(store.clone() as Arc<dyn QueryPlaneStore>),
-            None,
             Some(store.clone() as Arc<dyn TrajectorySink>),
-            Some(Arc::new(SingleMetadataStoreProvider::new(store))),
+            Some(Arc::new(SingleMetadataStoreProvider::new(store.clone()))),
         )
-        .commits_its_query_plane()
+        .with_query_plane(store as Arc<dyn QueryPlaneStore>)
+        .expect("the Turso journal writes its query plane in its commit")
     }
 
     pub fn from_tenant_router(router: TenantStoreRouter) -> Self {
@@ -1098,14 +1114,13 @@ impl StorageStack {
             ))),
             Some(platform_store),
             Some(router.clone() as Arc<dyn PolicyStore>),
-            Some(router.clone() as Arc<dyn QueryPlaneStore>),
-            None,
             Some(router.clone() as Arc<dyn TrajectorySink>),
             Some(Arc::new(TenantRoutedMetadataStoreProvider::new(
                 router.as_ref().clone(),
             ))),
         )
-        .commits_its_query_plane()
+        .with_query_plane(router as Arc<dyn QueryPlaneStore>)
+        .expect("the routed Turso journal writes its query plane in its commit")
     }
 
     pub fn from_redis(store: temper_store_redis::RedisEventStore) -> Self {
@@ -1113,8 +1128,6 @@ impl StorageStack {
         Self::new(
             BackendLabel::Redis,
             BoxedEventStore::from_arc(store),
-            None,
-            None,
             None,
             None,
             None,
@@ -1137,8 +1150,6 @@ impl StorageStack {
             None,
             None,
             platform,
-            None,
-            None,
             None,
             None,
             None,
@@ -1641,6 +1652,15 @@ impl BlobStore for PostgresEventStore {
         self.get_blob(key).await
     }
 
+    async fn get_blob_chunk(
+        &self,
+        key: &str,
+        offset: u64,
+        max_bytes: usize,
+    ) -> Result<Option<(u64, Vec<u8>)>, String> {
+        self.get_blob_chunk(key, offset, max_bytes).await
+    }
+
     async fn get_blob_if_size_at_most(
         &self,
         key: &str,
@@ -1671,6 +1691,15 @@ impl BlobStore for TursoEventStore {
 
     async fn get_blob(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
         self.get_blob(key).await
+    }
+
+    async fn get_blob_chunk(
+        &self,
+        key: &str,
+        offset: u64,
+        max_bytes: usize,
+    ) -> Result<Option<(u64, Vec<u8>)>, String> {
+        self.get_blob_chunk(key, offset, max_bytes).await
     }
 
     async fn get_blob_if_size_at_most(
@@ -2145,25 +2174,6 @@ fn pg_wasm_invocation_to_turso(
     }
 }
 
-#[async_trait::async_trait]
-impl DataOnlyCreateStore for PostgresEventStore {
-    async fn create_data_only_entity(
-        &self,
-        record: DataOnlyCreateRecord<'_>,
-    ) -> Result<u64, PersistenceError> {
-        self.create_data_only_entity_native_with_state(
-            record.tenant,
-            record.entity_type,
-            record.entity_id,
-            record.status,
-            record.fields,
-            record.state,
-            record.event,
-        )
-        .await
-    }
-}
-
 pub(crate) use redaction::redact_secrets;
 pub(crate) use trajectory_row::bounded_request_body;
 use trajectory_row::{
@@ -2292,4 +2302,15 @@ impl TrajectorySink for TenantStoreRouter {
                 )
             })
     }
+}
+
+/// Count the events an append wrote, by the tenant and entity type its
+/// journal belongs to (`temper_events_written_total`).
+fn count_written(persistence_id: &str, events: usize) {
+    let (tenant, entity_type) =
+        match temper_runtime::tenant::parse_persistence_id_parts(persistence_id) {
+            Ok((tenant, entity_type, _)) => (tenant, entity_type),
+            Err(_) => ("unknown", "unknown"),
+        };
+    crate::runtime_metrics::record_events_written(tenant, entity_type, events as u64);
 }

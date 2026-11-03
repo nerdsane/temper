@@ -78,7 +78,9 @@ on_success = "Tick"
     .await
     .expect("self callback did not terminate")
     .unwrap();
-    assert!(!result.success);
+    // The first Tick committed, so it is answered committed; the refused
+    // repeat is named among its trigger failures (ADR-0184).
+    assert!(result.success, "{result:?}");
     let actual = state
         .get_tenant_entity_state(&tenant, "Job", "job")
         .await
@@ -90,11 +92,11 @@ on_success = "Tick"
     );
     assert!(
         result
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("Job(job).Tick -> Job(job).Tick")),
+            .trigger_failures
+            .iter()
+            .any(|failure| failure.contains("Job(job).Tick -> Job(job).Tick")),
         "{:?}",
-        result.error
+        result.trigger_failures
     );
 }
 

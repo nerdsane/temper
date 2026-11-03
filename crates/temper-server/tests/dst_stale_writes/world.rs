@@ -33,6 +33,9 @@ pub(super) const CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
         <Parameter Name="bindingParameter" Type="Temper.Stale.Tally"/>
         <Parameter Name="last" Type="Edm.String"/>
       </Action>
+      <Action Name="Settle" IsBound="true">
+        <Parameter Name="bindingParameter" Type="Temper.Stale.Tally"/>
+      </Action>
       <Action Name="Repoint" IsBound="true">
         <Parameter Name="bindingParameter" Type="Temper.Stale.Tally"/>
         <Parameter Name="project_id" Type="Edm.String"/>
@@ -50,13 +53,14 @@ pub(super) const CSDL: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 
 /// `Bump` counts and writes who bumped last, so every bump changes the fields
 /// Cedar reads. Cedar also sees the status of the record's project
-/// (`ctx_project_status`), which `Repoint` changes.
+/// (`ctx_project_status`), which `Repoint` changes. `Settle` ends the tally,
+/// after which its guard refuses a `Bump`.
 pub(super) const TALLY_IOA: &str = r#"
 [automaton]
 name = "Tally"
-states = ["Open"]
+states = ["Open", "Settled"]
 initial = "Open"
-allow_indefinite_states = ["Open"]
+allow_indefinite_states = ["Open", "Settled"]
 
 [[state]]
 name = "count"
@@ -92,6 +96,12 @@ kind = "input"
 from = ["Open"]
 to = "Open"
 params = ["project_id"]
+
+[[action]]
+name = "Settle"
+kind = "input"
+from = ["Open"]
+to = "Settled"
 "#;
 
 pub(super) const PROJECT_IOA: &str = r#"
@@ -138,6 +148,18 @@ pub(super) fn customer(id: &str) -> SecurityContext {
     SecurityContext::from_verified_jwt(id, PrincipalKind::Customer, None, None, None, None)
 }
 
+/// A run: an agent acting for `owner`, as an app's run acts for its person.
+pub(super) fn run(id: &str) -> SecurityContext {
+    SecurityContext::from_verified_jwt(
+        id,
+        PrincipalKind::Agent,
+        Some("run"),
+        Some("owner"),
+        None,
+        None,
+    )
+}
+
 pub(super) fn server(seed: u64, scenario: &str) -> ServerState {
     server_with_journal(seed, scenario).0
 }
@@ -182,14 +204,19 @@ pub(super) fn server_with_journal(seed: u64, scenario: &str) -> (ServerState, Si
 pub(super) async fn send(
     state: &ServerState,
     as_who: &str,
+    request: Request<Body>,
+) -> (StatusCode, Value) {
+    send_as(state, customer(as_who), request).await
+}
+
+pub(super) async fn send_as(
+    state: &ServerState,
+    who: SecurityContext,
     mut request: Request<Body>,
 ) -> (StatusCode, Value) {
     request
         .extensions_mut()
-        .insert(AuthenticatedRequestContext::new(
-            TenantId::default(),
-            customer(as_who),
-        ));
+        .insert(AuthenticatedRequestContext::new(TenantId::default(), who));
     let response = build_router(state.clone()).oneshot(request).await.unwrap();
     let status = response.status();
     let bytes = axum::body::to_bytes(response.into_body(), 10_000_000)
@@ -229,6 +256,20 @@ pub(super) async fn act(
     body: Value,
 ) -> (StatusCode, Value) {
     post(state, as_who, &format!("/tdata/{path}"), body).await
+}
+
+/// A move sent by the run `id`.
+pub(super) async fn act_as_run(
+    state: &ServerState,
+    id: &str,
+    path: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let request = Request::post(format!("/tdata/{path}"))
+        .header("Content-Type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    send_as(state, run(id), request).await
 }
 
 pub(super) async fn tally(state: &ServerState, id: &str) -> temper_server::EntityState {

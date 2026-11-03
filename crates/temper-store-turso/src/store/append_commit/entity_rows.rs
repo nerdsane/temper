@@ -58,6 +58,11 @@ impl EntityRows {
         }
     }
 
+    /// Whether this commit already writes the entity's projection.
+    pub(super) fn projects_entity(&self) -> bool {
+        self.projection.is_some()
+    }
+
     /// Write the rows in `tx`, for the entity's journal at `sequence_nr`.
     pub(super) async fn write(
         &self,

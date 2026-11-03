@@ -4,12 +4,13 @@ use crate::driver::params;
 use temper_runtime::persistence::{
     JournalHead, PersistenceError, ProjectionCheckpoint, ProjectionRepairCandidate, storage_error,
 };
+use tracing::instrument;
 
 const HEADS: &str = "WITH heads AS (
     SELECT entity_type, entity_id, MAX(sequence_nr) AS sequence_nr FROM (
         SELECT entity_type, entity_id, sequence_nr FROM events WHERE tenant = ?1
         UNION ALL
-        SELECT entity_type, entity_id, sequence_nr FROM snapshots WHERE tenant = ?1
+        SELECT entity_type, entity_id, sequence_nr FROM snapshots INDEXED BY idx_snapshots_checkpoint WHERE tenant = ?1
     ) GROUP BY entity_type, entity_id
 ) ";
 
@@ -33,7 +34,7 @@ impl TursoEventStore {
         let conn = self.configured_connection().await?;
         let mut rows = conn.query("SELECT MAX(
             COALESCE((SELECT MAX(sequence_nr) FROM events WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3), 0),
-            COALESCE((SELECT MAX(sequence_nr) FROM snapshots WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3), 0))",
+            COALESCE((SELECT MAX(sequence_nr) FROM snapshots INDEXED BY idx_snapshots_checkpoint WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3), 0))",
             params![tenant, entity_type, entity_id]).await.map_err(storage_error)?;
         let row = rows.next().await.map_err(storage_error)?.ok_or_else(|| {
             PersistenceError::Storage("journal sequence query returned no row".into())
@@ -42,6 +43,7 @@ impl TursoEventStore {
     }
 
     /// Last durable sequences, in one read, for a separately supplied query plane.
+    #[instrument(skip_all, fields(otel.name = "turso.journal_heads", tenant))]
     pub async fn load_journal_heads(
         &self,
         tenant: &str,
@@ -68,6 +70,14 @@ impl TursoEventStore {
 
     /// Only missing/behind rows, compared with the journal in one tenant query.
     /// The narrow counters row can advance an unchanged catalog projection.
+    /// Each record's catalog checkpoint is found by its key: the engine
+    /// otherwise takes `idx_entity_catalog_status`, which reads every catalog
+    /// row of the record's type for each record (`driver/plan_check.rs`). At
+    /// 900 records of one type with 100 KB rows that took 20 s, against 38 ms.
+    /// The comparison reads indexes only, never a catalog row or a snapshot
+    /// (`idx_entity_catalog_checkpoint`, `idx_snapshots_checkpoint`), so its
+    /// cost does not grow with the size of records.
+    #[instrument(skip_all, fields(otel.name = "turso.lagging_projections", tenant))]
     pub async fn lagging_query_projections(
         &self,
         tenant: &str,
@@ -77,7 +87,8 @@ impl TursoEventStore {
             SELECT h.entity_type, h.entity_id, h.sequence_nr, {DELETED},
                    COALESCE(k.sequence_nr, c.sequence_nr), c.status
             FROM heads h
-            LEFT JOIN entity_catalog c ON c.tenant = ?1 AND c.entity_type = h.entity_type AND c.entity_id = h.entity_id
+            LEFT JOIN entity_catalog c INDEXED BY idx_entity_catalog_checkpoint
+              ON c.tenant = ?1 AND c.entity_type = h.entity_type AND c.entity_id = h.entity_id
             LEFT JOIN entity_catalog_counters k ON k.tenant = c.tenant AND k.entity_type = c.entity_type AND k.entity_id = c.entity_id
             WHERE COALESCE(k.sequence_nr, c.sequence_nr, 0) < h.sequence_nr
               AND (c.entity_id IS NOT NULL OR NOT {DELETED})
@@ -114,13 +125,14 @@ impl TursoEventStore {
     }
 
     /// Catalog checkpoints only, for comparison with a different event store.
+    /// Like the comparison, it reads the checkpoint index, not the rows.
     pub async fn query_projection_checkpoints(
         &self,
         tenant: &str,
     ) -> Result<Vec<ProjectionCheckpoint>, PersistenceError> {
         let conn = self.configured_connection().await?;
         let mut rows = conn.query("SELECT c.entity_type, c.entity_id, COALESCE(k.sequence_nr, c.sequence_nr), c.status
-            FROM entity_catalog c LEFT JOIN entity_catalog_counters k
+            FROM entity_catalog c INDEXED BY idx_entity_catalog_checkpoint LEFT JOIN entity_catalog_counters k
               ON k.tenant = c.tenant AND k.entity_type = c.entity_type AND k.entity_id = c.entity_id
             WHERE c.tenant = ?1 ORDER BY c.entity_type, c.entity_id", params![tenant]).await.map_err(storage_error)?;
         let mut out = Vec::new();

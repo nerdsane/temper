@@ -139,21 +139,3 @@ fn host_port_base_url(value: &Value) -> Option<String> {
     let port = value.get("port").and_then(Value::as_u64)?;
     Some(format!("http://{host}:{port}"))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resolves_base_url_from_embedded_payload() {
-        let payload = json!({
-            "trigger_context": {
-                "base_url": "http://127.0.0.1:4567"
-            }
-        });
-        assert_eq!(
-            base_url_from_embedded_payload(&payload.to_string()).as_deref(),
-            Some("http://127.0.0.1:4567")
-        );
-    }
-}

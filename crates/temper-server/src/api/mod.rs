@@ -16,7 +16,7 @@ mod spec_pin;
 mod trajectory_analysis;
 
 use axum::Router;
-use axum::extract::{FromRequestParts, Path, State};
+use axum::extract::{DefaultBodyLimit, FromRequestParts, Path, State};
 use axum::http::StatusCode;
 use axum::http::request::Parts;
 use axum::response::IntoResponse;
@@ -59,7 +59,7 @@ pub fn build_api_router() -> Router<ServerState> {
         )
         .route(
             "/specs/validate-ioa",
-            post(crate::observe::specs::handle_validate_ioa),
+            post(crate::observe::specs::handle_validate_ioa).layer(DefaultBodyLimit::disable()),
         )
         .route(
             "/wasm/modules/{module_name}",
@@ -198,6 +198,20 @@ pub(crate) async fn require_policy_auth(
     state: &ServerState,
     authenticated: &AuthenticatedRequestContext,
 ) -> Option<axum::response::Response> {
+    require_policy_set_action(state, authenticated, &["manage_policies"]).await
+}
+
+/// Authorize a request when Cedar permits any of `accepted` on the tenant's
+/// `PolicySet`, checked in order. A refusal is recorded against the last
+/// action, so approving the decision grants the narrowest accepted power.
+///
+/// Returns `Some(response)` if authorization is denied, `None` if allowed.
+async fn require_policy_set_action(
+    state: &ServerState,
+    authenticated: &AuthenticatedRequestContext,
+    accepted: &[&'static str],
+) -> Option<axum::response::Response> {
+    assert!(!accepted.is_empty(), "a policy route accepts some action");
     let security_ctx = authenticated.security_context();
     let tenant = authenticated.tenant().as_str();
     let resource_attrs = std::collections::BTreeMap::from([
@@ -210,13 +224,20 @@ pub(crate) async fn require_policy_auth(
             serde_json::Value::String(tenant.to_string()),
         ),
     ]);
-    if let Err(denial) = state.authorize_with_context(
-        security_ctx,
-        "manage_policies",
-        "PolicySet",
-        &resource_attrs,
-        tenant,
-    ) {
+    let mut refusal = None;
+    for action in accepted {
+        match state.authorize_with_context(
+            security_ctx,
+            action,
+            "PolicySet",
+            &resource_attrs,
+            tenant,
+        ) {
+            Ok(()) => return None,
+            Err(denial) => refusal = Some((*action, denial)),
+        }
+    }
+    if let Some((action, denial)) = refusal {
         let reason = denial.to_string();
         let pd = record_authz_denial(
             state,
@@ -224,7 +245,7 @@ pub(crate) async fn require_policy_auth(
                 tenant,
                 security_ctx,
                 agent_id_override: None,
-                action: "manage_policies",
+                action,
                 resource_type: "PolicySet",
                 resource_id: tenant,
                 resource_attrs: serde_json::json!({"tenant": tenant}),
@@ -283,23 +304,65 @@ impl FromRequestParts<ServerState> for PolicyAuthed {
         parts: &mut Parts,
         state: &ServerState,
     ) -> Result<Self, Self::Rejection> {
-        let Path(params) =
-            Path::<std::collections::BTreeMap<String, String>>::from_request_parts(parts, state)
-                .await
-                .map_err(IntoResponse::into_response)?;
-        let Some(tenant) = params.get("tenant") else {
-            // Fail closed: every route using PolicyAuthed must declare a
-            // {tenant} path parameter; reaching this branch is a routing bug.
-            return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
-        };
-        let authenticated =
-            require_authenticated_context(parts.extensions.get::<AuthenticatedRequestContext>())
-                .map_err(IntoResponse::into_response)?;
-        require_tenant_match(authenticated, tenant).map_err(IntoResponse::into_response)?;
-        match require_policy_auth(state, authenticated).await {
-            Some(resp) => Err(resp),
-            None => Ok(Self(authenticated.clone())),
-        }
+        policy_set_request(parts, state, &["manage_policies"])
+            .await
+            .map(Self)
+    }
+}
+
+/// Cedar policy-read gate as an axum extractor, for routes that only read
+/// the tenant's Cedar rows.
+///
+/// Accepts `read_policies` or `manage_policies` on the tenant's `PolicySet`.
+/// Reading the Cedar text grants no power, and a release identity must be
+/// able to verify an install's Cedar rows without the power to change them.
+/// Every route that writes policies uses [`PolicyAuthed`].
+pub(crate) struct PolicyReadAuthed(AuthenticatedRequestContext);
+
+impl PolicyReadAuthed {
+    /// Credential-bound tenant authorized to read its policies.
+    pub(crate) fn tenant(&self) -> &TenantId {
+        self.0.tenant()
+    }
+}
+
+impl FromRequestParts<ServerState> for PolicyReadAuthed {
+    type Rejection = axum::response::Response;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &ServerState,
+    ) -> Result<Self, Self::Rejection> {
+        // manage_policies first, so existing operators see one Allow decision.
+        policy_set_request(parts, state, &["manage_policies", "read_policies"])
+            .await
+            .map(Self)
+    }
+}
+
+/// Authenticated, tenant-matched context of a request Cedar permits one of
+/// `accepted` on the `{tenant}` path parameter's `PolicySet`.
+async fn policy_set_request(
+    parts: &mut Parts,
+    state: &ServerState,
+    accepted: &[&'static str],
+) -> Result<AuthenticatedRequestContext, axum::response::Response> {
+    let Path(params) =
+        Path::<std::collections::BTreeMap<String, String>>::from_request_parts(parts, state)
+            .await
+            .map_err(IntoResponse::into_response)?;
+    let Some(tenant) = params.get("tenant") else {
+        // Fail closed: every route using a policy extractor must declare a
+        // {tenant} path parameter; reaching this branch is a routing bug.
+        return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
+    };
+    let authenticated =
+        require_authenticated_context(parts.extensions.get::<AuthenticatedRequestContext>())
+            .map_err(IntoResponse::into_response)?;
+    require_tenant_match(authenticated, tenant).map_err(IntoResponse::into_response)?;
+    match require_policy_set_action(state, authenticated, accepted).await {
+        Some(resp) => Err(resp),
+        None => Ok(authenticated.clone()),
     }
 }
 

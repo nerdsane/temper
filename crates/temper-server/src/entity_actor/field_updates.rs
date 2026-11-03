@@ -47,6 +47,7 @@ pub(super) async fn commit_field_update(
     fields: Value,
     replace: bool,
     has_precondition: bool,
+    caller: Option<&crate::request_context::AgentContext>,
 ) -> Result<(), NotUpdated> {
     if actor
         .table
@@ -108,9 +109,11 @@ pub(super) async fn commit_field_update(
         "object-ness was checked above; the apply cannot decline"
     );
     let mut event = field_event(action, state, &fields);
+    event.origin = super::EventOrigin::from_caller(caller);
 
     let (Some(store), Some(backend)) = (actor.event_journal.as_ref(), actor.event_backend) else {
-        // No configured persistence: memory-only, as in every other handler.
+        // The same event metadata is visible without a journal.
+        state.push_event_bounded(event);
         return Ok(());
     };
 
@@ -164,6 +167,7 @@ pub(super) async fn commit_field_update(
                     "object-ness was checked above; the apply cannot decline"
                 );
                 event = field_event(action, state, &fields);
+                event.origin = super::EventOrigin::from_caller(caller);
             }
             Err(e) => {
                 state.fields = previous_fields;
@@ -175,13 +179,18 @@ pub(super) async fn commit_field_update(
     state.push_event_bounded(event);
 
     let persistence_id = actor.persistence_id();
-    if let Err(e) = EntityActor::maybe_save_snapshot(
-        store,
-        actor.snapshot_queue.as_ref(),
-        &persistence_id,
-        state,
-    )
-    .await
+    if let Err(e) = actor
+        .now
+        .during(
+            super::watchdog::Doing::Snapshotting,
+            EntityActor::maybe_save_snapshot(
+                store,
+                actor.snapshot_queue.as_ref(),
+                &persistence_id,
+                state,
+            ),
+        )
+        .await
     {
         tracing::warn!(
             entity = %state.entity_id,
@@ -208,6 +217,7 @@ fn field_event(action: &str, state: &EntityState, fields: &Value) -> EntityEvent
         timestamp: sim_now(),
         params: fields.clone(),
         idempotency_key: None,
+        origin: crate::entity_actor::EventOrigin::internal(),
         kind: temper_runtime::persistence::EventKind::Transition,
         outcome: None,
     }
@@ -262,12 +272,15 @@ pub(super) async fn catch_up(
 ) -> Result<(), String> {
     // Back off first, or against a live concurrent writer the whole budget burns
     // in microseconds and the retry buys nothing.
-    super::actor::sleep_persistence_retry(std::time::Duration::from_millis(if attempt == 1 {
-        10
-    } else {
-        50
-    }))
-    .await;
+    actor
+        .now
+        .during(
+            super::watchdog::Doing::RetryPause,
+            super::actor::sleep_persistence_retry(std::time::Duration::from_millis(
+                if attempt == 1 { 10 } else { 50 },
+            )),
+        )
+        .await;
     tracing::warn!(
         entity = %state.entity_id,
         action = %action,
@@ -289,17 +302,22 @@ pub(super) async fn catch_up(
     // A replay failure is returned as a refusal rather than propagated: bailing
     // out of the message handler would leave the caller's `ask` unanswered until
     // it times out, with the entity mid-rollback.
-    EntityActor::replay_events(
-        &table,
-        store,
-        backend,
-        &mut caught_up,
-        &actor.tenant,
-        actor.blob_store.as_ref(),
-        (ReplayPolicy::StrictSnapshot, ReplayLogging::Actor),
-    )
-    .await
-    .map_err(|e| format!("conflict recovery replay failed: {e}"))?;
+    actor
+        .now
+        .during(
+            super::watchdog::Doing::Replaying,
+            EntityActor::replay_events(
+                &table,
+                store,
+                backend,
+                &mut caught_up,
+                &actor.tenant,
+                actor.blob_store.as_ref(),
+                (ReplayPolicy::StrictSnapshot, ReplayLogging::Actor),
+            ),
+        )
+        .await
+        .map_err(|e| format!("conflict recovery replay failed: {e}"))?;
     debug_assert!(
         caught_up.sequence_nr >= actual,
         "POSTCONDITION: field-update replay under-reached the authoritative sequence \

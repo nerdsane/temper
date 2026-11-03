@@ -5,11 +5,9 @@ use axum::response::IntoResponse;
 use temper_odata::path::{KeyValue, ODataPath};
 use temper_runtime::tenant::TenantId;
 
-use super::constraints::{
-    ConstraintViolation, post_write_invariant_checks, pre_upsert_field_invariant_checks,
-    pre_upsert_relation_checks,
-};
+use super::constraints::ConstraintViolation;
 use crate::response::{ODataResponse, odata_error};
+use crate::state::write_record::RecordWrite;
 use crate::state::{DispatchError, ServerState, VerificationGateError};
 
 /// Extract the tenant ID from request headers.
@@ -159,6 +157,9 @@ pub(super) fn constraint_violation_response(err: ConstraintViolation) -> axum::r
         super::constraints::ConstraintViolationType::CrossInvariant => {
             ("cross_invariant", StatusCode::CONFLICT)
         }
+        super::constraints::ConstraintViolationType::StoredValueUnreadable => {
+            ("stored_value_unreadable", StatusCode::CONFLICT)
+        }
         super::constraints::ConstraintViolationType::FieldInvariant => {
             ("field_invariant", StatusCode::CONFLICT)
         }
@@ -179,45 +180,21 @@ pub(super) fn constraint_violation_response(err: ConstraintViolation) -> axum::r
     (status, axum::Json(body)).into_response()
 }
 
-/// Run pre-upsert relation checks and post-write invariant checks.
+/// Check the record a write will store, answering a violation with 409
+/// `ConstraintViolation`.
 ///
-/// Consolidates the duplicated two-step constraint check pattern used by
-/// create, patch, put, delete, and bound action handlers. The `action` label
-/// is used for the post-write check (e.g. "Create", "Patch", "Put", "Delete").
+/// `record` is the record as stored (see `state::write_record`), never the
+/// request body. The `action` label selects cross-invariants (e.g. "Create",
+/// "Patch", "Put", "Delete").
 pub(super) async fn run_write_prechecks(
     state: &ServerState,
-    tenant: &TenantId,
-    entity_type: &str,
-    entity_id: &str,
-    action: &str,
-    operation: &str,
-    fields: &serde_json::Value,
+    write: RecordWrite<'_>,
+    record: &serde_json::Value,
 ) -> Result<(), axum::response::Response> {
-    if let Err(v) =
-        pre_upsert_relation_checks(state, tenant, entity_type, entity_id, operation, fields).await
-    {
-        return Err(constraint_violation_response(v));
-    }
-    if let Err(v) =
-        pre_upsert_field_invariant_checks(state, tenant, entity_type, entity_id, operation, fields)
-            .await
-    {
-        return Err(constraint_violation_response(v));
-    }
-    if let Err(v) = post_write_invariant_checks(
-        state,
-        tenant,
-        entity_type,
-        entity_id,
-        action,
-        fields,
-        operation,
-    )
-    .await
-    {
-        return Err(constraint_violation_response(v));
-    }
-    Ok(())
+    state
+        .check_record_to_store(write, record)
+        .await
+        .map_err(constraint_violation_response)
 }
 
 /// Resolve the parent of a `$value` path to `(set_name, entity_id)`.

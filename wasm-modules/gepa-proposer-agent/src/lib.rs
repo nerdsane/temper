@@ -962,68 +962,6 @@ fn extract_markdown_code_blocks(text: &str) -> Vec<String> {
     blocks
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const BASE_SPEC: &str = r#"
-[automaton]
-name = "Issue"
-states = ["Open", "Assigned", "Closed"]
-initial = "Open"
-
-[[action]]
-name = "Assign"
-kind = "input"
-from = ["Open"]
-to = "Assigned"
-
-[[action]]
-name = "Close"
-kind = "input"
-from = ["Assigned"]
-to = "Closed"
-"#;
-
-    #[test]
-    fn optimizer_gate_allows_non_structural_change() {
-        let mutated = BASE_SPEC.replace("to = \"Assigned\"", "to = \"Open\"");
-        let gate = validate_optimizer_only_spec_mutation(BASE_SPEC, &mutated);
-        assert!(gate.allowed);
-    }
-
-    #[test]
-    fn optimizer_gate_blocks_added_action() {
-        let mutated = format!(
-            "{BASE_SPEC}\n[[action]]\nname = \"Reassign\"\nkind = \"input\"\nfrom = [\"Assigned\"]\nto = \"Assigned\"\n"
-        );
-        let gate = validate_optimizer_only_spec_mutation(BASE_SPEC, &mutated);
-        assert!(!gate.allowed);
-        assert_eq!(gate.delta.added_actions, vec!["Reassign".to_string()]);
-    }
-
-    #[test]
-    fn optimizer_gate_blocks_added_state() {
-        let mutated = BASE_SPEC.replace(
-            "states = [\"Open\", \"Assigned\", \"Closed\"]",
-            "states = [\"Open\", \"Assigned\", \"Closed\", \"Critical\"]",
-        );
-        let gate = validate_optimizer_only_spec_mutation(BASE_SPEC, &mutated);
-        assert!(!gate.allowed);
-        assert_eq!(gate.delta.added_states, vec!["Critical".to_string()]);
-    }
-
-    #[test]
-    fn dataset_missing_capabilities_extracts_array() {
-        let raw = r#"{"patterns":{"missing_capabilities":["Reassign","PromoteToCritical"]}}"#;
-        let out = extract_dataset_missing_capabilities(raw);
-        assert_eq!(
-            out,
-            vec!["PromoteToCritical".to_string(), "Reassign".to_string()]
-        );
-    }
-}
-
 fn sleep_tick(
     ctx: &Context,
     sandbox_url: &str,

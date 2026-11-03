@@ -87,7 +87,8 @@ guard = "'urgent' in labels && 'normal' in labels"
 
 #[test]
 fn test_dead_guard_detected() {
-    // Guard requires counter >= 10 but max is 2 → Z3 returns UNSAT
+    // No count is both above 9 and below 5, so Z3 returns UNSAT whatever
+    // the counter's bound.
     let spec = r#"
 [automaton]
 name = "DeadGuard"
@@ -103,7 +104,7 @@ initial = 0
 name = "Go"
 from = ["A"]
 to = "B"
-guard = "items > 9"
+guard = "items > 9 && items < 5"
 "#;
     let result = verify_symbolic(spec, 2);
     let go_guard = result
@@ -113,7 +114,7 @@ guard = "items > 9"
     assert!(go_guard.is_some());
     assert!(
         !go_guard.unwrap().1,
-        "Guard requiring items >= 10 with max_counter=2 should be unsatisfiable"
+        "a guard no count satisfies should be unsatisfiable"
     );
 }
 

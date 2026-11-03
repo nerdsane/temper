@@ -9,7 +9,9 @@ mod child;
 mod identity;
 mod listener;
 mod render;
+mod retry;
 mod sampling;
+mod shutdown;
 mod signals;
 mod wire;
 

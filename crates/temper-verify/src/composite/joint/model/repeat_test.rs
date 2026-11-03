@@ -39,7 +39,7 @@ fn run(model: &JointModel, entity: &str, name: &str) -> JointState {
         params: BTreeMap::new(),
     };
     let mut state = model
-        .commit(initial, entity, &action, &[], OUTSIDE, false)
+        .commit(initial, entity, &action, &[], OUTSIDE)
         .into_iter()
         .max_by_key(|(s, _)| s.inflight.len())
         .unwrap()
@@ -144,6 +144,11 @@ name = "sprouts"
 type = "counter"
 initial = 0
 
+# The model holds only a counter something reads.
+[[invariant]]
+name = "counted"
+assert = "sprouts >= 0"
+
 [[action]]
 name = "Sprout"
 from = ["Sown"]
@@ -190,6 +195,11 @@ allow_indefinite_states = ["Watching"]
 name = "records"
 type = "counter"
 initial = 0
+
+# The model holds only a counter something reads.
+[[invariant]]
+name = "counted"
+assert = "records >= 0"
 
 [[action]]
 name = "Record"
@@ -263,6 +273,11 @@ name = "growths"
 type = "counter"
 initial = 0
 
+# The model holds only a counter something reads.
+[[invariant]]
+name = "counted"
+assert = "growths >= 0"
+
 [[action]]
 name = "Start"
 from = ["Sown"]
@@ -310,6 +325,11 @@ name = "forwards"
 type = "counter"
 initial = 0
 
+# The model holds only a counter something reads.
+[[invariant]]
+name = "counted"
+assert = "forwards >= 0"
+
 [[action]]
 name = "Forward"
 from = ["Ready"]
@@ -339,6 +359,11 @@ allow_indefinite_states = ["Watching"]
 name = "records"
 type = "counter"
 initial = 0
+
+# The model holds only a counter something reads.
+[[invariant]]
+name = "counted"
+assert = "records >= 0"
 
 [[action]]
 name = "Record"

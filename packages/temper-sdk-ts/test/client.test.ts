@@ -33,13 +33,6 @@ describe("TemperClient", () => {
     );
   });
 
-  it("defaults tenant to 'default'", () => {
-    const client = new TemperClient({ baseUrl: "http://localhost:4200" });
-    expect(client.entityUrl("Agents")).toBe(
-      "http://localhost:4200/tdata/Agents"
-    );
-  });
-
   it("strips trailing slashes from baseUrl", () => {
     const client = new TemperClient({ baseUrl: "http://localhost:4200/" });
     expect(client.entityUrl("Tasks")).toBe(

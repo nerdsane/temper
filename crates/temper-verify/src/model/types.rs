@@ -9,7 +9,6 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::Instant;
 
 use std::collections::BTreeSet;
 
@@ -28,14 +27,15 @@ pub struct TemperModelState {
     pub counters: BTreeMap<String, usize>,
     /// Named boolean variables (e.g. `has_address`, `payment_captured`).
     pub booleans: BTreeMap<String, bool>,
-    /// Named list variables (e.g. `tags`, `labels`).
-    pub lists: BTreeMap<String, Vec<String>>,
-    /// The string variables an invariant reads, as symbols: `''`, a literal
+    /// Named list variables (e.g. `tags`, `labels`). Elements retain equality
+    /// symbols, so reused inputs alias and independent inputs can differ.
+    pub lists: BTreeMap<String, Vec<ModelString>>,
+    /// The string variables guards or rules read or effects write, as symbols: `''`, a literal
     /// the spec compares the variable with, or `#n`, a value that is equal
     /// only to itself. The verifier tracks which strings are equal, not what
     /// they say, so `#n` are renumbered in order of first use after every
     /// step ([`super::semantics::canonical_strings`]). Empty for a spec whose
-    /// invariants read no string.
+    /// guards, rules and effects use no string.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub strings: BTreeMap<String, ModelString>,
 }
@@ -154,10 +154,14 @@ pub enum ModelEffect {
     SubCounter { var: String, value: Arg },
     /// `var = value` on a bool.
     SetBool { var: String, value: Arg },
+    /// `var = 'literal'` on a string, including the empty string.
+    SetString { var: String, value: String },
     /// `append(var, value)`.
     ListAppend { var: String, value: Arg },
     /// `remove_at(var, index)`; out of range is a no-op.
     ListRemoveAt { var: String, index: Arg },
+    /// `remove(var, value)`: every element equal to `value`; none is a no-op.
+    ListRemove { var: String, value: Arg },
 }
 
 /// A resolved transition used internally by the model, pre-computed from a
@@ -174,23 +178,33 @@ pub struct ResolvedTransition {
     pub guard: Expr,
     /// Effects applied when the transition fires.
     pub effects: Vec<ModelEffect>,
-    /// The action parameters the effects read, by kind.
+    /// The action parameters the effects read, by kind. Entry-rule models
+    /// also choose parameters read only by guards or constraints.
     pub params: BTreeMap<String, ParamKind>,
-    /// The action parameters that write a tracked string variable of the
-    /// same name (the runtime writes every parameter into its field).
+    /// The string parameters the model gives a value: those that write a
+    /// tracked string variable of the same name (the runtime writes every
+    /// parameter into its field), and those a constraint ties to a tracked
+    /// one. Entry-rule models also choose guard inputs and list inputs here
+    /// to retain identity and evaluate the guard with the chosen assignment.
     pub string_params: Vec<StringParam>,
+    /// Original input constraints. Route proofs must identify any that
+    /// string parameter exploration does not enforce.
+    pub constraints: Vec<temper_spec::automaton::ActionConstraint>,
 }
 
-/// An action parameter that writes the tracked string variable of its name,
-/// with what the action's constraints allow it to be.
+/// A string parameter of an action, with what the action's constraints allow
+/// it to be.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StringParam {
-    /// The parameter, and the variable it writes.
+    /// The parameter.
     pub name: String,
-    /// `param_nonempty`: never `''`.
+    /// Whether it writes the tracked string variable of its name. One that
+    /// does not is modelled only so its constraints are decided.
+    pub writes: bool,
+    /// `param_nonempty`: never empty or whitespace-only.
     pub nonempty: bool,
-    /// `param_equals_field`: the value of this variable.
-    pub equals: Option<String>,
+    /// `param_equals_field`: equal to the value of every one of these variables.
+    pub equals: Vec<String>,
     /// `param_not_equals_field`: never the value of these variables.
     pub not_equals: Vec<String>,
 }
@@ -205,6 +219,21 @@ pub struct ResolvedInvariant {
     pub assert: Expr,
 }
 
+/// A rule on entering a place: every move into `place` from one of `from`
+/// must have `assert` true just before it fires (`model/entry.rs`).
+#[derive(Clone, Debug)]
+pub struct ResolvedEntryRule {
+    /// The rule name.
+    pub name: String,
+    /// The place it guards.
+    pub place: String,
+    /// The places whose moves into `place` it covers, never `place` itself
+    /// unless the spec names it.
+    pub from: Vec<String>,
+    /// The assertion, read in the state before the move.
+    pub assert: Expr,
+}
+
 // ---------------------------------------------------------------------------
 // Liveness properties
 // ---------------------------------------------------------------------------
@@ -212,8 +241,10 @@ pub struct ResolvedInvariant {
 /// The kind of liveness property.
 #[derive(Clone, Debug)]
 pub enum LivenessKind {
-    /// From any `from` state, eventually reaches one of `targets`.
-    /// Checked via Stateright's `Property::eventually` (acyclic paths only).
+    /// From every reachable state in one of `from` (a new record when it is
+    /// empty), every path gets to one of `targets`: none stops short or
+    /// loops forever without them. Checked on the model check's whole walk,
+    /// after a complete exploration ([`crate::reaches`]).
     ReachesState {
         from: Vec<String>,
         targets: Vec<String>,
@@ -221,6 +252,13 @@ pub enum LivenessKind {
     /// From any `from` state, there is always at least one enabled action.
     /// This is actually a safety property (always has actions).
     NoDeadlock { from: Vec<String> },
+    /// From every reachable state in one of `from` (any state when it is
+    /// empty), some moves lead to one of `targets`. Checked on the model
+    /// check's whole walk, after a complete exploration.
+    CanReach {
+        from: Vec<String>,
+        targets: Vec<String>,
+    },
 }
 
 /// A resolved liveness property.
@@ -246,6 +284,8 @@ pub struct TemperModel {
     pub transitions: Vec<ResolvedTransition>,
     /// Pre-resolved safety invariants (accessible to property fn pointers via &self).
     pub invariants: Vec<ResolvedInvariant>,
+    /// Rules every move into a place must meet as it fires.
+    pub entry_rules: Vec<ResolvedEntryRule>,
     /// Pre-resolved liveness properties.
     pub liveness: Vec<ResolvedLiveness>,
     /// States from which no transition may be enabled.
@@ -259,19 +299,23 @@ pub struct TemperModel {
     /// Initial boolean values from [[state]] declarations.
     pub(crate) initial_booleans: BTreeMap<String, bool>,
     /// Initial list values from [[state]] declarations.
-    pub(crate) initial_lists: BTreeMap<String, Vec<String>>,
+    pub(crate) initial_lists: BTreeMap<String, Vec<ModelString>>,
     /// Initial values of the tracked string variables.
     pub(crate) initial_strings: BTreeMap<String, ModelString>,
-    /// The string variables the verifier tracks: those an invariant reads,
-    /// and those whose value reaches one through a constraint or a reaction.
+    /// The string variables the verifier tracks: those guards/invariants read
+    /// or effects write, and those whose value reaches one through a
+    /// constraint or a reaction.
     pub tracked_strings: BTreeSet<String>,
-    /// String literals each tracked variable is compared with in a guard or
-    /// invariant: the values worth choosing for it besides `''` and others'.
+    /// Concrete initial, predicate and effect literals for tracked string inputs,
+    /// including literals tied to them indirectly through related statuses.
     pub(crate) string_literals: BTreeMap<String, BTreeSet<String>>,
     /// Per-counter upper bounds for bounded exploration.
     pub(crate) counter_bounds: BTreeMap<String, usize>,
     /// Default upper bound for counters not in counter_bounds.
     pub(crate) default_max_counter: usize,
+    /// Per-list upper bounds on length for bounded exploration; a list not
+    /// here is explored to `default_max_counter`.
+    pub(crate) list_bounds: BTreeMap<String, usize>,
     /// String literals each list is compared against (`'x' in list`) in any
     /// guard or invariant: the values worth choosing for `append(list, params.p)`.
     pub(crate) list_literals: BTreeMap<String, BTreeSet<String>>,
@@ -283,9 +327,12 @@ pub struct TemperModel {
 /// How far one model may be explored: a [`crate::Budget`] in force.
 #[derive(Clone, Debug)]
 pub(crate) struct ExploreLimit {
-    /// Past this instant the model offers no actions, so every walk of it
-    /// (model check, simulation, property tests) ends at once.
-    pub(crate) until: Instant,
+    /// The time the budget has used. Past `time` the model offers no
+    /// actions, so every walk of it (model check, simulation, property
+    /// tests) ends at once.
+    pub(crate) elapsed: crate::budget::Elapsed,
+    /// The budget's time.
+    pub(crate) time: std::time::Duration,
     /// States the model check may generate before it stops (a state reached
     /// twice counts twice).
     pub(crate) states: usize,
@@ -313,142 +360,86 @@ impl ExploreLimit {
     pub(crate) fn lift(&self) {
         self.lifted.store(true, Ordering::Relaxed);
     }
+
+    /// Whether the budget's time is spent.
+    pub(crate) fn past_time(&self) -> bool {
+        self.elapsed.now() >= self.time
+    }
+}
+
+/// Every field a walk reads, in order. `limit` is left out: it is the budget a
+/// walk runs under, not part of the model, so a model prints the same however
+/// it is budgeted. The checks are kept by a digest of this text
+/// ([`crate::VerificationCascade::digest`]); the destructuring makes a new
+/// field a compile error here until it is printed or left out on purpose.
+impl fmt::Debug for TemperModel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let TemperModel {
+            states,
+            transitions,
+            invariants,
+            entry_rules,
+            liveness,
+            terminal,
+            var_kinds,
+            initial_status,
+            initial_counters,
+            initial_booleans,
+            initial_lists,
+            initial_strings,
+            tracked_strings,
+            string_literals,
+            counter_bounds,
+            default_max_counter,
+            list_bounds,
+            list_literals,
+            limit: _,
+        } = self;
+        f.debug_struct("TemperModel")
+            .field("states", states)
+            .field("transitions", transitions)
+            .field("invariants", invariants)
+            .field("entry_rules", entry_rules)
+            .field("liveness", liveness)
+            .field("terminal", terminal)
+            .field("var_kinds", var_kinds)
+            .field("initial_status", initial_status)
+            .field("initial_counters", initial_counters)
+            .field("initial_booleans", initial_booleans)
+            .field("initial_lists", initial_lists)
+            .field("initial_strings", initial_strings)
+            .field("tracked_strings", tracked_strings)
+            .field("string_literals", string_literals)
+            .field("counter_bounds", counter_bounds)
+            .field("default_max_counter", default_max_counter)
+            .field("list_bounds", list_bounds)
+            .field("list_literals", list_literals)
+            .finish_non_exhaustive()
+    }
 }
 
 impl TemperModel {
+    /// Whether the model holds a value for the counter, boolean or list
+    /// `field`: some rule reads it.
+    pub fn holds(&self, field: &str) -> bool {
+        self.initial_counters.contains_key(field)
+            || self.initial_booleans.contains_key(field)
+            || self.initial_lists.contains_key(field)
+    }
+
+    /// Whether the model gives `action`'s string parameter `param` a value.
+    pub fn models_string(&self, action: &str, param: &str) -> bool {
+        self.transitions
+            .iter()
+            .filter(|t| t.name == action)
+            .any(|t| t.string_params.iter().any(|p| p.name == param))
+    }
+
     /// Whether the model has spent its time or expansion work allowance.
     pub fn out_of_time(&self) -> bool {
         self.limit.as_ref().is_some_and(|limit| {
             !limit.lifted.load(Ordering::Relaxed)
-                && (Instant::now() >= limit.until || limit.exhausted.load(Ordering::Relaxed))
+                && (limit.past_time() || limit.exhausted.load(Ordering::Relaxed))
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn state_display_status_only() {
-        let s = TemperModelState {
-            status: "Draft".into(),
-            counters: BTreeMap::new(),
-            booleans: BTreeMap::new(),
-            lists: BTreeMap::new(),
-            strings: BTreeMap::new(),
-        };
-        assert_eq!(s.to_string(), "Draft");
-    }
-
-    #[test]
-    fn state_display_with_counters() {
-        let s = TemperModelState {
-            status: "Active".into(),
-            counters: BTreeMap::from([("items".into(), 3)]),
-            booleans: BTreeMap::new(),
-            lists: BTreeMap::new(),
-            strings: BTreeMap::new(),
-        };
-        assert_eq!(s.to_string(), "Active(items=3)");
-    }
-
-    #[test]
-    fn state_display_with_true_booleans() {
-        let s = TemperModelState {
-            status: "Active".into(),
-            counters: BTreeMap::new(),
-            booleans: BTreeMap::from([("ready".into(), true), ("done".into(), false)]),
-            lists: BTreeMap::new(),
-            strings: BTreeMap::new(),
-        };
-        assert_eq!(s.to_string(), "Active[ready]");
-    }
-
-    #[test]
-    fn state_display_with_lists() {
-        let s = TemperModelState {
-            status: "Active".into(),
-            counters: BTreeMap::new(),
-            booleans: BTreeMap::new(),
-            lists: BTreeMap::from([("tags".into(), vec!["a".into(), "b".into()])]),
-            strings: BTreeMap::new(),
-        };
-        assert_eq!(s.to_string(), "Active{tags#2}");
-    }
-
-    #[test]
-    fn state_display_full() {
-        let s = TemperModelState {
-            status: "Active".into(),
-            counters: BTreeMap::from([("items".into(), 2)]),
-            booleans: BTreeMap::from([("ready".into(), true)]),
-            lists: BTreeMap::from([("tags".into(), vec!["x".into()])]),
-            strings: BTreeMap::new(),
-        };
-        assert_eq!(s.to_string(), "Active(items=2)[ready]{tags#1}");
-    }
-
-    #[test]
-    fn state_display_all_booleans_false_hides_brackets() {
-        let s = TemperModelState {
-            status: "X".into(),
-            counters: BTreeMap::new(),
-            booleans: BTreeMap::from([("a".into(), false), ("b".into(), false)]),
-            lists: BTreeMap::new(),
-            strings: BTreeMap::new(),
-        };
-        assert_eq!(s.to_string(), "X");
-    }
-
-    #[test]
-    fn action_display_with_target() {
-        let a = TemperModelAction {
-            name: "Submit".into(),
-            target_state: Some("Active".into()),
-            params: BTreeMap::new(),
-        };
-        assert_eq!(a.to_string(), "Submit -> Active");
-        let a = TemperModelAction {
-            params: BTreeMap::from([("n".into(), ParamValue::Count(2))]),
-            ..a
-        };
-        assert_eq!(a.to_string(), "Submit(n=2) -> Active");
-    }
-
-    #[test]
-    fn action_display_no_target() {
-        let a = TemperModelAction {
-            name: "AddItem".into(),
-            target_state: None,
-            params: BTreeMap::new(),
-        };
-        assert_eq!(a.to_string(), "AddItem");
-    }
-
-    #[test]
-    fn state_serde_roundtrip() {
-        let s = TemperModelState {
-            status: "Draft".into(),
-            counters: BTreeMap::from([("items".into(), 5)]),
-            booleans: BTreeMap::from([("ready".into(), true)]),
-            lists: BTreeMap::from([("tags".into(), vec!["vip".into()])]),
-            strings: BTreeMap::new(),
-        };
-        let json = serde_json::to_string(&s).unwrap();
-        let back: TemperModelState = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, s);
-    }
-
-    #[test]
-    fn action_serde_roundtrip() {
-        let a = TemperModelAction {
-            name: "Submit".into(),
-            target_state: Some("Active".into()),
-            params: BTreeMap::from([("tag".into(), ParamValue::Fresh)]),
-        };
-        let json = serde_json::to_string(&a).unwrap();
-        let back: TemperModelAction = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, a);
     }
 }

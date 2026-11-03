@@ -78,8 +78,18 @@ async fn try_reaction(state: &ServerState, reaction: &Reaction) -> ReactionTry {
         &snapshot.resource_attrs,
         sent.tenant.as_str(),
     ) {
+        let reason = denial.to_string();
+        // Every final Cedar refusal is reported here, including a retry whose
+        // first try could not read or send. The dispatcher only counts its
+        // immediate results on the fan-out span.
+        reaction.record_withheld(
+            state,
+            &snapshot.current_state.state.status,
+            &snapshot.resource_attrs,
+            &reason,
+        );
         return ReactionTry::Denied {
-            reason: denial.to_string(),
+            reason,
             target_status: snapshot.current_state.state.status,
         };
     }
@@ -92,9 +102,15 @@ async fn try_reaction(state: &ServerState, reaction: &Reaction) -> ReactionTry {
             sent.params.clone(),
             &sent.agent_ctx,
             false,
+            crate::state::write_record::WriteCaller::Kernel,
             None,
         )
         .await;
+    if let Ok(response) = &reply
+        && response.refused
+    {
+        reaction.record_refused(state, response);
+    }
     ReactionTry::Sent(Box::new(reply))
 }
 

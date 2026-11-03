@@ -152,6 +152,7 @@ impl ServerState {
                 }),
                 &agent,
                 false,
+                crate::state::write_record::WriteCaller::Kernel,
                 None,
             )
             .await

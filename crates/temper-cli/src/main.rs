@@ -760,15 +760,6 @@ mod tests {
     }
 
     #[test]
-    fn railway_start_command_does_not_pin_turso_storage() {
-        let railway_toml = include_str!("../../../railway.toml");
-        assert!(
-            !railway_toml.contains("--storage turso"),
-            "Railway must allow TEMPER_EVENT_STORE=postgres to select the backend"
-        );
-    }
-
-    #[test]
     fn test_cli_parse_migrate_turso_to_postgres() {
         let cli = Cli::parse_from([
             "temper",

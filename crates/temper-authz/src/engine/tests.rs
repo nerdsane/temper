@@ -13,11 +13,13 @@ fn admin_context() -> SecurityContext {
             role: None,
             acting_for: None,
             agent_type: None,
+            label: None,
             attributes: HashMap::new(),
         },
         context_attrs: HashMap::new(),
         correlation_id: "test-admin".to_string(),
         cause: None,
+        credential: None,
     }
 }
 
@@ -29,11 +31,13 @@ fn customer_context(id: &str) -> SecurityContext {
             role: None,
             acting_for: None,
             agent_type: None,
+            label: None,
             attributes: HashMap::new(),
         },
         context_attrs: HashMap::new(),
         correlation_id: "test-customer".to_string(),
         cause: None,
+        credential: None,
     }
 }
 

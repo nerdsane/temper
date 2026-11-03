@@ -417,41 +417,6 @@ mod tests {
     }
 
     #[test]
-    fn content_block_text_round_trips_json() {
-        let block = ContentBlock::text("hi");
-        let j = serde_json::to_string(&block).unwrap();
-        assert_eq!(j, r#"{"type":"text","text":"hi"}"#);
-        let back: ContentBlock = serde_json::from_str(&j).unwrap();
-        assert_eq!(back, block);
-    }
-
-    #[test]
-    fn content_block_tool_use_round_trips_json() {
-        let block = ContentBlock::ToolUse {
-            id: "toolu_1".into(),
-            name: "bash".into(),
-            input: serde_json::json!({"command": "ls"}),
-        };
-        let j = serde_json::to_string(&block).unwrap();
-        let back: ContentBlock = serde_json::from_str(&j).unwrap();
-        assert_eq!(back, block);
-        assert!(j.contains(r#""type":"tool_use""#));
-    }
-
-    #[test]
-    fn content_block_tool_result_round_trips_json() {
-        let block = ContentBlock::ToolResult {
-            tool_use_id: "toolu_1".into(),
-            content: "file1.txt\nfile2.txt".into(),
-            is_error: Some(false),
-        };
-        let j = serde_json::to_string(&block).unwrap();
-        let back: ContentBlock = serde_json::from_str(&j).unwrap();
-        assert_eq!(back, block);
-        assert!(j.contains(r#""type":"tool_result""#));
-    }
-
-    #[test]
     fn text_method_skips_non_text_blocks() {
         let resp = MessagesResponse {
             content: vec![

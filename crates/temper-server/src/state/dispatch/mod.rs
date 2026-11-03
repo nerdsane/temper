@@ -14,6 +14,7 @@ mod adapter;
 mod answers;
 mod authenticated_params;
 pub(crate) use authenticated_params::bind_authenticated_params;
+mod call_deadlines;
 mod compensation;
 mod composite;
 mod cross_entity;
@@ -23,18 +24,26 @@ mod error;
 pub use error::DispatchError;
 pub(crate) mod entity_rows;
 mod generated_callbacks;
+mod outside_write;
 pub(crate) mod owed_writes;
-mod projection_barrier;
+pub(crate) mod spawn_plan;
+pub use outside_write::StaleWrite;
 pub(crate) mod retry;
 mod scheduled_actions;
 pub(crate) mod state_timeouts;
+mod state_timer_fire;
 mod state_timer_follow;
 mod state_timer_reconcile;
 mod state_timer_rows;
+mod state_timer_setter;
+mod state_timer_settled;
+mod state_timer_stop;
 #[cfg(test)]
 #[path = "strict_support_test.rs"]
 mod strict_test_support;
 mod timer_cause;
+mod timer_standing;
+mod trigger_failures;
 mod wasm;
 pub(crate) use wasm::authorized_http_endpoint_host;
 #[cfg(feature = "observe")]

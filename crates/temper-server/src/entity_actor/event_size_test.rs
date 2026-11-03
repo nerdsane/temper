@@ -97,6 +97,7 @@ async fn a_change_over_the_limit_is_refused_and_never_written() {
     let patched: EntityResponse = actor
         .ask(
             EntityMsg::UpdateFields {
+                caller: None,
                 fields: serde_json::json!({ "Notes": "y".repeat(5_000) }),
                 replace: false,
                 expected_precondition: None,
@@ -156,11 +157,15 @@ async fn a_batch_with_one_change_over_the_limit_writes_nothing() {
             persistence_id: "default:Order:b-1".into(),
             expected_sequence: 0,
             events: vec![envelope("default:Order:b-1", 1, "p".into())],
+            state_timer: None,
+            projection: None,
         },
         PersistenceAppend {
             persistence_id: "default:Order:b-2".into(),
             expected_sequence: 0,
             events: vec![envelope("default:Order:b-2", 1, "x".repeat(5_000))],
+            state_timer: None,
+            projection: None,
         },
     ];
     let refused = journal.append_batch(&batch).await.unwrap_err();

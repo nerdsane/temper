@@ -157,3 +157,64 @@ async fn boot_projection_comparison_is_batched_and_respects_effective_sequences(
     assert_eq!(counter.projection.as_ref().unwrap().sequence_nr, 3);
     assert_eq!(counter.journal.sequence_nr, 4);
 }
+
+/// The comparison reads indexes, never a record's catalog row or snapshot:
+/// from a cold cache it reads fewer pages than there are records, each with a
+/// 32 KB catalog row and a 32 KB snapshot.
+#[tokio::test]
+async fn boot_comparison_reads_no_record_whole() {
+    const RECORDS: usize = 64;
+    let body = "x".repeat(32 * 1024);
+    let url = sqlite_test_url("boot-comparison-reads");
+    let store = TursoEventStore::new(&url, None).await.unwrap();
+    for n in 0..RECORDS {
+        let id = format!("doc-{n}");
+        let pid = format!("acme:Doc:{id}");
+        store
+            .append(&pid, 0, &[test_envelope("Touch", serde_json::json!({}))])
+            .await
+            .unwrap();
+        store.save_snapshot(&pid, 1, body.as_bytes()).await.unwrap();
+        store
+            .upsert_query_projection_with_state(
+                "acme",
+                "Doc",
+                &id,
+                "Open",
+                &serde_json::json!({ "body": body }),
+                &serde_json::json!({}),
+                1,
+            )
+            .await
+            .unwrap();
+    }
+    drop(store);
+    // A copy at a new path: the engine shares one open database, and its
+    // cache, per path within a process.
+    let from = url.strip_prefix("file:").unwrap();
+    let copy = sqlite_test_url("boot-comparison-reads-copy");
+    let copy = copy.strip_prefix("file:").unwrap();
+    for suffix in ["", "-wal"] {
+        if std::path::Path::new(&format!("{from}{suffix}")).exists() {
+            std::fs::copy(format!("{from}{suffix}"), format!("{copy}{suffix}")).unwrap();
+        }
+    }
+    let io = super::read_count::CountingIo::new();
+    let db = crate::driver::Database::local_with_io(copy, io.clone())
+        .await
+        .unwrap();
+    let store = TursoEventStore::open(db, false, None).await.unwrap();
+
+    io.reset();
+    let lagging = store.lagging_query_projections("acme").await.unwrap();
+    let reads = io.reads();
+    assert!(lagging.is_empty(), "every record is current: {lagging:?}");
+    assert!(
+        reads > 0,
+        "the comparison read nothing through the counted file"
+    );
+    assert!(
+        reads < RECORDS,
+        "the comparison read {reads} pages for {RECORDS} records: it read records whole"
+    );
+}

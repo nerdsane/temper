@@ -103,7 +103,9 @@ fn credential_entity_state() -> EntityState {
         last_snapshot_sequence_nr: 0,
         sequence_nr: 0,
         processed_idempotency_keys: BTreeMap::new(),
+        last_event: Default::default(),
         status_clock: Default::default(),
+        spawn_reservations: Default::default(),
     }
 }
 

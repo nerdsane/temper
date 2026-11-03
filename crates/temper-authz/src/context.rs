@@ -31,11 +31,18 @@ pub struct Principal {
     pub acting_for: Option<String>,
     /// Agent type classification (e.g. "claude-code", "openclaw").
     pub agent_type: Option<String>,
+    /// The name its issuer gave this agent instance, for people to know it by.
+    /// It says nothing about what the agent may do, so it is never a Cedar input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     /// Arbitrary attributes for ABAC evaluation.
     pub attributes: HashMap<String, serde_json::Value>,
 }
 
+mod credential;
 pub mod platform_keys;
+
+pub use credential::IssuedCredential;
 
 /// Whether `name` is a Cedar context key only the platform sets
 /// ([`platform_keys`]), which a record's field never fills.
@@ -61,6 +68,13 @@ pub struct SecurityContext {
     /// sets it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cause: Option<crate::MoveCause>,
+    /// What the verified token behind an agent's identity was issued under,
+    /// so a move made later in the agent's name (a timer it set) can ask
+    /// whether that token would still be accepted. None for every other
+    /// identity, and in a context saved before contexts kept it. Cedar never
+    /// sees it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential: Option<IssuedCredential>,
 }
 
 /// Credential-authenticated authority bound to one tenant.
@@ -159,11 +173,13 @@ impl SecurityContext {
                 role: None,
                 acting_for: None,
                 agent_type: None,
+                label: None,
                 attributes: HashMap::new(),
             },
             context_attrs: HashMap::new(),
             correlation_id: uuid::Uuid::now_v7().to_string(),
             cause: None,
+            credential: None,
         }
     }
 
@@ -189,11 +205,13 @@ impl SecurityContext {
                 role: None,
                 acting_for: None,
                 agent_type: None,
+                label: None,
                 attributes: HashMap::new(),
             },
             context_attrs: HashMap::new(),
             correlation_id,
             cause: None,
+            credential: None,
         }
     }
 
@@ -209,11 +227,13 @@ impl SecurityContext {
                 role: None,
                 acting_for: None,
                 agent_type: None,
+                label: None,
                 attributes: HashMap::new(),
             },
             context_attrs: HashMap::new(),
             correlation_id: uuid::Uuid::now_v7().to_string(),
             cause: None,
+            credential: None,
         }
     }
 
@@ -261,11 +281,13 @@ impl SecurityContext {
                 role: None,
                 acting_for: None,
                 agent_type: Some(agent_type_name.to_string()),
+                label: None,
                 attributes,
             },
             context_attrs,
             correlation_id: uuid::Uuid::now_v7().to_string(),
             cause: None,
+            credential: None,
         }
     }
 
@@ -327,11 +349,13 @@ impl SecurityContext {
                 role: role.map(|r| r.to_string()),
                 acting_for: acting_for.map(|a| a.to_string()),
                 agent_type: agent_type.map(|a| a.to_string()),
+                label: None,
                 attributes,
             },
             context_attrs,
             correlation_id: uuid::Uuid::now_v7().to_string(),
             cause: None,
+            credential: None,
         }
     }
 
@@ -394,6 +418,42 @@ impl SecurityContext {
             "action_context".to_string(),
             serde_json::Value::String(action_context.into()),
         );
+        self
+    }
+
+    /// Put what the records that describe the caller say (types marked
+    /// `principal_record`) on the principal, as Cedar's `principal.<name>`.
+    /// Only the identity boundary calls this, with names it built from the
+    /// verified token: `<Type>` for the status of the user's record in person,
+    /// `actingFor<Type>` for the user an agent acts for, and `<name>_<field>`
+    /// for a record's set (an array, which Cedar reads as a set). A record
+    /// type's name starts uppercase (the spec refuses others), so none of them
+    /// replaces an attribute set here.
+    #[must_use]
+    pub fn with_principal_records(
+        mut self,
+        records: &std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> Self {
+        for (name, value) in records {
+            self.principal
+                .attributes
+                .insert(name.clone(), value.clone());
+        }
+        self
+    }
+
+    /// Keep what the verified token behind this identity was issued under
+    /// ([`Self::credential`]). Only the identity boundary calls this, for an
+    /// agent resolved from a trusted-issuer token.
+    #[must_use]
+    pub fn with_credential(mut self, credential: Option<IssuedCredential>) -> Self {
+        self.credential = credential;
+        self
+    }
+
+    /// The name its issuer gave this agent instance ([`Principal::label`]).
+    pub fn with_label(mut self, label: Option<&str>) -> Self {
+        self.principal.label = label.map(str::to_string);
         self
     }
 

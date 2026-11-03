@@ -100,11 +100,13 @@ async fn get_orders(state: &ServerState, tenant: &str) -> StatusCode {
                     role: None,
                     acting_for: None,
                     agent_type: None,
+                    label: None,
                     attributes: Default::default(),
                 },
                 context_attrs: Default::default(),
                 correlation_id: "restore-isolation-test".to_string(),
                 cause: None,
+                credential: None,
             },
         ));
     build_router(state.clone())

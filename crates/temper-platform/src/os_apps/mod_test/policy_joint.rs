@@ -59,7 +59,7 @@ fn fixture_with_place(place: &str) -> PlatformState {
 #[tokio::test]
 async fn policy_only_install_checks_existing_apps_in_its_tenant() {
     let state = fixture();
-    let unproved = install_checks::prove(
+    let unproved = install_checks::prove_to_the_end(
         &state,
         "policy-owner",
         "policy-only",
@@ -70,7 +70,7 @@ async fn policy_only_install_checks_existing_apps_in_its_tenant() {
     .await
     .expect("the existing reaction can bring its record");
     assert!(unproved.is_empty(), "{unproved:?}");
-    let error = install_checks::prove(
+    let error = install_checks::prove_to_the_end(
         &state,
         "policy-owner",
         "policy-only",
@@ -81,7 +81,7 @@ async fn policy_only_install_checks_existing_apps_in_its_tenant() {
     .await
     .expect_err("a forbid must not strand another app's record");
     assert!(error.contains("brought"), "{error}");
-    let unproved = install_checks::prove(
+    let unproved = install_checks::prove_to_the_end(
         &state,
         "other-tenant",
         "policy-only",
@@ -98,7 +98,7 @@ async fn policy_only_install_checks_existing_apps_in_its_tenant() {
 async fn policy_checks_use_incoming_specs_over_active_versions() {
     let state = fixture();
     let replacement = PLACE.replace("App[Id].status == 'Live' => status == 'Live'", "true");
-    let unproved = install_checks::prove(
+    let unproved = install_checks::prove_to_the_end(
         &state,
         "policy-owner",
         "updated",
@@ -108,13 +108,12 @@ async fn policy_checks_use_incoming_specs_over_active_versions() {
     )
     .await
     .expect("the incoming spec replaces the old property before checking");
-    // The new property names only Place, so App's reaction into Place is
-    // outside its scope. The walk does not send that reaction, so the
-    // property is not checked: a warning, not a refusal.
-    assert!(
-        unproved.len() == 1 && unproved[0].contains("a reaction from App may take Place.Bring"),
-        "{unproved:?}"
-    );
+    // The incoming property is `eventually true`, which the forbid cannot
+    // break, while the active one is refused under the same Cedar (see
+    // `policy_only_install_checks_existing_apps_in_its_tenant`). App's
+    // reaction into Place is outside the new property's scope, so the walk
+    // sends it as an outside move, and the property holds with it.
+    assert!(unproved.is_empty(), "{unproved:?}");
 }
 
 #[tokio::test]
@@ -130,7 +129,7 @@ permit(principal, action == Action::"Bring", resource is Place) when {
     resource has id && context.triggerSourceEntityId == resource.id
 };
 "#;
-    let unproved = install_checks::prove(
+    let unproved = install_checks::prove_to_the_end(
         &state,
         "policy-owner",
         "policy-only",
@@ -141,7 +140,7 @@ permit(principal, action == Action::"Bring", resource is Place) when {
     .await
     .expect("only the reaction can finish after Start");
     assert!(unproved.is_empty(), "{unproved:?}");
-    let error = install_checks::prove(
+    let error = install_checks::prove_to_the_end(
         &state,
         "policy-owner",
         "policy-only",

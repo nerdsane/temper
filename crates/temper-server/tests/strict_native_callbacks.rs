@@ -147,14 +147,25 @@ async fn strict_native_callbacks_run_through_the_actual_wasm_engine() {
             .send()
             .await
             .unwrap();
-        assert_eq!(
-            response.status(),
-            if expected_revision == 0 {
-                reqwest::StatusCode::CONFLICT
-            } else {
-                reqwest::StatusCode::OK
-            }
-        );
+        // `Run` committed, so it answers OK; a refused answer is said beside it.
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let answer: serde_json::Value = response.json().await.unwrap();
+        let failures = answer.get("@temper.triggerFailures");
+        if expected_revision == 0 {
+            let failures = failures
+                .and_then(|f| f.as_array())
+                .expect("the refusal is reported");
+            assert_eq!(failures.len(), 1, "{failures:?}");
+            assert!(
+                failures[0]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("answer refused: "),
+                "{failures:?}"
+            );
+        } else {
+            assert!(failures.is_none(), "{answer}");
+        }
         let observed: serde_json::Value = client
             .get(format!("{base}/tdata/Jobs('job')"))
             .send()

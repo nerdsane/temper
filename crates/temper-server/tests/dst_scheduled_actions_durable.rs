@@ -332,3 +332,8 @@ fn dst_scheduled_actions_outlive_a_restart() {
         "no stop over {SEEDS} seeds came right after a written fire"
     );
 }
+
+#[path = "dst_scheduled_actions_durable/fractional.rs"]
+mod fractional;
+#[path = "dst_scheduled_actions_durable/lapsed.rs"]
+mod lapsed;

@@ -104,13 +104,14 @@ impl RequestFingerprint {
     }
 }
 
-/// The idempotency key of a follow-up request (an integration's callback)
-/// that the request under `parent` starts.
+/// The idempotency key of a follow-up request (a reaction, callback or
+/// scheduled action) that the request under `parent` starts.
 ///
-/// `label` names the follow-up (`callback`) and `detail` tells siblings with
-/// the same label apart. A retry of the parent derives the same key. The key
-/// is a hash, not the parent with more text appended, so it stays the same
-/// length however long a chain of callbacks runs.
+/// `label` names the follow-up (`callback`, `scheduled:<action>`)
+/// and `detail` tells siblings with the same label apart. A retry of the parent
+/// derives the same key. The key is a hash, not the parent with more text
+/// appended, so it stays the same length however long a chain of follow-ups
+/// runs: a self-rescheduling action keeps a key of constant size every cycle.
 pub fn derived_idempotency_key(parent: &str, label: &str, detail: &str) -> String {
     let mut hasher = Sha256::new();
     for part in [parent, label, detail] {

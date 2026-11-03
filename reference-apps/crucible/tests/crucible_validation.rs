@@ -209,11 +209,13 @@ fn authenticate(mut request: Request<Body>) -> Request<Body> {
             role: None,
             acting_for: None,
             agent_type: None,
+            label: None,
             attributes: Default::default(),
         },
         context_attrs: Default::default(),
         correlation_id: "crucible-validation".to_string(),
         cause: None,
+        credential: None,
     };
     request
         .extensions_mut()

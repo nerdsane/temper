@@ -17,9 +17,9 @@ pub use temper_authz::AuthenticatedRequestContext;
 
 #[allow(unused_imports)] // Used by observe/ handlers via crate::authz::observe_tenant_scope
 pub(crate) use helpers::{
-    DenialInput, GovernedMutationAuth, observe_tenant_scope, record_authz_denial,
-    require_authenticated_context, require_governed_mutation_auth, require_observe_auth,
-    require_tenant_match,
+    DenialInput, GovernedMutationAuth, denial_can_be_answered, observe_tenant_scope,
+    record_answerable_denial, record_authz_denial, require_authenticated_context,
+    require_governed_mutation_auth, require_observe_auth, require_tenant_match,
 };
 #[cfg(feature = "observe")]
 pub(crate) use helpers::{ResourceAuthorization, require_resource_authorization};

@@ -203,6 +203,7 @@ impl ServerState {
                 carry.params.clone(),
                 &AgentContext::system(),
                 false,
+                crate::state::write_record::WriteCaller::Kernel,
                 None,
             )
             .await;
@@ -270,6 +271,7 @@ impl ServerState {
                         await_integration: false,
                         await_reactions: true,
                     },
+                    crate::state::write_record::WriteCaller::Kernel,
                     decided_on,
                 )
                 .await

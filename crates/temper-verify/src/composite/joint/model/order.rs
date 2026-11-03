@@ -36,7 +36,7 @@ type Field = (String, String);
 type Param = (String, String, String);
 
 /// The families of counts kept as sequence numbers.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(super) struct Order {
     families: Vec<Family>,
     /// Each (entity, action)'s `param_greater_than_field` constraints the
@@ -47,7 +47,7 @@ pub(super) struct Order {
     rising: BTreeSet<Field>,
 }
 
-#[derive(Default, Clone)]
+#[derive(Debug, Default, Clone)]
 struct Family {
     fields: BTreeSet<Field>,
     params: BTreeSet<Param>,

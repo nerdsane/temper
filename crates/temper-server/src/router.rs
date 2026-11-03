@@ -162,6 +162,11 @@ pub fn build_routes(state: ServerState) -> Router {
         .layer(axum::middleware::from_fn(
             crate::authz::strip_inbound_identity_headers,
         ))
+        // Outermost: every request is inbound, refused or not.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::wake::note_inbound,
+        ))
         .with_state(state)
 }
 

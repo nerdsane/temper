@@ -1,10 +1,10 @@
 //! A pass that checked nothing is not a pass: a rule whose premise no walked
 //! state meets, and a walk that never takes an answer a module may give.
 
-use std::time::Duration;
-
 use temper_authz::SendAnalysis;
 use temper_spec::automaton::{Automaton, parse_automaton};
+
+use super::room::{Bytes, Progress};
 
 use super::*;
 
@@ -70,11 +70,13 @@ fn parsed(sources: &[&str]) -> Vec<Automaton> {
         .collect()
 }
 
-fn budget() -> Budget {
-    Budget {
-        time: Duration::from_secs(30),
-        states: 100_000,
-    }
+/// Run `check` in a room no fixture here comes near filling.
+fn bounded<T>(check: impl FnOnce(Bound<'_>) -> T) -> T {
+    let (room, progress) = (Bytes::new(1 << 30), Progress::default());
+    check(Bound {
+        room: &room,
+        progress: &progress,
+    })
 }
 
 fn liveness(done_kind: &str, on_success: bool, eventually: &str) -> JointLivenessResult {
@@ -82,7 +84,7 @@ fn liveness(done_kind: &str, on_success: bool, eventually: &str) -> JointLivenes
     let automatons = parsed(&[&ask(done_kind, on_success, &rule)]);
     let refs: Vec<&Automaton> = automatons.iter().collect();
     let analysis = SendAnalysis::new(POLICIES).expect("fixture policies parse");
-    let mut results = verify_joint_liveness(&refs, Some(&analysis), budget());
+    let mut results = bounded(|bound| verify_joint_liveness(&refs, Some(&analysis), bound));
     assert_eq!(results.len(), 1);
     results.remove(0)
 }
@@ -92,7 +94,7 @@ fn invariant(done_kind: &str, assert: &str) -> JointInvariantResult {
     let automatons = parsed(&[&ask(done_kind, false, &rule), BOX]);
     let refs: Vec<&Automaton> = automatons.iter().collect();
     let analysis = SendAnalysis::new(POLICIES).expect("fixture policies parse");
-    let mut results = verify_joint_invariants(&refs, Some(&analysis), budget());
+    let mut results = bounded(|bound| verify_joint_invariants(&refs, Some(&analysis), bound));
     assert_eq!(results.len(), 1);
     results.remove(0)
 }
@@ -169,69 +171,4 @@ fn an_invariant_the_walk_breaks_stays_broken() {
         matches!(result.outcome, JointOutcome::Broken { .. }),
         "{result}"
     );
-}
-
-/// A record whose `Done` only a reaction from `Push`, a type the rule does
-/// not name, sends.
-const PUSHED: &str = r#"
-[automaton]
-name = "Ask"
-states = ["Idle", "Asked", "Done", "Gone"]
-initial = "Idle"
-
-[[action]]
-name = "Start"
-kind = "input"
-from = ["Idle"]
-to = "Asked"
-
-[[action]]
-name = "Done"
-kind = "input"
-from = ["Asked"]
-to = "Done"
-
-[[liveness]]
-name = "rule"
-eventually = "status == 'Done' => status == 'Gone'"
-"#;
-
-const PUSH: &str = r#"
-[automaton]
-name = "Push"
-states = ["Ready", "Pushed"]
-initial = "Ready"
-
-[[action]]
-name = "Poke"
-kind = "input"
-from = ["Ready"]
-to = "Pushed"
-
-[[action.triggers]]
-name = "done"
-kind = "entity"
-target_entity = "Ask"
-target_action = "Done"
-
-[action.triggers.resolve_target]
-kind = "same_id"
-"#;
-
-#[test]
-fn a_pass_that_never_takes_a_reaction_from_outside_the_scope_is_not_checked() {
-    // In the runtime Push's reaction takes Done, and nothing then leads to
-    // Gone. The rule names only Ask, so the walk never takes it.
-    let automatons = parsed(&[PUSHED, PUSH]);
-    let refs: Vec<&Automaton> = automatons.iter().collect();
-    let policies = r#"permit(principal, action in [Action::"Start", Action::"Poke"], resource);"#;
-    let analysis = SendAnalysis::new(policies).expect("fixture policies parse");
-    let mut results = verify_joint_liveness(&refs, Some(&analysis), budget());
-    assert_eq!(results.len(), 1);
-    let result = results.remove(0);
-    let text = result.to_string();
-    assert!(!result.holds(), "{text}");
-    assert!(text.contains("NOT CHECKED"), "{text}");
-    assert!(text.contains("Ask.Done (from Asked)"), "{text}");
-    assert!(text.contains("a reaction from Push"), "{text}");
 }

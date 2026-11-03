@@ -4,8 +4,12 @@ mod projection;
 pub use projection::{JournalHead, ProjectionCheckpoint, ProjectionRepairCandidate};
 
 mod catalog_group;
+mod catalog_state;
+mod secret;
 mod tombstone;
 pub use catalog_group::CatalogGroupRow;
+pub use catalog_state::{catalog_state_for_storage, catalog_state_from_storage};
+pub use secret::{SecretPrecondition, SecretWrite};
 pub use tombstone::{EVENT_KIND_KEY, EventKind, TOMBSTONE_EVENT_TYPE, journal_is_deleted};
 
 /// Event type used for the parent-journal record of a Composite action.
@@ -14,6 +18,13 @@ pub use tombstone::{EVENT_KIND_KEY, EventKind, TOMBSTONE_EVENT_TYPE, journal_is_
 /// journals. This event records the composite intent and the exact sub-write
 /// journals/idempotency keys that were committed atomically with it.
 pub const COMPOSITE_EVENT_TYPE: &str = "CompositeEvent";
+
+/// How many WASM invocation log rows a tenant keeps, newest first. Its only
+/// reader, `/observe/wasm` (module stats and invocation history), reads at
+/// most the newest this many, so an older row is never read again; without a
+/// bound the log grew by one row per integration call for as long as the
+/// tenant ran.
+pub const WASM_INVOCATIONS_KEPT_PER_TENANT: i64 = 10_000;
 
 /// Replay/audit record for one Composite action application.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,7 +175,7 @@ pub struct EntityVectorCandidate {
 
 /// One armed `[[state_timeout]]`, kept so that a restarted server arms it
 /// again (ADR-0056). One row per entity: a state declares at most one timeout.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StateTimerRecord {
     pub tenant: String,
     pub entity_type: String,
@@ -184,20 +195,23 @@ pub struct StateTimerRecord {
     pub armed_by: String,
 }
 
-/// One pending `schedule(...)` or `schedule_at(...)` action, kept so that a
+/// One pending `schedule(...)` or `schedule_at(...)` action, or the deadline
+/// of a background module call that names an `on_failure`, kept so that a
 /// restarted server arms it again. An entity can have many; each row is
-/// removed in the commit of the event its action fires, or after a fire that
-/// wrote no event.
+/// removed in the commit of the event its action fires (for a call, the
+/// call's answer), or after a fire that wrote no event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScheduledActionRecord {
     pub tenant: String,
     pub entity_type: String,
     pub entity_id: String,
     /// Names this schedule: the arming event's journal sequence and the
-    /// effect's place among that event's schedules, so a repeated write of
-    /// the same arm lands on the same row.
+    /// effect's place among that event's schedules (`<seq>.<index>`), or the
+    /// called integration for a call's deadline (`<seq>.call:<integration>`),
+    /// so a repeated write of the same arm lands on the same row.
     pub arm_id: String,
-    /// The action to dispatch.
+    /// The action to dispatch. Empty means durably cancelled: recovery only
+    /// removes the row and must never dispatch it.
     pub action: String,
     /// When it is due, RFC 3339.
     pub due_at: String,
@@ -343,6 +357,40 @@ pub trait EventStore: Send + Sync + 'static {
     {
         let _ = tenant;
         async { Ok(Vec::new()) }
+    }
+
+    /// The pending scheduled actions of one record: what an arm compares
+    /// with, so an action armed twice for the same time keeps one row. The
+    /// default reads the tenant's rows and keeps the record's.
+    fn list_entity_scheduled_actions(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<ScheduledActionRecord>, PersistenceError>> + Send
+    {
+        let rows = self.list_scheduled_actions(tenant);
+        async move {
+            Ok(rows
+                .await?
+                .into_iter()
+                .filter(|row| row.entity_type == entity_type && row.entity_id == entity_id)
+                .collect())
+        }
+    }
+
+    /// Durably cancel a scheduled action without deleting its row, by clearing
+    /// its action. Idempotent, including when the row is already absent.
+    /// Recovery must only delete cancelled rows, never dispatch them. Stores
+    /// that keep rows override this; stores without rows can simply delete.
+    fn cancel_scheduled_action(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        arm_id: &str,
+    ) -> impl std::future::Future<Output = Result<(), PersistenceError>> + Send {
+        self.delete_scheduled_action(tenant, entity_type, entity_id, arm_id)
     }
 
     /// Remove one scheduled action's row once it has fired. Idempotent.
@@ -559,6 +607,30 @@ pub trait EventStore: Send + Sync + 'static {
         limit: usize,
     ) -> impl std::future::Future<Output = Result<Vec<PersistenceEnvelope>, PersistenceError>> + Send;
 
+    /// Creation time kept by the kernel, even after journal compaction. Stores
+    /// with a catalog prefer its saved fact; otherwise read exactly sequence 1.
+    fn first_event_at(
+        &self,
+        persistence_id: &str,
+    ) -> impl std::future::Future<
+        Output = Result<Option<chrono::DateTime<chrono::Utc>>, PersistenceError>,
+    > + Send {
+        async move {
+            Ok(self
+                .read_events_page(persistence_id, Some(2), 1)
+                .await?
+                .first()
+                .filter(|event| event.sequence_nr == 1)
+                .map(|event| {
+                    event
+                        .payload
+                        .get("timestamp")
+                        .and_then(|value| serde_json::from_value(value.clone()).ok())
+                        .unwrap_or(event.metadata.timestamp)
+                }))
+        }
+    }
+
     /// Save a state snapshot.
     fn save_snapshot(
         &self,
@@ -674,6 +746,76 @@ pub struct PersistenceAppend {
     pub expected_sequence: u64,
     /// Events to append to this journal.
     pub events: Vec<PersistenceEnvelope>,
+    /// The entity's query-plane row as the events leave it. A store whose
+    /// [`EventStore::commits_entity_rows`] is true writes it in the batch's
+    /// transaction, as [`CommitRows::projection`] in a single append.
+    #[serde(default)]
+    pub projection: Option<AppendProjection>,
+    /// The last timer mutation in this append. None preserves the existing
+    /// arm, including when a later event does not reset its clock.
+    #[serde(default)]
+    pub state_timer: Option<AppendStateTimer>,
+}
+
+/// An entity's query-plane row, owned, for an append in a batch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum AppendProjection {
+    /// The entity's status, its projected fields and its projected state.
+    Upsert {
+        status: String,
+        fields: serde_json::Value,
+        state: serde_json::Value,
+    },
+    /// The entity was deleted: its row and its field-index rows go.
+    Remove,
+}
+
+impl AppendProjection {
+    /// The row as a single append's commit rows carry it.
+    pub fn as_row(&self) -> ProjectionRow<'_> {
+        match self {
+            Self::Upsert {
+                status,
+                fields,
+                state,
+            } => ProjectionRow::Upsert {
+                status,
+                fields,
+                state,
+            },
+            Self::Remove => ProjectionRow::Remove,
+        }
+    }
+}
+
+/// An owned timer mutation committed with a batch stream's events.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum AppendStateTimer {
+    /// Entering or resetting a timed state replaces its durable arm.
+    Arm(StateTimerRecord),
+    /// Leaving a timed state or consuming a one-shot timer removes its arm.
+    End,
+}
+
+impl AppendStateTimer {
+    /// Borrow this mutation for the same writer a single append uses.
+    pub fn as_row(&self) -> StateTimerRow<'_> {
+        match self {
+            Self::Arm(row) => StateTimerRow::Arm(row),
+            Self::End => StateTimerRow::End,
+        }
+    }
+}
+
+impl PersistenceAppend {
+    /// The rows this append commits with its events.
+    pub fn commit_rows(&self) -> CommitRows<'_> {
+        CommitRows {
+            projection: self.projection.as_ref().map(AppendProjection::as_row),
+            state_timer: self.state_timer.as_ref().map(AppendStateTimer::as_row),
+            ..CommitRows::default()
+        }
+    }
 }
 
 /// New sequence number for one stream after an atomic batch append.

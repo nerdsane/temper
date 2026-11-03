@@ -29,8 +29,7 @@ use crate::request_context::AgentContext;
 /// that already model an error step participate without renaming.
 const FAILURE_TRANSITION_NAMES: &[&str] = &["Fail", "MarkFailed", "Error", "Abort"];
 
-/// The service a compensating transition runs as, and the source its
-/// callback key is derived under.
+/// The source a compensating transition derives its callback key under.
 const COMPENSATION_SOURCE: &str = "integration-compensation";
 
 impl crate::state::ServerState {
@@ -180,9 +179,17 @@ impl crate::state::ServerState {
                 return;
             }
         };
-        let agent_ctx = AgentContext::for_service_answering(COMPENSATION_SOURCE, &callback_ctx);
+        // The compensating move is made as whoever made the move whose
+        // integration failed, as a declared on_failure answer is.
         match self
-            .dispatch_tenant_action(tenant, entity_type, entity_id, &action, params, &agent_ctx)
+            .dispatch_tenant_action(
+                tenant,
+                entity_type,
+                entity_id,
+                &action,
+                params,
+                &callback_ctx.for_answer(),
+            )
             .await
         {
             Ok(resp) if resp.success => {

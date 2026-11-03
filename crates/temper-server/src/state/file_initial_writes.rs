@@ -1,6 +1,8 @@
 use std::sync::{Arc, RwLock};
 
-use temper_runtime::persistence::{EventMetadata, PersistenceEnvelope, PersistenceError};
+use temper_runtime::persistence::{
+    AppendProjection, CommitRows, EventMetadata, PersistenceEnvelope, PersistenceError,
+};
 use temper_runtime::scheduler::sim_uuid;
 use tracing::Instrument;
 
@@ -131,7 +133,7 @@ impl ServerState {
         let mut events = Vec::with_capacity(3);
 
         let created = EntityEvent::bootstrap(state.status.clone());
-        push_synthetic_event(&mut state, &mut events, created);
+        push_synthetic_event(&mut state, &mut events, created, agent_ctx);
 
         let no_xref = std::collections::BTreeMap::new();
         if create_params
@@ -140,7 +142,7 @@ impl ServerState {
         {
             let create_event =
                 apply_synthetic_file_action(&mut state, &table, "Create", create_params, &no_xref)?;
-            push_synthetic_event(&mut state, &mut events, create_event);
+            push_synthetic_event(&mut state, &mut events, create_event, agent_ctx);
         }
 
         let version_number = state.counters.get("version_count").copied().unwrap_or(0) + 1;
@@ -178,7 +180,7 @@ impl ServerState {
             stream_params,
             &stream_xref,
         )?;
-        push_synthetic_event(&mut state, &mut events, stream_event);
+        push_synthetic_event(&mut state, &mut events, stream_event, agent_ctx);
 
         let envelopes = events
             .iter()
@@ -188,7 +190,20 @@ impl ServerState {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        match store.append(&persistence_id, 0, &envelopes).await {
+        // The record's query-plane row commits with its events, as a move's.
+        let mut after = state.clone();
+        after.sequence_nr = envelopes.len() as u64;
+        let projection = store
+            .commits_entity_rows()
+            .then(|| self.append_projection(tenant, "File", &after));
+        let rows = CommitRows {
+            projection: projection.as_ref().map(AppendProjection::as_row),
+            ..CommitRows::default()
+        };
+        match store
+            .append_with_rows(&persistence_id, 0, &envelopes, rows)
+            .await
+        {
             Ok(sequence_nr) => state.sequence_nr = sequence_nr,
             Err(PersistenceError::ConcurrencyViolation { .. }) => {
                 return Err(FileStreamContentError::ActionRejected(format!(
@@ -200,27 +215,6 @@ impl ServerState {
                     "failed to persist atomic File initial content events for File('{file_id}'): {error}"
                 )));
             }
-        }
-
-        if let Some(query_plane) = self.query_plane_store() {
-            let fields = self.query_projection_fields(tenant, "File", &state.fields);
-            let projected_state = self.query_projection_state(&state);
-            query_plane
-                .upsert_projection(
-                    tenant.as_str(),
-                    "File",
-                    file_id,
-                    &state.status,
-                    &fields,
-                    &projected_state,
-                    state.sequence_nr,
-                )
-                .await
-                .map_err(|error| {
-                    FileStreamContentError::State(format!(
-                        "query projection write failed during atomic File initial content create: {error}"
-                    ))
-                })?;
         }
 
         self.stop_and_remove_entity(tenant, "File", file_id);
@@ -244,7 +238,9 @@ impl ServerState {
             spec_governed: true,
             refused: false,
             answered_action: None,
+            trigger_failures: Vec::new(),
             store_unavailable: false,
+            unrecorded_at: None,
         };
         self.broadcast_synthetic_file_stream_update(tenant, file_id, &response, agent_ctx);
         Ok(response)
@@ -434,8 +430,10 @@ fn apply_synthetic_file_action(
 fn push_synthetic_event(
     state: &mut EntityState,
     events: &mut Vec<EntityEvent>,
-    event: EntityEvent,
+    mut event: EntityEvent,
+    caller: &crate::request_context::AgentContext,
 ) {
+    event.origin = crate::entity_actor::EventOrigin::from_caller(Some(caller));
     state.sequence_nr = state.sequence_nr.saturating_add(1);
     state.push_event_bounded(event.clone());
     events.push(event);

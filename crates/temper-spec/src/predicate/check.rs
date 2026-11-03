@@ -139,24 +139,47 @@ pub fn unmodelable<'e>(expr: &'e Expr, vars: &BTreeMap<String, VarKind>) -> Opti
 /// in the joint check of the entity types the invariant names. Numbers that
 /// are not counters, and `null`, stay out.
 pub fn unverifiable<'e>(expr: &'e Expr, vars: &BTreeMap<String, VarKind>) -> Option<&'e Expr> {
+    unverifiable_assertion(expr, vars, false)
+}
+
+/// The first entry assertion read the verifier cannot check. Entry checks
+/// additionally model nullable related statuses and local list membership.
+pub(crate) fn unverifiable_entry<'e>(
+    expr: &'e Expr,
+    vars: &BTreeMap<String, VarKind>,
+) -> Option<&'e Expr> {
+    unverifiable_assertion(expr, vars, true)
+}
+
+fn unverifiable_assertion<'e>(
+    expr: &'e Expr,
+    vars: &BTreeMap<String, VarKind>,
+    entry: bool,
+) -> Option<&'e Expr> {
     let kind = |name: &str| vars.get(name).copied();
     let checked_operand = |operand: &Operand| match operand {
         Operand::Status
         | Operand::Lit(Literal::Int(_) | Literal::Str(_) | Literal::Bool(_))
         | Operand::CrossStatus { .. }
         | Operand::CrossField { .. } => true,
-        Operand::Var(name) => matches!(
-            kind(name),
-            Some(VarKind::Counter | VarKind::Bool | VarKind::Str)
-        ),
+        Operand::Var(name) => {
+            matches!(
+                kind(name),
+                Some(VarKind::Counter | VarKind::Bool | VarKind::Str)
+            ) || (entry && kind(name) == Some(VarKind::List))
+        }
         Operand::Len(name) => kind(name) == Some(VarKind::List),
-        Operand::Lit(Literal::Null) | Operand::Param(_) => false,
+        Operand::Lit(Literal::Null) => entry,
+        Operand::Param(_) => false,
     };
     match expr {
         Expr::Const(_) => None,
-        Expr::Not(inner) => unverifiable(inner, vars),
-        Expr::And(parts) | Expr::Or(parts) => parts.iter().find_map(|p| unverifiable(p, vars)),
-        Expr::Implies(a, b) => unverifiable(a, vars).or_else(|| unverifiable(b, vars)),
+        Expr::Not(inner) => unverifiable_assertion(inner, vars, entry),
+        Expr::And(parts) | Expr::Or(parts) => parts
+            .iter()
+            .find_map(|p| unverifiable_assertion(p, vars, entry)),
+        Expr::Implies(a, b) => unverifiable_assertion(a, vars, entry)
+            .or_else(|| unverifiable_assertion(b, vars, entry)),
         Expr::Var(name) => (kind(name) != Some(VarKind::Bool)).then_some(expr),
         Expr::Empty(name) => {
             (!matches!(kind(name), Some(VarKind::List | VarKind::Str))).then_some(expr)
@@ -169,7 +192,11 @@ pub fn unverifiable<'e>(expr: &'e Expr, vars: &BTreeMap<String, VarKind>) -> Opt
                 Set::List(_) => checked_operand(value),
                 Set::Var(name) => {
                     kind(name) == Some(VarKind::List)
-                        && matches!(value, Operand::Lit(Literal::Str(_)))
+                        && if entry {
+                            checked_operand(value)
+                        } else {
+                            matches!(value, Operand::Lit(Literal::Str(_)))
+                        }
                 }
             };
             (!checked).then_some(expr)

@@ -52,6 +52,11 @@ pub(super) enum OutboundError {
 }
 
 impl OutboundError {
+    /// reqwest's error names the whole URL, and this one reaches logs, spans and the module: a URL can hold a key.
+    fn transport(error: reqwest::Error) -> Self {
+        Self::Http(error.without_url())
+    }
+
     /// The message the guest sees: a refusal as it stands, a transport error
     /// as the calling path words it.
     pub(super) fn into_message(self, transport: impl FnOnce(reqwest::Error) -> String) -> String {
@@ -94,17 +99,25 @@ impl Redirects {
         builder: reqwest::RequestBuilder,
         operation: &str,
     ) -> Result<reqwest::Response, OutboundError> {
-        let request = builder.build().map_err(OutboundError::Http)?;
+        let request = builder.build().map_err(OutboundError::transport)?;
         let (gate, ctx) = match &self.gate {
             Some((gate, ctx)) if !self.is_internal(request.url()) => (gate, ctx),
-            _ => return client.execute(request).await.map_err(OutboundError::Http),
+            _ => {
+                return client
+                    .execute(request)
+                    .await
+                    .map_err(OutboundError::transport);
+            }
         };
         // The chain shares one timeout, as it did when reqwest followed it. A
         // timeout past the clock's range has no deadline: each hop keeps the
         // client's own, which waits as long.
         let deadline = Instant::now().checked_add(self.timeout);
         let mut hop = Hop::of(&request);
-        let mut response = client.execute(request).await.map_err(OutboundError::Http)?;
+        let mut response = client
+            .execute(request)
+            .await
+            .map_err(OutboundError::transport)?;
         let mut budget = REDIRECT_HOP_BUDGET;
         while let Some(next) = hop.next(&response) {
             if self.is_internal(next.request.url()) {
@@ -127,7 +140,7 @@ impl Redirects {
             response = client
                 .execute(next.request(deadline))
                 .await
-                .map_err(OutboundError::Http)?;
+                .map_err(OutboundError::transport)?;
             hop = next;
         }
         Ok(response)

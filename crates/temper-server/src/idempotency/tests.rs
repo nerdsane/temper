@@ -38,7 +38,9 @@ fn make_response(status: &str) -> EntityResponse {
             last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
             processed_idempotency_keys: BTreeMap::new(),
+            last_event: Default::default(),
             status_clock: Default::default(),
+            spawn_reservations: Default::default(),
         },
         error: None,
         custom_effects: vec![],
@@ -47,7 +49,9 @@ fn make_response(status: &str) -> EntityResponse {
         spec_governed: true,
         refused: false,
         answered_action: None,
+        trigger_failures: Vec::new(),
         store_unavailable: false,
+        unrecorded_at: None,
     }
 }
 
@@ -64,6 +68,7 @@ fn busy_response(field_bytes: usize) -> EntityResponse {
             timestamp: sim_now(),
             params: serde_json::json!({ "queue": "q".repeat(field_bytes) }),
             idempotency_key: Some(format!("dispatch:{index}")),
+            origin: Default::default(),
             kind: temper_runtime::persistence::EventKind::Transition,
             outcome: None,
         });
@@ -289,8 +294,14 @@ fn sustained_writes_hold_the_cache_under_budget() {
 #[test]
 fn cached_reply_keeps_event_metadata_without_parameters() {
     let cache = IdempotencyCache::new();
-    cache.put("Feed:f", "k", &req(), &busy_response(1024));
+    let mut response = busy_response(1024);
+    response.state.last_event.first_event_at = Some(temper_runtime::scheduler::sim_now());
+    cache.put("Feed:f", "k", &req(), &response);
     let cached = hit(&cache, "Feed:f", "k").unwrap();
+    assert_eq!(
+        cached.state.last_event.first_event_at,
+        response.state.last_event.first_event_at
+    );
     assert_eq!(cached.state.events.len(), 50);
     let last = cached.state.events.back().unwrap();
     assert_eq!(last.action, "Stepped");
@@ -384,8 +395,9 @@ fn estimate_counts_every_collection_a_reply_keeps() {
             .scheduled_actions
             .push(crate::entity_actor::ScheduledAction {
                 action: format!("Timer{index:03}"),
-                delay_seconds: 5,
+                delay_millis: 5000,
                 arm_id: String::new(),
+                due_at: None,
             });
     }
     let populated = estimated_entry_bytes("Feed:f", "k", &response);
@@ -402,6 +414,7 @@ fn keyed_events(state: &mut EntityState, keys: &[&str]) {
             timestamp: sim_now(),
             params: serde_json::Value::Null,
             idempotency_key: Some((*key).to_string()),
+            origin: Default::default(),
             kind: temper_runtime::persistence::EventKind::Transition,
             outcome: None,
         });
@@ -443,3 +456,6 @@ fn live_state_answers_a_retry_only_while_it_is_the_reply() {
     recounted.total_event_count += 1;
     assert!(!live_state_is_the_reply(&recounted, &cached, "k3"));
 }
+
+#[path = "index_test.rs"]
+mod indexes;

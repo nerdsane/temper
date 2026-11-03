@@ -87,6 +87,8 @@ scripts/setup-hooks.sh                                  # install git hooks (pre
 
 `main` takes changes through GitHub's merge queue. Once a PR's checks are green, it goes in with `gh pr merge <n> --auto` (the Factory's merge step queues its own releases). The queue tests each group of queued PRs on top of `main` (CI's `merge_group` run, the pull-request lane on the group's diff) and lands it. Never update a branch to catch up with `main` and never merge around the queue: the queue already tests against the latest `main`.
 
+A green PR run means it compiles and lints, not that its tests pass: every test runs once, in its merge group (31 Oct 2026), and a failure there drops the PR from the queue. To see the tests before queueing, run on the branch exactly what its merge group will, `gh workflow run ci.yml -R arni-labs/temper --ref <branch> -f changed="$(git diff --name-only origin/main...)"`, one filterset with `-f tests='<filterset>' -f packages=<crate>`, or the tests covering the change where you work.
+
 ## Deploying spec changes
 
 1. Spec passes the verification cascade (L0-L3)

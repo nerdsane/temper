@@ -96,6 +96,8 @@ impl CedarPhaseOutcome {
 pub(crate) enum CedarCheck {
     Gate,
     RowFilter,
+    /// Asks whether a caller acts with platform authority; a deny is an answer, not a refusal.
+    PlatformAuthority,
     Offer,
 }
 
@@ -104,6 +106,7 @@ impl CedarCheck {
         match self {
             Self::Gate => "gate",
             Self::RowFilter => "row_filter",
+            Self::PlatformAuthority => "platform_authority",
             Self::Offer => "offer",
         }
     }

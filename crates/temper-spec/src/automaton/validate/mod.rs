@@ -1,9 +1,16 @@
 //! Checks a parsed spec must pass before it is installed: declared states,
-//! predicates and effects, state timeouts, triggers, webhooks and vectors.
+//! predicates and effects, state timeouts, triggers, webhooks, vectors and
+//! the statechart labels.
 
 mod carries;
+mod fire_now;
+mod groups;
 mod triggers;
 mod webhooks;
+
+#[cfg(test)]
+#[path = "entry_rules_test.rs"]
+mod entry_rules_test;
 
 use super::parser::AutomatonParseError;
 use super::types::*;
@@ -19,6 +26,35 @@ pub(super) fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError>
             "initial state '{}' is not in states list",
             automaton.automaton.initial
         )));
+    }
+
+    // A principal record's status reaches Cedar as `principal.<name>`. Every
+    // attribute the kernel puts on a principal starts lowercase (`id`, `role`,
+    // `agentTypeVerified`, `actingFor<Type>`), so a name that starts uppercase
+    // can never stand in for one of them.
+    let name = &automaton.automaton.name;
+    if automaton.automaton.principal_record && !name.starts_with(|c: char| c.is_ascii_uppercase()) {
+        return Err(AutomatonParseError::Validation(format!(
+            "principal_record type '{name}' must start with an uppercase letter: Cedar reads it \
+             as principal.{name}, and every attribute the kernel sets on a principal starts \
+             lowercase, so only such a name cannot stand in for one"
+        )));
+    }
+    if let Some(field) = &automaton.automaton.principal_record_set {
+        if !automaton.automaton.principal_record {
+            return Err(AutomatonParseError::Validation(format!(
+                "principal_record_set = '{field}' needs principal_record = true: only a \
+                 principal record's fields reach the principal"
+            )));
+        }
+        let declared = automaton.state.iter().find(|var| &var.name == field);
+        if declared.map(|var| var.var_type) != Some(VarType::List) {
+            return Err(AutomatonParseError::Validation(format!(
+                "principal_record_set = '{field}' must name a list state variable of \
+                 '{name}' (a [[state]] with type = \"list\"), which Cedar reads as the set \
+                 principal.{name}_{field}"
+            )));
+        }
     }
 
     // 2. Runtime-owned fields cannot also be mutable spec variables or action
@@ -118,6 +154,7 @@ pub(super) fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError>
                 )));
             }
         }
+        fire_now::validate_fire_now_on(automaton, st)?;
     }
 
     // 6. Validate allow_indefinite_states entries are declared states
@@ -142,6 +179,10 @@ pub(super) fn validate(automaton: &Automaton) -> Result<(), AutomatonParseError>
     //    - names must be unique (each identifies one index partition + `decl=`).
     validate_vector_decls(automaton)?;
     carries::validate_carries(automaton)?;
+
+    // 8. Statechart labels: `says` is one line; `[[group]]` boxes form a tree.
+    groups::validate_says(automaton)?;
+    groups::validate_groups(automaton)?;
 
     Ok(())
 }
@@ -246,18 +287,70 @@ fn validate_predicates(automaton: &Automaton) -> Result<(), AutomatonParseError>
             ));
         }
     }
+    for rule in &automaton.entry_rules {
+        let slot = format!("entry rule '{}'", rule.name);
+        for place in std::iter::once(&rule.place).chain(&rule.from) {
+            if !automaton.automaton.states.contains(place) {
+                return Err(invalid(slot, format!("'{place}' is not a declared state")));
+            }
+        }
+        check(&rule.assert, Scope::State(&vars)).map_err(|e| invalid(slot.clone(), e))?;
+        no_params(&rule.assert, slot.clone())?;
+        no_related_field(&rule.assert, slot.clone())?;
+        // Entry checks share the assertion read contract, with nullable
+        // statuses and local membership modeled by the shared move environment.
+        if let Some(culprit) = crate::predicate::unverifiable_entry(&rule.assert, &vars) {
+            return Err(invalid(
+                slot,
+                format!("`{culprit}` reads a value the verification cascade cannot model"),
+            ));
+        }
+        // A rule no move is checked against proves nothing.
+        let covered = |from: &String| {
+            if rule.from.is_empty() {
+                from != &rule.place
+            } else {
+                rule.from.contains(from)
+            }
+        };
+        if !automaton.actions.iter().any(|a| {
+            let sources = if a.from.is_empty() {
+                &automaton.automaton.states
+            } else {
+                &a.from
+            };
+            a.kind != ActionKind::Output
+                && a.to.as_ref() == Some(&rule.place)
+                && sources.iter().any(covered)
+        }) {
+            return Err(invalid(
+                slot,
+                format!(
+                    "no action moves into '{}' from a place it covers",
+                    rule.place
+                ),
+            ));
+        }
+    }
     for live in &automaton.liveness {
         let slot = format!("liveness '{}'", live.name);
         let Some(eventually) = &live.eventually else {
             if !live.relies_on.is_empty() {
                 return Err(invalid(slot, "`relies_on` needs `eventually`".into()));
             }
+            if !live.can_reach.is_empty() {
+                validate_can_reach(automaton, live).map_err(|e| invalid(slot, e))?;
+            }
             continue;
         };
-        if !live.from.is_empty() || !live.reaches.is_empty() || live.has_actions.is_some() {
+        if !live.from.is_empty()
+            || !live.reaches.is_empty()
+            || !live.can_reach.is_empty()
+            || live.has_actions.is_some()
+        {
             return Err(invalid(
                 slot,
-                "`eventually` takes no `from`, `reaches` or `has_actions`".into(),
+                "`eventually` takes no `from`, `reaches`, `can_reach` or `has_actions`".into(),
             ));
         }
         check(eventually, Scope::State(&vars)).map_err(|e| invalid(slot.clone(), e))?;
@@ -292,6 +385,24 @@ fn validate_predicates(automaton: &Automaton) -> Result<(), AutomatonParseError>
             return Err(AutomatonParseError::Validation(format!(
                 "terminal references undeclared state '{state}'"
             )));
+        }
+    }
+    Ok(())
+}
+
+/// A `can_reach` rule is its own kind of liveness, and every place it names
+/// is declared: a misspelt `from` would leave it checking nothing, and a
+/// misspelt target would refuse every record.
+fn validate_can_reach(automaton: &Automaton, live: &Liveness) -> Result<(), String> {
+    if !live.reaches.is_empty() || live.has_actions.is_some() {
+        return Err("`can_reach` takes no `reaches` or `has_actions`".into());
+    }
+    for (key, places) in [("from", &live.from), ("can_reach", &live.can_reach)] {
+        if let Some(place) = places
+            .iter()
+            .find(|place| !automaton.automaton.states.contains(place))
+        {
+            return Err(format!("`{key}` names no place '{place}'"));
         }
     }
     Ok(())

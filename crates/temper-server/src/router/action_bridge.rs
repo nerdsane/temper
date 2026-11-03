@@ -65,14 +65,18 @@ pub(super) async fn dispatch_action_bridge_result(
         "HttpEndpoint action bridge dispatching configured action"
     );
 
-    let dispatch = state
-        .dispatch_tenant_action_ext_typed(
-            &tenant_id,
-            &bridge.entity_type,
-            &entity_id,
-            &bridge.action,
-            action_params,
-            crate::state::DispatchExtOptions {
+    // The record's checks run in the dispatch, on the record as it is. A
+    // dispatch decided on a record that changed first is decided again on it
+    // (`state::redecide`).
+    let mut redecide = crate::state::redecide::Redecide::start(&state);
+    let dispatch = loop {
+        let dispatch = state
+            .dispatch_outside_action(crate::state::DispatchCommand {
+                tenant: &tenant_id,
+                entity_type: &bridge.entity_type,
+                entity_id: &entity_id,
+                action: &bridge.action,
+                params: action_params.clone(),
                 agent_ctx: &agent_ctx,
                 await_integration: true,
                 // Await reactions like the OData action path
@@ -83,9 +87,13 @@ pub(super) async fn dispatch_action_bridge_result(
                 // the reaction is spawned in the background and its
                 // sub_writes are silently dropped.
                 await_reactions: true,
-            },
-        )
-        .await;
+            })
+            .await;
+        let stale = matches!(dispatch, Err(crate::state::DispatchError::StaleWrite(_)));
+        if !redecide.again(stale, "action_bridge") {
+            break dispatch;
+        }
+    };
 
     match dispatch {
         Ok(response) if response.success => {
@@ -101,6 +109,15 @@ pub(super) async fn dispatch_action_bridge_result(
                 .unwrap_or("configured action failed"),
             response.refusal.as_ref(),
         ),
+        Err(crate::state::DispatchError::StaleWrite(stale))
+            if bridge.response != "git-receive-pack" =>
+        {
+            axum::http::Response::builder()
+                .status(axum::http::StatusCode::CONFLICT)
+                .header("content-type", "application/json")
+                .body(Body::from(stale.body().to_string()))
+                .expect("response builder")
+        }
         Err(e) => action_bridge_error_response(&bridge.response, &refs, sideband, &e.to_string()),
     }
 }

@@ -18,6 +18,7 @@ mod repeat_stop;
 pub(crate) mod resolver;
 pub mod sim_dispatcher;
 pub mod types;
+mod withheld;
 
 pub use dispatcher::ReactionDispatcher;
 pub use registry::ReactionRegistry;

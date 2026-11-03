@@ -10,13 +10,14 @@
 //!
 //! The invariants:
 //! - A write its policy allows on the state it lands on lands, however many
-//!   writes race it: N allowed moves at once all land, and the count is N.
+//!   writes race it: N allowed moves sent at once are each answered on their
+//!   first attempt, and the count is N. None is answered as stale.
 //! - No write lands on a state its policy refuses: a move allowed only while
 //!   the record's project is Open never lands after the record was pointed at
-//!   a Closed project, though it was decided while the project was Open.
-//! - A write is never answered "decided on a state that changed": the caller
-//!   gets the answer for the record as it is. The same holds for field updates
-//!   and deletes.
+//!   a Closed project, though it was decided while the project was Open. It is
+//!   decided again on the record as it is, and refused by the policy.
+//! - A person and the runs acting for them move one record at once: each move
+//!   lands or is refused by its guard on the record as it is, never as stale.
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use futures_util::future::join_all;
@@ -30,7 +31,17 @@ mod world;
 
 use world::*;
 
-/// N allowed moves at once on one record: every one lands, and the count is N.
+/// A move its guard refused on the record as it is, by a guard expression or
+/// by the states it may start from: not stale.
+fn refused_by_guard(status: StatusCode, body: &Value) -> bool {
+    status == StatusCode::CONFLICT
+        && matches!(
+            body["error"]["code"].as_str(),
+            Some("GuardFailed" | "InvalidState")
+        )
+}
+
+/// N allowed moves race on one record: each lands on its first attempt.
 async fn allowed_moves_race(seed: u64) -> Result<(), String> {
     let _sim = install_deterministic_context(seed);
     let state = server(seed, "moves");
@@ -57,7 +68,7 @@ async fn allowed_moves_race(seed: u64) -> Result<(), String> {
         .collect();
     if !refused.is_empty() {
         return Err(format!(
-            "{} of {RACING_MOVES} allowed moves did not land: {}",
+            "{} of {RACING_MOVES} allowed moves did not land on their first attempt: {}",
             refused.len(),
             refused.join("; ")
         ));
@@ -153,6 +164,62 @@ async fn linked_record_attack(seed: u64) -> Result<(), String> {
     if landed != bumps {
         return Err(format!(
             "{landed} bumps answered OK but {bumps} landed: {actions:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// A person settles the tally while runs acting for them bump it.
+async fn person_and_runs_race(seed: u64) -> Result<(), String> {
+    let _sim = install_deterministic_context(seed);
+    let state = server(seed, "person-and-runs");
+    create(&state, "Projects", json!({ "Id": "p1" })).await?;
+    create(&state, "Tallies", json!({ "Id": "t1", "project_id": "p1" })).await?;
+
+    let _faults = install_buggify_context(seed);
+    let runs: Vec<String> = (0..RACING_ATTACKS).map(|i| format!("run{i}")).collect();
+    let (settled, bumps) = tokio::join!(
+        act(
+            &state,
+            "owner",
+            "Tallies('t1')/Temper.Stale.Settle",
+            json!({})
+        ),
+        join_all(runs.iter().map(|id| {
+            act_as_run(
+                &state,
+                id,
+                "Tallies('t1')/Temper.Stale.Bump",
+                json!({ "last": id }),
+            )
+        })),
+    );
+    if settled.0 != StatusCode::OK {
+        return Err(format!(
+            "the person's settle did not land: {} {}",
+            settled.0, settled.1
+        ));
+    }
+    for (id, (status, body)) in runs.iter().zip(&bumps) {
+        if *status != StatusCode::OK && !refused_by_guard(*status, body) {
+            return Err(format!(
+                "{id}'s bump was answered {status} {body}, neither landed nor refused by its guard"
+            ));
+        }
+    }
+    let record = tally(&state, "t1").await;
+    let actions: Vec<&str> = record.events.iter().map(|e| e.action.as_str()).collect();
+    let Some(settled_at) = actions.iter().position(|a| *a == "Settle") else {
+        return Err(format!("no Settle in the record's moves {actions:?}"));
+    };
+    if actions[settled_at..].contains(&"Bump") {
+        return Err(format!("a bump landed after the settle: {actions:?}"));
+    }
+    let landed = bumps.iter().filter(|(s, _)| *s == StatusCode::OK).count();
+    let count = record.counters.get("count").copied().unwrap_or_default();
+    if count != landed {
+        return Err(format!(
+            "{landed} bumps answered OK but the count is {count}"
         ));
     }
     Ok(())
@@ -285,6 +352,15 @@ async fn deletes_race(seed: u64) -> Result<(), String> {
 async fn dst_stale_writes_every_allowed_move_on_a_busy_record_lands() {
     for seed in seeds() {
         if let Err(violation) = allowed_moves_race(seed).await {
+            panic!("seed {seed}: {violation}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn dst_stale_writes_a_person_and_their_runs_moving_one_record_are_never_answered_stale() {
+    for seed in seeds() {
+        if let Err(violation) = person_and_runs_race(seed).await {
             panic!("seed {seed}: {violation}");
         }
     }

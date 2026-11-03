@@ -93,7 +93,7 @@ impl fmt::Display for Literal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Literal::Int(value) => write!(f, "{value}"),
-            Literal::Str(value) => write!(f, "'{value}'"),
+            Literal::Str(value) => write!(f, "'{}'", value.replace('\'', "''")),
             Literal::Bool(value) => write!(f, "{value}"),
             Literal::Null => f.write_str("null"),
         }

@@ -208,7 +208,7 @@ async fn read_live_row(
         .get_tenant_entity_state(tenant, entity_type, entity_id)
         .await
         .map_err(|error| format!("{entity_type}('{entity_id}') could not be read: {error}"))?;
-    if response.state.status == "Deleted" {
+    if response.state.is_tombstoned() {
         // Reading it started an actor for a deleted row; it goes again.
         state.stop_and_remove_entity(tenant, entity_type, entity_id);
         return Ok(None);

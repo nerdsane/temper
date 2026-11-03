@@ -39,6 +39,7 @@ async fn update(actor: &ActorRef<EntityMsg>, fields: serde_json::Value) -> Entit
     actor
         .ask(
             EntityMsg::UpdateFields {
+                caller: None,
                 fields,
                 replace: false,
                 expected_precondition: None,
@@ -144,6 +145,7 @@ async fn a_field_update_decided_before_another_writer_moved_the_record_is_refuse
     let answer: EntityResponse = holder
         .ask(
             EntityMsg::UpdateFields {
+                caller: None,
                 fields: serde_json::json!({"Customer": "Bob"}),
                 replace: false,
                 expected_precondition: Some(decided_on),
@@ -162,6 +164,7 @@ async fn a_field_update_decided_before_another_writer_moved_the_record_is_refuse
     let landed: EntityResponse = holder
         .ask(
             EntityMsg::UpdateFields {
+                caller: None,
                 fields: serde_json::json!({"Customer": "Bob"}),
                 replace: false,
                 expected_precondition: Some(again),
@@ -194,6 +197,7 @@ async fn a_delete_decided_before_another_writer_moved_the_record_is_refused_with
     );
 
     let delete = |precondition: String| EntityMsg::Delete {
+        caller: None,
         expected_authorization_precondition: Some(precondition),
     };
     let answer: EntityResponse = holder
@@ -241,6 +245,7 @@ async fn a_delete_that_finds_its_record_deleted_writes_nothing() {
         let answer: EntityResponse = actor
             .ask(
                 EntityMsg::Delete {
+                    caller: None,
                     expected_authorization_precondition: None,
                 },
                 ASK,
@@ -315,6 +320,7 @@ async fn a_delete_on_a_record_its_spec_moved_to_deleted_still_writes_a_tombstone
     let deleted: EntityResponse = actor
         .ask(
             EntityMsg::Delete {
+                caller: None,
                 expected_authorization_precondition: None,
             },
             ASK,

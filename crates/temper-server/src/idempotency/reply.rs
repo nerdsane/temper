@@ -29,6 +29,7 @@ pub(super) fn replay_copy(response: &EntityResponse) -> EntityResponse {
             timestamp: event.timestamp,
             params: serde_json::Value::Null,
             idempotency_key: event.idempotency_key.clone(),
+            origin: event.origin.clone(),
             kind: temper_runtime::persistence::EventKind::Transition,
             outcome: None,
         })
@@ -51,7 +52,9 @@ pub(super) fn replay_copy(response: &EntityResponse) -> EntityResponse {
             last_snapshot_sequence_nr: state.last_snapshot_sequence_nr,
             sequence_nr: state.sequence_nr,
             processed_idempotency_keys: BTreeMap::new(),
+            last_event: state.last_event.clone(),
             status_clock: state.status_clock.clone(),
+            spawn_reservations: state.spawn_reservations.clone(),
         },
         error: response.error.clone(),
         custom_effects: response.custom_effects.clone(),
@@ -60,7 +63,9 @@ pub(super) fn replay_copy(response: &EntityResponse) -> EntityResponse {
         spec_governed: response.spec_governed,
         refused: response.refused,
         answered_action: None,
+        trigger_failures: response.trigger_failures.clone(),
         store_unavailable: response.store_unavailable,
+        unrecorded_at: response.unrecorded_at,
     }
 }
 
@@ -82,6 +87,11 @@ pub(super) fn estimated_entry_bytes(
                 + event.from_status.len()
                 + event.to_status.len()
                 + event.idempotency_key.as_ref().map_or(0, String::len)
+                + event.origin.by.as_ref().map_or(0, String::len)
+                + event.origin.acting_for.as_ref().map_or(0, String::len)
+                + event.origin.agent_type.as_ref().map_or(0, String::len)
+                + event.origin.role.as_ref().map_or(0, String::len)
+                + event.origin.label.as_ref().map_or(0, String::len)
         })
         .sum();
     let spawns: usize = response
@@ -91,6 +101,7 @@ pub(super) fn estimated_entry_bytes(
             VALUE_OVERHEAD_BYTES
                 + spawn.entity_type.len()
                 + spawn.entity_id.len()
+                + spawn.reservation_id.len()
                 + spawn
                     .copied_fields
                     .iter()
@@ -116,8 +127,22 @@ pub(super) fn estimated_entry_bytes(
         + state.entity_type.len()
         + state.entity_id.len()
         + state.status.len()
+        + [
+            &state.last_event.last_event_by,
+            &state.last_event.last_event_for,
+            &state.last_event.last_event_agent_type,
+            &state.last_event.last_event_label,
+        ]
+        .into_iter()
+        .map(|value| value.as_ref().map_or(0, String::len))
+        .sum::<usize>()
         + response.error.as_ref().map_or(0, String::len)
         + json_bytes(&state.fields)
+        + state
+            .spawn_reservations
+            .iter()
+            .map(|(field, owner)| named(field) + owner.len())
+            .sum::<usize>()
         + events
         + spawns
         + lists

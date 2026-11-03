@@ -91,11 +91,21 @@ pub(super) async fn load_entity_current_fields(
 /// AND-equality candidate pushdown can bound any non-keyed point lookup (e.g. `Path eq
 /// '/souls' and WorkspaceId eq …`) instead of full-scanning and 413ing at tenant scale
 /// (ARN-68). Enumerates authoritatively (registry types + `store.list_entity_ids_by_type`),
-/// recovers each entity from its snapshot plus journal tail, and upserts the
-/// query projection. Idempotent (re-runs converge; it re-processes every entity — there
-/// is no watermark/skip like the key-index backfill has); runs as a background task off
-/// the boot path. This is the generic counterpart to the declared-key backfill — covers ALL
-/// types, where the key backfill covers only declared-key shapes (incl. null components).
+/// recovers each entity from its snapshot plus journal tail, and rewrites its existing
+/// catalog row and field index. Idempotent (re-runs converge; it re-processes every entity:
+/// there is no watermark/skip like the key-index backfill has); runs as a background task
+/// off the boot path, while the server serves. This is the generic counterpart to the
+/// declared-key backfill: it covers ALL types, where the key backfill covers only
+/// declared-key shapes (incl. null components).
+///
+/// What it covers that boot repair does not: a catalog row as current as its journal whose
+/// field index is out of step with it, such as a row written before the field index
+/// existed, one whose fields sit wrapped under `fields`, or one written before its spec
+/// changed which fields are indexed (`query_indexed`). Boot repair only replays records
+/// whose catalog row is missing or behind their journal, and does so before serving.
+/// So this pass leaves a record with no catalog row alone (`refresh_projection`): while
+/// the server serves, only the record's own commit creates that row, and a commit cannot
+/// lock or see a row another writer creates while it runs.
 pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, tenant: &TenantId) {
     let overall_started_at = Instant::now(); // determinism-ok: production-only backfill duration metric
     let Some((store, backend)) = state.event_journal() else {
@@ -235,7 +245,7 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
                 "field index backfill: persistence replay produced no state"
             );
             errors += 1;
-        } else if replayed.status == "Deleted" {
+        } else if replayed.is_tombstoned() {
             if let Err(e) = query_plane
                 .remove_projection(tenant.as_str(), entity_type, entity_id)
                 .await
@@ -284,7 +294,7 @@ pub(super) async fn populate_field_index_from_snapshots(state: &ServerState, ten
             }
         } else {
             match query_plane
-                .upsert_projection(
+                .refresh_projection(
                     tenant.as_str(),
                     entity_type,
                     entity_id,

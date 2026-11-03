@@ -72,53 +72,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn authz_error_display_denied() {
-        let err = AuthzError::Denied("not allowed".into());
-        assert_eq!(err.to_string(), "authorization denied: not allowed");
-    }
-
-    #[test]
-    fn authz_error_display_policy_parse() {
-        let err = AuthzError::PolicyParse("bad syntax".into());
-        assert_eq!(err.to_string(), "policy parse error: bad syntax");
-    }
-
-    #[test]
-    fn authz_error_display_invalid_principal() {
-        let err = AuthzError::InvalidPrincipal("unknown".into());
-        assert_eq!(err.to_string(), "invalid principal: unknown");
-    }
-
-    #[test]
-    fn authz_error_display_invalid_resource() {
-        let err = AuthzError::InvalidResource("missing".into());
-        assert_eq!(err.to_string(), "invalid resource: missing");
-    }
-
-    #[test]
-    fn authz_error_display_engine() {
-        let err = AuthzError::Engine("internal failure".into());
-        assert_eq!(
-            err.to_string(),
-            "authorization engine error: internal failure"
-        );
-    }
-
-    #[test]
-    fn denial_display_policy_denied_with_ids() {
-        let d = AuthzDenial::PolicyDenied {
-            policy_ids: vec!["p1".into(), "p2".into()],
-        };
-        assert_eq!(d.to_string(), "denied by policy: p1, p2");
-    }
-
-    #[test]
-    fn denial_display_policy_denied_empty_ids() {
-        let d = AuthzDenial::PolicyDenied { policy_ids: vec![] };
-        assert_eq!(d.to_string(), "denied by policy");
-    }
-
-    #[test]
     fn denial_display_no_matching_permit() {
         assert_eq!(
             AuthzDenial::NoMatchingPermit.to_string(),

@@ -62,11 +62,13 @@ fn security_context() -> SecurityContext {
             role: None,
             acting_for: None,
             agent_type: None,
+            label: None,
             attributes: Default::default(),
         },
         context_attrs: Default::default(),
         correlation_id: "raw-ingest-test".to_string(),
         cause: None,
+        credential: None,
     }
 }
 

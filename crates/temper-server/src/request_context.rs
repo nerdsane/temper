@@ -14,19 +14,25 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::idempotency::IdempotencyKey;
 
+mod answer;
 pub(crate) mod armed_by;
+pub(crate) mod calls;
 mod execution;
 mod fires;
 mod inline_chain;
 mod observation_metadata;
 
+pub use calls::BackgroundCall;
 pub use fires::{ScheduledFire, StateTimerFire};
 pub use inline_chain::{ChainStep, InlineChain, RepeatedStep, StepEntity};
 
 /// Maximum callbacks along one server-owned internal context lineage.
 ///
-/// This is not a global fanout quota and is not persisted across restarts or
-/// propagated through external HTTP requests.
+/// A scheduled follow-on that waits on the clock starts a new lineage (see
+/// `for_scheduled_follow_on`).
+///
+/// This is not a global fanout quota and is not propagated through external
+/// HTTP requests.
 pub const MAX_CALLBACK_HOPS: u32 = 512;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -53,6 +59,8 @@ pub(crate) enum CallbackBudgetExceeded {
 ///   namespaced observability metadata supplied by clients
 #[derive(Debug, Clone, Default)]
 pub struct AgentContext {
+    /// Kernel-captured immediate origin for a spawned follow-on; never client input.
+    pub event_origin: Option<crate::entity_actor::EventOrigin>,
     /// Runtime-owned steps of the inline execution this context runs inside;
     /// never populated from request headers. See [`InlineChain`].
     pub inline_chain: InlineChain,
@@ -101,10 +109,33 @@ pub struct AgentContext {
     /// the fire's event, and only for that record, so a child dispatch that
     /// inherits this context removes nothing.
     pub fires_scheduled_action: Option<ScheduledFire>,
+    /// Runtime-owned; never populated from request headers. The background
+    /// module calls with an `on_failure` that this move may start, by trigger:
+    /// the actor writes a deadline row, in the move's commit, for each one
+    /// its effects start (`request_context::calls`). Set only on the caller
+    /// a move is sent to its actor with; empty everywhere else.
+    pub background_calls: Vec<BackgroundCall>,
+    /// Runtime-owned; never populated from request headers. The deadline row
+    /// of the background call this context answers: the answer's commit
+    /// removes it, on that record only.
+    pub ends_call: Option<ScheduledFire>,
     /// Runtime-owned; never populated from request headers. The state timer
     /// this dispatch fires: the actor applies its action only while the
     /// record's journal is at the sequence the timer was armed at.
     pub fires_state_timer: Option<StateTimerFire>,
+    /// Runtime-owned; never populated from request headers. Whether this
+    /// caller could read the record when their move set its timers, as Cedar
+    /// answered then; the timers the move sets keep it. A fire is withheld
+    /// only when it is `Some(true)` and the setter can no longer read the
+    /// record (`timer_standing`). None when not asked: the move sets no
+    /// timer, names no caller, or was made before timers kept this.
+    pub read_when_set: Option<bool>,
+    /// Runtime-owned; never populated from request headers. The move
+    /// [`Self::read_when_set`] was answered for: its record, action and
+    /// idempotency key. Another dispatch of that move keeps the answer, so a
+    /// committed move recovered after its reply was lost keeps the answer
+    /// taken before it (`timer_standing`).
+    pub read_when_set_for: Option<String>,
     /// Generic, client-supplied observability metadata.
     ///
     /// Producers should namespace their keys, for example
@@ -113,7 +144,28 @@ pub struct AgentContext {
     pub observation_metadata: BTreeMap<String, String>,
 }
 
+/// Whether `context` names a caller: a principal a credential stands for. The
+/// kernel's own identities act for no one: an empty or anonymous id, a System
+/// principal, or a service the kernel names ([`AgentContext::for_service`],
+/// role "service").
+pub(crate) fn names_a_caller(context: &SecurityContext) -> bool {
+    let principal = &context.principal;
+    !(principal.id.is_empty()
+        || principal.id == "anonymous"
+        || principal.kind == temper_authz::PrincipalKind::System
+        || principal.role.as_deref() == Some("service"))
+}
+
 impl AgentContext {
+    /// The security context of the caller this context acts as, when it
+    /// names one ([`names_a_caller`]); None for a context without one and for
+    /// the kernel's own identities.
+    pub(crate) fn caller(&self) -> Option<&SecurityContext> {
+        self.security_ctx
+            .as_ref()
+            .filter(|context| names_a_caller(context))
+    }
+
     /// The sequence this dispatch's state timer was armed at, when the
     /// dispatch fires `action` on this record. A child dispatch that inherits
     /// the context, on another record or with another action, is not the fire.
@@ -124,15 +176,63 @@ impl AgentContext {
         entity_id: &str,
         action: &str,
     ) -> Option<u64> {
-        self.fires_state_timer
-            .as_ref()
-            .filter(|fire| {
-                fire.tenant == tenant
-                    && fire.entity_type == entity_type
-                    && fire.entity_id == entity_id
-                    && fire.action == action
-            })
+        self.state_timer_fire(tenant, entity_type, entity_id, action)
             .map(|fire| fire.armed_seq)
+    }
+
+    /// The state timer fire this dispatch is, when it fires `action` on this
+    /// record (see [`Self::state_timer_armed_seq`]).
+    pub(crate) fn state_timer_fire(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        action: &str,
+    ) -> Option<&StateTimerFire> {
+        self.fires_state_timer.as_ref().filter(|fire| {
+            fire.tenant == tenant
+                && fire.entity_type == entity_type
+                && fire.entity_id == entity_id
+                && fire.action == action
+        })
+    }
+
+    /// Begin a `schedule` / `schedule_at` follow-on of this context.
+    ///
+    /// A follow-on that waits on the clock (a delay of one second or more)
+    /// runs at most once per second per schedule effect, the same floor a
+    /// state timer has (`state_timeout` requires `after_seconds > 0`). That
+    /// wait is what bounds a periodic schedule, so it starts a fresh callback
+    /// lineage and a recurring schedule keeps running however many cycles it
+    /// has completed. A follow-on waiting less than one second, including a
+    /// `schedule_at` whose time has already passed, keeps the parent's
+    /// callback lineage.
+    ///
+    /// Either way the follow-on is a new request on the record: it gets an
+    /// idempotency key of its own, derived from this context's key, the
+    /// scheduled action and the effect's place in the transition (`index`).
+    /// The parent's key itself would answer the follow-on with the scheduling
+    /// transition's reply, so it would never run. A retry of the parent, in
+    /// flight or long finished, derives the same key, and the record answers
+    /// the second copy with the first one's reply instead of running it again.
+    pub(crate) fn for_scheduled_follow_on(
+        &self,
+        action: &str,
+        index: usize,
+        delay_millis: u64,
+    ) -> Self {
+        let mut next = self.for_background_task();
+        next.idempotency_key = self.idempotency_key.as_ref().map(|key| {
+            IdempotencyKey::FollowUp(crate::idempotency::derived_idempotency_key(
+                key.as_str(),
+                &format!("scheduled:{action}"),
+                &index.to_string(),
+            ))
+        });
+        if delay_millis >= 1000 {
+            next.callback_hops = 0;
+        }
+        next
     }
 
     /// Create a system-level agent context for internal operations.
@@ -142,6 +242,7 @@ impl AgentContext {
     /// dropping identity via `Default`.
     pub fn system() -> Self {
         Self {
+            event_origin: None,
             inline_chain: InlineChain::default(),
             callback_hops: 0,
             security_ctx: Some(SecurityContext::system()),
@@ -156,7 +257,11 @@ impl AgentContext {
             workflow_run_id: None,
             idempotency_key: None,
             fires_scheduled_action: None,
+            background_calls: Vec::new(),
+            ends_call: None,
             fires_state_timer: None,
+            read_when_set: None,
+            read_when_set_for: None,
             observation_metadata: BTreeMap::new(),
         }
     }
@@ -181,6 +286,7 @@ impl AgentContext {
         security_ctx.principal.role = Some("service".to_string());
 
         Self {
+            event_origin: None,
             inline_chain: InlineChain::default(),
             callback_hops: 0,
             security_ctx: Some(security_ctx),
@@ -195,7 +301,11 @@ impl AgentContext {
             workflow_run_id: None,
             idempotency_key: None,
             fires_scheduled_action: None,
+            background_calls: Vec::new(),
+            ends_call: None,
             fires_state_timer: None,
+            read_when_set: None,
+            read_when_set_for: None,
             observation_metadata: BTreeMap::new(),
         }
     }
@@ -215,15 +325,6 @@ impl AgentContext {
     /// agent, but they still belong to the same logical workflow trace.
     pub fn for_service_inheriting(service_name: &str, parent: &AgentContext) -> Self {
         Self::for_service(service_name).inherit_observability_from(parent)
-    }
-
-    /// The service identity a callback ([`Self::for_callback`]) runs as, with
-    /// the callback's own key: a retried parent's callback is then answered
-    /// as its first, whichever identity sends it.
-    pub fn for_service_answering(service_name: &str, callback: &AgentContext) -> Self {
-        let mut context = Self::for_service_inheriting(service_name, callback);
-        context.idempotency_key = callback.idempotency_key.clone();
-        context
     }
 
     /// Copy the execution budget and non-authority observability fields from a parent.
@@ -328,6 +429,7 @@ pub(crate) fn extract_agent_context(headers: &HeaderMap) -> AgentContext {
     let workflow_run_id = header_string(headers, "x-temper-workflow-run-id");
 
     AgentContext {
+        event_origin: None,
         inline_chain: InlineChain::default(),
         callback_hops: 0,
         security_ctx: None,
@@ -342,7 +444,11 @@ pub(crate) fn extract_agent_context(headers: &HeaderMap) -> AgentContext {
         workflow_run_id,
         idempotency_key,
         fires_scheduled_action: None,
+        background_calls: Vec::new(),
+        ends_call: None,
         fires_state_timer: None,
+        read_when_set: None,
+        read_when_set_for: None,
         observation_metadata: observation_metadata::extract(headers),
     }
 }

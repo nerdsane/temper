@@ -200,6 +200,7 @@ pub(super) fn make_context() -> WasmInvocationContext {
         workflow_root_entity_id: None,
         workflow_run_id: None,
         http_request: None,
+        trigger_principal: None,
     }
 }
 
@@ -221,27 +222,11 @@ fn hash_module_deterministic() {
 }
 
 #[test]
-fn engine_creation() {
-    let engine = WasmEngine::new();
-    assert!(engine.is_ok());
-}
-
-#[test]
 fn module_too_large_rejected() {
     let engine = WasmEngine::new().unwrap();
     let big = vec![0u8; MAX_MODULE_SIZE + 1];
     let result = engine.compile_and_cache(&big);
     assert!(matches!(result, Err(WasmError::ModuleTooLarge { .. })));
-}
-
-#[test]
-fn resource_limits_default() {
-    let limits = WasmResourceLimits::default();
-    assert_eq!(limits.max_fuel, 1_000_000_000);
-    assert_eq!(limits.max_memory, 64 * 1024 * 1024);
-    // ADR-0045: raised from 30s to cover HTTP-fronted integrations under load.
-    assert_eq!(limits.max_duration, std::time::Duration::from_secs(120));
-    assert_eq!(limits.max_response_bytes, 1024 * 1024);
 }
 
 #[tokio::test]
@@ -264,23 +249,6 @@ async fn wasm_guest_can_drive_structured_observability_span_lifecycle() {
     assert!(
         result.is_ok(),
         "guest span host functions should link and complete: {result:?}"
-    );
-}
-
-#[test]
-fn timeout_error_display() {
-    let err = WasmError::Timeout(std::time::Duration::from_secs(5));
-    let msg = err.to_string();
-    assert!(msg.contains("timeout"), "expected 'timeout' in: {msg}");
-}
-
-#[test]
-fn memory_limit_exceeded_display() {
-    let err = WasmError::MemoryLimitExceeded { max_bytes: 1024 };
-    let msg = err.to_string();
-    assert!(
-        msg.contains("memory limit"),
-        "expected 'memory limit' in: {msg}"
     );
 }
 

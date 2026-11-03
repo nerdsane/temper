@@ -1,0 +1,35 @@
+[automaton]
+name = "StringRecord"
+states = ["Ready", "Failed", "Recovered"]
+initial = "Ready"
+terminal = ["Recovered"]
+
+[[state]]
+name = "error"
+type = "string"
+initial = ""
+
+[[state]]
+name = "reason"
+type = "string"
+initial = "initial"
+
+[[action]]
+name = "Fail"
+from = ["Ready"]
+to = "Failed"
+params = ["error"]
+
+[[action]]
+name = "Recover"
+from = ["Failed"]
+to = "Recovered"
+effect = ["error = ''", "reason = 'recovered'"]
+
+[[invariant]]
+name = "RecoveredClearsError"
+assert = "status in ['Recovered'] => error == ''"
+
+[[invariant]]
+name = "RecoveredHasReason"
+assert = "status in ['Recovered'] => reason == 'recovered'"

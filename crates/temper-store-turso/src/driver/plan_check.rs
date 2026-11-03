@@ -11,11 +11,17 @@
 //! 11 ms at 33,000 field-index rows, against 0.02 ms by the key, inside every
 //! append. A statement like that names the index it is for (`INDEXED BY`);
 //! this check fails every test that runs one that does not.
+//!
+//! A join gives a column the same way: `c.entity_id = h.entity_id`, once the
+//! plan has read `h`, fixes `c.entity_id` for each of `h`'s rows. On 30 Oct
+//! 2026 the boot comparison joined each journal head to its catalog row by
+//! tenant and type only, reading every catalog row of the type per record:
+//! 20 s at 900 records with 100 KB rows, against 38 ms by the key.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Mutex, OnceLock};
 
-use crate::sql_terms::{find_word, gives};
+use crate::sql_terms::{find_word, gives, joined_with};
 
 /// Statement texts already checked in this process.
 fn checked() -> &'static Mutex<BTreeSet<String>> {
@@ -24,7 +30,8 @@ fn checked() -> &'static Mutex<BTreeSet<String>> {
 }
 
 /// Panic when `sql`'s plan on `conn` searches a table by fewer `= ?` columns
-/// than one of the table's indexes would take from `sql`.
+/// than one of the table's indexes would take from `sql`, by a parameter or
+/// by a table the plan reads before it.
 pub(super) async fn check(conn: &turso::Connection, sql: &str) {
     let head = sql
         .split_whitespace()
@@ -50,10 +57,16 @@ pub(super) async fn check(conn: &turso::Connection, sql: &str) {
     };
     let tables = table_names(sql);
     let terms = without_set_lists(sql);
-    for detail in plan {
-        let Some((name, searched_by)) = search_of(&detail) else {
+    for (at, detail) in plan.iter().enumerate() {
+        let Some((name, searched_by)) = search_of(detail) else {
             continue;
         };
+        // A name that more than one plan line reads (each subquery with its
+        // own `d`) is left out of joins: which reading a term means is not
+        // known.
+        let read_once = |other: &str| plan.iter().filter(|line| reads(line, other)).count() == 1;
+        let read_before =
+            |other: &str| read_once(other) && plan[..at].iter().any(|line| reads(line, other));
         let table = tables.get(name).map_or(name, String::as_str);
         let unqualified = tables.len() == 1;
         let used = searched_by
@@ -63,13 +76,19 @@ pub(super) async fn check(conn: &turso::Connection, sql: &str) {
         for (index, columns) in indexes(conn, table).await {
             let given = columns
                 .iter()
-                .take_while(|column| gives(&terms, name, unqualified, column))
+                .take_while(|column| {
+                    gives(&terms, name, unqualified, column)
+                        || (read_once(name)
+                            && joined_with(&terms, name, column)
+                                .into_iter()
+                                .any(read_before))
+                })
                 .count();
             assert!(
                 used >= given,
                 "this statement gives the first {given} columns of {index} {columns:?} with \
-                 `= ?`, but its plan searches {table} by {used} ({detail}); name the index \
-                 with INDEXED BY (see driver/plan_check.rs):\n{sql}"
+                 `= ?` or a join, but its plan searches {table} by {used} ({detail}); name \
+                 the index with INDEXED BY (see driver/plan_check.rs):\n{sql}"
             );
         }
     }
@@ -130,6 +149,19 @@ fn search_of(detail: &str) -> Option<(&str, &str)> {
         .and_then(|(_, cols)| cols.split_once(')'))
         .map_or("", |(cols, _)| cols);
     Some((name, searched_by))
+}
+
+/// Whether the plan line `detail` reads the table or alias `name`: `SEARCH
+/// name ...`, `SCAN name`, or `SCAN table AS name`.
+fn reads(detail: &str, name: &str) -> bool {
+    let Some(rest) = detail
+        .strip_prefix("SEARCH ")
+        .or_else(|| detail.strip_prefix("SCAN "))
+    else {
+        return false;
+    };
+    let mut words = rest.split_whitespace();
+    words.next() == Some(name) || (words.next() == Some("AS") && words.next() == Some(name))
 }
 
 /// Every table `sql` reads or writes, by its name and by its alias.
@@ -218,6 +250,15 @@ mod tests {
         );
         assert_eq!(search_of("SCAN events"), Some(("events", "")));
         assert_eq!(search_of("USE TEMP B-TREE FOR ORDER BY"), None);
+    }
+
+    #[test]
+    fn a_plan_line_reads_its_table_or_alias() {
+        assert!(reads("SCAN heads AS h", "h"));
+        assert!(reads("SCAN heads AS h", "heads"));
+        assert!(reads("SEARCH c USING INDEX i (tenant=?) LEFT-JOIN", "c"));
+        assert!(!reads("SEARCH c USING INDEX i (tenant=?)", "i"));
+        assert!(!reads("USE SORTER FOR GROUP BY", "h"));
     }
 
     #[test]

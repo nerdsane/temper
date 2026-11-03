@@ -15,6 +15,9 @@ use super::*;
 use crate::entity_actor::EntityState;
 use crate::registry::SpecRegistry;
 
+#[path = "timer_recovery_test.rs"]
+mod recovery;
+
 const SEED: u64 = 23;
 const ITEM: &str = "item-1";
 
@@ -79,6 +82,16 @@ target_entity = "Item"
 action = "Nudge"
 generated_from = "decision"
 
+[[action.sub_writes]]
+target_entity = "Item"
+action = "Note"
+generated_from = "decision"
+
+[[action]]
+name = "Note"
+from = ["Moved"]
+params = [{ name = "moved_by", type = "string" }]
+
 [[action]]
 name = "Move"
 from = ["Waiting"]
@@ -100,19 +113,20 @@ params = []
 [[action]]
 name = "Nudge"
 from = ["Moved"]
-params = []
+params = [{ name = "moved_by", type = "string", source = "authenticated_subject" }]
 
 [[action]]
 name = "Tick"
 from = ["Moved"]
 to = "Ticked"
-params = [{ name = "ticked_by", type = "string", source = "authenticated_subject" }]
+params = [{ name = "ticked_by", type = "string", source = "authenticated_subject" }, { name = "moved_by", type = "string" }]
 
 [[state_timeout]]
 state = "Moved"
 after_seconds = 3
 on_timeout = "Tick"
 reset_on = ["Nudge"]
+args = { moved_by = "moved_by" }
 "#;
 
 /// How a transition reaches the journal.

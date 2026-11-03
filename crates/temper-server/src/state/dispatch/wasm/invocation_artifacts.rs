@@ -194,7 +194,7 @@ impl crate::state::ServerState {
             params: callback_params,
             agent_ctx: callback_ctx,
         };
-        self.send_answer(sent, mode, "wasm-runtime", "WASM").await
+        self.send_answer(sent, mode, "WASM").await
     }
 
     /// Record a WASM authorization denial: persist decision, create governance

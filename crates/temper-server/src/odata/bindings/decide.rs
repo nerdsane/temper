@@ -1,6 +1,5 @@
 //! Every check a bound action passes before its dispatch, decided on the record
-//! as it is read now. The route runs them again when the record changed before
-//! the action reached it (see `crate::state::redecide`).
+//! as it is read now. An outside action is held to this state.
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -10,11 +9,11 @@ use temper_jit::table::ContractError;
 use temper_runtime::tenant::TenantId;
 
 use super::ActionSpan;
-use crate::authz::{DenialInput, record_authz_denial};
+use crate::authz::{DenialInput, record_answerable_denial};
 use crate::odata::account_verification::enforce_commons_account_verified_for_action;
-use crate::odata::common::{authorized_snapshot_failure, run_write_prechecks};
+use crate::odata::common::authorized_snapshot_failure;
 use crate::odata::file_content::refuse_caller_content;
-use crate::odata::rate_limit::{enforce_commons_write_rate_limit, owner_id_from_action};
+use crate::odata::rate_limit::enforce_commons_write_rate_limit;
 use crate::request_context::AgentContext;
 use crate::response::{odata_denial, odata_error, odata_refusal};
 use crate::state::{DispatchError, ServerState};
@@ -105,7 +104,7 @@ pub(super) async fn decide(request: &BoundAction<'_>, first: bool) -> Result<Dec
     );
     if let Err(denial) = authz_result {
         let reason = denial.to_string();
-        let pd = record_authz_denial(
+        let pd = record_answerable_denial(
             state,
             DenialInput {
                 tenant: tenant.as_str(),
@@ -128,6 +127,13 @@ pub(super) async fn decide(request: &BoundAction<'_>, first: bool) -> Result<Dec
         .await;
 
         action_span.set_status(Status::error(reason.clone()));
+        let Some(pd) = pd else {
+            return Err(
+                odata_error(StatusCode::FORBIDDEN, "AuthorizationDenied", &reason)
+                    .into_response()
+                    .into(),
+            );
+        };
         let reason_with_id = format!("{reason} (decision: {})", pd.id);
         return Err(odata_denial(&reason_with_id, &pd.id).into_response().into());
     }
@@ -164,6 +170,7 @@ pub(super) async fn decide(request: &BoundAction<'_>, first: bool) -> Result<Dec
         entity_type,
         &current_state.state.fields,
         &resolved_body,
+        security_ctx,
     )
     .await
     {
@@ -171,35 +178,7 @@ pub(super) async fn decide(request: &BoundAction<'_>, first: bool) -> Result<Dec
         return Err((*resp).into());
     }
 
-    if first
-        && let Err(resp) = enforce_commons_write_rate_limit(
-            state,
-            tenant,
-            entity_type,
-            owner_id_from_action(&current_state.state.fields, &resolved_body),
-            security_ctx,
-        )
-        .await
-    {
-        action_span.set_status(Status::error("RateLimitExceeded"));
-        return Err(resp.into());
-    }
-
-    let current_fields = current_state.state.fields.clone();
-    if let Err(resp) = run_write_prechecks(
-        state,
-        tenant,
-        entity_type,
-        key_str,
-        action,
-        "bound_action",
-        &current_fields,
-    )
-    .await
-    {
-        action_span.set_status(Status::error("ConstraintViolation"));
-        return Err(resp.into());
-    }
+    // Dispatch checks the record the interpreter will store on every action path.
     if let Some(resp) = refuse_caller_content(entity_type, action, &resolved_body) {
         action_span.set_status(Status::error("FileContentFields"));
         return Err(resp.into());
@@ -243,6 +222,15 @@ pub(super) async fn decide(request: &BoundAction<'_>, first: bool) -> Result<Dec
         return Err(odata_error(StatusCode::BAD_REQUEST, code, &message)
             .into_response()
             .into());
+    }
+
+    // Pre-dispatch contract refusals do not spend a commons token.
+    if first
+        && let Err(resp) =
+            enforce_commons_write_rate_limit(state, tenant, entity_type, security_ctx).await
+    {
+        action_span.set_status(Status::error("RateLimitExceeded"));
+        return Err(resp.into());
     }
 
     let snapshot = match state

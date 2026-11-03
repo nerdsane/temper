@@ -60,6 +60,10 @@ pub enum DispatchError {
     #[error("conflict: {0}")]
     Conflict(String),
 
+    /// The record changed after an outside write read it; the caller re-reads and retries.
+    #[error("{0}")]
+    StaleWrite(super::StaleWrite),
+
     /// The entity type has no registered spec — all actions are denied by default.
     #[error("entity type '{0}' is not governed by any registered spec")]
     Ungoverned(String),
@@ -130,6 +134,7 @@ impl DispatchError {
             | Self::ActorFailed(_)
             | Self::WasmFailed(_)
             | Self::QuotaExceeded(_)
+            | Self::StaleWrite(_)
             | Self::Conflict(_)
             | Self::StoreUnavailable(_)
             | Self::Internal(_) => false,

@@ -28,16 +28,18 @@ use super::common::{
 };
 use super::constraints::{DeletePlan, plan_delete};
 use super::file_content::refuse_content_fields;
-use super::rate_limit::{enforce_commons_write_rate_limit, owner_id_from_fields};
+use super::rate_limit::enforce_commons_write_rate_limit;
 use super::response::annotate_entity;
 use super::storage_guardrails::enforce_commons_storage_cap;
 use super::stream_put::{handle_file_value_put, handle_stream_put, streamed_file_target};
 use crate::blobs::hydrate_blob_refs_for_tenant;
+use crate::entity_actor::EntityState;
 use crate::request_context::{AgentContext, extract_agent_context};
 use crate::response::{ODataResponse, odata_error, odata_refusal};
 use crate::state::batch_delete::BatchDeleteError;
 use crate::state::redecide::Redecide;
 use crate::state::trajectory::{TrajectoryEntry, TrajectorySource};
+use crate::state::write_record::{RecordWrite, WriteCaller, created_record, field_update_record};
 use crate::state::{CreateError, ServerState};
 
 type ODataWriteError = Box<axum::response::Response>;
@@ -380,6 +382,50 @@ async fn authorize_pg_mutation(
     Ok((actor_state, version))
 }
 
+/// The record a Postgres-runtime action stores: its actor's own handler run
+/// on a copy of `current`, with the status beside the fields as field
+/// invariants read it. `None` when the actor refuses the action and stores
+/// nothing.
+async fn pg_action_record(
+    actor_sys: &temper_actor_runtime::ActorSystem,
+    handle: &temper_actor_runtime::ActorHandle,
+    current: &temper_actor_runtime::spec_actor::SpecActorState,
+    action: &str,
+    params: &serde_json::Value,
+) -> Result<Option<serde_json::Value>, ODataWriteError> {
+    let internal = |message: String| {
+        Box::new(
+            odata_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "ActorPreviewError",
+                &message,
+            )
+            .into_response(),
+        )
+    };
+    let state = serde_json::to_vec(current).map_err(|error| internal(error.to_string()))?;
+    let message =
+        temper_actor_runtime::spec_actor::SpecMessage::with_params(action, params.clone());
+    let next = match actor_sys.preview(handle, &state, message).await {
+        Ok(next) => next,
+        Err(temper_actor_runtime::ActorError::Rejected(_)) => return Ok(None),
+        Err(error) => return Err(internal(error.to_string())),
+    };
+    let next: temper_actor_runtime::spec_actor::SpecActorState =
+        serde_json::from_slice(&next).map_err(|error| internal(error.to_string()))?;
+    let mut record = match next.fields {
+        serde_json::Value::Object(fields) => fields,
+        _ => serde_json::Map::new(),
+    };
+    for key in ["status", "Status"] {
+        record.insert(
+            key.to_string(),
+            serde_json::Value::String(next.status.clone()),
+        );
+    }
+    Ok(Some(serde_json::Value::Object(record)))
+}
+
 async fn authorize_existing_mutation(
     state: &ServerState,
     tenant: &TenantId,
@@ -420,15 +466,14 @@ async fn authorize_existing_mutation(
         &snapshot.current_state.state,
     );
     Ok(ExistingMutationResource {
-        status: snapshot.current_state.state.status,
-        fields: snapshot.current_state.state.fields,
+        state: snapshot.current_state.state,
         precondition,
     })
 }
 
 struct ExistingMutationResource {
-    status: String,
-    fields: serde_json::Value,
+    /// The authorized entity state; the write commits only while it is current.
+    state: EntityState,
     precondition: String,
 }
 
@@ -574,16 +619,30 @@ pub async fn handle_odata_post(
                 return odata_error(StatusCode::BAD_REQUEST, "StrictActionContract", &error)
                     .into_response();
             }
+            let created_record = match state.transition_table_for_dispatch(&tenant, &entity_type) {
+                Ok(table) => created_record(&entity_type, &entity_id, &table, &initial_fields),
+                Err(error) => {
+                    return odata_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "RegistryError",
+                        &error.to_string(),
+                    )
+                    .into_response();
+                }
+            };
             let _commons_guardrail_lock = state.acquire_commons_write_guardrail_lock(&tenant).await;
 
             if let Err(resp) = run_write_prechecks(
                 &state,
-                &tenant,
-                &entity_type,
-                &entity_id,
-                "Create",
-                "create",
-                &initial_fields,
+                RecordWrite {
+                    caller: WriteCaller::of_request(&security_ctx),
+                    tenant: &tenant,
+                    entity_type: &entity_type,
+                    entity_id: &entity_id,
+                    action: "Create",
+                    operation: "create",
+                },
+                &created_record,
             )
             .await
             {
@@ -595,6 +654,7 @@ pub async fn handle_odata_post(
                 &tenant,
                 &entity_type,
                 &initial_fields,
+                &security_ctx,
             )
             .await
             {
@@ -626,14 +686,8 @@ pub async fn handle_odata_post(
                 return resp;
             }
 
-            if let Err(resp) = enforce_commons_write_rate_limit(
-                &state,
-                &tenant,
-                &entity_type,
-                owner_id_from_fields(&initial_fields),
-                &security_ctx,
-            )
-            .await
+            if let Err(resp) =
+                enforce_commons_write_rate_limit(&state, &tenant, &entity_type, &security_ctx).await
             {
                 return resp;
             }
@@ -766,11 +820,12 @@ pub async fn handle_odata_post(
             }
 
             match state
-                .try_create_data_only_tenant_entity(
+                .try_create_data_only_tenant_entity_by(
                     &tenant,
                     &entity_type,
                     &entity_id,
                     initial_fields.clone(),
+                    Some(&agent_ctx),
                 )
                 .await
             {
@@ -795,13 +850,28 @@ pub async fn handle_odata_post(
                 }
             }
 
+            // A timed first state's timer keeps whether its creator could
+            // read the record.
+            let creator = match state
+                .created_with_read_when_set(
+                    &tenant,
+                    &entity_type,
+                    &entity_id,
+                    &initial_fields,
+                    &agent_ctx,
+                )
+                .await
+            {
+                Ok(creator) => creator,
+                Err(reason) => return crate::write_health::store_unavailable(&reason),
+            };
             match state
                 .get_or_create_tenant_entity_by(
                     &tenant,
                     &entity_type,
                     &entity_id,
                     initial_fields,
-                    &agent_ctx,
+                    &creator,
                 )
                 .await
             {
@@ -816,7 +886,7 @@ pub async fn handle_odata_post(
                             &entity_type,
                             &entity_id,
                             &response,
-                            &agent_ctx,
+                            &creator,
                         )
                         .await;
                     if entity_type == "RateLimit" {
@@ -955,6 +1025,39 @@ pub async fn handle_odata_post(
                             error.refusal.as_ref(),
                         )
                         .into_response();
+                    }
+                }
+                let caller = WriteCaller::of_request(&security_ctx);
+                if state.action_record_checked(caller, &tenant, &entity_type, action_name) {
+                    // The record checked is the one this runtime's own actor stores.
+                    let record = match pg_action_record(
+                        actor_sys,
+                        &handle,
+                        &actor_state,
+                        action_name,
+                        &body_json,
+                    )
+                    .await
+                    {
+                        Ok(record) => record,
+                        Err(response) => return *response,
+                    };
+                    if let Some(record) = record
+                        && let Err(violation) = state
+                            .check_record_to_store(
+                                RecordWrite {
+                                    caller,
+                                    tenant: &tenant,
+                                    entity_type: &entity_type,
+                                    entity_id: &key_str,
+                                    action: action_name,
+                                    operation: "action",
+                                },
+                                &record,
+                            )
+                            .await
+                    {
+                        return constraint_violation_response(violation);
                     }
                 }
                 match actor_sys
@@ -1109,7 +1212,7 @@ pub async fn handle_odata_patch(
                 if let Some(response) = refuse_content_fields(&entity_type, &body_json) {
                     return response;
                 }
-                let mut prospective_fields = existing.fields;
+                let mut prospective_fields = existing.state.fields.clone();
                 if let (Some(dst), Some(src)) =
                     (prospective_fields.as_object_mut(), body_json.as_object())
                 {
@@ -1126,7 +1229,7 @@ pub async fn handle_odata_patch(
                         tenant: &tenant,
                         entity_type: &entity_type,
                         entity_id: &key_str,
-                        status: &existing.status,
+                        status: &existing.state.status,
                         fields: &prospective_fields,
                         security_ctx: &security_ctx,
                         agent_ctx: &agent_ctx,
@@ -1140,14 +1243,18 @@ pub async fn handle_odata_patch(
                 let _commons_guardrail_lock =
                     state.acquire_commons_write_guardrail_lock(&tenant).await;
 
+                let record = field_update_record(&existing.state, &body_json, false);
                 if let Err(resp) = run_write_prechecks(
                     &state,
-                    &tenant,
-                    &entity_type,
-                    &key_str,
-                    "Patch",
-                    "patch",
-                    &prospective_fields,
+                    RecordWrite {
+                        caller: WriteCaller::of_request(&security_ctx),
+                        tenant: &tenant,
+                        entity_type: &entity_type,
+                        entity_id: &key_str,
+                        action: "Patch",
+                        operation: "patch",
+                    },
+                    &record,
                 )
                 .await
                 {
@@ -1159,6 +1266,7 @@ pub async fn handle_odata_patch(
                     &tenant,
                     &entity_type,
                     &prospective_fields,
+                    &security_ctx,
                 )
                 .await
                 {
@@ -1182,7 +1290,6 @@ pub async fn handle_odata_patch(
                         &state,
                         &tenant,
                         &entity_type,
-                        owner_id_from_fields(&prospective_fields),
                         &security_ctx,
                     )
                     .await
@@ -1199,6 +1306,7 @@ pub async fn handle_odata_patch(
                         body_json,
                         false,
                         existing.precondition,
+                        &agent_ctx,
                     )
                     .await;
                 if let Ok(response) = &answer
@@ -1382,7 +1490,7 @@ pub async fn handle_odata_put(
                         tenant: &tenant,
                         entity_type: &entity_type,
                         entity_id: &key_str,
-                        status: &existing.status,
+                        status: &existing.state.status,
                         fields: &body_json,
                         security_ctx: &security_ctx,
                         agent_ctx: &agent_ctx,
@@ -1396,14 +1504,18 @@ pub async fn handle_odata_put(
                 let _commons_guardrail_lock =
                     state.acquire_commons_write_guardrail_lock(&tenant).await;
 
+                let record = field_update_record(&existing.state, &body_json, true);
                 if let Err(resp) = run_write_prechecks(
                     &state,
-                    &tenant,
-                    &entity_type,
-                    &key_str,
-                    "Put",
-                    "put",
-                    &body_json,
+                    RecordWrite {
+                        caller: WriteCaller::of_request(&security_ctx),
+                        tenant: &tenant,
+                        entity_type: &entity_type,
+                        entity_id: &key_str,
+                        action: "Put",
+                        operation: "put",
+                    },
+                    &record,
                 )
                 .await
                 {
@@ -1415,6 +1527,7 @@ pub async fn handle_odata_put(
                     &tenant,
                     &entity_type,
                     &body_json,
+                    &security_ctx,
                 )
                 .await
                 {
@@ -1438,7 +1551,6 @@ pub async fn handle_odata_put(
                         &state,
                         &tenant,
                         &entity_type,
-                        owner_id_from_fields(&body_json),
                         &security_ctx,
                     )
                     .await
@@ -1455,6 +1567,7 @@ pub async fn handle_odata_put(
                         body_json,
                         true,
                         existing.precondition,
+                        &agent_ctx,
                     )
                     .await;
                 if let Ok(response) = &answer
@@ -1610,12 +1723,15 @@ pub async fn handle_odata_delete(
                     };
                 if let Err(resp) = run_write_prechecks(
                     &state,
-                    &tenant,
-                    &entity_type,
-                    &key_str,
-                    "Delete",
-                    "delete",
-                    &existing.fields,
+                    RecordWrite {
+                        caller: WriteCaller::of_request(&security_ctx),
+                        tenant: &tenant,
+                        entity_type: &entity_type,
+                        entity_id: &key_str,
+                        action: "Delete",
+                        operation: "delete",
+                    },
+                    &existing.state.fields,
                 )
                 .await
                 {
@@ -1626,7 +1742,8 @@ pub async fn handle_odata_delete(
                     &state,
                     &tenant,
                     &entity_type,
-                    &existing.fields,
+                    &existing.state.fields,
+                    &security_ctx,
                 )
                 .await
                 {
@@ -1638,7 +1755,6 @@ pub async fn handle_odata_delete(
                         &state,
                         &tenant,
                         &entity_type,
-                        owner_id_from_fields(&existing.fields),
                         &security_ctx,
                     )
                     .await
@@ -1676,6 +1792,7 @@ pub async fn handle_odata_delete(
                         &entity_type,
                         &key_str,
                         existing.precondition,
+                        &agent_ctx,
                     )
                     .await;
                 if let Ok(response) = &answer

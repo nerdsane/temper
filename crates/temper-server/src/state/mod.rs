@@ -13,22 +13,23 @@ mod file_read_blobs;
 mod file_read_projection;
 mod file_reads;
 mod file_writes;
+mod host_metrics;
 pub mod metrics;
 pub mod pending_decisions;
 mod persistence;
 pub mod policy_suggestions;
 mod projection_backfill;
 mod published_artifacts;
-mod query_projection_queue;
 pub(crate) mod rate_limit;
 pub(crate) mod redecide;
-mod runtime_metrics;
+pub(crate) mod runtime_metrics;
 mod spec_change;
 mod start_runtime;
 pub mod status_cache;
 pub(crate) mod storage_caps;
 pub mod trajectory;
 pub mod wasm_invocation_log;
+pub(crate) mod write_record;
 
 pub use admission::{AdmissionController, AdmissionOutcome, AdmissionPermit};
 pub(crate) use dispatch::authorized_http_endpoint_host;
@@ -36,7 +37,7 @@ pub(crate) use dispatch::authorized_http_endpoint_host;
 pub(crate) use dispatch::internal_http_capability_issuer;
 pub(crate) use dispatch::owed_writes;
 pub use dispatch::{
-    BootTimerCounts, BootTimers, DispatchCommand, DispatchError, DispatchExtOptions,
+    BootTimerCounts, BootTimers, DispatchCommand, DispatchError, DispatchExtOptions, StaleWrite,
     StateTimeoutTracker, TimerFollowHold,
 };
 pub use entity_ops::{
@@ -51,14 +52,13 @@ pub use pending_decisions::{
     ActionScope, DecisionStatus, DurationScope, PendingDecision, PolicyScopeMatrix, PrincipalScope,
     ResourceScope,
 };
-pub use persistence::WasmModuleSource;
+pub use persistence::{SecretWriteOutcome, WasmModuleSource};
 pub use policy_suggestions::PolicySuggestionEngine;
 pub use published_artifacts::PublishFileArtifactRequest;
 #[cfg(feature = "observe")]
 pub(crate) use published_artifacts::{
     PUBLISH_ARTIFACT_STALE_AUTHORIZATION, PublishArtifactAuthorization,
 };
-pub(crate) use query_projection_queue::{ProjectionEnqueueOutcome, QueryProjectionWriteQueue};
 pub use spec_change::{
     CarryMove, CarryReport, SpecChange, SpecChangePlan, SpecChangeRefused, StuckRecords,
 };
@@ -92,8 +92,8 @@ use crate::ots_trajectory_outbox::OtsTrajectoryOutbox;
 use crate::registry::SpecRegistry;
 use crate::secrets::vault::SecretsVault;
 use crate::storage::{
-    BackendLabel, BoxedEventStore, DataOnlyCreateStore, MetadataStore, PolicyStore,
-    QueryPlaneStore, StorageStack, TrajectorySink,
+    BackendLabel, BoxedEventStore, MetadataStore, PolicyStore, QueryPlaneStore, StorageStack,
+    TrajectorySink,
 };
 use crate::trigger::ReactionDispatcher;
 use crate::wasm_registry::WasmModuleRegistry;
@@ -240,11 +240,14 @@ fn env_bool(name: &str, default: bool) -> bool {
     }
 }
 
+/// Default per-attempt ask deadline, also used for entity watchdog reports.
+pub(crate) const DEFAULT_ACTION_DISPATCH_TIMEOUT: Duration = Duration::from_secs(5);
+
 fn env_timeout() -> Duration {
     let secs: u64 = std::env::var("TEMPER_ACTION_TIMEOUT_SECS") // determinism-ok: read once at startup
         .ok()
         .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(5);
+        .unwrap_or(DEFAULT_ACTION_DISPATCH_TIMEOUT.as_secs());
     debug_assert!(secs > 0 && secs <= 300, "action timeout must be 1-300s");
     Duration::from_secs(secs)
 }
@@ -446,8 +449,6 @@ pub struct ServerState {
     pub last_accessed: Arc<RwLock<BTreeMap<String, chrono::DateTime<chrono::Utc>>>>,
     /// First-class storage capabilities selected for this runtime.
     pub storage_stack: Option<Arc<StorageStack>>,
-    /// Bounded background writer for derived query-plane projection rows.
-    pub(crate) query_projection_queue: Arc<Mutex<Option<Arc<QueryProjectionWriteQueue>>>>,
     /// Bounded background writer for durable actor recovery snapshots.
     pub(crate) snapshot_write_queue: Arc<Mutex<Option<Arc<SnapshotWriteQueue>>>>,
     /// Bounded background writer for full OTS trajectory artifacts.
@@ -539,6 +540,11 @@ pub struct ServerState {
     /// schedules it armed), and leaves the map when its fire ends.
     pub(crate) scheduled_armed:
         Arc<std::sync::Mutex<BTreeMap<crate::request_context::ScheduledFire, usize>>>,
+    /// When each live timer is due by the wall clock: what its wait runs to,
+    /// and what the wake reports name (`wake`).
+    pub(crate) due_times: Arc<crate::wake::DueTimes>,
+    /// This process's background calls are live, even during boot retries.
+    pub(crate) call_process_id: uuid::Uuid,
     /// The writes committed moves owe that the store has not taken yet, by
     /// idempotency key, each tried again until it lands or fails otherwise
     /// (`dispatch::owed_writes`). In memory only: a restart loses them.
@@ -584,6 +590,10 @@ pub struct ServerState {
     /// Pending owner-byte reservations held by admitted raw Blob uploads.
     commons_storage_reservations:
         Arc<Mutex<BTreeMap<String, storage_caps::CommonsStorageReservationEntry>>>,
+    /// Passing checks, by the digest of what their levels read, when this
+    /// server has no platform store to keep them in (`observe::specs::kept`).
+    #[cfg(feature = "observe")]
+    pub(crate) check_verdicts: Arc<Mutex<BTreeMap<String, temper_verify::CascadeResult>>>,
     /// Coarse commons-mode write guardrail lock.
     ///
     /// Held from preflight through persistence for commons writes so exact
@@ -714,12 +724,15 @@ impl ServerState {
         if let Ok(mut slot) = self.snapshot_write_queue.lock() {
             *slot = Some(snapshot_queue);
         }
-        if let Some(query_plane) = stack.query_plane.clone() {
-            let queue = QueryProjectionWriteQueue::start(query_plane);
-            if let Ok(mut slot) = self.query_projection_queue.lock() {
-                *slot = Some(queue);
-            }
-        }
+        // A stack reads only the query plane its journal writes
+        // (`StorageStack::with_query_plane`); `events` is public, so a stack
+        // whose journal was replaced since is refused here.
+        assert!(
+            stack.query_plane().is_none()
+                || stack.query_plane_is_journal()
+                || stack.reads_through_probe(),
+            "the storage stack's query plane is not its journal's store"
+        );
         if let Some(metadata) = stack.metadata.clone() {
             let queue = OtsTrajectoryOutbox::start();
             queue.recover_queued_metadata_stores(stack.backend.as_str(), metadata);
@@ -734,14 +747,7 @@ impl ServerState {
     pub(crate) fn query_plane_store(&self) -> Option<Arc<dyn QueryPlaneStore>> {
         self.storage_stack
             .as_ref()
-            .and_then(|stack| stack.query_plane.clone())
-    }
-
-    /// Return the native data-only create capability when the backend supports it.
-    pub(crate) fn data_only_create_store(&self) -> Option<Arc<dyn DataOnlyCreateStore>> {
-        self.storage_stack
-            .as_ref()
-            .and_then(|stack| stack.data_only_create.clone())
+            .and_then(|stack| stack.query_plane().cloned())
     }
 
     /// Return the runtime event journal capability plus backend label.
@@ -812,7 +818,6 @@ impl ServerState {
             actor_registry: Arc::new(RwLock::new(BTreeMap::new())),
             last_accessed: Arc::new(RwLock::new(BTreeMap::new())),
             storage_stack: None,
-            query_projection_queue: Arc::new(Mutex::new(None)),
             snapshot_write_queue: Arc::new(Mutex::new(None)),
             ots_trajectory_outbox: Arc::new(Mutex::new(None)),
             data_dir: std::path::PathBuf::new(),
@@ -849,6 +854,8 @@ impl ServerState {
             state_timeout_tracker: Arc::new(StateTimeoutTracker::new()),
             state_timer_rows: None,
             scheduled_armed: Arc::default(),
+            due_times: Arc::default(),
+            call_process_id: temper_runtime::scheduler::sim_uuid(),
             owed_writes: Arc::default(),
             timer_recovery_complete: Arc::default(),
             runtime_started: Arc::default(),
@@ -866,6 +873,8 @@ impl ServerState {
             commons_rate_limit_buckets: Arc::new(Mutex::new(BTreeMap::new())),
             commons_storage_projection_cache: Arc::new(Mutex::new(BTreeMap::new())),
             commons_storage_reservations: Arc::new(Mutex::new(BTreeMap::new())),
+            #[cfg(feature = "observe")]
+            check_verdicts: Arc::new(Mutex::new(BTreeMap::new())),
             commons_write_guardrail_lock: Arc::new(tokio::sync::Mutex::new(())),
             raw_blob_ingest_budget: crate::blob_store::BlobIngestBudget::runtime(),
             file_ingest_budget: crate::blob_store::BlobIngestBudget::files(),
@@ -1095,7 +1104,6 @@ impl ServerState {
             actor_registry: Arc::new(RwLock::new(BTreeMap::new())),
             last_accessed: Arc::new(RwLock::new(BTreeMap::new())),
             storage_stack: None,
-            query_projection_queue: Arc::new(Mutex::new(None)),
             snapshot_write_queue: Arc::new(Mutex::new(None)),
             ots_trajectory_outbox: Arc::new(Mutex::new(None)),
             data_dir: std::path::PathBuf::new(),
@@ -1131,6 +1139,8 @@ impl ServerState {
             state_timeout_tracker: Arc::new(StateTimeoutTracker::new()),
             state_timer_rows: None,
             scheduled_armed: Arc::default(),
+            due_times: Arc::default(),
+            call_process_id: temper_runtime::scheduler::sim_uuid(),
             owed_writes: Arc::default(),
             timer_recovery_complete: Arc::default(),
             runtime_started: Arc::default(),
@@ -1148,6 +1158,8 @@ impl ServerState {
             commons_rate_limit_buckets: Arc::new(Mutex::new(BTreeMap::new())),
             commons_storage_projection_cache: Arc::new(Mutex::new(BTreeMap::new())),
             commons_storage_reservations: Arc::new(Mutex::new(BTreeMap::new())),
+            #[cfg(feature = "observe")]
+            check_verdicts: Arc::new(Mutex::new(BTreeMap::new())),
             commons_write_guardrail_lock: Arc::new(tokio::sync::Mutex::new(())),
             raw_blob_ingest_budget: crate::blob_store::BlobIngestBudget::runtime(),
             file_ingest_budget: crate::blob_store::BlobIngestBudget::files(),
@@ -1474,6 +1486,7 @@ impl ServerState {
             workflow_root_entity_id: agent_ctx.workflow_root_entity_id.clone(),
             workflow_run_id: agent_ctx.workflow_run_id.clone(),
             http_request: None,
+            trigger_principal: None,
         };
 
         let security_ctx = agent_ctx.security_ctx.as_ref().ok_or_else(|| {

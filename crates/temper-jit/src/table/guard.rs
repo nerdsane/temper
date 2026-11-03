@@ -294,6 +294,7 @@ fn to_json(value: Val<'_>) -> serde_json::Value {
         Val::Str(s) => s.into(),
         Val::Symbol(n) => serde_json::json!({ "symbol": n }),
         Val::Strs(items) => items.to_vec().into(),
+        Val::Values(items) => items.into_iter().map(to_json).collect(),
         Val::Json(json) => json.clone(),
     }
 }
@@ -307,6 +308,10 @@ fn render(value: Val<'_>) -> String {
         Val::Str(s) => s.to_string(),
         Val::Symbol(n) => format!("<symbol:{n}>"),
         Val::Strs(items) => format!("[{}]", items.join(", ")),
+        Val::Values(items) => format!(
+            "[{}]",
+            items.into_iter().map(render).collect::<Vec<_>>().join(", ")
+        ),
         Val::Json(json) => json.to_string(),
     }
 }

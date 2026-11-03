@@ -1,5 +1,6 @@
 //! OData entity-set reads through the query-plane contract.
 
+mod equality;
 mod pagination;
 mod scan;
 #[cfg(test)]
@@ -12,14 +13,13 @@ pub(in crate::odata) use types::{
 };
 
 use super::authz::{LIST_ACTION, authorize_read};
-use super::read_support::missing_catalog_entity_ids;
 use scan::{
     ScanCounters, budget_rejection, native_candidate_page_plan, read_from_source_cursor,
     try_native_page_read,
 };
 use types::{QueryPlaneCoverageReport, QueryPlaneFallbackReason, QueryPlaneReadStrategy};
 
-fn should_try_native_before_catalog_coverage(
+fn should_try_native_page_first(
     request: &QueryPlaneReadRequest<'_>,
     plan: &scan::NativeCandidatePagePlan,
 ) -> bool {
@@ -199,26 +199,6 @@ fn should_check_source_cursor_catalog_coverage(
     candidate_count <= budget.scan_candidate_budget()
 }
 
-async fn catalog_coverage_report(
-    request: &QueryPlaneReadRequest<'_>,
-    all_entity_ids: &[String],
-) -> (QueryPlaneCoverageReport, Vec<String>) {
-    let missing_ids = missing_catalog_entity_ids(
-        request.state,
-        request.tenant,
-        request.entity_type,
-        all_entity_ids,
-    )
-    .await;
-    (
-        QueryPlaneCoverageReport {
-            missing: missing_ids.len(),
-            matched: 0,
-        },
-        missing_ids,
-    )
-}
-
 /// Execute one page of an OData entity-set read through the query-plane
 /// contract. Pagination (server-driven `@odata.nextLink` continuation) is
 /// layered on top by [`read_entity_set_from_query_plane`].
@@ -246,6 +226,16 @@ pub(in crate::odata) async fn read_entity_set_page(
     // scan budget can never trip. On a miss we fall back to the full list, which still
     // covers pre-backfill entities: a safe additive fast path until #324 is retired.
     let keyed = keyed_candidate_ids(&request).await;
+    if keyed.is_none()
+        && let Some(result) = equality::try_reconciled_equality_read(&request).await
+    {
+        return result;
+    }
+    // Without an indexed string-equality conjunct (for example a null-only
+    // filter, a non-indexed field, or an OR), or without a durable delta for
+    // this actual journal, retain the general planner below. Its conservative
+    // scan is still needed when no narrower complete candidate proof exists.
+
     // A keyed result of `Some([])` is authoritative absence (the watermark is set):
     // the co-committed `entity_key_index` has no such entity. No native page read
     // runs after that, here or below: the eventually-consistent field index and
@@ -263,51 +253,12 @@ pub(in crate::odata) async fn read_entity_set_page(
     let mut reconciling_exact_match_lag = false;
     if !keyed_authoritative_absent
         && let Some(plan) = native_plan.clone()
-        && should_try_native_before_catalog_coverage(&request, &plan)
+        && should_try_native_page_first(&request, &plan)
     {
         let indexed_entity_ids = request
             .state
             .list_entity_ids(request.tenant, request.entity_type);
-        let can_repair_with_bounded_coverage = !indexed_entity_ids.is_empty()
-            && indexed_entity_ids.len() <= request.budget.scan_candidate_budget();
-        if can_repair_with_bounded_coverage {
-            let (coverage, missing_ids) =
-                catalog_coverage_report(&request, &indexed_entity_ids).await;
-            if coverage.missing == 0 {
-                if let Some(result) = try_native_page_read(&request, plan, coverage).await {
-                    let result = result?;
-                    if should_reconcile_empty_exact_match_against_authoritative(
-                        &request,
-                        &indexed_entity_ids,
-                        &result,
-                    ) {
-                        reconciling_exact_match_lag = true;
-                    } else {
-                        return Ok(QueryPlaneReadResult {
-                            entities: result.entities,
-                            count: result.count,
-                            telemetry: result.telemetry,
-                            next_skiptoken: None,
-                        });
-                    }
-                }
-            } else {
-                let result = read_from_source_cursor(
-                    &request,
-                    &indexed_entity_ids,
-                    coverage,
-                    &missing_ids,
-                    QueryPlaneFallbackReason::CatalogCoverageGap,
-                )
-                .await?;
-                return Ok(QueryPlaneReadResult {
-                    entities: result.entities,
-                    count: result.count,
-                    telemetry: result.telemetry,
-                    next_skiptoken: None,
-                });
-            }
-        } else if let Some(result) =
+        if let Some(result) =
             try_native_page_read(&request, plan, QueryPlaneCoverageReport::default()).await
         {
             let result = result?;
@@ -433,11 +384,11 @@ pub(in crate::odata) async fn read_entity_set_page(
             ));
         }
     }
-    let (coverage, missing_ids) = catalog_coverage_report(&request, &all_entity_ids).await;
-
+    // Every record's catalog row commits with its event, so the catalog
+    // covers every id the read lists.
+    let coverage = QueryPlaneCoverageReport::default();
     if !reconciling_exact_match_lag
         && !keyed_authoritative_absent
-        && coverage.missing == 0
         && let Some(plan) = native_plan.clone()
         && let Some(result) = try_native_page_read(&request, plan, coverage).await
     {
@@ -453,8 +404,6 @@ pub(in crate::odata) async fn read_entity_set_page(
         QueryPlaneFallbackReason::KeyedAbsence
     } else if reconciling_exact_match_lag {
         QueryPlaneFallbackReason::ProjectionLagReconcile
-    } else if coverage.missing > 0 {
-        QueryPlaneFallbackReason::CatalogCoverageGap
     } else if request.query_options.filter.is_some() && native_plan.is_none() {
         QueryPlaneFallbackReason::FilterPushdownUnavailable
     } else if request.state.query_plane_store().is_some() {
@@ -462,14 +411,8 @@ pub(in crate::odata) async fn read_entity_set_page(
     } else {
         QueryPlaneFallbackReason::NoFilterPushdown
     };
-    let result = read_from_source_cursor(
-        &request,
-        &all_entity_ids,
-        coverage,
-        &missing_ids,
-        fallback_reason,
-    )
-    .await?;
+    let result =
+        read_from_source_cursor(&request, &all_entity_ids, coverage, &[], fallback_reason).await?;
     Ok(QueryPlaneReadResult {
         entities: result.entities,
         count: result.count,

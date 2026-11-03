@@ -19,6 +19,7 @@ impl ServerState {
     /// it ends with the counts per tenant and type, which it also logs as
     /// `state timers after boot`. A second call in the same process starts
     /// nothing and returns None: a second re-arm would arm every row again.
+    #[tracing::instrument(skip_all, fields(otel.name = "boot.start_runtime"))]
     pub async fn start_runtime(&self) -> Option<tokio::task::JoinHandle<BootTimers>> {
         if self.runtime_started.swap(true, Ordering::SeqCst) {
             tracing::warn!("server runtime already started in this process; not started again");
@@ -26,6 +27,9 @@ impl ServerState {
         }
         self.spawn_runtime_metrics_loop();
         let boot = self.rearm_state_timers().await;
+        // Report once the boot's timers are armed, even when none are, and
+        // from now on make timers wait again by the wall clock after a resume.
+        self.due_times.start();
         self.spawn_carry_stranded(self.tenants_with_carries());
         Some(boot)
     }

@@ -34,14 +34,20 @@
 //! restoring the registry. Bare-pool compatibility APIs still use the default
 //! search path. Schema selection is independent of Temper tenant authorization.
 
-mod data_only_create;
+mod append_commit;
+#[cfg(test)]
+mod append_commit_test;
 pub mod dbm;
+mod first_event;
 mod metrics;
 mod namespace;
 pub use namespace::PostgresSchema;
 mod catalog_groups;
 pub mod migration;
 pub mod platform;
+mod projection_delta;
+#[cfg(test)]
+mod projection_delta_test;
 mod projection_freshness;
 mod projection_repair;
 #[cfg(test)]
@@ -61,10 +67,10 @@ pub use platform::{
     PostgresOtsTrajectoryRow, PostgresPolicyApprovalCommit, PostgresPolicyDenialPatternRow,
     PostgresPolicyRow, PostgresProjectedEntityFieldsRow, PostgresPublishedArtifactRow,
     PostgresPublishedArtifactUpsert, PostgresQueuedOtsTrajectoryRow, PostgresSecretRow,
-    PostgresSpecRow, PostgresSpecVerificationUpdate, PostgresTrajectoryInsert,
-    PostgresTrajectoryRow, PostgresTrajectoryStats, PostgresUnmetIntentAggRow,
-    PostgresWasmInvocationInsert, PostgresWasmInvocationRow, PostgresWasmModuleMetadataRow,
-    PostgresWasmModuleRow,
+    PostgresSecretVersionRow, PostgresSpecRow, PostgresSpecVerificationUpdate,
+    PostgresTrajectoryInsert, PostgresTrajectoryRow, PostgresTrajectoryStats,
+    PostgresUnmetIntentAggRow, PostgresWasmInvocationInsert, PostgresWasmInvocationRow,
+    PostgresWasmModuleMetadataRow, PostgresWasmModuleRow,
 };
 pub use store::PostgresEventStore;
 

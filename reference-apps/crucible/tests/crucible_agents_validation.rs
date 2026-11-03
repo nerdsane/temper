@@ -141,11 +141,13 @@ fn authenticate(mut request: Request<Body>) -> Request<Body> {
             role: None,
             acting_for: None,
             agent_type: None,
+            label: None,
             attributes: Default::default(),
         },
         context_attrs: Default::default(),
         correlation_id: "crucible-agent-validation".to_string(),
         cause: None,
+        credential: None,
     };
     request
         .extensions_mut()
@@ -211,6 +213,28 @@ fn agent_body(id: &str, name: &str) -> String {
             "UpdatedAt": "2026-04-11T00:00:00Z"
         }}"#
     )
+}
+
+/// Archive a managed agent the way a client does: set `ArchivedAt`, then run
+/// the bound action. Field invariants hold on bound actions too, so
+/// `ArchivedRequiresArchivedAt` refuses the transition without it.
+async fn archive_agent(state: &ServerState, id: &str) -> (StatusCode, serde_json::Value) {
+    let (status, body) = patch(
+        state,
+        &format!("/tdata/ManagedAgents('{id}')"),
+        r#"{"ArchivedAt": "2026-04-11T00:10:00Z"}"#,
+    )
+    .await;
+    assert!(
+        status == StatusCode::OK || status == StatusCode::NO_CONTENT,
+        "PATCH ArchivedAt: {status} {body:?}"
+    );
+    post(
+        state,
+        &format!("/tdata/ManagedAgents('{id}')/Temper.Crucible.ArchiveManagedAgent"),
+        "{}",
+    )
+    .await
 }
 
 // =========================================================================
@@ -432,12 +456,7 @@ async fn archive_agent_action_succeeds() {
     )
     .await;
 
-    let (status, body) = post(
-        &state,
-        "/tdata/ManagedAgents('agent-arch')/Temper.Crucible.ArchiveManagedAgent",
-        "{}",
-    )
-    .await;
+    let (status, body) = archive_agent(&state, "agent-arch").await;
     assert!(
         status == StatusCode::OK || status == StatusCode::NO_CONTENT,
         "ArchiveManagedAgent must succeed on an Active managed agent; got {status}: {body:?}"
@@ -569,12 +588,7 @@ async fn create_mcp_server_on_archived_agent_is_rejected() {
     )
     .await;
 
-    let (status, _) = post(
-        &state,
-        "/tdata/ManagedAgents('agent-archived-mcp')/Temper.Crucible.ArchiveManagedAgent",
-        "{}",
-    )
-    .await;
+    let (status, _) = archive_agent(&state, "agent-archived-mcp").await;
     assert!(status == StatusCode::OK || status == StatusCode::NO_CONTENT);
 
     let body = r#"{
@@ -924,12 +938,7 @@ async fn create_version_on_archived_agent_is_rejected() {
     )
     .await;
 
-    let (status, _) = post(
-        &state,
-        "/tdata/ManagedAgents('agent-ver-bad')/Temper.Crucible.ArchiveManagedAgent",
-        "{}",
-    )
-    .await;
+    let (status, _) = archive_agent(&state, "agent-ver-bad").await;
     assert!(status == StatusCode::OK || status == StatusCode::NO_CONTENT);
 
     let body = r#"{

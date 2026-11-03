@@ -106,22 +106,28 @@ impl CatalogGroup {
     }
 }
 
-/// Backend-neutral durable projection upsert.
-#[derive(Clone, Debug, PartialEq)]
-pub struct QueryProjectionUpsert {
-    pub entity_type: String,
-    pub entity_id: String,
-    pub status: String,
-    pub fields: serde_json::Value,
-    pub state: serde_json::Value,
-    pub indexed_fields: serde_json::Value,
-    pub sequence_nr: u64,
-    pub known_new: bool,
-}
-
 /// Durable query-plane capability.
 #[async_trait::async_trait]
 pub trait QueryPlaneStore: Send + Sync {
+    /// Indexed equality candidates and every entity whose projection is not
+    /// authoritative, from one storage snapshot. The second vector identifies
+    /// candidates requiring an authoritative read. With `Some(budget)`, return
+    /// at most `budget + 1` candidates, prioritizing pending ids: an empty second
+    /// vector proves the entire gap is empty even when the probe overflows.
+    /// With no probe budget, read the complete union without truncation.
+    /// A `None` result means the backend cannot prove completeness (including
+    /// a separately stored journal).
+    async fn reconciled_equality_candidates(
+        &self,
+        _journal: &super::BoxedEventStore,
+        _tenant: &str,
+        _entity_type: &str,
+        _predicates: &[(String, String)],
+        _probe_budget: Option<usize>,
+    ) -> Result<Option<(Vec<String>, Vec<String>)>, PersistenceError> {
+        Ok(None)
+    }
+
     /// Compare catalog checkpoints with the co-located journal in one query.
     /// Called only when the stack verifies this is the journal itself.
     async fn lagging_projections(
@@ -155,25 +161,22 @@ pub trait QueryPlaneStore: Send + Sync {
         sequence_nr: u64,
     ) -> Result<(), PersistenceError>;
 
-    async fn upsert_projections(
+    /// Rewrite an existing catalog row and its field index, as
+    /// [`Self::upsert_projection`] does, and leave a record with no catalog row
+    /// alone. A background pass while the server serves uses this: only a
+    /// record's own commit creates its row then, and boot repair creates the
+    /// missing ones before serving.
+    #[expect(clippy::too_many_arguments, reason = "projection upsert boundary")]
+    async fn refresh_projection(
         &self,
         tenant: &str,
-        projections: &[QueryProjectionUpsert],
-    ) -> Result<(), PersistenceError> {
-        for projection in projections {
-            self.upsert_projection(
-                tenant,
-                &projection.entity_type,
-                &projection.entity_id,
-                &projection.status,
-                &projection.fields,
-                &projection.state,
-                projection.sequence_nr,
-            )
-            .await?;
-        }
-        Ok(())
-    }
+        entity_type: &str,
+        entity_id: &str,
+        status: &str,
+        fields: &serde_json::Value,
+        state: &serde_json::Value,
+        sequence_nr: u64,
+    ) -> Result<(), PersistenceError>;
 
     async fn remove_projection(
         &self,

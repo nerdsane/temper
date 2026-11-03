@@ -188,7 +188,11 @@ async fn a_change_to_a_nested_field_or_the_state_still_lands() {
     assert_eq!(seq, 9);
     assert_eq!(status, "Waiting");
     assert_eq!(stored_fields, grown);
-    assert_eq!(state["fields"], grown);
+    assert_eq!(
+        state.get("fields"),
+        None,
+        "the stored state does not repeat the fields the fields column holds"
+    );
     assert_eq!(state["sequence_nr"], 9);
 }
 

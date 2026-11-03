@@ -35,6 +35,13 @@ impl WritePriority {
 /// 170 ms on a Tensorlake drive, roll3, 26 Oct 2026).
 const GIVE_WAY_RECHECK: Duration = Duration::from_millis(25);
 
+/// A wait at the gate this long is logged, and so is a hold this long that
+/// kept another writer waiting: the pair names who held the gate while others
+/// queued, and the hold says how much of it went to getting a connection and
+/// how much to the transaction. Metrics carry no Temper id in Datadog, so the
+/// logs are what tell one Temper's queue from another's.
+const SLOW_TURN: Duration = Duration::from_millis(100);
+
 /// The process-local queue for writes to one database: its one permit, and
 /// the writers waiting for it.
 ///
@@ -72,23 +79,47 @@ impl WriteGate {
 #[derive(Debug)]
 pub(crate) struct GatePermit {
     _permit: OwnedSemaphorePermit,
+    gate: Arc<WriteGate>,
     operation: &'static str,
     acquired: Instant,
+    /// When the writer's connection was ready. Getting one can wait behind a
+    /// push or a checkpoint, so a slow hold is split at this point into that
+    /// wait and the transaction.
+    connected: Option<Instant>,
 }
 
 impl GatePermit {
-    fn new(permit: OwnedSemaphorePermit, operation: &'static str) -> Self {
+    fn new(permit: OwnedSemaphorePermit, gate: &Arc<WriteGate>, operation: &'static str) -> Self {
         Self {
             _permit: permit,
+            gate: Arc::clone(gate),
             operation,
             acquired: Instant::now(),
+            connected: None,
         }
     }
 }
 
 impl Drop for GatePermit {
     fn drop(&mut self) {
-        record_turso_write_gate_hold(self.acquired.elapsed(), self.operation);
+        let held = self.acquired.elapsed();
+        record_turso_write_gate_hold(held, self.operation);
+        // The permit is still this writer's here: it is let go after `drop`.
+        let waiting = self.gate.waiting.load(Ordering::Acquire);
+        if held >= SLOW_TURN && waiting > 0 {
+            let held_ms = held.as_millis() as u64;
+            let connection_ms = self
+                .connected
+                .map_or(0, |at| at.duration_since(self.acquired).as_millis() as u64);
+            tracing::warn!(
+                operation = self.operation,
+                held_ms,
+                connection_ms,
+                transaction_ms = held_ms.saturating_sub(connection_ms),
+                waiting,
+                "turso.write_gate held"
+            );
+        }
     }
 }
 
@@ -107,12 +138,11 @@ impl TursoEventStore {
     /// A connection that may write on a permit already taken.
     pub(super) async fn write_connection_on(
         &self,
-        permit: GatePermit,
+        mut permit: GatePermit,
     ) -> Result<WriteConnection, PersistenceError> {
-        Ok(WriteConnection::new(
-            self.configured_connection().await?,
-            permit,
-        ))
+        let conn = self.configured_connection().await?;
+        permit.connected = Some(Instant::now());
+        Ok(WriteConnection::new(conn, permit))
     }
 
     /// Acquire the process-local Turso write lane.
@@ -136,7 +166,7 @@ impl TursoEventStore {
             "timed_out"
         };
         record_turso_write_gate_wait(started.elapsed(), operation, priority.as_str(), outcome);
-        Ok(GatePermit::new(permit?, operation))
+        Ok(GatePermit::new(permit?, &self.write_gate, operation))
     }
 
     async fn wait_for_permit(
@@ -166,7 +196,7 @@ impl TursoEventStore {
         drop(waiting);
 
         let waited = started.elapsed();
-        if waited >= Duration::from_millis(100) {
+        if waited >= SLOW_TURN {
             tracing::warn!(
                 operation,
                 priority = priority.as_str(),
@@ -196,7 +226,9 @@ impl TursoEventStore {
         loop {
             if gate.waiting.load(Ordering::Acquire) == 0 {
                 match gate.permit.clone().try_acquire_owned() {
-                    Ok(turn) => return Ok(GatePermit::new(turn, "turso.trim_change_log")),
+                    Ok(turn) => {
+                        return Ok(GatePermit::new(turn, gate, "turso.trim_change_log"));
+                    }
                     Err(tokio::sync::TryAcquireError::Closed) => return Err(write_gate_closed()),
                     Err(tokio::sync::TryAcquireError::NoPermits) => {}
                 }

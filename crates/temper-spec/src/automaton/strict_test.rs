@@ -470,6 +470,59 @@ params=[{name="owner",type="string",source="authenticated_subject"}]
     assert_eq!(json["source"], "authenticated_subject");
 }
 
+/// `declaration` is the bound parameter's declaration; `strict` the automaton's.
+fn bound_label_spec(strict: bool, declaration: &str) -> String {
+    format!(
+        r#"
+[automaton]
+name="Post"
+states=["Draft","Posted"]
+initial="Draft"
+strict_action_params={strict}
+[[state]]
+name="author"
+type="string"
+initial=""
+[[action]]
+name="Publish"
+from=["Draft"]
+to="Posted"
+params=[{declaration}]
+"#
+    )
+}
+
+#[test]
+fn an_agent_label_source_parses_on_a_strict_string_parameter() {
+    let source = bound_label_spec(
+        true,
+        r#"{name="author",type="string",source="authenticated_agent_label"}"#,
+    );
+    let auto = super::parse_automaton(&source).expect("trusted parameter source must parse");
+    let json = serde_json::to_value(&auto.actions[0].params[0]).unwrap();
+    assert_eq!(json["source"], "authenticated_agent_label");
+}
+
+#[test]
+fn an_agent_label_source_needs_strict_params_and_a_string() {
+    for source in [
+        bound_label_spec(
+            false,
+            r#"{name="author",type="string",source="authenticated_agent_label"}"#,
+        ),
+        bound_label_spec(
+            true,
+            r#"{name="author",type="bool",source="authenticated_agent_label"}"#,
+        ),
+    ] {
+        let error = super::parse_automaton(&source).unwrap_err().to_string();
+        assert!(
+            error.contains("requires strict_action_params and string type"),
+            "{error}"
+        );
+    }
+}
+
 #[test]
 fn a_related_record_s_field_is_read_only_by_an_invariant() {
     let invariant = r#"

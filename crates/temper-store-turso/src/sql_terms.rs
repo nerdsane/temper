@@ -48,6 +48,72 @@ pub(crate) fn gives(sql: &str, name: &str, unqualified: bool, column: &str) -> b
     false
 }
 
+/// The tables `sql` equates `name.column` with, each by the name or alias its
+/// term uses (`name.column = other.x` or `other.x = name.column`), in terms
+/// every row must meet. A plan that reads `other` before `name` has its value
+/// for each of its rows, so it can search `name` by `column` as by `= ?`.
+pub(crate) fn joined_with<'a>(sql: &'a str, name: &str, column: &str) -> Vec<&'a str> {
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let qualified = format!("{name}.{column}");
+    let mut others = Vec::new();
+    let mut from = 0;
+    while let Some(found) = sql[from..].find(&qualified) {
+        let start = from + found;
+        let end = start + qualified.len();
+        from = end;
+        if sql[..start].chars().next_back().is_some_and(is_word)
+            || sql[end..].chars().next().is_some_and(is_word)
+        {
+            continue;
+        }
+        let right = sql[end..]
+            .trim_start()
+            .strip_prefix('=')
+            .filter(|rest| !rest.starts_with('='))
+            .and_then(|rest| {
+                let rest = rest.trim_start();
+                leading_column(rest).map(|(other, len)| (other, sql.len() - rest.len() + len))
+            });
+        let left = sql[..start]
+            .trim_end()
+            .strip_suffix('=')
+            .filter(|rest| !rest.ends_with(['<', '>', '!', '=']))
+            .and_then(|rest| {
+                let rest = rest.trim_end();
+                trailing_column(rest).map(|(other, len)| (other, rest.len() - len))
+            });
+        let terms = [
+            right.map(|(other, term_end)| (other, start, term_end)),
+            left.map(|(other, term_start)| (other, term_start, end)),
+        ];
+        for (other, term_start, term_end) in terms.into_iter().flatten() {
+            if other != name && holds_for_every_row(sql, term_start, term_end) {
+                others.push(other);
+            }
+        }
+    }
+    others
+}
+
+/// The table of the `table.column` that `text` starts with, and its length.
+fn leading_column(text: &str) -> Option<(&str, usize)> {
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let table_len = text.find(|c: char| !is_word(c))?;
+    let rest = text[table_len..].strip_prefix('.')?;
+    let column_len = rest.find(|c: char| !is_word(c)).unwrap_or(rest.len());
+    (table_len > 0 && column_len > 0).then(|| (&text[..table_len], table_len + 1 + column_len))
+}
+
+/// The table of the `table.column` that `text` ends with, and its length.
+fn trailing_column(text: &str) -> Option<(&str, usize)> {
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let column_start = text.rfind(|c: char| !is_word(c))? + 1;
+    let before = text[..column_start].strip_suffix('.')?;
+    let table_start = before.rfind(|c: char| !is_word(c)).map_or(0, |at| at + 1);
+    (table_start < before.len() && column_start < text.len())
+        .then(|| (&before[table_start..], text.len() - table_start))
+}
+
 /// Whether the term at `start..end` of `sql` holds for every row: no group of
 /// parentheses around it joins terms with `OR` (`(?2 IS NULL OR tenant =
 /// ?2)`), and no `NOT` stands right before it or before a group that holds
@@ -163,6 +229,22 @@ mod tests {
         assert!(!gives(grouped, "t", true, "tenant"));
         let nested = "x = ?3 OR (y = ?4 AND status = ?5)";
         assert!(!gives(nested, "t", true, "status"));
+    }
+
+    #[test]
+    fn a_column_equated_with_another_tables_is_joined_with_it() {
+        let sql = "SELECT 1 FROM heads h LEFT JOIN entity_catalog c \
+                   ON c.tenant = ?1 AND c.entity_type = h.entity_type AND c.entity_id=h.entity_id \
+                   LEFT JOIN counters k ON k.tenant = c.tenant AND (k.x = c.x OR k.y = 1) \
+                   WHERE c.sequence_nr <= h.sequence_nr AND NOT d.entity_id = c.entity_id";
+        assert_eq!(joined_with(sql, "c", "entity_type"), vec!["h"]);
+        assert_eq!(joined_with(sql, "c", "entity_id"), vec!["h"]);
+        assert_eq!(joined_with(sql, "c", "tenant"), vec!["k"]);
+        assert_eq!(joined_with(sql, "k", "tenant"), vec!["c"]);
+        assert!(joined_with(sql, "c", "x").is_empty());
+        assert!(joined_with(sql, "c", "sequence_nr").is_empty());
+        assert!(joined_with(sql, "d", "entity_id").is_empty());
+        assert!(joined_with(sql, "h", "entity_type_x").is_empty());
     }
 
     #[test]

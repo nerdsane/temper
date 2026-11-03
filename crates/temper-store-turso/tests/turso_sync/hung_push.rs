@@ -2,68 +2,13 @@
 //! waited: the engine's own steps inside the push's span, and a fresh request
 //! to the remote timed step by step beside it.
 
-use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use temper_store_turso::TursoEventStore;
-use tracing_subscriber::layer::{Context, SubscriberExt};
-use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::layer::SubscriberExt;
 
 use crate::support::*;
-
-/// One logged line: the span it was logged in, its message and its fields.
-#[derive(Clone, Debug)]
-struct Line {
-    span: Option<String>,
-    target: String,
-    message: String,
-    fields: BTreeMap<String, String>,
-}
-
-/// Every line logged on this thread while it listens.
-#[derive(Clone, Default)]
-struct Lines(Arc<Mutex<Vec<Line>>>);
-
-impl Lines {
-    fn find(&self, matches: impl Fn(&Line) -> bool) -> Option<Line> {
-        self.0
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|line| matches(line))
-            .cloned()
-    }
-}
-
-impl<S> tracing_subscriber::Layer<S> for Lines
-where
-    S: tracing::Subscriber + for<'a> LookupSpan<'a>,
-{
-    fn on_event(&self, event: &tracing::Event<'_>, ctx: Context<'_, S>) {
-        #[derive(Default)]
-        struct Fields(BTreeMap<String, String>);
-        impl tracing::field::Visit for Fields {
-            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-                self.0.insert(field.name().to_string(), value.to_string());
-            }
-            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-                self.0
-                    .insert(field.name().to_string(), format!("{value:?}"));
-            }
-        }
-        let mut fields = Fields::default();
-        event.record(&mut fields);
-        let message = fields.0.remove("message").unwrap_or_default();
-        self.0.lock().unwrap().push(Line {
-            span: ctx.event_span(event).map(|span| span.name().to_string()),
-            target: event.metadata().target().to_string(),
-            message,
-            fields: fields.0,
-        });
-    }
-}
 
 #[tokio::test]
 async fn a_hung_push_shows_where_it_waited() {
@@ -75,6 +20,9 @@ async fn a_hung_push_shows_where_it_waited() {
     let store = TursoEventStore::new_synced(path.to_str().expect("utf-8"), &url, TOKEN)
         .await
         .expect("open through the valve");
+    // A copy's first push asks the remote what it holds before it sends;
+    // pushing once while the valve is open leaves the hung push to the engine.
+    push(&store).await;
     let lines = Lines::default();
     // This thread's own listener: the test runtime runs every task here.
     let _listening = tracing::subscriber::set_default(

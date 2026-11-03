@@ -173,7 +173,7 @@ fn adding_count_scan_work_preserves_page_metadata() {
 
     let mut page = QueryPlaneReadTelemetry {
         strategy: QueryPlaneReadStrategy::ReadSourceCursor,
-        fallback_reason: QueryPlaneFallbackReason::CatalogCoverageGap,
+        fallback_reason: QueryPlaneFallbackReason::ProjectionLagReconcile,
         filter_pushdown: false,
         catalog_materialization: false,
         candidate_count: 7,

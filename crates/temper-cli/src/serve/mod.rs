@@ -9,10 +9,13 @@
 
 mod actor_runtime;
 mod bootstrap;
+mod data_dir;
 mod loader;
 mod local_sandbox;
 mod observe_ui;
 pub(crate) mod options;
+#[cfg(test)]
+mod pushed_boot_tests;
 mod storage;
 mod sync_copy;
 #[cfg(test)]
@@ -115,9 +118,9 @@ pub async fn run(
             temper_platform::module_review::ModuleReviewer::new(judge),
         ));
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let data_dir = Path::new(&home).join(".local/share/temper");
-    state.server.data_dir = data_dir.clone();
+    // TEMPER_DATA_DIR puts this server's files (pushed app versions, blobs,
+    // caches) where they outlive the machine, such as a mounted volume.
+    state.server.data_dir = data_dir::data_dir();
     state.server.files_need_object_store = storage::files_need_object_store();
 
     seed_cedar_policies(&state, tenant_policy_seed);
@@ -243,7 +246,7 @@ pub async fn run(
     }
 
     // Phase 8: Bootstrap system + agent tenants
-    bootstrap::bootstrap_tenants(&state, &apps).await;
+    bootstrap::bootstrap_tenants(&state, &apps, bootstrap::EarlierOperatorKeys::from_env()).await;
     // Phase 8b: Restore persisted apps + apply CLI `--app` requests.
     bootstrap::bootstrap_installed_apps(&state, &os_app_installs).await?;
     if actor_runtime == ActorRuntimeBackend::Postgres {
@@ -323,6 +326,40 @@ pub async fn run(
         };
         for tenant in tenants {
             temper_server::http_endpoint::rebuild_tenant_table(&state.server, &tenant).await;
+        }
+    }
+
+    // Where this process reports its earliest due time, so a control plane
+    // that suspends it can wake it then. Both are needed; either alone is a
+    // misconfiguration, logged and otherwise ignored.
+    match (
+        std::env::var("TEMPER_WAKE_REPORT_URL").ok(), // determinism-ok: startup config
+        std::env::var("TEMPER_WAKE_REPORT_TOKEN").ok(), // determinism-ok: startup config
+    ) {
+        (Some(url), Some(token)) if !url.is_empty() && !token.is_empty() => {
+            match temper_server::wake::HttpWakeSink::new(url, token) {
+                Ok(sink) => state.server.set_wake_sink(std::sync::Arc::new(sink)),
+                Err(error) => tracing::error!(%error, "wake reports off"),
+            }
+        }
+        (None, None) => {}
+        _ => tracing::error!(
+            "wake reports off: TEMPER_WAKE_REPORT_URL and TEMPER_WAKE_REPORT_TOKEN are needed together"
+        ),
+    }
+    // How long the sandbox stays awake after an inbound request, in seconds:
+    // a timer due before then fires on its own and is not reported. The
+    // control plane sets it below the time its sandboxes really stay awake,
+    // for margin. Unset, every due time from now is reported.
+    if let Ok(awake) = std::env::var("TEMPER_WAKE_AWAKE_SECS") {
+        // determinism-ok: startup config
+        match awake.parse::<u64>() {
+            Ok(secs) => state
+                .server
+                .set_wake_awake(std::time::Duration::from_secs(secs)),
+            Err(error) => {
+                tracing::error!(%error, "TEMPER_WAKE_AWAKE_SECS is not a number of seconds; every due time is reported")
+            }
         }
     }
 

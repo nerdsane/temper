@@ -80,11 +80,13 @@ async fn send(state: &ServerState, request: Request<Body>) -> (StatusCode, Strin
                     role: None,
                     acting_for: None,
                     agent_type: None,
+                    label: None,
                     attributes: Default::default(),
                 },
                 context_attrs: Default::default(),
                 correlation_id: "spec-restart-test".to_string(),
                 cause: None,
+                credential: None,
             },
         ));
     let response = build_router(state.clone()).oneshot(request).await.unwrap();
@@ -303,3 +305,6 @@ async fn replace_mode_load_dir_removes_dropped_types_durably() {
         "a type a replace-mode load dropped must stay dropped after restart"
     );
 }
+
+#[path = "spec_restart/principal_collision.rs"]
+mod principal_collision;

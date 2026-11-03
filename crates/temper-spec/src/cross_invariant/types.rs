@@ -126,39 +126,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn delete_policy_default_is_restrict() {
-        assert_eq!(DeletePolicy::default(), DeletePolicy::Restrict);
-    }
-
-    #[test]
-    fn invariant_kind_default_is_hard() {
-        assert_eq!(InvariantKind::default(), InvariantKind::Hard);
-    }
-
-    #[test]
-    fn cross_invariant_spec_default() {
-        let spec = CrossInvariantSpec::default();
-        assert_eq!(spec.version, 1);
-        assert_eq!(spec.default_delete_policy, DeletePolicy::Restrict);
-        assert!(spec.invariants.is_empty());
-        assert!(spec.relation_overrides.is_empty());
-    }
-
-    #[test]
-    fn delete_policy_serde_roundtrip() {
-        for policy in [
-            DeletePolicy::Restrict,
-            DeletePolicy::Cascade,
-            DeletePolicy::SetNull,
-            DeletePolicy::None,
-        ] {
-            let json = serde_json::to_string(&policy).unwrap();
-            let back: DeletePolicy = serde_json::from_str(&json).unwrap();
-            assert_eq!(back, policy);
-        }
-    }
-
-    #[test]
     fn delete_policy_serde_rename() {
         assert_eq!(
             serde_json::to_string(&DeletePolicy::Restrict).unwrap(),

@@ -31,8 +31,15 @@ pub struct StateTimerFire {
     pub entity_type: String,
     /// The record's id.
     pub entity_id: String,
+    /// The timed state the timer was declared for.
+    pub state: String,
     /// The timer's `on_timeout` action.
     pub action: String,
     /// The record's journal sequence when the timer was armed.
     pub armed_seq: u64,
+    /// Whether its action resets its own clock, so the timer fires again a
+    /// budget later. A timer that fires once is ended by its fire's event:
+    /// the record's status clock then says it fired (`rearm_clock_start`), so
+    /// that fire is recorded even when it changes nothing else.
+    pub repeats: bool,
 }

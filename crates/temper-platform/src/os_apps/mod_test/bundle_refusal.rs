@@ -21,7 +21,8 @@ struct Fixture {
 impl Fixture {
     async fn new(label: &str) -> Self {
         let id = uuid::Uuid::new_v4();
-        let db_url = format!("file:/tmp/temper-bundle-refusal-{label}-{id}.db");
+        let db_path = std::env::temp_dir().join(format!("temper-bundle-refusal-{label}-{id}.db"));
+        let db_url = format!("file:{}", db_path.display());
         let apps_root = std::env::temp_dir().join(format!("temper-bundle-refusal-{label}-{id}"));
         let store = TursoEventStore::new(&db_url, None)
             .await
@@ -181,6 +182,7 @@ fn registering_unparseable_cross_invariants_returns_an_error_and_keeps_the_regis
         &[("Order", ORDER_IOA)],
         bootstrap::BootstrapTenantSpecsOptions {
             merge: true,
+            csdl_mode: bootstrap::CsdlMode::MergedIntoExisting,
             label: "OsApp(test)",
             verified_cache: &verified_cache,
             cross_invariants_source: Some(UNSUPPORTED_CROSS_INVARIANTS),
@@ -201,3 +203,9 @@ fn registering_unparseable_cross_invariants_returns_an_error_and_keeps_the_regis
         "a refused registration changes nothing"
     );
 }
+
+#[path = "bundle_refusal/trigger_args_test.rs"]
+mod trigger_args;
+
+#[path = "bundle_refusal/principal_collision_test.rs"]
+mod principal_collision;

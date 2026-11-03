@@ -160,7 +160,7 @@ async fn two_integrations_answering_alike_both_apply_under_one_caller_key() {
 }
 
 /// [`SURVEY_IOA`] calling `/first` and `/second`. The second has no failure
-/// callback, so its failure fails the request; every `Unanswered` counts in
+/// callback, so its failure goes to the record's failure path; every `Unanswered` counts in
 /// `misses`, so one applied beside an `Answered` shows. Each callback reacts
 /// on the same survey (`Tally` and `Flag`), so a reaction started for a
 /// callback that did not commit shows too.
@@ -280,14 +280,14 @@ impl Survey {
         self.ask(true).await
     }
 
-    /// `Ask`, answered before its integrations run in the background.
-    async fn ask_in_background(&self) -> (bool, Option<String>) {
-        self.ask(false).await
+    async fn ask(&self, await_integration: bool) -> (bool, Option<String>) {
+        let response = self.answer(await_integration).await;
+        (response.success, response.error)
     }
 
-    async fn ask(&self, await_integration: bool) -> (bool, Option<String>) {
-        let response = self
-            .state
+    /// The answer to `Ask`, whole.
+    async fn answer(&self, await_integration: bool) -> temper_server::EntityResponse {
+        self.state
             .dispatch_tenant_action_ext(
                 &self.tenant,
                 "Survey",
@@ -301,8 +301,7 @@ impl Survey {
                 },
             )
             .await
-            .expect("Ask dispatches");
-        (response.success, response.error)
+            .expect("Ask dispatches")
     }
 
     /// The survey's counter `name`.
@@ -314,24 +313,11 @@ impl Survey {
             .expect("record");
         entity.state.counters.get(name).copied().unwrap_or(0)
     }
-
-    /// Whether `answers` reaches `target` within `limit`, polling every 20 ms.
-    async fn answers_reach(&self, target: usize, limit: Duration) -> bool {
-        let deadline = tokio::time::Instant::now() + limit;
-        while tokio::time::Instant::now() < deadline {
-            if self.count("answers").await == target {
-                return true;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        false
-    }
 }
 
 /// An outside service where `/first` answers `yes` once and `then` after,
 /// and `/second` fails its first call and answers `yes` after. A request's
-/// first run commits `/first`'s callback and then fails on `/second`, which
-/// leaves its integrations to the retry.
+/// first run commits `/first`'s callback and then fails on `/second`.
 async fn failing_partway(then: ResponseTemplate) -> MockServer {
     let outside = MockServer::start().await;
     Mock::given(method("POST"))
@@ -379,117 +365,48 @@ async fn calls(outside: &MockServer, route: &str) -> usize {
         .count()
 }
 
-/// A callback that runs in the background, after the request has answered,
-/// keeps its key too. The first request commits `/first`'s callback and fails
-/// on `/second`; its retry runs both again in the background, where `/first`
-/// now fails. That failure callback is answered by the committed success.
+/// A request whose second integration fails still committed: it answers
+/// success and names the failed trigger, and the first callback applied. Its
+/// retry under the same key gets that answer and calls no service again; the
+/// failure was handed to the record's failure path, not back to the caller.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_retry_applies_no_background_callback_again() {
-    let outside = failing_partway(ResponseTemplate::new(500)).await;
-    let survey = Survey::new(&outside, "ask-4");
-
-    let (success, _) = survey.ask_inline().await;
-    assert!(!success, "the second integration failed the request");
-    assert_eq!(
-        survey.count("answers").await,
-        1,
-        "the first callback committed"
-    );
-
-    let (success, error) = survey.ask_in_background().await;
-    assert!(success, "{error:?}");
-    // One task runs the integrations in order and waits for each callback, so
-    // `/first`'s callback has landed once `/second`'s has.
-    assert!(
-        survey.answers_reach(2, Duration::from_secs(10)).await,
-        "the retry's second callback applies"
-    );
-    assert_eq!(
-        calls(&outside, "/first").await,
-        2,
-        "the retry ran the first integration again"
-    );
-    assert_eq!(
-        survey.count("misses").await,
-        0,
-        "a retry applied a background callback beside the committed one"
-    );
-}
-
-/// A retry whose outside service answers it differently does not apply the
-/// committed callback again: the first request commits `/first`'s `yes` and
-/// fails on `/second`, and the retry's `/first` answers `changed`.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_retry_after_a_request_that_failed_partway_does_not_apply_a_committed_callback_again() {
+async fn a_retry_after_a_trigger_failed_gets_the_committed_answer() {
     let outside = failing_partway(answer("changed")).await;
     let survey = Survey::new(&outside, "ask-2");
 
-    let (success, _) = survey.ask_inline().await;
-    assert!(!success, "the second integration failed the request");
+    let first = survey.answer(true).await;
+    assert!(first.success, "{:?}", first.error);
+    assert_eq!(
+        first.trigger_failures.len(),
+        1,
+        "{:?}",
+        first.trigger_failures
+    );
     assert_eq!(
         survey.count("answers").await,
         1,
         "the first callback committed"
     );
 
-    let (success, error) = survey.ask_inline().await;
-    assert!(success, "{error:?}");
+    let retry = survey.answer(true).await;
+    assert!(retry.success, "{:?}", retry.error);
+    assert_eq!(retry.trigger_failures, first.trigger_failures);
     assert_eq!(
-        calls(&outside, "/first").await,
-        2,
-        "the retry ran the first integration again"
+        (
+            calls(&outside, "/first").await,
+            calls(&outside, "/second").await
+        ),
+        (1, 1),
+        "the retry called no service again"
     );
-    assert_eq!(
-        survey.count("answers").await,
-        2,
-        "the committed callback is not applied again; the second applies once"
-    );
-}
-
-/// An integration whose success callback committed, and which fails when a
-/// retry of its request runs it again, keeps the outcome it had: its failure
-/// callback is answered by the committed success, not applied beside it, and
-/// the failure callback's reactions do not start.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_retry_whose_integration_now_fails_keeps_its_committed_outcome() {
-    let outside = failing_partway(ResponseTemplate::new(500)).await;
-    let survey = Survey::new(&outside, "ask-3");
-
-    let (success, _) = survey.ask_inline().await;
-    assert!(!success, "the second integration failed the request");
-    assert_eq!(
-        survey.count("answers").await,
-        1,
-        "the first callback committed"
-    );
-
-    let (success, error) = survey.ask_inline().await;
-    assert!(success, "{error:?}");
-    assert_eq!(
-        calls(&outside, "/first").await,
-        2,
-        "the retry ran the first integration again, and it failed"
-    );
-    assert_eq!(
-        survey.count("misses").await,
-        0,
-        "the failure callback was applied beside the committed success"
-    );
-    assert_eq!(
-        survey.count("answers").await,
-        2,
-        "the second integration answered once"
-    );
-    assert_eq!(
-        survey.count("flags").await,
-        0,
-        "the reaction of a failure callback that never committed started"
-    );
+    assert_eq!(survey.count("answers").await, 1);
+    assert_eq!(survey.count("misses").await, 0);
     assert_eq!(
         survey.count("tallies").await,
-        2,
-        "each committed success reacted once"
+        1,
+        "the committed success reacted once"
     );
+    assert_eq!(survey.count("flags").await, 0);
 }
 
 /// A caller that hangs up does not end its request's integrations: they run

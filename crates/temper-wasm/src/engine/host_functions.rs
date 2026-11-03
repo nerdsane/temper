@@ -72,15 +72,6 @@ where
     }
 }
 
-fn redact_url_for_log(url: &str) -> String {
-    let without_fragment = url.split('#').next().unwrap_or(url);
-    without_fragment
-        .split('?')
-        .next()
-        .unwrap_or(without_fragment)
-        .to_string()
-}
-
 /// Outcome of resolving an entity-state field against a `HostState`.
 ///
 /// Pulled out of the `host_read_field` closure so the pure logic is unit-testable
@@ -1886,7 +1877,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                     headers,
                 };
                 let method_for_log = head.method.clone();
-                let url_for_log = redact_url_for_log(&head.url);
+                let url_for_log = crate::host_trait::telemetry_url(&head.url);
                 let deadline = caller.data().remaining_host_call_timeout();
                 let Ok(result) = run_host_call_with_timeout(
                     "host_http_stream_begin_outbound",

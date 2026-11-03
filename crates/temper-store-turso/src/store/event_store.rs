@@ -100,6 +100,27 @@ impl EventStore for TursoEventStore {
         self.scheduled_action_rows(tenant).await
     }
 
+    async fn list_entity_scheduled_actions(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<Vec<ScheduledActionRecord>, PersistenceError> {
+        self.entity_scheduled_action_rows(tenant, entity_type, entity_id)
+            .await
+    }
+
+    async fn cancel_scheduled_action(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        arm_id: &str,
+    ) -> Result<(), PersistenceError> {
+        self.cancel_scheduled_action_row(tenant, entity_type, entity_id, arm_id)
+            .await
+    }
+
     async fn delete_scheduled_action(
         &self,
         tenant: &str,
@@ -322,10 +343,11 @@ impl EventStore for TursoEventStore {
         }
         if let [append] = appends {
             let sequence_nr = self
-                .append(
+                .append_with_rows(
                     &append.persistence_id,
                     append.expected_sequence,
                     &append.events,
+                    append.commit_rows(),
                 )
                 .await?;
             return Ok(vec![PersistenceAppendResult {
@@ -395,6 +417,38 @@ impl EventStore for TursoEventStore {
         Ok(page)
     }
 
+    async fn first_event_at(
+        &self,
+        persistence_id: &str,
+    ) -> Result<Option<chrono::DateTime<chrono::Utc>>, PersistenceError> {
+        let (tenant, entity_type, entity_id) =
+            parse_persistence_id_parts(persistence_id).map_err(PersistenceError::Storage)?;
+        let conn = self.configured_connection().await?;
+        // One read keeps the saved fact and the journal fallback consistent
+        // with compaction. Both probes use the full record key.
+        let mut rows = conn.query(
+            "SELECT COALESCE(
+                (SELECT first_event_at FROM entity_catalog INDEXED BY sqlite_autoindex_entity_catalog_1
+                 WHERE tenant=?1 AND entity_type=?2 AND entity_id=?3),
+                (SELECT COALESCE(json_extract(payload, '$.timestamp'), json_extract(metadata, '$.timestamp'))
+                 FROM events INDEXED BY idx_events_entity
+                 WHERE tenant=?1 AND entity_type=?2 AND entity_id=?3 AND sequence_nr=1))",
+            params![tenant, entity_type, entity_id]).await.map_err(storage_error)?;
+        let row = rows
+            .next()
+            .await
+            .map_err(storage_error)?
+            .ok_or_else(|| PersistenceError::Storage("missing creation lookup row".into()))?;
+        let saved: Option<String> = row.get(0).map_err(storage_error)?;
+        saved
+            .map(|saved| {
+                chrono::DateTime::parse_from_rfc3339(&saved)
+                    .map(|t| t.with_timezone(&chrono::Utc))
+                    .map_err(|error| PersistenceError::Serialization(error.to_string()))
+            })
+            .transpose()
+    }
+
     #[instrument(skip_all, fields(persistence_id, otel.name = "turso.save_snapshot"))]
     async fn save_snapshot(
         &self,
@@ -427,6 +481,15 @@ impl EventStore for TursoEventStore {
         )
         .await
         .map_err(storage_error)?;
+
+        tx.execute("INSERT INTO entity_projection_delta (tenant, entity_type, entity_id, sequence_nr)
+            SELECT ?1, ?2, ?3, ?4 WHERE NOT EXISTS (
+                SELECT 1 FROM entity_catalog c INDEXED BY idx_entity_catalog_checkpoint LEFT JOIN entity_catalog_counters k
+                    ON k.tenant = c.tenant AND k.entity_type = c.entity_type AND k.entity_id = c.entity_id
+                WHERE c.tenant = ?1 AND c.entity_type = ?2 AND c.entity_id = ?3
+                    AND COALESCE(k.sequence_nr, c.sequence_nr) >= ?4)
+            ON CONFLICT (tenant, entity_type, entity_id) DO UPDATE SET sequence_nr = MAX(sequence_nr, excluded.sequence_nr)",
+            params![tenant, entity_type, entity_id, sequence_nr as i64]).await.map_err(storage_error)?;
 
         let mut segment_rows = tx
             .query(

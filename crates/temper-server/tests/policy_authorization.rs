@@ -69,11 +69,13 @@ fn admin_context() -> SecurityContext {
             role: None,
             acting_for: None,
             agent_type: None,
+            label: None,
             attributes: Default::default(),
         },
         context_attrs: Default::default(),
         correlation_id: "policy-admin-test".to_string(),
         cause: None,
+        credential: None,
     }
 }
 
@@ -243,3 +245,119 @@ async fn add_policy_rule_persists_own_row_without_rewriting_primary() {
         "identical enabled cedar_text must not insert a duplicate row"
     );
 }
+
+const GUARD_PERMIT: &str = r#"permit(principal, action == Action::"Write", resource is Thing);"#;
+const GUARD_V1: &str = r#"forbid(principal, action == Action::"Write", resource is Thing)
+when { principal has role && principal.role == "first-guard" };"#;
+const GUARD_V2: &str = r#"forbid(principal, action == Action::"Write", resource is Thing)
+when { principal has role && principal.role == "second-guard" };"#;
+
+/// Cedar statements in `text`.
+fn statements(text: &str) -> usize {
+    temper_authz::statements::policy_statements(text)
+        .expect("live Cedar parses")
+        .len()
+}
+
+fn writer(role: &str) -> SecurityContext {
+    let mut who = SecurityContext::from_resolved_identity("writer", "customer", None);
+    who.principal.role = Some(role.to_string());
+    who
+}
+
+/// A policy created again, or created with new text under the same id, ends
+/// with exactly the rows' statements live: repeats add no copies, and the
+/// statements the id held before stop deciding at once, not at the next restart.
+#[tokio::test]
+async fn create_policy_replaces_what_its_id_held() {
+    let (state, store, _temp) = policy_state().await;
+    let base = format!("{OPERATOR_POLICY}\n{GUARD_PERMIT}");
+    store
+        .save_policy(TENANT, "base", &base, "system")
+        .await
+        .expect("seed base row");
+    state
+        .authz
+        .reload_tenant_policies(TENANT, &base)
+        .expect("load base");
+    state
+        .tenant_policies
+        .write()
+        .unwrap()
+        .insert(TENANT.to_string(), base.clone());
+
+    let app = build_router(state.clone());
+    let create = |cedar_text: &str| {
+        let body =
+            serde_json::json!({ "policy_id": "guard", "cedar_text": cedar_text }).to_string();
+        request_with_context(
+            "POST",
+            "/api/tenants/default/policies/create",
+            Body::from(body),
+            TENANT,
+            SecurityContext::from_resolved_identity("operator", "operator", None),
+        )
+    };
+    let live = || {
+        state
+            .authz
+            .get_tenant_policy_text(TENANT)
+            .unwrap_or_default()
+    };
+    let refused = |role: &str| {
+        !state
+            .authz
+            .authorize_for_tenant(TENANT, &writer(role), "Write", "Thing", &Default::default())
+            .is_allowed()
+    };
+
+    for _ in 0..3 {
+        let created = app
+            .clone()
+            .oneshot(create(GUARD_V1))
+            .await
+            .expect("create runs");
+        assert_eq!(created.status(), StatusCode::CREATED);
+    }
+    assert_eq!(
+        statements(&live()),
+        statements(&base) + 1,
+        "a repeated create stacks no copies:\n{}",
+        live()
+    );
+    assert!(refused("first-guard"));
+    assert!(!refused("second-guard"));
+
+    let replaced = app
+        .clone()
+        .oneshot(create(GUARD_V2))
+        .await
+        .expect("create runs");
+    assert_eq!(replaced.status(), StatusCode::CREATED);
+    assert!(
+        !refused("first-guard"),
+        "the id's old forbid still decides:\n{}",
+        live()
+    );
+    assert!(refused("second-guard"));
+
+    // What a restart loads: every enabled row, once.
+    let rows = store.load_policies_for_tenant(TENANT).await.expect("rows");
+    let from_rows: usize = rows
+        .iter()
+        .filter(|row| row.enabled)
+        .map(|row| statements(&row.cedar_text))
+        .sum();
+    assert_eq!(
+        statements(&live()),
+        from_rows,
+        "live Cedar is what its rows hold:\n{}",
+        live()
+    );
+}
+
+#[path = "policy_authorization/create_regressions.rs"]
+mod create_regressions;
+
+#[path = "policy_authorization/read_policies.rs"]
+mod read_policies;

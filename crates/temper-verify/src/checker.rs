@@ -3,14 +3,17 @@
 //! This module wraps Stateright's BFS model checker and produces a
 //! `VerificationResult` summarizing the outcome.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use stateright::{Checker, Expectation, Model};
 use temper_spec::predicate::Truth;
 
-use crate::model::ResolvedTransition;
-use crate::model::semantics::{successors, truth};
+use crate::can_reach::{broken_rules, unproved_rules};
+use crate::lost_places::{LostPlace, lost_places};
+use crate::model::semantics::{successors_noting_cuts, truth};
+use crate::model::{ENTRY_RULES, ResolvedTransition, entry_broken};
 use crate::model::{TemperModel, TemperModelAction, TemperModelState};
+use crate::reach::{Graph, Reach};
 
 /// A counterexample discovered during model checking.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -18,13 +21,19 @@ pub struct Counterexample {
     /// The property name that was violated.
     pub property: String,
     /// What is false in the trace's last state: for `Invariants`, the names
-    /// of the invariants false there; for any other property, its name.
+    /// of the invariants false there; for `EntryRules`, the rule its last
+    /// move breaks; for any other property, its name.
     #[serde(default)]
     pub violated: Vec<String>,
     /// The sequence of (state, action) pairs leading to the violation: each
     /// state and the action taken from it, the last state with none. For a
     /// safety property it ends at the first state on the path that breaks it.
     pub trace: Vec<(TemperModelState, Option<TemperModelAction>)>,
+    /// For a broken `can_reach` rule, the places the trace's last state can
+    /// never reach; for a broken `reaches` rule, the places the trace never
+    /// gets to; empty for any other property.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub never_reaches: Vec<String>,
 }
 
 /// The result of running exhaustive model checking.
@@ -40,6 +49,40 @@ pub struct VerificationResult {
     pub dead_transitions: Vec<String>,
     /// Whether the checker completed its exploration (vs. hitting a limit).
     pub is_complete: bool,
+    /// The counters and lists a reachable move takes past the bound they
+    /// are explored to, each with that bound. Those moves are not explored,
+    /// so when this is not empty every property holds only up to these
+    /// bounds: the result is bounded, not proved.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bounded_by: Vec<(String, usize)>,
+    /// Records that can never reach a place another record in the same
+    /// place still can, found only by a whole walk. Worth a look; they
+    /// don't fail the check.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lost_places: Vec<LostPlace>,
+    /// `can_reach` and `reaches` rules the completed walk cannot prove
+    /// because local numeric guards are abstract, and `reaches` rules that
+    /// hold only if a record whose every move is gated on another record
+    /// (or on an untracked value) moves on. These prevent a pass, without asserting
+    /// that a concrete record breaks the rule.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unproved_can_reach: Vec<String>,
+    /// The places a whole walk reached, with what a kept verdict needs to
+    /// stand for a spec that differs only in its silent moves
+    /// ([`TemperModel::is_silent`]). `None` when the walk did not finish.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reached: Option<Reached>,
+}
+
+/// The places a whole walk of a model reached.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Reached {
+    /// Every place a reachable state is in.
+    pub places: Vec<String>,
+    /// The places of reachable states no move but a silent one leaves.
+    pub stuck: Vec<String>,
+    /// The places in `stuck` a silent move leaves.
+    pub left_silently: Vec<String>,
 }
 
 /// Run exhaustive BFS model checking on the given `TemperModel`.
@@ -79,13 +122,7 @@ pub fn check_model(model: &TemperModel) -> VerificationResult {
     let mut counterexamples = Vec::new();
 
     for (property_name, path) in discoveries {
-        // After the time cut every state still queued had no actions, so it
-        // looks like the end of a walk: an `eventually` property found false
-        // there proves nothing. (A state-limit stop leaves the queue as it was.)
-        if cut_by_time && property_name == crate::model::REACHES_TERMINAL {
-            continue;
-        }
-        let trace = first_break(&walked, property_name, path.into_vec());
+        let mut trace = first_break(&walked, property_name, path.into_vec());
         let violated = match trace.last() {
             Some((state, _)) if property_name == "Invariants" => walked
                 .invariants
@@ -93,26 +130,60 @@ pub fn check_model(model: &TemperModel) -> VerificationResult {
                 .filter(|inv| truth(&inv.assert, &walked.var_kinds, state) == Truth::False)
                 .map(|inv| inv.name.clone())
                 .collect(),
+            Some((state, _)) if property_name == ENTRY_RULES => {
+                match entry_broken(&walked, state) {
+                    Some(broken) => {
+                        trace.last_mut().expect("entry-rule path has a pre-state").1 =
+                            Some(broken.action);
+                        trace.push((broken.after, None));
+                        vec![broken.rule.name.clone()]
+                    }
+                    None => vec![property_name.to_string()],
+                }
+            }
             _ => vec![property_name.to_string()],
         };
         counterexamples.push(Counterexample {
             property: property_name.to_string(),
             violated,
             trace,
+            never_reaches: Vec::new(),
         });
     }
 
     // An edge never seen in part of the state space may still be enabled in
     // the rest: dead transitions are named only after a whole exploration.
-    let dead_transitions = if explored_all {
-        find_dead_transitions(model)
-    } else {
-        None
+    let walked = if explored_all { walk(model) } else { None };
+    let is_complete = walked.is_some();
+    let (dead_transitions, bounded_by, lost_places, reached, unproved_reaches) = match walked {
+        Some(w) => {
+            counterexamples.extend(w.broken);
+            (
+                w.dead,
+                w.cut_short.into_iter().collect(),
+                w.lost_places,
+                Some(w.reached),
+                w.unproved_reaches,
+            )
+        }
+        None => Default::default(),
     };
-    let is_complete = dead_transitions.is_some();
-    let dead_transitions = dead_transitions.unwrap_or_default();
-    let all_properties_hold =
-        is_complete && counterexamples.is_empty() && dead_transitions.is_empty();
+    let mut unproved_can_reach = if is_complete {
+        unproved_rules(model)
+    } else {
+        Vec::new()
+    };
+    // A rule the spec's untracked guards already leave unproved is named once.
+    for (rule, why) in unproved_reaches {
+        let named = format!("rule '{rule}' not proved");
+        if !unproved_can_reach.iter().any(|u| u.starts_with(&named)) {
+            unproved_can_reach.push(why);
+        }
+    }
+    let all_properties_hold = is_complete
+        && counterexamples.is_empty()
+        && dead_transitions.is_empty()
+        && unproved_can_reach.is_empty();
 
     VerificationResult {
         states_explored,
@@ -120,6 +191,10 @@ pub fn check_model(model: &TemperModel) -> VerificationResult {
         counterexamples,
         dead_transitions,
         is_complete,
+        bounded_by,
+        lost_places,
+        unproved_can_reach,
+        reached,
     }
 }
 
@@ -130,7 +205,7 @@ pub fn check_model(model: &TemperModel) -> VerificationResult {
 /// it over the earlier one, so the path it returns ends at the last such
 /// state it visited, not the first: on a 23-move break it returned 38 moves.
 /// Cutting at the first failing state gives a path that ends where the
-/// property broke. A liveness (`eventually`) path is returned whole.
+/// property broke.
 fn first_break(
     model: &TemperModel,
     name: &str,
@@ -153,25 +228,54 @@ fn first_break(
     steps
 }
 
-/// The transitions no reachable state enables, or `None` when the model's
-/// time limit ran out before every reachable state was walked.
-fn find_dead_transitions(model: &TemperModel) -> Option<Vec<String>> {
-    let mut visited_states = HashSet::new();
+/// What a walk of every reachable state found.
+struct Walked {
+    /// The transitions no reachable state enables.
+    dead: Vec<String>,
+    /// The counters and lists a reachable move takes past their bound, with it.
+    cut_short: BTreeMap<String, usize>,
+    /// The records that can never reach a place another in theirs can.
+    lost_places: Vec<LostPlace>,
+    /// A path for each `can_reach` or `reaches` rule a record breaks.
+    broken: Vec<Counterexample>,
+    /// Each `reaches` rule that holds only if a record that may wait moves
+    /// on, with why it is not proved.
+    unproved_reaches: Vec<(String, String)>,
+    /// The places reached, and those only a silent move leaves.
+    reached: Reached,
+}
+
+/// Walk every reachable state, or return `None` when the model's time limit
+/// ran out before every reachable state was walked.
+fn walk(model: &TemperModel) -> Option<Walked> {
+    let mut found: HashMap<TemperModelState, u32> = HashMap::new();
+    let mut graph = Graph::default();
     let mut queue = VecDeque::new();
     for init in model.init_states() {
-        if visited_states.insert(init.clone()) {
-            queue.push_back(init);
+        if !found.contains_key(&init) {
+            let at = graph.add(model, &init, None);
+            found.insert(init.clone(), at);
+            queue.push_back((init, at));
         }
     }
 
     let mut covered = vec![false; model.transitions.len()];
+    let mut cut = BTreeMap::new();
+    let silent: Vec<bool> = (0..model.transitions.len())
+        .map(|index| model.is_silent(index))
+        .collect();
+    let mut places = BTreeSet::new();
+    let mut stuck = BTreeSet::new();
 
-    while let Some(state) = queue.pop_front() {
+    while let Some((state, at)) = queue.pop_front() {
         if model.out_of_time() {
             return None;
         }
+        let mut cut_here = BTreeMap::new();
+        let mut to = Vec::new();
+        let mut moves = false;
         for (index, transition) in model.transitions.iter().enumerate() {
-            let next_states = step(model, transition, &state);
+            let next_states = step(model, transition, &state, &mut cut_here);
             if model.out_of_time() {
                 return None;
             }
@@ -179,12 +283,26 @@ fn find_dead_transitions(model: &TemperModel) -> Option<Vec<String>> {
                 continue;
             }
             covered[index] = true;
+            moves |= !silent[index];
             for next in next_states {
-                if visited_states.insert(next.clone()) {
-                    queue.push_back(next);
-                }
+                let next_at = match found.get(&next) {
+                    Some(&next_at) => next_at,
+                    None => {
+                        let next_at = graph.add(model, &next, Some((at, index as u32)));
+                        found.insert(next.clone(), next_at);
+                        queue.push_back((next, next_at));
+                        next_at
+                    }
+                };
+                to.push(next_at);
             }
         }
+        graph.steps_from(at, !cut_here.is_empty(), to);
+        cut.extend(cut_here);
+        if !moves {
+            stuck.insert(state.status.clone());
+        }
+        places.insert(state.status);
     }
 
     let dead = model
@@ -199,15 +317,48 @@ fn find_dead_transitions(model: &TemperModel) -> Option<Vec<String>> {
             }
         })
         .collect();
-    Some(dead)
+    let (lost_places, mut broken) = match Reach::of(model, &graph) {
+        Some(reach) => (
+            lost_places(model, &graph, &reach, &found),
+            broken_rules(model, &graph, &reach, &found),
+        ),
+        None => Default::default(),
+    };
+    let reaches = crate::reaches::check(model, &graph, &found);
+    broken.extend(reaches.broken);
+    let left_silently = stuck
+        .iter()
+        .filter(|place| {
+            model
+                .transitions
+                .iter()
+                .enumerate()
+                .any(|(index, t)| silent[index] && t.from_states.contains(place))
+        })
+        .cloned()
+        .collect();
+    Some(Walked {
+        dead,
+        cut_short: cut,
+        lost_places,
+        broken,
+        unproved_reaches: reaches.unproved,
+        reached: Reached {
+            places: places.into_iter().collect(),
+            stuck: stuck.into_iter().collect(),
+            left_silently,
+        },
+    })
 }
 
 /// The states `transition` reaches from `state`: none when it is not
-/// enabled, one per explored parameter assignment otherwise.
+/// enabled, one per explored parameter assignment otherwise. Adds to `cut`
+/// what a step it leaves out would take past its bound.
 fn step(
     model: &TemperModel,
     transition: &ResolvedTransition,
     state: &TemperModelState,
+    cut: &mut BTreeMap<String, usize>,
 ) -> Vec<TemperModelState> {
     // `transition_enabled` admits a cross-entity gated edge (its guard is a
     // free boolean), so the gated target state is walked, as it is reachable
@@ -215,7 +366,7 @@ fn step(
     if !model.transition_enabled(transition, state) {
         return Vec::new();
     }
-    successors(model, transition, state)
+    successors_noting_cuts(model, transition, state, cut)
         .into_iter()
         .map(|(_, next)| next)
         .collect()

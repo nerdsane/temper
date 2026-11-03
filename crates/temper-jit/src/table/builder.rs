@@ -180,6 +180,12 @@ impl TransitionTable {
                                         .map(|source| (param.name().to_owned(), source))
                                 })
                                 .collect(),
+                            fire_now_in: automaton
+                                .state_timeouts
+                                .iter()
+                                .filter(|timeout| timeout.fire_now_on.contains(&action.name))
+                                .map(|timeout| timeout.state.clone())
+                                .collect(),
                             constraints: action.constraints.clone(),
                         },
                     )
@@ -219,8 +225,10 @@ fn convert_effect(effect: ResolvedEffect) -> Effect {
         ResolvedEffect::AddCounter { var, value } => Effect::AddCounter { var, value },
         ResolvedEffect::SubCounter { var, value } => Effect::SubCounter { var, value },
         ResolvedEffect::SetBool { var, value } => Effect::SetBool { var, value },
+        ResolvedEffect::SetString { var, value } => Effect::SetString { var, value },
         ResolvedEffect::ListAppend { var, value } => Effect::ListAppend { var, value },
         ResolvedEffect::ListRemoveAt { var, index } => Effect::ListRemoveAt { var, index },
+        ResolvedEffect::ListRemove { var, value } => Effect::ListRemove { var, value },
         ResolvedEffect::Dispatch(name) => Effect::Custom(name),
         ResolvedEffect::Schedule {
             action,
