@@ -8,6 +8,7 @@ pub mod custom_effects;
 mod dispatch;
 mod entity_ops;
 mod evolution;
+mod existing_entity;
 mod file_initial_writes;
 mod file_read_blobs;
 mod file_read_projection;
@@ -1523,21 +1524,21 @@ impl ServerState {
         Ok((200, bytes))
     }
 
-    /// Find an entity spec by name across all tenants.
+    /// Find an entity spec by name in one tenant.
     ///
-    /// Returns the owning tenant and the IOA source string on success.
+    /// Returns the IOA source string on success. Callers pass the
+    /// credential-bound tenant: each tenant resolves only its own types, so
+    /// two tenants may define the same type name independently.
     /// Acquires a read lock on the spec registry.
     pub fn find_entity_ioa_source(
         &self,
+        tenant: &temper_runtime::tenant::TenantId,
         entity: &str,
-    ) -> Option<(temper_runtime::tenant::TenantId, String)> {
+    ) -> Option<String> {
         let registry = self.registry.read().unwrap(); // ci-ok: infallible lock
-        for tenant_id in registry.tenant_ids() {
-            if let Some(entity_spec) = registry.get_spec(tenant_id, entity) {
-                return Some((tenant_id.clone(), entity_spec.ioa_source.clone()));
-            }
-        }
-        None
+        registry
+            .get_spec(tenant, entity)
+            .map(|entity_spec| entity_spec.ioa_source.clone())
     }
 
     /// Load aggregated unmet-intent failure groups for one tenant.

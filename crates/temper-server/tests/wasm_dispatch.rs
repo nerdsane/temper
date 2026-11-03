@@ -259,7 +259,7 @@ async fn assert_wasm_authz_denial_artifacts(state: &ServerState, entity_id: &str
     let mut denied_invocation = None;
     for _ in 0..100 {
         let invocations = turso
-            .load_recent_wasm_invocations(1000)
+            .load_recent_wasm_invocations(TenantId::default().as_str(), 1000)
             .await
             .expect("query wasm invocations from Turso");
         denied_invocation = invocations
@@ -811,7 +811,7 @@ async fn composite_result_with_an_undeclared_sub_write_fails_the_integration() {
     let mut refused = None;
     for _ in 0..50 {
         let invocations = turso
-            .load_recent_wasm_invocations(1000)
+            .load_recent_wasm_invocations(TenantId::default().as_str(), 1000)
             .await
             .expect("query wasm invocations");
         refused = invocations

@@ -7,10 +7,12 @@ use serde::Deserialize;
 use temper_authz::AuthenticatedRequestContext;
 use temper_runtime::persistence::PersistenceEnvelope;
 
-use crate::authz::{require_authenticated_context, require_observe_auth};
+use crate::authz::require_authenticated_context;
 use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::entity_actor::{EntityEvent, EntityMsg, EntityResponse, EntityState};
 use crate::state::ServerState;
+
+use super::entity_read::require_existing_entity_read;
 
 /// GET /observe/entities/{entity_type}/{entity_id}/history -- entity event history.
 ///
@@ -41,8 +43,8 @@ pub(crate) async fn handle_get_entity_history(
     Query(params): Query<EntityHistoryParams>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let authenticated = require_authenticated_context(authenticated.as_deref())?;
-    require_observe_auth(&state, authenticated, "read", &entity_type)?;
     let page = HistoryPage::parse(&params)?;
+    require_existing_entity_read(&state, authenticated, &entity_type, &entity_id).await?;
     let tenant = authenticated.tenant().clone();
     let persistence_id = format!("{tenant}:{entity_type}:{entity_id}");
 
@@ -81,6 +83,9 @@ pub(crate) async fn handle_get_entity_history(
             (events, next_before)
         }
     };
+
+    // Decided again after the read, so the decision sees every event returned.
+    require_existing_entity_read(&state, authenticated, &entity_type, &entity_id).await?;
 
     let mut json = serde_json::json!({
         "entity_type": entity_type,

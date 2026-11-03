@@ -31,6 +31,7 @@ pub use read::handle_hints;
 pub use read::handle_metadata;
 pub use read::handle_odata_get;
 pub use read::handle_service_document;
+pub(crate) use read::load_existing_entity_descriptor_body;
 pub(crate) use unavailable_tenant::refuse_unavailable_tenant;
 pub use unavailable_tenant::{tenant_not_ready_response, unavailable_tenant_response};
 pub use write::handle_odata_delete;

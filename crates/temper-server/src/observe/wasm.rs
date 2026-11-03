@@ -359,7 +359,7 @@ pub async fn handle_list_wasm_modules(
     require_observe_auth(&state, authenticated, "read_wasm", "WasmModule")?;
     let tenant_scope = observe_tenant_scope(authenticated);
 
-    // Collect invocation stats via fan-out across all tenant stores.
+    // Invocation stats count only the caller tenant's own runs.
     let invocation_stats: std::collections::BTreeMap<String, (usize, usize, Option<String>)> = {
         let mut stats: std::collections::BTreeMap<String, (usize, usize, Option<String>)> =
             std::collections::BTreeMap::new();
@@ -369,6 +369,7 @@ pub async fn handle_list_wasm_modules(
         for store in store.iter() {
             if let Ok(rows) = store
                 .load_recent_wasm_invocations(
+                    tenant_scope.as_str(),
                     temper_runtime::persistence::WASM_INVOCATIONS_KEPT_PER_TENANT,
                 )
                 .await
@@ -456,7 +457,10 @@ pub async fn handle_list_wasm_invocations(
         .metadata_store_for_tenant(authenticated.tenant().as_str())
         .await;
     for store in store.iter() {
-        match store.load_recent_wasm_invocations(limit as i64).await {
+        match store
+            .load_recent_wasm_invocations(authenticated.tenant().as_str(), limit as i64)
+            .await
+        {
             Ok(rows) => {
                 let filtered: Vec<serde_json::Value> = rows
                     .into_iter()

@@ -5,6 +5,7 @@
 
 mod agents;
 mod entities;
+mod entity_read;
 pub(crate) mod evolution;
 mod history;
 mod metrics;
@@ -276,6 +277,9 @@ pub fn build_observe_router() -> Router<ServerState> {
         .route("/refresh/stream", get(refresh::handle_refresh_stream))
 }
 
+#[cfg(test)]
+#[path = "tenant_scope_test.rs"]
+mod tenant_scope_tests;
 #[cfg(test)]
 #[path = "mod_test.rs"]
 mod tests;

@@ -289,10 +289,15 @@ impl TursoEventStore {
         Ok(())
     }
 
-    /// Load recent WASM invocation log entries (newest first, up to `limit`).
-    #[instrument(skip_all, fields(otel.name = "turso.load_recent_wasm_invocations"))]
+    /// Load one tenant's recent WASM invocation log entries (newest first, up
+    /// to `limit`).
+    ///
+    /// The tenant is bound in the query because several tenants may share
+    /// one database; the limit then counts only that tenant's rows.
+    #[instrument(skip_all, fields(tenant, otel.name = "turso.load_recent_wasm_invocations"))]
     pub async fn load_recent_wasm_invocations(
         &self,
+        tenant: &str,
         limit: i64,
     ) -> Result<Vec<TursoWasmInvocationRow>, PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.load_recent_wasm_invocations");
@@ -302,9 +307,10 @@ impl TursoEventStore {
                 "SELECT tenant, entity_type, entity_id, module_name, trigger_action, \
                         callback_action, success, error, duration_ms, created_at \
                  FROM wasm_invocation_logs \
+                 WHERE tenant = ?1 \
                  ORDER BY created_at DESC \
-                 LIMIT ?1",
-                params![limit],
+                 LIMIT ?2",
+                params![tenant, limit],
             )
             .await
             .map_err(storage_error)?;

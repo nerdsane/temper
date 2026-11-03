@@ -18,6 +18,7 @@ use crate::blobs::hydrate_blob_refs_for_tenant;
 use crate::entity_actor::EntityResponse;
 use crate::state::ServerState;
 
+use super::entity_read::load_authorized_entity_state;
 use super::{EntityInstanceSummary, EventStreamParams};
 
 /// GET /observe/entities -- list active entity instances from the actor registry.
@@ -101,7 +102,6 @@ pub(crate) async fn handle_wait_for_entity_state(
     Query(params): Query<WaitForEntityStateParams>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let authenticated = require_authenticated_context(authenticated.as_deref())?;
-    require_observe_auth(&state, authenticated, "read", &entity_type)?;
     let tenant = authenticated.tenant().clone();
     record_wait_span_identity(&tenant, &entity_type, &entity_id);
 
@@ -131,7 +131,8 @@ pub(crate) async fn handle_wait_for_entity_state(
     tokio::pin!(poll_sleep);
     tokio::pin!(deadline_sleep);
 
-    let entity = load_wait_entity_state(&state, &tenant, &entity_type, &entity_id).await?;
+    let entity =
+        load_authorized_entity_state(&state, authenticated, &entity_type, &entity_id).await?;
     if target_statuses.contains(&entity.state.status) {
         return wait_entity_response(&state, &tenant, &entity, false, "initial_state").await;
     }
@@ -146,14 +147,14 @@ pub(crate) async fn handle_wait_for_entity_state(
                             && change.entity_type == entity_type
                             && change.entity_id == entity_id =>
                     {
-                        let entity = load_wait_entity_state(&state, &tenant, &entity_type, &entity_id).await?;
+                        let entity = load_authorized_entity_state(&state, authenticated, &entity_type, &entity_id).await?;
                         if target_statuses.contains(&entity.state.status) {
                             return wait_entity_response(&state, &tenant, &entity, false, "event").await;
                         }
                     }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        let entity = load_wait_entity_state(&state, &tenant, &entity_type, &entity_id).await?;
+                        let entity = load_authorized_entity_state(&state, authenticated, &entity_type, &entity_id).await?;
                         if target_statuses.contains(&entity.state.status) {
                             return wait_entity_response(&state, &tenant, &entity, false, "lagged").await;
                         }
@@ -164,14 +165,14 @@ pub(crate) async fn handle_wait_for_entity_state(
                 }
             }
             _ = &mut poll_sleep => {
-                let entity = load_wait_entity_state(&state, &tenant, &entity_type, &entity_id).await?;
+                let entity = load_authorized_entity_state(&state, authenticated, &entity_type, &entity_id).await?;
                 if target_statuses.contains(&entity.state.status) {
                     return wait_entity_response(&state, &tenant, &entity, false, "poll").await;
                 }
                 poll_sleep.as_mut().reset(tokio::time::Instant::now() + poll_delay); // determinism-ok: HTTP handler, not actor code
             }
             _ = &mut deadline_sleep => {
-                let entity = load_wait_entity_state(&state, &tenant, &entity_type, &entity_id).await?;
+                let entity = load_authorized_entity_state(&state, authenticated, &entity_type, &entity_id).await?;
                 return wait_entity_response(&state, &tenant, &entity, true, "timeout").await;
             }
         }
@@ -187,18 +188,6 @@ pub(super) fn record_wait_span_identity(
     span.record("tenant", tenant.as_str());
     span.record("entity_type", entity_type);
     span.record("entity_id", entity_id);
-}
-
-async fn load_wait_entity_state(
-    state: &ServerState,
-    tenant: &temper_runtime::tenant::TenantId,
-    entity_type: &str,
-    entity_id: &str,
-) -> Result<EntityResponse, StatusCode> {
-    state
-        .get_tenant_entity_state(tenant, entity_type, entity_id)
-        .await
-        .map_err(|_| StatusCode::NOT_FOUND)
 }
 
 async fn wait_entity_response(
@@ -219,6 +208,10 @@ async fn wait_entity_response(
 }
 
 /// GET /observe/entities/{entity_type}/{entity_id}/events -- replayable SSE stream for one entity.
+///
+/// The read is decided after the replay is taken and again before each live
+/// event, on the entity's state at that moment. The stream ends as soon as the
+/// caller may no longer read the entity or it no longer exists.
 pub(crate) async fn handle_entity_event_stream(
     State(state): State<ServerState>,
     authenticated: Option<Extension<AuthenticatedRequestContext>>,
@@ -227,7 +220,6 @@ pub(crate) async fn handle_entity_event_stream(
     Query(params): Query<EntityEventStreamParams>,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, StatusCode> {
     let authenticated = require_authenticated_context(authenticated.as_deref())?;
-    require_observe_auth(&state, authenticated, "read", &entity_type)?;
     let tenant = authenticated.tenant().clone();
     let since = headers
         .get("last-event-id")
@@ -238,6 +230,7 @@ pub(crate) async fn handle_entity_event_stream(
     let rx = state.entity_observe_tx.subscribe();
     let replay = state.entity_observe_replay(tenant.as_str(), &entity_type, &entity_id, since);
     let replay_high_water = replay.events.last().map(|event| event.seq).unwrap_or(since);
+    load_authorized_entity_state(&state, authenticated, &entity_type, &entity_id).await?;
     // Events after `since` that are no longer buffered are said, never
     // skipped silently: the client must read the entity again.
     let gap = replay.missed.then(|| {
@@ -261,22 +254,42 @@ pub(crate) async fn handle_entity_event_stream(
     let live_tenant = tenant.clone();
     let live_entity_type = entity_type.clone();
     let live_entity_id = entity_id.clone();
-    let live_stream = BroadcastStream::new(rx).filter_map(move |result| match result {
-        Ok(event)
-            if event.tenant == live_tenant.as_str()
-                && event.entity_type == live_entity_type
-                && event.entity_id == live_entity_id
-                && event.seq > replay_high_water =>
-        {
-            let data = serde_json::to_string(&event.data).unwrap_or_default();
-            Some(Ok(Event::default()
-                .id(event.seq.to_string())
-                .event(&event.event_name)
-                .data(data)))
-        }
-        Ok(_) => None,
-        Err(_) => None,
-    });
+    let live_authenticated = authenticated.clone();
+    let live_stream = BroadcastStream::new(rx)
+        .filter_map(move |result| match result {
+            Ok(event)
+                if event.tenant == live_tenant.as_str()
+                    && event.entity_type == live_entity_type
+                    && event.entity_id == live_entity_id
+                    && event.seq > replay_high_water =>
+            {
+                Some(event)
+            }
+            Ok(_) => None,
+            Err(_) => None,
+        })
+        .then(move |event| {
+            let state = state.clone();
+            let authenticated = live_authenticated.clone();
+            async move {
+                load_authorized_entity_state(
+                    &state,
+                    &authenticated,
+                    &event.entity_type,
+                    &event.entity_id,
+                )
+                .await
+                .ok()?;
+                let data = serde_json::to_string(&event.data).unwrap_or_default();
+                Some(Ok::<Event, Infallible>(
+                    Event::default()
+                        .id(event.seq.to_string())
+                        .event(&event.event_name)
+                        .data(data),
+                ))
+            }
+        })
+        .map_while(|event| event);
 
     Ok(Sse::new(replay_stream.chain(live_stream)).keep_alive(KeepAlive::default()))
 }
