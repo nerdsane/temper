@@ -260,8 +260,10 @@ fn agent_ctx_for_composite_wasm_result(
 /// Whether a composite's sub-writes were refused, so the composite failed.
 ///
 /// A refusal is Cedar denying a sub-write, a sub-write's guard or state no
-/// longer allowing it (its target has moved on), a quota, or a target type
-/// with no spec. The kernel checks Cedar and every guard for all sub-writes
+/// longer allowing it (its target has moved on), a quota, a target type
+/// with no spec, or the module's answer breaking the action's contract (a
+/// sub-write the action does not declare, or a malformed list), which is
+/// found before anything is written. The kernel checks Cedar and every guard for all sub-writes
 /// before the first write, and the atomic batch writes all or nothing, so a
 /// refusal there means none of the composite's writes landed. On the
 /// per-write path (no journal, or a sub-write with its own effects), a write
@@ -278,6 +280,7 @@ fn composite_sub_writes_refused(error: &DispatchError) -> bool {
             | DispatchError::Conflict(_)
             | DispatchError::QuotaExceeded(_)
             | DispatchError::Ungoverned(_)
+            | DispatchError::WasmFailed(_)
     )
 }
 
@@ -1327,6 +1330,16 @@ impl crate::state::ServerState {
                 {
                     Ok(consumed) => consumed,
                     Err(error) => {
+                        tracing::warn!(
+                            tenant = %ctx.entity_ref.tenant,
+                            entity_type = ctx.entity_ref.entity_type,
+                            entity_id = ctx.entity_ref.entity_id,
+                            action = ctx.action,
+                            integration = %integration.name,
+                            module = %module_name,
+                            error = %error,
+                            "composite integration result refused"
+                        );
                         let recovery = if composite_sub_writes_refused(&error) {
                             integration.on_failure.clone()
                         } else {

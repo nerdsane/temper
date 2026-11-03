@@ -32,26 +32,31 @@ pub(super) fn has_sub_writes(params: &Value) -> bool {
     params.get("sub_writes").is_some() || params.get("SubWrites").is_some()
 }
 
+// The module's answer breaking the action's contract is the module's failure (`WasmFailed`), found
+// before anything is written, so the integration's `on_failure` may run.
 pub(super) fn parse_sub_writes(params: &Value) -> Result<Vec<CompositeSubWrite>, DispatchError> {
     let raw = params
         .get("sub_writes")
         .or_else(|| params.get("SubWrites"))
         .ok_or_else(|| {
-            DispatchError::Internal(
+            DispatchError::WasmFailed(
                 "Composite integration result must include `sub_writes`/`SubWrites`".to_string(),
             )
         })?;
 
-    serde_json::from_value(raw.clone())
-        .map_err(|e| DispatchError::Internal(format!("Invalid composite sub_writes payload: {e}")))
+    serde_json::from_value(raw.clone()).map_err(|e| {
+        DispatchError::WasmFailed(format!("Invalid composite sub_writes payload: {e}"))
+    })
 }
 
 pub(super) fn validate_sub_writes(
+    entity_type: &str,
+    action: &str,
     metadata: &CompositeActionMetadata,
     sub_writes: &[CompositeSubWrite],
 ) -> Result<(), DispatchError> {
     if !metadata.sub_writes.is_empty() && sub_writes.is_empty() {
-        return Err(DispatchError::Internal(
+        return Err(DispatchError::WasmFailed(
             "Composite action declared sub-writes but none were provided".to_string(),
         ));
     }
@@ -64,8 +69,8 @@ pub(super) fn validate_sub_writes(
 
     for sub_write in sub_writes {
         if !declared.contains(&(sub_write.entity_type.clone(), sub_write.action.clone())) {
-            return Err(DispatchError::Internal(format!(
-                "Composite sub-write {}.{} is not declared by the action contract",
+            return Err(DispatchError::WasmFailed(format!(
+                "Composite sub-write {}.{} is not declared by the action contract of {entity_type}.{action}",
                 sub_write.entity_type, sub_write.action
             )));
         }
