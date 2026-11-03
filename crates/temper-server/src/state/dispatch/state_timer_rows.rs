@@ -378,7 +378,7 @@ impl ServerState {
         if !undated.is_empty() {
             // determinism-ok: the due times of rows an older release wrote go
             // in behind the boot, one low-priority write each.
-            tokio::spawn(date_timer_rows(undated));
+            tokio::spawn(super::overdue_timer_rows::date_timer_rows(undated));
         }
         Ok((armed, overdue))
     }
@@ -440,28 +440,6 @@ impl ServerState {
             }
         }
         declared
-    }
-}
-
-/// Write the due time on each row an older release wrote without one (or
-/// under another budget), so the gauge of timers past due sees it. An update
-/// only: a row whose timer fired and removed it meanwhile stays removed.
-async fn date_timer_rows(rows: Vec<(Arc<dyn StateTimerStore>, StateTimerRecord, String)>) {
-    for (store, row, due_at) in rows {
-        if let Err(error) = store
-            .date_state_timer(
-                &row.tenant,
-                &row.entity_type,
-                &row.entity_id,
-                &row.arm_id,
-                &due_at,
-            )
-            .await
-        {
-            tracing::warn!(tenant = %row.tenant, entity_type = %row.entity_type,
-                entity_id = %row.entity_id, %error,
-                "state timer row's due time not written; the next boot writes it");
-        }
     }
 }
 
