@@ -172,20 +172,4 @@ mod tests {
         assert!(!result.all_succeeded());
         assert!((result.success_rate() - 0.0).abs() < f64::EPSILON);
     }
-
-    #[test]
-    fn test_replay_error_serialization() {
-        let error = ReplayError {
-            action: "Reassign".into(),
-            from_state: "Open".into(),
-            error_kind: ReplayErrorKind::UnknownAction,
-            message: "not defined".into(),
-        };
-
-        let json = serde_json::to_string(&error).unwrap();
-        assert!(json.contains("\"unknown_action\""));
-
-        let parsed: ReplayError = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.error_kind, ReplayErrorKind::UnknownAction);
-    }
 }

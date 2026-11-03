@@ -29,6 +29,21 @@ pub trait SimActorHandler: Send {
     /// Handle a message (action + params) and return the resulting state.
     fn handle_message(&mut self, action: &str, params: &str) -> Result<serde_json::Value, String>;
 
+    /// Entity identity for resolving related records, independent of the scheduler ID.
+    /// Handlers without entity semantics need not provide one.
+    fn entity_identity(&self) -> Option<(&str, &str)> {
+        None
+    }
+
+    /// Refresh related reads from the simulated entities' current statuses.
+    /// Called before action discovery and again at message delivery, so delayed
+    /// messages and callbacks see the status at execution time.
+    fn refresh_related_statuses(
+        &mut self,
+        _statuses: &std::collections::BTreeMap<(String, String), String>,
+    ) {
+    }
+
     /// Current status string (e.g., "Draft", "Submitted").
     fn current_status(&self) -> String;
 

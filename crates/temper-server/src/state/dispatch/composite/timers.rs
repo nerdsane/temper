@@ -4,12 +4,14 @@
 //! goes through `run_post_dispatch_effects`, which cancels the timers the
 //! transition supersedes and arms the ones its state declares. The atomic
 //! batch appends every sub-write's event in one journal write instead, so it
-//! does the same bookkeeping itself once the batch commits: cancel before
-//! waiting for visibility, arm after. Each timer fires as the sub-write's
-//! agent, which is the caller whose action set the composite going.
+//! commits the last timer mutation for each stream with its events. Once
+//! committed, it cancels superseded live timers and arms the committed ones.
+//! Each timer fires as the sub-write's agent, the caller whose action set
+//! the composite going.
 
 use super::*;
 use crate::entity_actor::EntityResponse;
+use crate::state::ServerState;
 use crate::state::dispatch::effects::PostDispatchContext;
 
 /// One staged sub-write on an entity type that declares state timers, with
@@ -21,6 +23,29 @@ pub(super) struct TimedTransition<'a> {
 }
 
 impl TimedTransition<'_> {
+    /// The same durable timer mutation a single dispatch commits. Capture it
+    /// at this transition, before later sub-writes can change the fields.
+    pub(super) fn timer_row(
+        &self,
+        server: &ServerState,
+        tenant: &TenantId,
+    ) -> Option<temper_runtime::persistence::AppendStateTimer> {
+        server.committed_timer_row(
+            tenant,
+            &self.write.entity_type,
+            &crate::entity_actor::entity_rows::RowsInput {
+                state: &self.response.state,
+                event: self
+                    .response
+                    .state
+                    .events
+                    .back()
+                    .expect("staged transition has an event"),
+                caller: Some(&self.agent_ctx),
+            },
+        )
+    }
+
     /// The context the sub-write's own dispatch would hand its post-dispatch
     /// effects.
     fn post_dispatch_context<'c>(&'c self, tenant: &'c TenantId) -> PostDispatchContext<'c> {
@@ -40,13 +65,20 @@ impl TimedTransition<'_> {
 /// The agent a composite sub-write runs as: the composite's caller, under the
 /// sub-write's own idempotency key. Both the atomic batch and the per-write
 /// fallback use it, so a sub-write's timers fire as the same identity on
-/// either path.
+/// either path. Whether the caller could read a record is about that record
+/// alone (`timer_standing`), so the composite's answer is dropped: the
+/// per-write fallback asks again for its own record, and the atomic batch's
+/// timers fire as before.
 pub(super) fn composite_sub_write_agent(
     composite_agent_ctx: &AgentContext,
     write: &PreparedCompositeSubWrite,
 ) -> AgentContext {
     let mut agent = composite_agent_ctx.clone();
-    agent.idempotency_key = Some(write.idempotency_key.clone());
+    agent.idempotency_key = Some(crate::idempotency::IdempotencyKey::Request(
+        write.idempotency_key.clone(),
+    ));
+    agent.read_when_set = None;
+    agent.read_when_set_for = None;
     agent
 }
 
@@ -84,6 +116,11 @@ impl crate::state::ServerState {
                 scheduled_actions: Vec::new(),
                 spawn_requests: Vec::new(),
                 spec_governed: true,
+                refused: false,
+                answered_action: None,
+                trigger_failures: Vec::new(),
+                store_unavailable: false,
+                unrecorded_at: None,
             },
         })
     }

@@ -29,4 +29,7 @@ mod types;
 
 pub use client::{ClientBuilder, TemperClient};
 pub use sse::parse_sse_stream;
-pub use types::{AuditEntry, AuthzResponse, EntityEvent};
+pub use types::{
+    AuditEntry, AuthzActionResponse, AuthzBatchResponse, AuthzRecord, AuthzRecordResponse,
+    AuthzResponse, EntityEvent,
+};

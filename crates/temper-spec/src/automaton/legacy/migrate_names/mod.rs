@@ -6,21 +6,7 @@ mod triggers;
 
 use toml_edit::{Array, DocumentMut, Item, TableLike, Value, value};
 
-/// Sections the current reader knows.
-const SECTIONS: [&str; 12] = [
-    "automaton",
-    "state",
-    "action",
-    "invariant",
-    "liveness",
-    "webhook",
-    "context_entity",
-    "field_invariant",
-    "state_timeout",
-    "key",
-    "vector",
-    "admission",
-];
+use crate::automaton::toml_parser::SECTIONS;
 
 /// Rewrite old value spellings and key names in `doc`. With `drop_unknown`,
 /// keys and sections no reader reads are removed (noted).
@@ -54,9 +40,11 @@ pub(super) fn migrate_names(
     pass.entries(doc, "state_timeout", Pass::state_timeout)?;
     for (section, keys) in [
         ("invariant", &["name", "assert"][..]),
+        ("entry_rule", &["name", "place", "from", "assert"][..]),
         ("field_invariant", &["name", "assert", "message"][..]),
         ("context_entity", &["name", "entity_type", "id_field"][..]),
         ("key", &["name", "properties"][..]),
+        ("group", &["name", "says", "states"][..]),
         (
             "vector",
             &["name", "property", "model_property", "dims", "metric"][..],
@@ -393,6 +381,7 @@ impl Pass<'_> {
                 "on_timeout",
                 "max_occurrences",
                 "reset_on",
+                "fire_now_on",
                 "args",
             ],
         );

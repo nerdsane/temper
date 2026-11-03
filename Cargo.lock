@@ -2367,6 +2367,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
 
 [[package]]
+name = "fallible-streaming-iterator"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
+
+[[package]]
 name = "fancy-regex"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2934,6 +2940,9 @@ name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
+dependencies = [
+ "ahash",
+]
 
 [[package]]
 name = "hashbrown"
@@ -2956,6 +2965,15 @@ dependencies = [
  "allocator-api2 0.2.21",
  "equivalent",
  "foldhash 0.2.0",
+]
+
+[[package]]
+name = "hashlink"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ba4ff7128dee98c7dc9794b6a411377e1404dba1c97deb8d1a55297bd25d8af"
+dependencies = [
+ "hashbrown 0.14.5",
 ]
 
 [[package]]
@@ -3852,6 +3870,7 @@ version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2e99fb7a497b1e3339bc746195567ed8d3e24945ecd636e3619d20b9de9e9149"
 dependencies = [
+ "cc",
  "pkg-config",
  "vcpkg",
 ]
@@ -4564,6 +4583,7 @@ dependencies = [
  "opentelemetry_sdk",
  "prost 0.13.5",
  "reqwest 0.12.28",
+ "serde_json",
  "thiserror 2.0.18",
  "tracing",
 ]
@@ -4574,9 +4594,12 @@ version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "56f8870d3024727e99212eb3bb1762ec16e255e3e6f58eeb3dc8db1aa226746d"
 dependencies = [
+ "base64 0.22.1",
+ "hex",
  "opentelemetry",
  "opentelemetry_sdk",
  "prost 0.13.5",
+ "serde",
  "tonic",
 ]
 
@@ -5870,6 +5893,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusqlite"
+version = "0.32.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7753b721174eb8ff87a9a0e799e2d7bc3749323e773db92e0984debb00019d6e"
+dependencies = [
+ "bitflags 2.11.0",
+ "fallible-iterator 0.3.0",
+ "fallible-streaming-iterator",
+ "hashlink 0.9.1",
+ "libsqlite3-sys",
+ "smallvec",
+]
+
+[[package]]
 name = "rustc-demangle"
 version = "0.1.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6566,7 +6603,7 @@ dependencies = [
  "futures-io",
  "futures-util",
  "hashbrown 0.15.5",
- "hashlink",
+ "hashlink 0.10.0",
  "indexmap 2.13.0",
  "log",
  "memchr",
@@ -7101,6 +7138,7 @@ dependencies = [
  "temper-store-postgres",
  "temper-store-redis",
  "temper-store-turso",
+ "temper-test-resource",
  "temper-transport",
  "temper-verify",
  "temper-wasm",
@@ -7110,6 +7148,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tracing",
+ "tracing-subscriber",
  "url",
  "urlencoding",
  "uuid",
@@ -7194,6 +7233,7 @@ name = "temper-observe"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "futures",
  "log",
  "opentelemetry",
  "opentelemetry-appender-tracing",
@@ -7219,6 +7259,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "chrono",
+ "percent-encoding",
  "serde",
  "serde_json",
  "temper-runtime",
@@ -7270,7 +7311,6 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "temper-authz",
- "temper-codegen",
  "temper-jit",
  "temper-observe",
  "temper-optimize",
@@ -7363,6 +7403,8 @@ dependencies = [
  "libc",
  "lru",
  "opentelemetry",
+ "opentelemetry-appender-tracing",
+ "opentelemetry-otlp",
  "opentelemetry_sdk",
  "p256",
  "percent-encoding",
@@ -7390,6 +7432,7 @@ dependencies = [
  "temper-store-redis",
  "temper-store-sim",
  "temper-store-turso",
+ "temper-test-resource",
  "temper-verify",
  "temper-wasm",
  "tempfile",
@@ -7435,6 +7478,7 @@ dependencies = [
  "sha2 0.10.9",
  "sqlx",
  "temper-runtime",
+ "temper-test-resource",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -7452,6 +7496,7 @@ dependencies = [
  "serde",
  "serde_json",
  "temper-runtime",
+ "temper-test-resource",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
@@ -7477,11 +7522,14 @@ dependencies = [
  "chrono",
  "opentelemetry",
  "reqwest 0.12.28",
+ "rusqlite",
  "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "temper-runtime",
+ "temper-store-turso",
+ "temper-test-resource",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -7492,6 +7540,10 @@ dependencies = [
  "uuid",
  "wiremock",
 ]
+
+[[package]]
+name = "temper-test-resource"
+version = "0.1.0"
 
 [[package]]
 name = "temper-transport"
@@ -7515,7 +7567,10 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "stateright",
+ "temper-authz",
+ "temper-jit",
  "temper-runtime",
  "temper-spec",
  "z3",
@@ -7534,10 +7589,12 @@ dependencies = [
  "futures-util",
  "opentelemetry",
  "opentelemetry_sdk",
+ "proc-macro2",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "syn 2.0.117",
  "temper-observe",
  "thiserror 2.0.18",
  "tokio",

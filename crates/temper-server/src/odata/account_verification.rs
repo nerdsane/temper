@@ -1,6 +1,7 @@
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde_json::Value;
+use temper_authz::SecurityContext;
 use temper_runtime::tenant::TenantId;
 
 use crate::response::odata_error;
@@ -9,29 +10,40 @@ use crate::state::account_verification::CommonsAccountVerificationError;
 
 type AccountVerificationResponse = Box<axum::response::Response>;
 
+/// Verify the authenticated caller before an owner-scoped commons write of
+/// `fields` (create, PATCH, PUT, DELETE).
 pub(super) async fn enforce_commons_account_verified_for_write(
     state: &ServerState,
     tenant: &TenantId,
     entity_type: &str,
     fields: &Value,
+    security_ctx: &SecurityContext,
 ) -> Result<(), AccountVerificationResponse> {
     map_account_verification_error(
         state
-            .enforce_commons_verified_owner_for_write(tenant, entity_type, fields)
+            .enforce_commons_verified_subject(tenant, entity_type, fields, None, security_ctx)
             .await,
     )
 }
 
+/// Verify the authenticated caller before an owner-scoped bound action.
 pub(super) async fn enforce_commons_account_verified_for_action(
     state: &ServerState,
     tenant: &TenantId,
     entity_type: &str,
     current_fields: &Value,
     params: &Value,
+    security_ctx: &SecurityContext,
 ) -> Result<(), AccountVerificationResponse> {
     map_account_verification_error(
         state
-            .enforce_commons_verified_owner_for_action(tenant, entity_type, current_fields, params)
+            .enforce_commons_verified_subject(
+                tenant,
+                entity_type,
+                current_fields,
+                Some(params),
+                security_ctx,
+            )
             .await,
     )
 }

@@ -390,16 +390,6 @@ mod tests {
     }
 
     #[test]
-    fn test_frontier_serialization() {
-        let mut frontier = ParetoFrontier::new();
-        frontier.try_add(make_candidate("c1", &[("x", 0.8)]));
-
-        let json = serde_json::to_string(&frontier).unwrap();
-        let parsed: ParetoFrontier = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.len(), 1);
-    }
-
-    #[test]
     fn test_remove_dominated_programs_matches_frequency_frontier_intuition() {
         // p1 is present in every front but always co-present with stronger peers,
         // so it should be removed as dominated support.

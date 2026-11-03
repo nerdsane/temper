@@ -167,15 +167,24 @@ pub(crate) async fn handle_approve_decision(
         }
     };
 
-    // Validate the generated policy combined with existing enabled policies.
-    let prospective = {
-        let policies = state.tenant_policies.read().unwrap(); // ci-ok: infallible lock
-        let existing = policies.get(&tenant).cloned().unwrap_or_default();
-        if existing.is_empty() {
-            generated_policy.clone()
-        } else {
-            format!("{existing}\n{generated_policy}")
+    // Validate the generated policy combined with existing enabled policies,
+    // as the decision's row: what that row held before leaves.
+    let policy_id = format!("decision:{id}");
+    let prospective = match super::policies::support::live_text_with_entry(
+        &state,
+        &tenant,
+        &policy_id,
+        &generated_policy,
+    )
+    .await
+    {
+        Ok(Some(text)) => text,
+        // The same rule is already this decision's row and live.
+        Ok(None) => {
+            let policies = state.tenant_policies.read().unwrap(); // ci-ok: infallible lock
+            policies.get(&tenant).cloned().unwrap_or_default()
         }
+        Err(refused) => return refused.into_response(),
     };
     if let Err(error) = state.authz.validate_tenant_policies(&prospective) {
         tracing::warn!(%error, "policy validation failed");
@@ -204,7 +213,6 @@ pub(crate) async fn handle_approve_decision(
                 .into_response();
         }
     };
-    let policy_id = format!("decision:{id}");
     let Some(store) = state.metadata_store_for_tenant(&tenant).await else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,

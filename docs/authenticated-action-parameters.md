@@ -46,6 +46,26 @@ Trusted actor messages and replay events are internal runtime interfaces, not
 untrusted request entry points. Service reactions should inherit already-bound
 values using ordinary declared parameters, not attempt to impersonate a caller.
 
+## The agent's label
+
+`source = "authenticated_agent_label"` binds the name a trusted issuer gave the
+calling agent instance (its token's `agent_label` claim), so a record can keep
+who made it after `last_event_label` has moved on:
+
+```toml
+params = [{ name = "author", type = "string", source = "authenticated_agent_label" }]
+```
+
+It follows the same rules as the subject: the caller submits `{}`, a supplied
+value is rejected even when it is true, and a move with no caller (system,
+service, anonymous) is refused. A timer that fires such a move needs a caller
+too. It needs `strict_action_params = true` and a string parameter, and `as` on
+a carry still takes only the subject. A person in person, or an agent whose
+issuer gave it no label, binds an empty string and the move lands: having no
+label says nothing about what a caller may do. The kernel keeps the label away
+from Cedar, but a bound field is an ordinary field of the record, which the
+app's own policies can read like any other.
+
 Regression tests: `cargo test -p temper-server --test authenticated_params` and
 `cargo test -p temper-server --lib authenticated_params`.
 The tests use actual verification results, OData handlers, a local libSQL

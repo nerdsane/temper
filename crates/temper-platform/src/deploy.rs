@@ -241,6 +241,7 @@ impl DeployPipeline {
                     reachable_paths: None,
                     composite_report: None,
                     stopped: None,
+                    kept: None,
                 }
             } else {
                 let cascade = VerificationCascade::from_ioa(&entity.ioa_source)
@@ -313,6 +314,7 @@ impl DeployPipeline {
 
                     match register_result {
                         Ok(()) => {
+                            state.server.spawn_follow_spec_changes();
                             state.broadcast(PlatformEvent::DeployStatus {
                                 tenant: input.tenant_name.clone(),
                                 success: true,

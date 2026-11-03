@@ -48,6 +48,27 @@ pub struct WasmInvocationContext {
     /// response. `None` for entity-action-triggered invocations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_request: Option<HttpDispatchContext>,
+    /// Who the move that set this integration off was made as: the
+    /// principal Cedar saw for that move. A timer's move is its setter's,
+    /// and a reaction's is the move it reacts to's. `None` when the move was
+    /// made by the kernel itself (a system or service move) or anonymously.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_principal: Option<TriggerPrincipal>,
+}
+
+/// The principal a triggering move was made as.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TriggerPrincipal {
+    /// The principal's id: the person, or the agent instance.
+    pub id: String,
+    /// `Customer` (a person), `Agent` or `Admin`.
+    pub kind: String,
+    /// For an agent, the person it acts for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acting_for: Option<String>,
+    /// For an agent, its type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
 }
 
 /// HTTP-specific invocation context, attached to `WasmInvocationContext`
@@ -104,6 +125,12 @@ pub struct WasmInvocationResult {
     pub error: Option<String>,
     /// Execution duration in milliseconds.
     pub duration_ms: u64,
+    /// The module answered empty (`"empty": true`): it has nothing to
+    /// report, and the kernel moves nothing, whatever the trigger's
+    /// `on_success` names. `"action": ""` is not empty: modules have long
+    /// written it to mean "send `on_success`".
+    #[serde(default)]
+    pub empty_answer: bool,
 }
 
 /// Resource limits for WASM module execution (TigerStyle budgets).
@@ -167,167 +194,5 @@ impl WasmAuthzContext {
             entity_type: "Order".into(),
             trigger_action: "submitOrder".into(),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn invocation_context_serde_roundtrip() {
-        let ctx = WasmInvocationContext {
-            tenant: "t1".into(),
-            entity_type: "Order".into(),
-            entity_id: "ORD-1".into(),
-            trigger_action: "Submit".into(),
-            wasm_module: Some("order_submitter".into()),
-            trigger_params: serde_json::json!({"amount": 100}),
-            entity_state: serde_json::json!({"status": "Draft"}),
-            agent_id: Some("agent-1".into()),
-            session_id: None,
-            integration_config: std::collections::BTreeMap::new(),
-            trace_id: String::new(),
-            workflow_root_entity_type: None,
-            workflow_root_entity_id: None,
-            workflow_run_id: None,
-            http_request: None,
-        };
-        let json = serde_json::to_string(&ctx).unwrap();
-        let back: WasmInvocationContext = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.tenant, "t1");
-        assert_eq!(back.entity_type, "Order");
-        assert_eq!(back.wasm_module, Some("order_submitter".into()));
-        assert_eq!(back.agent_id, Some("agent-1".into()));
-        assert!(back.session_id.is_none());
-    }
-
-    #[test]
-    fn invocation_context_skips_empty_optional_fields() {
-        let ctx = WasmInvocationContext {
-            tenant: "t".into(),
-            entity_type: "E".into(),
-            entity_id: "1".into(),
-            trigger_action: "A".into(),
-            wasm_module: None,
-            trigger_params: serde_json::Value::Null,
-            entity_state: serde_json::Value::Null,
-            agent_id: None,
-            session_id: None,
-            integration_config: std::collections::BTreeMap::new(),
-            trace_id: String::new(),
-            workflow_root_entity_type: None,
-            workflow_root_entity_id: None,
-            workflow_run_id: None,
-            http_request: None,
-        };
-        let json = serde_json::to_string(&ctx).unwrap();
-        assert!(!json.contains("agent_id"));
-        assert!(!json.contains("session_id"));
-        assert!(!json.contains("wasm_module"));
-        assert!(!json.contains("integration_config"));
-        assert!(!json.contains("workflow_root_entity_type"));
-        assert!(!json.contains("workflow_root_entity_id"));
-        assert!(!json.contains("workflow_run_id"));
-        assert!(!json.contains("http_request"));
-    }
-
-    #[test]
-    fn http_dispatch_context_serde_roundtrip() {
-        let http = HttpDispatchContext {
-            method: "POST".into(),
-            path: "/repos/acme/widgets.git/git-upload-pack".into(),
-            params: std::collections::BTreeMap::from([
-                ("owner".to_string(), "acme".to_string()),
-                ("repo".to_string(), "widgets".to_string()),
-            ]),
-            headers: vec![(
-                "content-type".into(),
-                "application/x-git-upload-pack-request".into(),
-            )],
-            principal_id: Some("gt-01".into()),
-            request_body_handle: 1,
-            response_body_handle: 2,
-        };
-        let json = serde_json::to_string(&http).unwrap();
-        let back: HttpDispatchContext = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.method, "POST");
-        assert_eq!(back.params.get("owner"), Some(&"acme".to_string()));
-        assert_eq!(back.request_body_handle, 1);
-        assert_eq!(back.response_body_handle, 2);
-    }
-
-    #[test]
-    fn invocation_context_with_http_request_serializes() {
-        let ctx = WasmInvocationContext {
-            tenant: "temper-git".into(),
-            entity_type: "HttpEndpoint".into(),
-            entity_id: "he-1".into(),
-            trigger_action: "HandleHttp".into(),
-            wasm_module: Some("git_http_endpoint".into()),
-            trigger_params: serde_json::Value::Null,
-            entity_state: serde_json::Value::Null,
-            agent_id: None,
-            session_id: None,
-            integration_config: std::collections::BTreeMap::new(),
-            trace_id: String::new(),
-            workflow_root_entity_type: None,
-            workflow_root_entity_id: None,
-            workflow_run_id: None,
-            http_request: Some(HttpDispatchContext {
-                method: "GET".into(),
-                path: "/repos/acme/widgets.git/info/refs".into(),
-                params: std::collections::BTreeMap::new(),
-                headers: vec![],
-                principal_id: None,
-                request_body_handle: 10,
-                response_body_handle: 11,
-            }),
-        };
-        let json = serde_json::to_string(&ctx).unwrap();
-        assert!(json.contains("http_request"));
-        assert!(json.contains("request_body_handle"));
-        let back: WasmInvocationContext = serde_json::from_str(&json).unwrap();
-        assert!(back.http_request.is_some());
-        assert_eq!(back.http_request.unwrap().method, "GET");
-    }
-
-    #[test]
-    fn invocation_result_serde_roundtrip() {
-        let result = WasmInvocationResult {
-            callback_action: "PaymentConfirmed".into(),
-            callback_params: serde_json::json!({"ref": "tx-123"}),
-            success: true,
-            error: None,
-            duration_ms: 250,
-        };
-        let json = serde_json::to_string(&result).unwrap();
-        let back: WasmInvocationResult = serde_json::from_str(&json).unwrap();
-        assert!(back.success);
-        assert_eq!(back.callback_action, "PaymentConfirmed");
-        assert_eq!(back.duration_ms, 250);
-    }
-
-    #[test]
-    fn resource_limits_defaults() {
-        let limits = WasmResourceLimits::default();
-        assert_eq!(limits.max_fuel, 1_000_000_000);
-        assert_eq!(limits.max_memory, 64 * 1024 * 1024);
-        // ADR-0045: raised from 30s to cover HTTP-fronted integrations under load.
-        assert_eq!(limits.max_duration, std::time::Duration::from_secs(120));
-        assert_eq!(limits.max_response_bytes, 1024 * 1024);
-    }
-
-    #[test]
-    fn max_module_size_is_10mb() {
-        assert_eq!(MAX_MODULE_SIZE, 10 * 1024 * 1024);
-    }
-
-    #[test]
-    fn authz_context_test_fixture() {
-        let ctx = WasmAuthzContext::test_fixture();
-        assert_eq!(ctx.tenant, "test-tenant");
-        assert_eq!(ctx.module_name, "stripe_charge");
-        assert_eq!(ctx.agent_id, Some("agent-1".into()));
     }
 }

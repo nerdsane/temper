@@ -26,6 +26,8 @@ to = "Removed"
 hint = "Permanently stop tracking this location."
 
 [[liveness]]
-name = "EventuallyRemoved"
+# An active location can always still be removed. Not `reaches`: tracking
+# can be paused and resumed forever.
+name = "CanBeRemoved"
 from = ["Active"]
-reaches = ["Removed"]
+can_reach = ["Removed"]

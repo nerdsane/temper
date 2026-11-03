@@ -54,12 +54,8 @@ impl TursoEventStore {
     ) -> Result<(), String> {
         let ttl_seconds = ttl.map(|d| d.as_secs() as i64);
         for attempt in 1..=BLOB_STORE_ATTEMPTS {
-            let _write_permit = self
-                .acquire_write_permit("turso.put_blob", WritePriority::Low)
-                .await
-                .map_err(|e| e.to_string())?;
             let conn = self
-                .configured_connection()
+                .write_connection("turso.put_blob", WritePriority::Low)
                 .await
                 .map_err(|e| e.to_string())?;
             let result = match ttl_seconds {
@@ -80,6 +76,9 @@ impl TursoEventStore {
                     .await
                 }
             };
+            // Free the gate before any backoff: a writer waiting must not wait
+            // through this one's sleep.
+            drop(conn);
             match result {
                 Ok(_) => return Ok(()),
                 Err(error) => {
@@ -111,12 +110,8 @@ impl TursoEventStore {
     /// Rows with `expires_at = NULL` (the default) are never touched. See
     /// ADR-0047.
     pub async fn sweep_expired_blobs(&self, max_rows: u64) -> Result<u64, String> {
-        let _write_permit = self
-            .acquire_write_permit("turso.sweep_expired_blobs", WritePriority::Low)
-            .await
-            .map_err(|e| e.to_string())?;
         let conn = self
-            .configured_connection()
+            .write_connection("turso.sweep_expired_blobs", WritePriority::Low)
             .await
             .map_err(|e| e.to_string())?;
         let sql = format!(

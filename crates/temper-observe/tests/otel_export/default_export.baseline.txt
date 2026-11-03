@@ -85,7 +85,7 @@ metric "temper_trace_sampler_configured_rules" scope=temper.observe kind=gauge u
   resource runtime-id = "<masked>"
   resource service.name = "temper-platform"
   point {"rule_kind": "drop_exact"} = 2
-  point {"rule_kind": "reduced_prefix"} = 3
+  point {"rule_kind": "reduced_prefix"} = 2
 metric "temper_trace_sampler_decisions_total" scope=temper.observe kind=sum unit="" description="Trace sampler decisions by bounded rule name and final sampling decision."
   resource runtime-id = "<masked>"
   resource service.name = "temper-platform"

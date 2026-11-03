@@ -1,0 +1,9 @@
+[package]
+name = "temper-test-resource"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Tests that need an outside resource run, or fail in CI when it is missing"
+publish = false
+

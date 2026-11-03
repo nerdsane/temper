@@ -2,6 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
+use sha2::Digest as _;
+use temper_server::state::ServerState;
+
 const MAX_IDENTITY_COMPONENT_BYTES: usize = 128;
 
 pub(super) fn validate_identity_component(label: &str, value: &str) -> Result<(), String> {
@@ -93,6 +96,104 @@ fn cleanup_staged_directory(staged: &Path) -> String {
         Ok(()) => String::new(),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(error) => format!("; failed to clean staged directory: {error}"),
+    }
+}
+
+/// Whose files a Genesis cache directory holds.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum CacheOwner<'a> {
+    /// An install of an app closure into `tenant`.
+    Install {
+        tenant: &'a str,
+        source: InstallSource<'a>,
+    },
+    /// A bundle this registry exports from `registry_tenant`'s Genesis rows.
+    Export { registry_tenant: &'a str },
+    /// A dependency read while resolving a closure in `tenant`.
+    DependencyRead { tenant: &'a str },
+}
+
+/// Where an install's files come from.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum InstallSource<'a> {
+    /// The configured registry, as this registry tenant serves them.
+    Registry(&'a str),
+    /// This process's own Genesis rows in this tenant (`App.Install`).
+    Local(&'a str),
+    /// Files the caller posted to this server (`POST /api/os-apps/{name}/install`).
+    Pushed,
+}
+
+impl CacheOwner<'_> {
+    fn key(&self) -> String {
+        match self {
+            Self::Install {
+                tenant,
+                source: InstallSource::Registry(registry_tenant),
+            } => format!("install\n{tenant}\nregistry\n{registry_tenant}"),
+            Self::Install {
+                tenant,
+                source: InstallSource::Local(source_tenant),
+            } => format!("install\n{tenant}\nlocal\n{source_tenant}"),
+            Self::Install {
+                tenant,
+                source: InstallSource::Pushed,
+            } => format!("install\n{tenant}\npushed"),
+            Self::Export { registry_tenant } => format!("export\n{registry_tenant}"),
+            Self::DependencyRead { tenant } => format!("dependency-read\n{tenant}"),
+        }
+    }
+}
+
+/// The cache directory for one owner's copy of `app_ref`.
+///
+/// Every owner gets its own directory: an install replaces its directory as a
+/// whole, so a directory shared by two tenants' installs of one ref would
+/// hand each tenant whatever the other installed last.
+pub(super) fn genesis_cache_root(
+    state: &ServerState,
+    owner: CacheOwner<'_>,
+    app_ref: &str,
+) -> PathBuf {
+    let root = genesis_cache_base(state);
+    let key = format!("{}\n{app_ref}", owner.key());
+    let digest = format!("{:x}", sha2::Sha256::digest(key.as_bytes()));
+    root.join(format!("{}-{}", sanitize_fragment(app_ref), &digest[..32]))
+}
+
+/// The pre-tenant shared layout, used only for digest-verified recovery.
+/// Delete with the pre-tenant cache migration after existing installs move.
+pub(super) fn legacy_genesis_cache_root(state: &ServerState, app_ref: &str) -> PathBuf {
+    let digest = format!("{:x}", sha2::Sha256::digest(app_ref.as_bytes()));
+    genesis_cache_base(state).join(format!("{}-{}", sanitize_fragment(app_ref), &digest[..16]))
+}
+
+fn genesis_cache_base(state: &ServerState) -> PathBuf {
+    if state.data_dir.as_os_str().is_empty() {
+        std::env::temp_dir().join("temper-genesis-app-cache")
+    } else {
+        state.data_dir.join("genesis-app-cache")
+    }
+}
+
+/// Lowercase `input` and turn each run of other characters into one dash.
+pub(super) fn sanitize_fragment(input: &str) -> String {
+    let mut out = String::new();
+    let mut last_dash = false;
+    for ch in input.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+            last_dash = false;
+        } else if !last_dash {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    let trimmed = out.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "item".to_string()
+    } else {
+        trimmed
     }
 }
 

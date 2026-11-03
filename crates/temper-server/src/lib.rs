@@ -22,6 +22,11 @@ pub mod entity_actor;
 pub mod event_budget_metrics;
 pub mod events;
 pub mod eventual_invariants;
+mod growable_stack;
+#[cfg(feature = "observe")]
+pub mod host_room;
+#[cfg(feature = "observe")]
+pub mod host_turn;
 pub mod http_endpoint;
 pub mod idempotency;
 pub mod identity;
@@ -54,9 +59,10 @@ pub(crate) mod trace_context;
 pub(crate) mod trajectory_outbox;
 pub mod trigger;
 pub mod vector_index;
+pub mod wake;
 pub mod wasm_registry;
 pub mod webhooks;
-pub(crate) mod workflow_tracing;
+pub mod write_health;
 
 // Reads RSS from procfs, which only Linux has.
 #[cfg(all(test, target_os = "linux"))]

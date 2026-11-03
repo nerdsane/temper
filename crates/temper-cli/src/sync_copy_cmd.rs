@@ -15,12 +15,24 @@
 //! - If the stop was raised in error and the remote holds every change:
 //!   `resume` clears it and the next start confirms writes again.
 //!
+//! A restore runs for as long as it keeps writing the file. One that stopped
+//! part way (`status` shows "restoring") needs nothing: the next start moves
+//! the partial file aside, keeps it, and restores again.
+//!
+//! `fetch` downloads the remote into a new path, with TURSO_SYNC_URL and
+//! TURSO_SYNC_AUTH_TOKEN set, the way a start restores it, printing how far it
+//! has got as it goes. It never overwrites (it refuses a path where the file
+//! or any `<path>-*` exists), serves nothing and leaves the remote unchanged.
+//! Run it in place of a start, with the app stopped, then move the fetched
+//! files into place by hand.
+//!
 //! `adopt` moves a database that was never synced onto an empty remote, with
 //! the app stopped and TURSO_SYNC_URL and TURSO_SYNC_AUTH_TOKEN set: the file
 //! is set aside and kept, and its rows are copied into a fresh synced
 //! database, pushed chunk by chunk.
 
 use std::io::Write;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use temper_store_turso::SyncCopy;
@@ -49,6 +61,38 @@ pub enum Action {
         #[arg(long)]
         db: String,
     },
+    /// With the app stopped: download the remote named by TURSO_SYNC_URL and
+    /// TURSO_SYNC_AUTH_TOKEN into a new path, never over an existing file.
+    Fetch {
+        #[arg(long)]
+        db: String,
+    },
+}
+
+/// How often `fetch` prints how far it has got.
+const FETCH_REPORT_EVERY: Duration = Duration::from_secs(30);
+
+fn remote() -> Result<(String, String)> {
+    let url = std::env::var("TURSO_SYNC_URL").context("TURSO_SYNC_URL is required")?;
+    let token =
+        std::env::var("TURSO_SYNC_AUTH_TOKEN").context("TURSO_SYNC_AUTH_TOKEN is required")?;
+    Ok((url, token))
+}
+
+async fn fetch(db: &str) -> Result<String> {
+    let (url, token) = remote()?;
+    let mut fetching = std::pin::pin!(SyncCopy::fetch(db, &url, &token));
+    let mut report = tokio::time::interval(FETCH_REPORT_EVERY);
+    report.tick().await;
+    loop {
+        tokio::select! {
+            fetched = &mut fetching => return Ok(fetched?),
+            _ = report.tick() => {
+                let (written, size) = SyncCopy::restored_bytes(db);
+                writeln!(std::io::stdout(), "fetching: {written} of {size} bytes written")?;
+            }
+        }
+    }
 }
 
 pub async fn run(action: Action) -> Result<()> {
@@ -63,11 +107,10 @@ pub async fn run(action: Action) -> Result<()> {
             SyncCopy::set_aside(&db)?.display()
         ),
         Action::Adopt { db } => {
-            let url = std::env::var("TURSO_SYNC_URL").context("TURSO_SYNC_URL is required")?;
-            let token = std::env::var("TURSO_SYNC_AUTH_TOKEN")
-                .context("TURSO_SYNC_AUTH_TOKEN is required")?;
+            let (url, token) = remote()?;
             temper_store_turso::store::sync_adopt::adopt(&db, &url, &token).await?
         }
+        Action::Fetch { db } => fetch(&db).await?,
     };
     writeln!(std::io::stdout(), "{report}")?;
     Ok(())

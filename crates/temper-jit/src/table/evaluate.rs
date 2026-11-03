@@ -133,15 +133,17 @@ impl TransitionTable {
     /// spurious guard "failure" must not silently drop committed history.
     ///
     /// Returns the effects of the first rule matching `action` whose
-    /// `from_states` admit `current_state` (the same rule the live dispatch
-    /// fired). Returns `None` when no such rule exists (unknown action / from
-    /// state) — the caller then relies solely on the stored `to_status`.
-    pub fn replay_effects(&self, current_state: &str, action: &str) -> Option<&[Effect]> {
+    /// `from_states` admit `from_status`, the status the event stored as its
+    /// start (the same rule the live dispatch fired, while the spec is
+    /// unchanged). Returns `None` when no such rule exists (unknown action /
+    /// from state). Either way the caller sets the status to the event's
+    /// stored `to_status` afterwards.
+    pub fn replay_effects(&self, from_status: &str, action: &str) -> Option<&[Effect]> {
         let indices = self.rule_index.get(action)?;
         for &i in indices {
             let rule = &self.rules[i];
             let state_ok =
-                rule.from_states.is_empty() || rule.from_states.iter().any(|s| s == current_state);
+                rule.from_states.is_empty() || rule.from_states.iter().any(|s| s == from_status);
             if state_ok {
                 return Some(&rule.effects);
             }

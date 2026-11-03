@@ -7,8 +7,8 @@ use temper_runtime::persistence::{
 };
 use temper_server::state::TrajectoryEntry;
 use temper_server::storage::{
-    BackendLabel, BoxedEventStore, QueryPlaneStore, QueryProjectionFieldsRow, StorageStack,
-    TrajectorySink,
+    BackendLabel, BoxedEventStore, QueryPlaneRefused, QueryPlaneStore, QueryProjectionFieldsRow,
+    StorageStack, TrajectorySink,
 };
 use temper_store_turso::TursoEventStore;
 
@@ -37,6 +37,19 @@ impl QueryPlaneStore for RecordingQueryPlane {
         assert_eq!(state["fields"]["title"], "hello");
         assert_eq!(sequence_nr, 7);
         Ok(())
+    }
+
+    async fn refresh_projection(
+        &self,
+        _tenant: &str,
+        _entity_type: &str,
+        _entity_id: &str,
+        _status: &str,
+        _fields: &serde_json::Value,
+        _state: &serde_json::Value,
+        _sequence_nr: u64,
+    ) -> Result<(), PersistenceError> {
+        unreachable!("this stack is never refreshed in the background")
     }
 
     async fn remove_projection(
@@ -139,6 +152,17 @@ impl EventStore for RecordingEventStore {
         Ok(vec![test_envelope(1)])
     }
 
+    async fn read_events_page(
+        &self,
+        persistence_id: &str,
+        before_sequence: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        assert_eq!(persistence_id, "default:Ticket:t-1");
+        assert!(before_sequence.is_none_or(|before| before > 1) && limit > 0);
+        Ok(vec![test_envelope(1)])
+    }
+
     async fn save_snapshot(
         &self,
         persistence_id: &str,
@@ -196,6 +220,8 @@ async fn boxed_event_store_delegates_through_object_safe_adapter() {
                 persistence_id: "default:Ticket:t-1".to_string(),
                 expected_sequence: 0,
                 events: events.clone(),
+                state_timer: None,
+                projection: None,
             }])
             .await
             .expect("append batch through dyn adapter"),
@@ -260,21 +286,65 @@ fn storage_stack_labels_backend_and_exposes_boxed_events() {
         None,
         None,
         None,
-        None,
-        None,
     );
 
     assert_eq!(stack.backend, BackendLabel::Postgres);
     assert!(Arc::ptr_eq(&stack.events.inner(), &events.inner()));
     assert!(stack.platform.is_none());
     assert!(stack.policies.is_none());
-    assert!(stack.query_plane.is_none());
+    assert!(stack.query_plane().is_none());
     assert!(stack.trajectory.is_none());
     assert!(stack.metadata.is_none());
 }
 
+/// A stack reads only the query plane its journal writes in each commit: a
+/// journal that writes no rows, or another store than the journal's, is
+/// refused, so no list read ever meets a row the journal has not written.
 #[tokio::test]
-async fn storage_stack_exposes_query_plane_and_trajectory_capabilities() {
+async fn storage_stack_refuses_a_query_plane_its_journal_does_not_write() {
+    let bare = StorageStack::new(
+        BackendLabel::Postgres,
+        BoxedEventStore::new(RecordingEventStore),
+        None,
+        None,
+        None,
+        None,
+        Some(Arc::new(RecordingTrajectorySink)),
+        None,
+    );
+    let refused = bare
+        .with_query_plane(Arc::new(RecordingQueryPlane))
+        .err()
+        .expect("a journal that writes no rows has no query plane");
+    assert_eq!(
+        refused,
+        QueryPlaneRefused::JournalWritesNoRows {
+            backend: "postgres"
+        }
+    );
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let open = |name: &str| {
+        let url = format!("file:{}", dir.path().join(name).display());
+        async move { TursoEventStore::new(&url, None).await.expect("turso") }
+    };
+    let journal = open("journal.db").await;
+    let other = Arc::new(open("other.db").await) as Arc<dyn QueryPlaneStore>;
+    let stack = StorageStack::from_turso(journal);
+    assert!(stack.query_plane().is_some());
+    let refused = stack
+        .without_query_plane()
+        .with_query_plane(other)
+        .err()
+        .expect("another store than the journal's is refused");
+    assert_eq!(
+        refused,
+        QueryPlaneRefused::NotTheJournal { backend: "turso" }
+    );
+}
+
+#[tokio::test]
+async fn storage_stack_exposes_its_trajectory_sink() {
     let stack = StorageStack::new(
         BackendLabel::Postgres,
         BoxedEventStore::new(RecordingEventStore),
@@ -282,53 +352,9 @@ async fn storage_stack_exposes_query_plane_and_trajectory_capabilities() {
         None,
         None,
         None,
-        Some(Arc::new(RecordingQueryPlane)),
-        None,
         Some(Arc::new(RecordingTrajectorySink)),
         None,
     );
-
-    let query_plane = stack.query_plane.as_ref().expect("query plane");
-    query_plane
-        .upsert_projection(
-            "default",
-            "Ticket",
-            "t-1",
-            "Open",
-            &serde_json::json!({"title": "hello"}),
-            &serde_json::json!({"fields": {"title": "hello"}}),
-            7,
-        )
-        .await
-        .expect("upsert projection");
-    assert_eq!(
-        query_plane
-            .query_field_index("default", "Ticket", "title = ?", vec!["hello".to_string()])
-            .await
-            .expect("query field index"),
-        Some(vec!["t-1".to_string()])
-    );
-    assert_eq!(
-        query_plane
-            .load_projection_fields_many("default", "Ticket", &["t-1".to_string()], &["title"])
-            .await
-            .expect("load projection fields")
-            .expect("projection fields")[0]
-            .fields["title"],
-        Some("hello".to_string())
-    );
-    query_plane
-        .remove_projection("default", "Ticket", "t-1")
-        .await
-        .expect("remove projection");
-    assert_eq!(
-        query_plane
-            .projected_entity_counts_by_tenant()
-            .await
-            .expect("counts"),
-        Some(vec![("default".to_string(), 1)])
-    );
-
     stack
         .trajectory
         .as_ref()
@@ -354,7 +380,7 @@ async fn storage_stack_from_turso_exposes_concrete_capability_handles() {
     assert!(stack.turso.is_some());
     assert!(stack.platform.is_some());
     assert!(stack.policies.is_some());
-    assert!(stack.query_plane.is_some());
+    assert!(stack.query_plane().is_some());
     assert!(stack.trajectory.is_some());
     assert!(stack.metadata.is_some());
 }

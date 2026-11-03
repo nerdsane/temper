@@ -14,9 +14,8 @@ fn keyed_filter_resolves_to_bounded_candidate_on_postgres() {
     };
     use temper_runtime::scheduler::{sim_now, sim_uuid as runtime_sim_uuid};
 
-    let database_url = match std::env::var("DATABASE_URL") {
-        Ok(url) => url,
-        Err(_) => return,
+    let Some(database_url) = temper_test_resource::env_var("DATABASE_URL") else {
+        return;
     };
 
     sqlx::test_block_on(async {
@@ -418,7 +417,7 @@ fn native_plan_pushes_file_lookup_equalities_with_status_ne_recheck() {
         plan.params,
         vec!["Path", "/proofs/live.txt", "WorkspaceId", "ws-1"]
     );
-    assert!(should_try_native_before_catalog_coverage(&request, &plan));
+    assert!(should_try_native_page_first(&request, &plan));
 }
 
 #[tokio::test]
@@ -816,6 +815,9 @@ async fn file_point_lookup_with_status_ne_uses_lossless_equality_candidates() {
         ),
         Err(QueryPlaneReadError::AuthorizationDenied(_)) => {
             panic!("file point lookup should not be denied by read authorization")
+        }
+        Err(QueryPlaneReadError::ReadUnavailable) => {
+            panic!("authoritative read should be available")
         }
         Err(QueryPlaneReadError::InvalidContinuation) => {
             panic!("no $skiptoken was supplied")

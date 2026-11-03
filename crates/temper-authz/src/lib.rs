@@ -4,6 +4,7 @@
 //! authorization decisions on OData operations. Every actor message dispatch
 //! goes through: Request → SecurityContext → Cedar Evaluate → Allow/Deny.
 
+mod cause;
 mod context;
 mod engine;
 mod error;
@@ -11,11 +12,15 @@ mod metrics;
 mod policy_gen;
 pub mod statements;
 
+pub use cause::{MoveCause, ReactionHop, TimerArm, TimerRecord};
 pub use context::{
-    AuthenticatedRequestContext, Principal, PrincipalKind, SecurityContext,
-    is_cedar_authority_context_key,
+    AuthenticatedRequestContext, IssuedCredential, Principal, PrincipalKind, SecurityContext,
+    is_cedar_authority_context_key, platform_keys,
 };
-pub use engine::{AuthzDecision, AuthzEngine, ListReadUniformity, VERIFIED_OPERATOR_WHEN};
+pub use engine::{
+    Asker, Attr, AuthzDecision, AuthzEngine, Cause, Hop, Kind, ListRead, ListReadUniformity, May,
+    Question, RowRule, SendAnalysis, VERIFIED_OPERATOR_WHEN, permitted_resource_types,
+};
 pub use error::{AuthzDenial, AuthzError};
 pub use metrics::init_metrics;
 pub use policy_gen::{

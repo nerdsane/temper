@@ -8,6 +8,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::{ActionKind, Automaton, Effect, FieldInvariant};
 
 mod absorbing;
+mod trigger_args;
+
+pub use trigger_args::lint_trigger_target_args;
 
 /// Severity of a lint finding.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -83,6 +86,12 @@ impl LintFinding {
 /// - parser: syntax and structural parseability
 /// - lint: semantic completeness / consistency
 pub fn lint_automaton(automaton: &Automaton) -> Vec<LintFinding> {
+    lint_automaton_for_type(automaton, &automaton.automaton.name)
+}
+
+/// Run semantic lint checks under the loader's registered entity type name.
+/// Entity-trigger targets use that name; timer targets always stay local.
+pub fn lint_automaton_for_type(automaton: &Automaton, registered_type: &str) -> Vec<LintFinding> {
     let mut findings = Vec::new();
 
     for action in &automaton.actions {
@@ -112,6 +121,7 @@ pub fn lint_automaton(automaton: &Automaton) -> Vec<LintFinding> {
 
     lint_field_invariants(automaton, &mut findings);
     absorbing::lint(automaton, &mut findings);
+    findings.extend(lint_trigger_target_args(automaton, registered_type));
 
     findings
 }
@@ -257,6 +267,9 @@ fn lint_spawn_effect(
     );
     let mut available_params = available_spawn_params(action, parent_snake);
     available_params.extend(copy.iter().cloned());
+    // A param the spawn leaves unset that names one of the child's declared
+    // variables reads as that variable's initial value, so it needs no mapping.
+    available_params.extend(target_automaton.state.iter().map(|var| var.name.clone()));
     lint_spawn_param_mapping(
         entity_name,
         &action.name,

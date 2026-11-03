@@ -95,7 +95,10 @@ fn composite_wasm_result_inherits_generated_dispatch_idempotency() {
     );
 
     assert_eq!(
-        composite_agent.idempotency_key.as_deref(),
+        composite_agent
+            .idempotency_key
+            .as_ref()
+            .map(crate::idempotency::IdempotencyKey::as_str),
         Some("dispatch:default:App:app:PublishNewVersion:one"),
         "composite sub-writes need the parent dispatch idempotency so repeated app version updates get distinct sub-write keys"
     );
@@ -104,12 +107,17 @@ fn composite_wasm_result_inherits_generated_dispatch_idempotency() {
 #[test]
 fn composite_wasm_result_preserves_caller_supplied_idempotency() {
     let mut agent = AgentContext::for_service("version-publisher");
-    agent.idempotency_key = Some("caller-key".to_string());
+    agent.idempotency_key = Some(crate::idempotency::IdempotencyKey::Request(
+        "caller-key".to_string(),
+    ));
 
     let composite_agent = agent_ctx_for_composite_wasm_result(&agent, Some("generated-key"));
 
     assert_eq!(
-        composite_agent.idempotency_key.as_deref(),
+        composite_agent
+            .idempotency_key
+            .as_ref()
+            .map(crate::idempotency::IdempotencyKey::as_str),
         Some("caller-key"),
         "caller idempotency remains authoritative for retries"
     );
@@ -168,7 +176,9 @@ fn llm_model_for_observability_prefers_callback_model() {
         last_snapshot_sequence_nr: 0,
         sequence_nr: 0,
         processed_idempotency_keys: std::collections::BTreeMap::new(),
+        last_event: Default::default(),
         status_clock: Default::default(),
+        spawn_reservations: Default::default(),
     };
     let callback_params = json!({
         "_gen_ai_model": "gpt-5.4",
@@ -209,7 +219,9 @@ fn llm_root_span_stays_on_active_trace() {
         last_snapshot_sequence_nr: 0,
         sequence_nr: 0,
         processed_idempotency_keys: std::collections::BTreeMap::new(),
+        last_event: Default::default(),
         status_clock: Default::default(),
+        spawn_reservations: Default::default(),
     };
     let integration = temper_spec::automaton::Integration {
         name: "provider_caller".to_string(),
@@ -217,7 +229,7 @@ fn llm_root_span_stays_on_active_trace() {
         integration_type: "wasm".to_string(),
         module: Some("provider_caller".to_string()),
         config: std::collections::BTreeMap::new(),
-        on_success: None,
+        on_success: Vec::new(),
         on_failure: None,
         llm: true,
     };
@@ -312,7 +324,9 @@ fn llm_parent_context_records_llm_span_and_dispatch_parent_ids() {
         last_snapshot_sequence_nr: 0,
         sequence_nr: 0,
         processed_idempotency_keys: std::collections::BTreeMap::new(),
+        last_event: Default::default(),
         status_clock: Default::default(),
+        spawn_reservations: Default::default(),
     };
     let (llm_trace_id, llm_span_id) = dispatch_parent.in_scope(|| {
         let llm_span = tracing::info_span!("llm_caller.trace");
@@ -409,7 +423,9 @@ fn llm_parent_context_reuses_existing_llmobs_agent_root() {
         last_snapshot_sequence_nr: 0,
         sequence_nr: 0,
         processed_idempotency_keys: std::collections::BTreeMap::new(),
+        last_event: Default::default(),
         status_clock: Default::default(),
+        spawn_reservations: Default::default(),
     };
 
     let mut callback_params = json!({});
@@ -453,7 +469,9 @@ fn llmobs_tool_parent_prefers_workflow_span_id() {
         last_snapshot_sequence_nr: 0,
         sequence_nr: 0,
         processed_idempotency_keys: std::collections::BTreeMap::new(),
+        last_event: Default::default(),
         status_clock: Default::default(),
+        spawn_reservations: Default::default(),
     };
 
     assert_eq!(
@@ -480,6 +498,7 @@ async fn strict_wasm_callbacks_prepare_generated_metadata_but_preserve_constrain
                         entity_type: "StrictJob",
                         entity_id: "job",
                     },
+                    "fixture",
                     "Complete",
                     params,
                     &agent,

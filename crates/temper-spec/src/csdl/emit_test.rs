@@ -332,3 +332,95 @@ fn schema_alias_survives_parse_emit_and_serialization() {
     let restored: CsdlDocument = serde_json::from_value(legacy).unwrap();
     assert_eq!(restored.schemas[0].alias, None);
 }
+
+/// A CSDL whose `Child.Parent` relation declares `policy` as its delete policy.
+fn csdl_with_delete_policy(policy: &str) -> String {
+    format!(
+        r#"<?xml version="1.0"?>
+    <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+      <edmx:DataServices>
+        <Schema Namespace="Test" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+          <EntityType Name="Parent">
+            <Key><PropertyRef Name="Id"/></Key>
+            <Property Name="Id" Type="Edm.String" Nullable="false"/>
+          </EntityType>
+          <EntityType Name="Child">
+            <Key><PropertyRef Name="Id"/></Key>
+            <Property Name="Id" Type="Edm.String" Nullable="false"/>
+            <Property Name="parent_id" Type="Edm.String" Nullable="false"/>
+            <NavigationProperty Name="Parent" Type="Test.Parent">
+              <ReferentialConstraint Property="parent_id" ReferencedProperty="Id"/>
+              <Annotation Term="Temper.Vocab.Relation.DeletePolicy" String="{policy}"/>
+            </NavigationProperty>
+          </EntityType>
+        </Schema>
+      </edmx:DataServices>
+    </edmx:Edmx>"#
+    )
+}
+
+fn child_parent_policy(doc: &CsdlDocument) -> Option<crate::cross_invariant::DeletePolicy> {
+    let child = doc.schemas[0].entity_type("Child").unwrap();
+    child.navigation_properties[0].delete_policy
+}
+
+#[test]
+fn navigation_delete_policy_survives_emit_and_reparse() {
+    use crate::cross_invariant::DeletePolicy;
+    for (name, policy) in [
+        ("restrict", DeletePolicy::Restrict),
+        ("cascade", DeletePolicy::Cascade),
+        ("none", DeletePolicy::None),
+    ] {
+        let doc = parse_csdl(&csdl_with_delete_policy(name)).unwrap();
+        assert_eq!(child_parent_policy(&doc), Some(policy));
+        let reparsed = parse_csdl(&emit_csdl_xml(&doc)).expect("emitted XML should re-parse");
+        assert_eq!(child_parent_policy(&reparsed), Some(policy), "{name}");
+        let child = reparsed.schemas[0].entity_type("Child").unwrap();
+        assert_eq!(
+            child.navigation_properties[0].referential_constraints[0].property,
+            "parent_id"
+        );
+    }
+}
+
+#[test]
+fn navigation_without_delete_policy_declares_none() {
+    let xml = csdl_with_delete_policy("cascade").replace(
+        r#"<Annotation Term="Temper.Vocab.Relation.DeletePolicy" String="cascade"/>"#,
+        "",
+    );
+    let doc = parse_csdl(&xml).unwrap();
+    assert_eq!(child_parent_policy(&doc), None);
+    assert_eq!(
+        child_parent_policy(&parse_csdl(&emit_csdl_xml(&doc)).unwrap()),
+        None
+    );
+}
+
+#[test]
+fn unknown_or_unimplemented_delete_policy_is_refused() {
+    for name in ["setnull", "Cascade", "orphan"] {
+        let error = parse_csdl(&csdl_with_delete_policy(name))
+            .expect_err("a delete policy the server cannot carry out must not parse");
+        assert!(
+            error.to_string().contains("Relation.DeletePolicy"),
+            "{name}: {error}"
+        );
+    }
+}
+
+#[test]
+fn delete_policy_as_a_string_element_reads_as_the_attribute_does() {
+    use crate::cross_invariant::DeletePolicy;
+    let attribute = r#"<Annotation Term="Temper.Vocab.Relation.DeletePolicy" String="cascade"/>"#;
+    let element = r#"<Annotation Term="Temper.Vocab.Relation.DeletePolicy"><String>cascade</String></Annotation>"#;
+    let xml = csdl_with_delete_policy("cascade").replace(attribute, element);
+    let doc = parse_csdl(&xml).expect("the String element form of a delete policy parses");
+    assert_eq!(child_parent_policy(&doc), Some(DeletePolicy::Cascade));
+
+    let collection = r#"<Annotation Term="Temper.Vocab.Relation.DeletePolicy"><Collection><String>cascade</String></Collection></Annotation>"#;
+    let error = parse_csdl(&csdl_with_delete_policy("cascade").replace(attribute, collection))
+        .expect_err("a Collection is not a delete policy, even one of one String");
+    assert!(error.to_string().contains("must be a String"), "{error}");
+}

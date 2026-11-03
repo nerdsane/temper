@@ -18,6 +18,7 @@ use crate::secrets::template::resolve_secret_templates;
 use temper_runtime::scheduler::{sim_now, sim_uuid};
 use temper_runtime::tenant::TenantId;
 
+use super::owed_writes::OwedMove;
 use super::{
     WasmDispatchMode, WasmDispatchRequest, WasmEntityRef, record_workflow_span_attrs, retry,
 };
@@ -189,7 +190,8 @@ impl crate::state::ServerState {
             .workflow_run_id
             .clone()
             .unwrap_or_else(|| format!("{entity_type}:{entity_id}"));
-        let span = tracing::info_span!(
+        let span = crate::trace_context::runtime_work_span!(
+            crate::trace_context::cause(),
             "dispatch.background_adapter_integrations",
             workflow.root_entity_type = %workflow_root_entity_type,
             workflow.root_entity_id = %workflow_root_entity_id,
@@ -279,6 +281,9 @@ impl crate::state::ServerState {
         };
 
         let mut last_response: Option<EntityResponse> = None;
+        // Triggers on one action are independent: one that fails is kept, and
+        // the triggers after it still run.
+        let mut failures: Vec<String> = Vec::new();
 
         for effect_name in req.custom_effects {
             let integration = integrations
@@ -289,20 +294,26 @@ impl crate::state::ServerState {
                 continue;
             };
 
-            if let Some(resp) = self
+            match self
                 .dispatch_single_adapter_integration(
                     &ctx,
                     &integration,
                     req.entity_state,
                     req.action_params,
                 )
-                .await?
+                .await
             {
-                last_response = Some(resp);
+                Ok(Some(resp)) => last_response = Some(resp),
+                Ok(None) => {}
+                Err(error) => failures.push(error),
             }
         }
 
-        Ok(last_response)
+        if failures.is_empty() {
+            Ok(last_response)
+        } else {
+            Err(failures.join("; "))
+        }
     }
 
     #[instrument(skip_all, fields(otel.name = "dispatch.dispatch_single_adapter_integration", integration = %integration.name))]
@@ -398,18 +409,24 @@ impl crate::state::ServerState {
         };
 
         if result.success {
-            let callback_action = integration
-                .on_success
-                .clone()
-                .or_else(|| result.callback_action.clone());
-            let Some(callback_action) = callback_action else {
-                return Ok(None);
+            let named: Vec<String> = result.callback_action.clone().into_iter().collect();
+            let answers = if integration.on_success.is_empty() {
+                named
+            } else {
+                integration.on_success.clone()
             };
             let callback_params = normalize_success_params(result);
+            let Some(callback_action) = self
+                .choose_answer(ctx.entity_ref, &answers, &callback_params)
+                .await
+            else {
+                return Ok(None);
+            };
             return self
                 .dispatch_adapter_callback(
                     ctx.entity_ref,
-                    &callback_action,
+                    &integration.name,
+                    callback_action,
                     callback_params,
                     ctx.agent_ctx,
                     ctx.mode,
@@ -484,10 +501,13 @@ impl crate::state::ServerState {
             let outcome = retry::ask_with_backoff::<_, EntityResponse, _>(
                 &actor,
                 || EntityMsg::Action {
+                    caller: None,
                     name: "Revoke".to_string(),
                     params: serde_json::json!({}),
                     related: BTreeMap::new(),
-                    idempotency_key: Some(idempotency_key.clone()),
+                    idempotency_key: Some(crate::idempotency::IdempotencyKey::Request(
+                        idempotency_key.clone(),
+                    )),
                     expected_authorization_precondition: None,
                 },
                 &policy,
@@ -551,6 +571,7 @@ impl crate::state::ServerState {
 
         self.dispatch_adapter_callback(
             ctx.entity_ref,
+            &integration.name,
             &callback_action,
             params,
             ctx.agent_ctx,
@@ -563,12 +584,18 @@ impl crate::state::ServerState {
     async fn dispatch_adapter_callback(
         &self,
         entity_ref: WasmEntityRef<'_>,
+        integration: &str,
         callback_action: &str,
         callback_params: serde_json::Value,
         agent_ctx: &AgentContext,
         mode: WasmDispatchMode,
     ) -> Result<Option<EntityResponse>, String> {
-        let callback_ctx = match agent_ctx.for_callback() {
+        let callback_ctx = match agent_ctx.for_callback(
+            entity_ref.entity_type,
+            entity_ref.entity_id,
+            callback_action,
+            integration,
+        ) {
             Ok(context) => context,
             Err(error) => {
                 return self
@@ -576,7 +603,6 @@ impl crate::state::ServerState {
                     .await;
             }
         };
-        let agent_ctx = &callback_ctx;
         let callback_params = match self.prepare_generated_action_params(
             entity_ref.tenant,
             entity_ref.entity_type,
@@ -590,61 +616,15 @@ impl crate::state::ServerState {
                     .await;
             }
         };
-        match mode {
-            WasmDispatchMode::Inline => {
-                let resp = super::wasm::dispatch_callback_action_boxed(
-                    self,
-                    crate::state::dispatch::DispatchCommand {
-                        tenant: entity_ref.tenant,
-                        entity_type: entity_ref.entity_type,
-                        entity_id: entity_ref.entity_id,
-                        action: callback_action,
-                        params: callback_params,
-                        agent_ctx,
-                        await_integration: true,
-                        await_reactions: true,
-                    },
-                )
-                .await
-                .map_err(|e| e.to_string())?;
-                if !resp.success {
-                    self.record_generated_callback_refusal(
-                        entity_ref,
-                        callback_action,
-                        resp.error.as_deref().unwrap_or("callback rejected"),
-                    );
-                }
-                Ok(Some(resp))
-            }
-            WasmDispatchMode::Background => {
-                let callback_ctx =
-                    AgentContext::for_service_inheriting("platform-dispatch", agent_ctx);
-                let response = self
-                    .dispatch_tenant_action(
-                        entity_ref.tenant,
-                        entity_ref.entity_type,
-                        entity_ref.entity_id,
-                        callback_action,
-                        callback_params,
-                        &callback_ctx,
-                    )
-                    .await
-                    .map_err(|e| {
-                        let msg =
-                            format!("failed to dispatch adapter callback '{callback_action}': {e}");
-                        tracing::error!(callback = %callback_action, error = %e, "{msg}");
-                        msg
-                    })?;
-                if !response.success {
-                    self.record_generated_callback_refusal(
-                        entity_ref,
-                        callback_action,
-                        response.error.as_deref().unwrap_or("callback rejected"),
-                    );
-                }
-                Ok(None)
-            }
-        }
+        let sent = OwedMove {
+            tenant: entity_ref.tenant.clone(),
+            entity_type: entity_ref.entity_type.to_string(),
+            entity_id: entity_ref.entity_id.to_string(),
+            action: callback_action.to_string(),
+            params: callback_params,
+            agent_ctx: callback_ctx,
+        };
+        self.send_answer(sent, mode, "adapter").await
     }
 
     /// Mint a platform credential for adapter execution if the entity has an `agent_type_id`.

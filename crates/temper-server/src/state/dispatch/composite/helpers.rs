@@ -13,22 +13,18 @@ pub(super) fn synthetic_initial_state(
     )
 }
 
-/// The error for a sub-write that answered unsuccessfully. The target records
-/// the sub-write's key only when the write commits. A committed write can still
-/// answer unsuccessfully (its query projection failed afterwards); the target
-/// changed, so that answer is not a refusal.
+/// The error for a sub-write that answered unsuccessfully. Only a refusal
+/// (nothing was written) is a conflict. A write whose storage failed may have
+/// landed, and a committed write can still answer unsuccessfully (its query
+/// projection failed afterwards), so neither is a refusal.
 pub(super) fn sub_write_failure(
     response: &crate::entity_actor::EntityResponse,
-    idempotency_key: &str,
     error: String,
 ) -> DispatchError {
-    if response
-        .state
-        .has_processed_idempotency_key(idempotency_key)
-    {
-        DispatchError::Internal(error)
-    } else {
+    if response.refused {
         DispatchError::Conflict(error)
+    } else {
+        DispatchError::Internal(error)
     }
 }
 
@@ -78,11 +74,8 @@ pub(super) fn validate_sub_writes(
     Ok(())
 }
 
-pub(super) fn table_has_cross_entity_guards_for_action(
-    table: &TransitionTable,
-    action: &str,
-) -> bool {
-    !table.guard_related_refs(action).is_empty()
+pub(super) fn table_reads_related_records(table: &TransitionTable, action: &str) -> bool {
+    !table.related_refs(action).is_empty()
 }
 
 pub(super) fn composite_sub_write_uses_parent_gate(
@@ -279,8 +272,8 @@ pub(super) fn composite_parent_idempotency(
     agent_ctx: &AgentContext,
     callback_params: &Value,
 ) -> String {
-    if let Some(key) = agent_ctx.idempotency_key.as_deref() {
-        return key.to_string();
+    if let Some(key) = agent_ctx.idempotency_key.as_ref() {
+        return key.as_str().to_string();
     }
 
     let mut hasher = Sha256::new();
@@ -358,12 +351,46 @@ pub(super) fn composite_envelope(
     })
 }
 
+/// Whether an atomic batch that answered with a concurrency violation was
+/// written anyway. A store that retries a write whose answer was lost reports
+/// the landed write as a concurrency violation (the Turso store does). A batch
+/// lands whole or not at all, so its first journal settles it: it holds the
+/// batch's first event exactly when the batch landed.
+pub(super) async fn composite_batch_landed(
+    store: &crate::storage::BoxedEventStore,
+    appends: &[PersistenceAppend],
+) -> Result<bool, DispatchError> {
+    let Some((first, event)) = appends
+        .first()
+        .and_then(|append| append.events.first().map(|event| (append, event)))
+    else {
+        return Ok(false);
+    };
+    let stored = store
+        .read_events(&first.persistence_id, first.expected_sequence)
+        .await
+        .map_err(|e| {
+            DispatchError::Internal(format!(
+                "failed to read {} after a composite batch concurrency violation: {e}",
+                first.persistence_id
+            ))
+        })?;
+    Ok(stored
+        .iter()
+        .any(|stored| stored.metadata.event_id == event.metadata.event_id))
+}
+
 pub(super) fn composite_batch_persistence_error(error: PersistenceError) -> DispatchError {
     match error {
         PersistenceError::ConcurrencyViolation { .. } => {
             DispatchError::Conflict(format!("composite batch persistence conflict: {error}"))
         }
-        PersistenceError::Serialization(_) | PersistenceError::Storage(_) => {
+        PersistenceError::Storage(_)
+        | PersistenceError::OutcomeUnknown(_)
+        | PersistenceError::StorageFull { .. } => {
+            DispatchError::StoreUnavailable(format!("composite batch persistence failed: {error}"))
+        }
+        PersistenceError::Serialization(_) => {
             DispatchError::Internal(format!("composite batch persistence failed: {error}"))
         }
         PersistenceError::EventTooLarge { .. } => DispatchError::QuotaExceeded(error.to_string()),

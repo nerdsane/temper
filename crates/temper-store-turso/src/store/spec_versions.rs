@@ -8,10 +8,11 @@
 
 use std::collections::BTreeMap;
 
-use crate::driver::{Connection, params};
+use crate::driver::params;
 use temper_runtime::persistence::{PersistenceError, storage_error};
 use tracing::instrument;
 
+use super::instrumentation::InstrumentedConnection;
 use super::{TursoEventStore, TursoSpecRow, write_gate::WritePriority};
 use crate::metrics::TursoQueryTimer;
 
@@ -64,7 +65,7 @@ impl SavedSpecVersion {
 
 impl TursoEventStore {
     pub(super) async fn load_saved_spec_versions(
-        conn: &Connection,
+        conn: &InstrumentedConnection,
     ) -> Result<Vec<SavedSpecVersion>, PersistenceError> {
         let mut rows = conn
             .query(
@@ -114,10 +115,9 @@ impl TursoEventStore {
         if versions.is_empty() && removed.is_empty() {
             return Ok(true);
         }
-        let _write_permit = self
-            .acquire_write_permit("turso.commit_spec_versions", WritePriority::High)
+        let conn = self
+            .write_connection("turso.commit_spec_versions", WritePriority::High)
             .await?;
-        let conn = self.configured_connection().await?;
         let tx = conn.begin_immediate().await.map_err(storage_error)?;
         for (entity_type, content_hash, csdl_xml) in versions {
             let promoted = tx
@@ -173,10 +173,9 @@ impl TursoEventStore {
     #[instrument(skip_all, fields(otel.name = "turso.delete_uncommitted_specs"))]
     pub async fn delete_uncommitted_specs(&self) -> Result<usize, PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.delete_uncommitted_specs");
-        let _write_permit = self
-            .acquire_write_permit("turso.delete_uncommitted_specs", WritePriority::High)
+        let conn = self
+            .write_connection("turso.delete_uncommitted_specs", WritePriority::High)
             .await?;
-        let conn = self.configured_connection().await?;
         let mut saved: BTreeMap<(String, String), SavedSpecVersion> =
             Self::load_saved_spec_versions(&conn)
                 .await?

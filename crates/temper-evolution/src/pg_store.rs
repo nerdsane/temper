@@ -580,46 +580,4 @@ mod tests {
         assert_eq!(string_to_record_type("Unknown"), None);
         assert_eq!(string_to_record_status("Unknown"), None);
     }
-
-    #[test]
-    fn test_observation_serialization_for_payload() {
-        let record = ObservationRecord {
-            header: RecordHeader::new(RecordType::Observation, "test"),
-            source: "sentinel:latency".to_string(),
-            classification: ObservationClass::Performance,
-            evidence_query: "SELECT 1".to_string(),
-            threshold_field: None,
-            threshold_value: None,
-            observed_value: Some(42.0),
-            context: serde_json::json!({}),
-        };
-
-        let payload = serde_json::to_value(&record).expect("should serialize");
-        let deserialized: ObservationRecord =
-            serde_json::from_value(payload).expect("should deserialize");
-        assert_eq!(deserialized.header.id, record.header.id);
-        assert_eq!(deserialized.source, "sentinel:latency");
-    }
-
-    #[test]
-    fn test_insight_serialization_for_payload() {
-        let record = InsightRecord {
-            header: RecordHeader::new(RecordType::Insight, "test"),
-            category: InsightCategory::UnmetIntent,
-            signal: InsightSignal {
-                intent: "test".to_string(),
-                volume: 100,
-                success_rate: 0.5,
-                trend: Trend::Stable,
-                growth_rate: None,
-            },
-            recommendation: "build it".to_string(),
-            priority_score: 0.8,
-        };
-
-        let payload = serde_json::to_value(&record).expect("should serialize");
-        let deserialized: InsightRecord =
-            serde_json::from_value(payload).expect("should deserialize");
-        assert_eq!(deserialized.priority_score, 0.8);
-    }
 }

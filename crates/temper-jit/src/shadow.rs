@@ -138,6 +138,7 @@ mod tests {
             action_contracts: Default::default(),
             initial_values: Default::default(),
             composite_actions: Default::default(),
+            invariants: Vec::new(),
             rule_index: Default::default(),
         };
         table.rebuild_index();

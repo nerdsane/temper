@@ -1,43 +1,25 @@
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::IntoResponse;
-use serde_json::Value;
 use temper_authz::SecurityContext;
 use temper_runtime::tenant::TenantId;
 
 use crate::response::odata_error;
 use crate::state::ServerState;
+use crate::state::account_verification::commons_subject;
 
-pub(super) fn owner_id_from_fields(fields: &Value) -> Option<String> {
-    first_non_empty_string(
-        fields,
-        &[
-            "ChildOwnerId",
-            "OwnerId",
-            "OwnerAccountId",
-            "AccountId",
-            "owner_id",
-            "ownerAccountId",
-            "accountId",
-        ],
-    )
-}
-
-pub(super) fn owner_id_from_action(fields: &Value, params: &Value) -> Option<String> {
-    owner_id_from_fields(params).or_else(|| owner_id_from_fields(fields))
-}
-
+/// Spend one commons write token from the authenticated caller's own bucket.
+/// Owner fields in the request or the row do not choose the bucket.
 pub(super) async fn enforce_commons_write_rate_limit(
     state: &ServerState,
     tenant: &TenantId,
     entity_type: &str,
-    owner_id: Option<String>,
     security_context: &SecurityContext,
 ) -> Result<(), axum::response::Response> {
     if !state.commons_guardrails_enabled(tenant) || rate_limit_exempt_entity(entity_type) {
         return Ok(());
     }
 
-    let owner_id = owner_id.unwrap_or_else(|| security_context.principal.id.clone());
+    let owner_id = commons_subject(security_context);
     if owner_id.trim().is_empty() || owner_id == "anonymous" {
         return Ok(());
     }
@@ -75,16 +57,4 @@ pub(super) async fn enforce_commons_write_rate_limit(
 
 fn rate_limit_exempt_entity(entity_type: &str) -> bool {
     matches!(entity_type, "Owner" | "RateLimit")
-}
-
-fn first_non_empty_string(fields: &Value, names: &[&str]) -> Option<String> {
-    for name in names {
-        if let Some(value) = fields.get(*name).and_then(|v| v.as_str()) {
-            let trimmed = value.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
-        }
-    }
-    None
 }

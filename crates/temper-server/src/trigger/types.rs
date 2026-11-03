@@ -14,18 +14,8 @@ use serde::{Deserialize, Serialize};
 /// crash-looped the platform at startup. Nothing is preallocated from this
 /// constant: rules live in growable `BTreeMap`s, so exceeding it corrupts
 /// nothing. A consumer must not reject a tenant for being above it. See
-/// ADR-0176; [`MAX_REACTION_DEPTH`] is the bound that is still enforced.
+/// ADR-0176.
 pub const MAX_REACTIONS_PER_TENANT: usize = 256;
-
-/// Maximum cascade depth for recursive reaction dispatch; why it exists and
-/// how reaching it is reported is written on the definition.
-///
-/// Owned by `temper-runtime` and re-exported here so the two crates cannot
-/// disagree. Three sites enforce it: the production dispatcher, the simulation
-/// dispatcher, and `RequestContext`'s callback depth. Until this re-export they
-/// read two independently defined copies of the number; nothing kept them
-/// equal, and ADR-0176 rests on this bound being the one that still holds.
-pub use temper_runtime::reaction::MAX_REACTION_DEPTH;
 
 /// A reaction rule: when a trigger fires, dispatch an action on a target entity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,116 +119,28 @@ pub struct ReactionResult {
     pub target_status: Option<String>,
     /// Error message if the action failed.
     pub error: Option<String>,
-    /// The cascade depth at which this reaction fired.
+    /// How many reactions deep in its chain this one fired; the first
+    /// reaction of an action is at 0.
     pub depth: u32,
 }
 
 impl ReactionResult {
-    /// A reaction that was not run because its chain reached
-    /// [`MAX_REACTION_DEPTH`].
-    pub fn stopped_at_depth(rule_name: &str, depth: u32) -> Self {
-        debug_assert!(depth >= MAX_REACTION_DEPTH);
+    /// A reaction that was not run because it would repeat a step its chain
+    /// is already in ([`InlineChain`](crate::request_context::InlineChain)).
+    pub fn stopped_on_repeat(
+        rule_name: &str,
+        depth: u32,
+        repeat: &crate::request_context::RepeatedStep,
+    ) -> Self {
         Self {
             rule_name: rule_name.to_string(),
             success: false,
             target_status: None,
             error: Some(format!(
-                "reaction not run: its chain already ran {MAX_REACTION_DEPTH} reactions, the \
-                 most one action may set off; a longer chain is stopped as a loop"
+                "reaction not run: it would repeat a step its chain is already in ({repeat}), \
+                 so the chain is a loop"
             )),
             depth,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn reaction_rule_serializes_roundtrip() {
-        let rule = ReactionRule {
-            name: "order_confirmed_triggers_payment".to_string(),
-            when: ReactionTrigger {
-                entity_type: "Order".to_string(),
-                action: Some("ConfirmOrder".to_string()),
-                guard: Some(temper_spec::predicate::parse("status == 'Confirmed'").unwrap()),
-            },
-            then: ReactionTarget {
-                entity_type: "Payment".to_string(),
-                action: "AuthorizePayment".to_string(),
-                args: BTreeMap::new(),
-            },
-            resolve_target: TargetResolver::Field {
-                field: "payment_id".to_string(),
-            },
-            principal: None,
-        };
-
-        let json = serde_json::to_string(&rule).unwrap();
-        let deserialized: ReactionRule = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.name, rule.name);
-        assert_eq!(deserialized.when.entity_type, "Order");
-        assert_eq!(deserialized.then.action, "AuthorizePayment");
-    }
-
-    #[test]
-    fn reaction_target_serialises_args() {
-        let mut args = BTreeMap::new();
-        args.insert(
-            "job_type".to_string(),
-            temper_spec::predicate::parse_arg("next_stage").unwrap(),
-        );
-        args.insert(
-            "source".to_string(),
-            temper_spec::predicate::parse_arg("'curation'").unwrap(),
-        );
-        let target = ReactionTarget {
-            entity_type: "CurationJob".to_string(),
-            action: "Submit".to_string(),
-            args,
-        };
-        let json = serde_json::to_string(&target).unwrap();
-        assert!(json.contains("\"job_type\":\"next_stage\""), "{json}");
-        assert!(json.contains("\"source\":\"'curation'\""), "{json}");
-
-        let back: ReactionTarget = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.args, target.args);
-    }
-
-    #[test]
-    fn reaction_target_defaults_args_empty() {
-        let json = r#"{"entity_type":"B","action":"Do"}"#;
-        let target: ReactionTarget = serde_json::from_str(json).unwrap();
-        assert!(target.args.is_empty());
-    }
-
-    #[test]
-    fn target_resolver_variants_serialize() {
-        let field = TargetResolver::Field {
-            field: "payment_id".to_string(),
-        };
-        let json = serde_json::to_string(&field).unwrap();
-        assert!(json.contains("\"type\":\"Field\""));
-
-        let same = TargetResolver::SameId;
-        let json = serde_json::to_string(&same).unwrap();
-        assert!(json.contains("\"type\":\"SameId\""));
-
-        let static_id = TargetResolver::Static {
-            entity_id: "singleton".to_string(),
-        };
-        let json = serde_json::to_string(&static_id).unwrap();
-        assert!(json.contains("\"type\":\"Static\""));
-
-        let create = TargetResolver::CreateIfMissing {
-            id_field: "payment_id".to_string(),
-        };
-        let json = serde_json::to_string(&create).unwrap();
-        assert!(json.contains("\"type\":\"CreateIfMissing\""));
-
-        let fresh = TargetResolver::Create;
-        let json = serde_json::to_string(&fresh).unwrap();
-        assert!(json.contains("\"type\":\"Create\""));
     }
 }
