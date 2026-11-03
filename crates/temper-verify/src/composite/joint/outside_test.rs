@@ -151,8 +151,13 @@ fn an_invariant_a_reaction_from_outside_the_scope_breaks_is_broken() {
     // names Ask and Box, not Push.
     let rule = "[[invariant]]\nname = \"rule\"\nassert = \"status == 'Done' => Box[Id].status == 'Full'\"\n";
     // The walk sends that reaction with any sender, so it walks once more
-    // with Push in the scope, where sure moves alone break the rule.
-    let result = invariant(&[&ask(false, rule), BOX, &push(false)], POLICIES);
+    // with Push in the scope, where sure moves alone break the rule. Cedar
+    // must let the reaction through: under `POLICIES` alone the runtime
+    // refuses it, and the rule holds.
+    let policies = format!(
+        "{POLICIES}\npermit(principal, action == Action::\"Done\", resource) when {{ context has via && context.via == \"reaction\" }};"
+    );
+    let result = invariant(&[&ask(false, rule), BOX, &push(false)], &policies);
     let text = result.to_string();
     let JointOutcome::Broken { path } = &result.outcome else {
         panic!("expected broken, got {text}");
