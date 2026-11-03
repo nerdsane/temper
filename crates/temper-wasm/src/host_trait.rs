@@ -1811,14 +1811,8 @@ impl WasmHost for ProductionWasmHost {
                 };
                 let req_body = reqwest::Body::wrap_stream(body_stream);
 
-                // `send` resolves on the response head, which a server may send
-                // before it has read the request body. A failed send or a
-                // non-success head means nothing will read the rest, so close
-                // the reader before publishing the head: the guest's next write
-                // fails instead of waiting forever. After a success head the
-                // reader stays open for as long as the server reads, and closes
-                // when the exchange ends; closing it here would cut the body
-                // short and the server would see a shorter, well-formed request.
+                // `send` resolves on the response head, possibly before the server read the body: a success head keeps
+                // the reader open until the exchange ends; anything else closes it so the guest's next write fails.
                 let send_result = redirects
                     .send(
                         &client,
@@ -1873,7 +1867,6 @@ impl WasmHost for ProductionWasmHost {
                 tracing::Span::current().record("response_bytes", response_bytes);
                 tracing::Span::current()
                     .record("duration_ms", started.elapsed().as_millis() as u64);
-                // The exchange is over, so nothing reads further request body.
                 let _ = streams.close(bridge_req).await;
                 let _ = streams.close(bridge_resp).await;
             }
