@@ -7521,6 +7521,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "opentelemetry",
+ "opentelemetry_sdk",
  "reqwest 0.12.28",
  "rusqlite",
  "rustls",
