@@ -6,7 +6,9 @@ use temper_server::storage::StorageStack;
 use temper_spec::csdl::parse_csdl;
 use temper_store_turso::TursoEventStore;
 
-use super::{EarlierOperatorKeys, bootstrap_installed_apps, bootstrap_tenants};
+use super::super::installed_apps::bootstrap_installed_apps;
+use super::super::later::Later;
+use super::{EarlierOperatorKeys, bootstrap_tenants};
 
 #[tokio::test]
 async fn agent_bootstrap_keeps_specs_restored_into_default() {
@@ -36,7 +38,7 @@ async fn agent_bootstrap_keeps_specs_restored_into_default() {
         &[("Note", NOTE_IOA)],
     );
 
-    bootstrap_tenants(&state, &[], EarlierOperatorKeys::Keep).await;
+    bootstrap_tenants(&state, &[], EarlierOperatorKeys::Keep, &own_only()).await;
 
     let registry = state.registry.read().unwrap();
     let config = registry
@@ -59,6 +61,7 @@ async fn every_booted_tenant_has_the_http_endpoint_type() {
         &state,
         &[("app-tenant".to_string(), String::new())],
         EarlierOperatorKeys::Keep,
+        &own_only(),
     )
     .await;
 
@@ -94,10 +97,10 @@ async fn a_boot_that_retires_earlier_operator_keys_revokes_the_previous_key() {
     let tenant = TenantId::new("default");
     let mut state = PlatformState::new(None);
     state.api_token = Some(OLD_KEY.to_string());
-    bootstrap_tenants(&state, &[], EarlierOperatorKeys::Keep).await;
+    bootstrap_tenants(&state, &[], EarlierOperatorKeys::Keep, &own_only()).await;
 
     state.api_token = Some(NEW_KEY.to_string());
-    bootstrap_tenants(&state, &[], EarlierOperatorKeys::Retire).await;
+    bootstrap_tenants(&state, &[], EarlierOperatorKeys::Retire, &own_only()).await;
 
     let resolver = IdentityResolver::new();
     assert!(
@@ -158,7 +161,7 @@ async fn bootstrap_installed_apps_replays_persisted_app_when_registry_specs_are_
         .server
         .set_storage_stack(StorageStack::from_turso(turso));
 
-    bootstrap_installed_apps(&state, &[])
+    bootstrap_installed_apps(&state, &[], &mut own_only())
         .await
         .expect("bootstrap should replay persisted apps");
 
@@ -173,4 +176,9 @@ async fn bootstrap_installed_apps_replays_persisted_app_when_registry_specs_are_
     );
 
     let _ = std::fs::remove_file(&db_path);
+}
+
+/// A boot's own tenants, with no tenant left for after it serves yet.
+fn own_only() -> Later {
+    Later::new(Later::own_tenants(&[], None))
 }

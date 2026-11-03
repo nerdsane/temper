@@ -485,6 +485,55 @@ impl ServerState {
     ///
     /// Startup recovery now restores registry entries only; compilation is
     /// deferred until first invoke via [`ensure_wasm_module_cached`].
+    /// Recover `tenant`'s WASM modules from the store into the registry, for
+    /// a tenant restored after the server serves; [`Self::load_wasm_modules`]
+    /// does every tenant's at once.
+    pub async fn load_tenant_wasm_modules(&self, tenant: &str) -> Result<usize, String> {
+        let hash = |bytes: &[u8], stored: &str| {
+            if stored.is_empty() {
+                temper_wasm::WasmEngine::hash_module(bytes)
+            } else {
+                stored.to_string()
+            }
+        };
+        let modules: Vec<(String, String)> = if let Some(turso) =
+            self.turso_store_for_tenant(tenant).await
+        {
+            turso
+                .load_all_wasm_modules(tenant)
+                .await
+                .map_err(|e| format!("failed to load WASM modules from turso: {e}"))?
+                .into_iter()
+                .map(|row| {
+                    (
+                        row.module_name.clone(),
+                        hash(&row.wasm_bytes, &row.sha256_hash),
+                    )
+                })
+                .collect()
+        } else if let Some(platform) = self.storage_stack.as_ref().and_then(|s| s.platform.clone())
+        {
+            platform
+                .load_all_wasm_modules(tenant)
+                .await?
+                .into_iter()
+                .map(|row| {
+                    (
+                        row.module_name.clone(),
+                        hash(&row.wasm_bytes, &row.sha256_hash),
+                    )
+                })
+                .collect()
+        } else {
+            return Ok(0);
+        };
+        let tenant_id = temper_runtime::tenant::TenantId::new(tenant);
+        for (module_name, hash) in &modules {
+            self.register_wasm_module(&tenant_id, module_name, hash);
+        }
+        Ok(modules.len())
+    }
+
     pub async fn load_wasm_modules(&self) -> Result<usize, String> {
         let Some(stack) = self.storage_stack.as_ref() else {
             return Ok(0);

@@ -8,6 +8,7 @@ use temper_runtime::persistence::{PersistenceError, storage_error};
 use tracing::Instrument;
 use tracing::field::Empty;
 
+use super::outcome::{PushOutcome, record_changes_pushed};
 use super::{
     CopyState, DriverError, PUSH_ATTEMPT_TIMEOUT, REMOTE_STATEMENT_FAILED, SyncCopy, files,
 };
@@ -121,6 +122,13 @@ impl SyncCopy {
             covered - self.inner.pushed.load(Ordering::Acquire),
         );
         let remote_had = self.remote_had().await?;
+        // The engine sends only the changes above the remote's record, so
+        // with none above it the push sends nothing for the remote to
+        // confirm, and its success is not counted (`temper_turso_sync_pushes`).
+        // A refusal or no answer still is: it says the remote cannot be
+        // written. Changes above the record count as sent even if the engine
+        // leaves some out; Temper sets none of its filters that would.
+        let sends = self.row_changes_between(remote_had, covered).await?;
         // Until it is known to have succeeded, a push may have committed on
         // the remote past the engine's own record: set before it starts, so
         // a caller that gives up on it (an answer's time limit) leaves it set.
@@ -133,16 +141,22 @@ impl SyncCopy {
             Ok(Ok(())) => {
                 self.inner.unsure.store(false, Ordering::Release);
                 self.inner.timeouts.store(0, Ordering::Release);
+                if sends > 0 {
+                    PushOutcome::Confirmed.record();
+                    record_changes_pushed(sends.unsigned_abs());
+                }
             }
             Ok(Err(error)) => {
                 self.inner.timeouts.store(0, Ordering::Release);
                 let message = error.to_string();
+                PushOutcome::of_engine_error(&message).record();
                 if message.contains(REMOTE_STATEMENT_FAILED) {
                     self.after_refusal(remote_had, &message).await;
                 }
                 return Err(storage_error(error));
             }
             Err(_) => {
+                PushOutcome::Failed.record();
                 self.inner.timeouts.fetch_add(1, Ordering::AcqRel);
                 return Err(PersistenceError::Storage(format!(
                     "turso.sync push timed out after {} s",
@@ -177,10 +191,18 @@ impl SyncCopy {
             return Ok(hint);
         }
         // A remote that does not answer this counts like a push that timed
-        // out, so a hung remote still ends in the restart.
+        // out, so a hung remote still ends in the restart. A push that stops
+        // here counts failed in `temper_turso_sync_pushes`: this read's errors
+        // carry no code to tell a refusal apart, and a refusal of a read is
+        // rare, since a blocked org refuses writes, not reads.
         match tokio::time::timeout(REMOTE_READ_TIMEOUT, self.inner.remote.last_change()).await {
-            Ok(read) => Ok(hint.max(read.map_err(storage_error)?)),
+            Ok(Ok(read)) => Ok(hint.max(read)),
+            Ok(Err(error)) => {
+                PushOutcome::Failed.record();
+                Err(storage_error(error))
+            }
             Err(_) => {
+                PushOutcome::Failed.record();
                 self.inner.timeouts.fetch_add(1, Ordering::AcqRel);
                 Err(PersistenceError::Storage(format!(
                     "turso.sync the remote did not say how far it got within {} s",
@@ -267,6 +289,28 @@ impl SyncCopy {
                 "SELECT COALESCE(SUM(COALESCE(LENGTH(before), 0) + COALESCE(LENGTH(after), 0) \
                  + COALESCE(LENGTH(updates), 0)), 0) FROM turso_cdc WHERE change_id > ?1",
                 crate::driver::params![after],
+            )
+            .await
+            .map_err(storage_error)?;
+        let Some(row) = rows.next().await.map_err(storage_error)? else {
+            return Ok(0);
+        };
+        row.get::<i64>(0).map_err(storage_error)
+    }
+
+    /// The row changes the change log numbers above `after`, up to `through`.
+    ///
+    /// The numbers can't be subtracted for this. Each commit ends with a row
+    /// of its own, which the engine does not send and the remote's record
+    /// stops short of, so the newest number sits above the record even with
+    /// nothing left to send (a commit row's `change_type` is 2 or null).
+    async fn row_changes_between(&self, after: i64, through: i64) -> Result<i64, PersistenceError> {
+        let conn = self.connect().await.map_err(storage_error)?;
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM turso_cdc \
+                 WHERE change_id > ?1 AND change_id <= ?2 AND change_type IN (-1, 0, 1)",
+                crate::driver::params![after, through],
             )
             .await
             .map_err(storage_error)?;

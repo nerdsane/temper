@@ -143,7 +143,17 @@ pub(crate) async fn handle_approve_decision(
         return resp;
     }
 
-    let generated_policy = decision.generate_policy_from_matrix(&scope);
+    let generated_policy = match decision.generate_policy_from_matrix(&scope) {
+        Ok(text) => text,
+        Err(error) => {
+            tracing::warn!(%error, "decision cannot be rendered as a policy");
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("Decision cannot be rendered as a policy: {error}"),
+            )
+                .into_response();
+        }
+    };
     let evolution_record_id = decision.evolution_record_id.clone();
     let pending_decision_json = match serde_json::to_string(&decision) {
         Ok(json) => json,

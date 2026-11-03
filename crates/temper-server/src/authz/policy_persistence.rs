@@ -115,26 +115,33 @@ pub fn record_policy_change(state: &ServerState, tenant: &str, policy_id: &str, 
 ///
 /// Called on tenant registration and during server boot via `recover_cedar_policies`.
 /// Silently degrades (logs a warning) if durable storage is unavailable or the table is empty.
-#[instrument(skip_all, fields(tenant, otel.name = "authz.load_and_activate_tenant_policies"))]
 pub async fn load_and_activate_tenant_policies(state: &ServerState, tenant: &str) {
+    if let Err(e) = try_load_and_activate_tenant_policies(state, tenant).await {
+        tracing::warn!(
+            error = %e,
+            tenant,
+            "failed to load Cedar policies from durable `policies` table"
+        );
+    }
+}
+
+/// [`load_and_activate_tenant_policies`], answering Err when the `policies`
+/// table could not be read: the tenant's policies are then unknown, not
+/// empty, and a tenant restored after the server serves stays starting.
+/// Policies that do not parse are logged, as there.
+#[instrument(skip_all, fields(tenant, otel.name = "authz.load_and_activate_tenant_policies"))]
+pub async fn try_load_and_activate_tenant_policies(
+    state: &ServerState,
+    tenant: &str,
+) -> Result<(), String> {
     let Some(store) = state.policy_store() else {
-        return;
+        return Ok(());
     };
 
-    let rows = match store.load_policies_for_tenant(tenant).await {
-        Ok(rows) => rows,
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                tenant,
-                "failed to load Cedar policies from durable `policies` table"
-            );
-            return;
-        }
-    };
+    let rows = store.load_policies_for_tenant(tenant).await?;
 
     if rows.is_empty() {
-        return;
+        return Ok(());
     }
 
     // Build named policy entries for per-policy PolicyId assignment.
@@ -156,7 +163,7 @@ pub async fn load_and_activate_tenant_policies(state: &ServerState, tenant: &str
             tenant,
             "failed to reload Cedar engine after loading durable policies"
         );
-        return;
+        return Ok(());
     }
 
     // Also update the in-memory text cache for backward compat (GET endpoint,
@@ -175,4 +182,5 @@ pub async fn load_and_activate_tenant_policies(state: &ServerState, tenant: &str
         enabled = enabled_count,
         "Cedar policies activated from durable `policies` table"
     );
+    Ok(())
 }

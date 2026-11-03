@@ -32,7 +32,7 @@ use blob_materialization::{
 };
 use bundles::{
     GenesisBundleBudget, MAX_GENESIS_BUNDLE_APPS, MAX_GENESIS_BUNDLE_FILE_BYTES,
-    collect_bundle_files, materialize_registry_app_closure_via_bundle,
+    collect_bundle_files, is_generated_component, materialize_registry_app_closure_via_bundle,
 };
 #[cfg(test)]
 use bundles::{safe_bundle_relative_path, write_bundle_app};
@@ -50,8 +50,10 @@ use registry::{RegistryUrl, registry_client};
 pub(crate) use restore::installed_version_files;
 use restore::rollback_to_prior;
 pub use restore::{
-    CacheFetchSummary, CacheFetches, GenesisCacheRecovery, restore_genesis_app_cache_roots,
-    restore_genesis_registry_cache_roots, start_genesis_registry_cache_recovery,
+    CacheFetchSummary, CacheFetches, GenesisCacheRecovery, PlannedCacheRoot, plan_app_cache_roots,
+    restore_genesis_app_cache_roots, restore_genesis_registry_cache_roots,
+    restore_planned_cache_roots, start_genesis_registry_cache_recovery,
+    start_registry_cache_recovery_of,
 };
 use written::Written;
 
@@ -1304,6 +1306,7 @@ pub async fn export_genesis_registry_bundle_for(
             &app.repository_id,
             &app.version_hash,
             &app_dir,
+            TreeSelection::Source,
             &mut materialization_budget,
         )
         .await?;
@@ -1391,7 +1394,7 @@ async fn resolve_genesis_app_closure(
         }
         if audience == BundleAudience::Anonymous {
             // Before materialize_commit_tree, which writes this repository's
-            // content to the cache in order to read its manifest.
+            // manifest to the cache in order to read it.
             refuse_unless_repository_is_public(state, tenant, &app).await?;
         }
         let cache_root = genesis_cache_root(
@@ -1413,6 +1416,7 @@ async fn resolve_genesis_app_closure(
             &app.repository_id,
             &app.version_hash,
             &app_dir,
+            TreeSelection::Manifest,
             &mut materialization_budget,
         )
         .await?;
@@ -1459,6 +1463,7 @@ async fn materialize_app_closure(
             &app.repository_id,
             &app.version_hash,
             &app_dir,
+            TreeSelection::Everything,
             &mut materialization_budget,
         )
         .await?;
@@ -1640,6 +1645,7 @@ async fn materialize_commit_tree(
     repository_id: &str,
     version_hash: &str,
     app_dir: &Path,
+    selection: TreeSelection,
     budget: &mut GenesisBundleBudget,
 ) -> Result<BTreeSet<String>, String> {
     let commit_id = validate_git_object_id(version_hash)?;
@@ -1670,6 +1676,7 @@ async fn materialize_commit_tree(
         repository_id,
         &tree_sha,
         staged.path(),
+        selection,
         budget,
     )
     .await?;
@@ -1683,6 +1690,7 @@ async fn materialize_tree(
     repository_id: &str,
     tree_sha: &str,
     dir: &Path,
+    selection: TreeSelection,
     budget: &mut GenesisBundleBudget,
 ) -> Result<BTreeSet<String>, String> {
     let mut written = BTreeSet::new();
@@ -1706,6 +1714,9 @@ async fn materialize_tree(
         .map_err(|error| format!("read Genesis tree {current_tree}: {error}"))?;
         for entry in parse_tree_entries(git_object_body(&canonical, "tree")?)? {
             validate_tree_entry_name(&entry.name)?;
+            if !selection.keeps(depth, &entry) {
+                continue;
+            }
             let path = current_dir.join(&entry.name);
             let entry_depth = depth
                 .checked_add(1)
@@ -1757,6 +1768,30 @@ async fn materialize_tree(
         }
     }
     Ok(written)
+}
+
+/// Which entries of a Genesis tree a reader fetches and writes to disk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TreeSelection {
+    /// Every entry. A direct install may load a prebuilt module from
+    /// `target/` when the app ships no packaged copy beside it.
+    Everything,
+    /// Everything a bundle can carry: generated directories are skipped
+    /// while walking, so their objects are never fetched.
+    Source,
+    /// Only the root `app.toml`, which is all a dependency read needs.
+    Manifest,
+}
+
+impl TreeSelection {
+    /// `depth` is the depth of the tree that holds `entry`; the root is 0.
+    fn keeps(self, depth: usize, entry: &TreeEntry) -> bool {
+        match self {
+            Self::Everything => true,
+            Self::Source => !is_generated_component(std::ffi::OsStr::new(&entry.name)),
+            Self::Manifest => depth == 0 && !entry.is_tree() && entry.name == "app.toml",
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1931,6 +1966,37 @@ mod tests {
         assert!(!entries[0].is_tree());
         assert_eq!(entries[1].name, "specs");
         assert!(entries[1].is_tree());
+    }
+
+    #[test]
+    fn tree_selections_fetch_only_what_their_reader_uses() {
+        let entry = |mode: &str, name: &str| TreeEntry {
+            mode: mode.to_string(),
+            name: name.to_string(),
+            object_sha: "1".repeat(40),
+        };
+        let manifest = entry("100644", "app.toml");
+        let specs = entry("40000", "specs");
+        let target = entry("40000", "target");
+        let git = entry("40000", ".git");
+
+        for kept in [&manifest, &specs, &target, &git] {
+            assert!(TreeSelection::Everything.keeps(0, kept));
+        }
+        assert!(TreeSelection::Source.keeps(0, &manifest));
+        assert!(TreeSelection::Source.keeps(2, &specs));
+        assert!(!TreeSelection::Source.keeps(0, &target));
+        assert!(
+            !TreeSelection::Source.keeps(2, &target),
+            "nested build output"
+        );
+        assert!(!TreeSelection::Source.keeps(0, &git));
+        assert!(TreeSelection::Manifest.keeps(0, &manifest));
+        assert!(
+            !TreeSelection::Manifest.keeps(1, &manifest),
+            "only the root manifest"
+        );
+        assert!(!TreeSelection::Manifest.keeps(0, &specs));
     }
 
     #[test]

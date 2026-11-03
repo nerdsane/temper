@@ -926,7 +926,6 @@ impl ServerState {
     /// `created_by` creates: a new actor writes its `Created` event as that
     /// caller's, so a first state with a timer commits the timer's row with
     /// it.
-    #[instrument(skip_all, fields(otel.name = "entity.get_or_spawn_tenant_actor_with_fields", tenant = %tenant, entity_type, entity_id))]
     fn get_or_spawn_tenant_actor_created_by(
         &self,
         tenant: &TenantId,
@@ -935,6 +934,47 @@ impl ServerState {
         initial_fields: serde_json::Value,
         created_by: Option<&AgentContext>,
     ) -> Result<ActorRef<EntityMsg>, String> {
+        self.get_or_spawn_actor_in(
+            tenant,
+            entity_type,
+            entity_id,
+            initial_fields,
+            created_by,
+            false,
+        )?
+        .ok_or_else(|| format!("entity '{entity_id}' was not started"))
+    }
+
+    /// The actor of an entity the index lists, started if it is not live, or
+    /// `None` when the index no longer lists it. The index is checked under
+    /// the registry's write lock, so an entity whose delete has finished is
+    /// never started again.
+    pub(crate) fn get_or_spawn_indexed_actor(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<Option<ActorRef<EntityMsg>>, String> {
+        self.get_or_spawn_actor_in(
+            tenant,
+            entity_type,
+            entity_id,
+            serde_json::json!({}),
+            None,
+            true,
+        )
+    }
+
+    #[instrument(skip_all, fields(otel.name = "entity.get_or_spawn_tenant_actor_with_fields", tenant = %tenant, entity_type, entity_id))]
+    fn get_or_spawn_actor_in(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        entity_id: &str,
+        initial_fields: serde_json::Value,
+        created_by: Option<&AgentContext>,
+        only_if_indexed: bool,
+    ) -> Result<Option<ActorRef<EntityMsg>>, String> {
         if !initial_fields
             .as_object()
             .is_some_and(|fields| fields.is_empty())
@@ -948,7 +988,7 @@ impl ServerState {
             let registry = self.actor_registry.read().unwrap();
             if let Some(actor_ref) = registry.get(&key).filter(|actor| !actor.is_closed()) {
                 self.touch_actor_access(&key);
-                return Ok(actor_ref.clone());
+                return Ok(Some(actor_ref.clone()));
             }
         }
 
@@ -1016,7 +1056,10 @@ impl ServerState {
         let actor_ref = {
             let mut registry = self.actor_registry.write().unwrap();
             if let Some(existing) = registry.get(&key).filter(|actor| !actor.is_closed()) {
-                return Ok(existing.clone());
+                return Ok(Some(existing.clone()));
+            }
+            if only_if_indexed && !self.entity_exists(tenant, entity_type, entity_id) {
+                return Ok(None);
             }
             let actor_ref = self.actor_system.spawn(actor, &key);
             registry.insert(key.clone(), actor_ref.clone());
@@ -1034,7 +1077,7 @@ impl ServerState {
         }
         self.touch_actor_access(&key);
 
-        Ok(actor_ref)
+        Ok(Some(actor_ref))
     }
 
     /// Remove an entity from the index and actor registry.

@@ -43,7 +43,9 @@
 //! checked in settled states: those with nothing in flight. The walk is
 //! breadth first, so each broken invariant's path is a shortest one. A walk
 //! that does not fit in the memory its [`Room`] gives it says so and is
-//! never a pass.
+//! never a pass. Guided walks then go on past where it stopped, by the same
+//! moves (`model/guided.rs`): they can find a break it did not reach, with
+//! a path that replays, and never make a pass either.
 //!
 //! Nor is a walk that checked nothing. A module whose trigger names no
 //! `on_success` may answer with any action its result names, and the model
@@ -85,6 +87,7 @@ use crate::model::{ModelString, ParamValue};
 
 pub use model::DroppedReaction;
 pub(crate) use model::dropped_reactions;
+pub use model::{Candidate, GUIDED_STEPS, Guide, GuidedSearch, guided_search, plain};
 use model::{JointModel, Move, Sending};
 use state::render;
 pub use state::{Call, Committed, Dispatch, JointState, ReactionStep};
@@ -415,6 +418,10 @@ mod chain_test;
 #[cfg(test)]
 #[path = "literals_test.rs"]
 mod literals_tests;
+
+#[cfg(test)]
+#[path = "guided_test.rs"]
+mod guided_tests;
 
 #[cfg(test)]
 #[path = "sure_test.rs"]

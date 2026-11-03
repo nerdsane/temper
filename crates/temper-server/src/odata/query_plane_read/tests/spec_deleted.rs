@@ -222,7 +222,15 @@ async fn a_restart_puts_back_a_spec_deleted_records_catalog_row() {
         "the setup is a Temper written before the fix: ord-05 listed, with no catalog row"
     );
 
-    restarted.repair_query_projections_at_boot().await;
+    let tenants: Vec<_> = restarted
+        .registry
+        .read()
+        .unwrap()
+        .tenant_ids()
+        .into_iter()
+        .cloned()
+        .collect();
+    restarted.repair_query_projections_at_boot(&tenants).await;
     let shown = reads(&restarted).await;
     let events_after = store.read_events(&journal, 0).await.expect("read").len();
 

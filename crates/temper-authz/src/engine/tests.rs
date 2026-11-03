@@ -177,15 +177,20 @@ fn test_invalid_policy_returns_error() {
 }
 
 #[test]
-fn invalid_action_denies_through_instrumented_error_path() {
+fn unbuildable_request_entity_denies_through_instrumented_error_path() {
+    // Action ids are taken verbatim, so any action string names an action;
+    // a resource type that is not a Cedar type name cannot be built at all.
     let engine = AuthzEngine::permissive();
     let ctx = customer_context("cust-1");
     let attrs = HashMap::new();
 
-    let decision = engine.authorize(&ctx, "bad\"action", "Order", &attrs);
+    let decision = engine.authorize(&ctx, "read", "Order Item", &attrs);
     assert!(
-        matches!(decision, AuthzDecision::Deny(AuthzDenial::InvalidAction(_))),
-        "invalid action should deny with typed reason, got: {decision:?}"
+        matches!(
+            decision,
+            AuthzDecision::Deny(AuthzDenial::InvalidResource(_))
+        ),
+        "unbuildable resource should deny with typed reason even when every request is permitted, got: {decision:?}"
     );
 }
 

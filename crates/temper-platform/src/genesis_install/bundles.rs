@@ -21,6 +21,12 @@ use crate::os_apps::AppFileSource;
 
 pub(super) const MAX_GENESIS_BUNDLE_FILES: usize = 4096;
 pub(super) const MAX_GENESIS_BUNDLE_APPS: usize = 256;
+
+/// Build output and repository metadata: a bundle never carries a path with
+/// one of these components, so an export never needs to read them.
+pub(super) fn is_generated_component(part: &std::ffi::OsStr) -> bool {
+    part == "target" || part == ".git"
+}
 pub(super) const MAX_GENESIS_BUNDLE_FILE_BYTES: u64 = 16 * 1024 * 1024;
 // Raised from 64 MiB. A real app closure did not fit: dsf-factory alone is
 // ~52 MB of legitimate compiled WASM (59 modules, one per resource operation),
@@ -248,7 +254,7 @@ pub(super) fn safe_bundle_relative_path(path: &str) -> Result<PathBuf, String> {
     for component in rel.components() {
         match component {
             Component::Normal(part) => {
-                if part == "target" || part == ".git" {
+                if is_generated_component(part) {
                     return Err(format!(
                         "bundle file path '{}' contains forbidden component '{}'",
                         path,
@@ -368,7 +374,7 @@ pub(super) fn collect_bundle_files(
     let mut files = Vec::new();
     let generated = |rel: &&String| {
         rel.split('/')
-            .any(|part| part == "target" || part == ".git")
+            .any(|part| is_generated_component(std::ffi::OsStr::new(part)))
     };
     for rel in paths.iter().filter(|rel| !generated(rel)) {
         if files.len() >= file_budget {
