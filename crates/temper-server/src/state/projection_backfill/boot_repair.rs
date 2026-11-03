@@ -9,106 +9,112 @@ use temper_runtime::tenant::TenantId;
 use tracing::{Instrument, instrument};
 
 impl ServerState {
-    /// Repair every serving tenant, including apps restored from the store.
-    /// Registry membership is authoritative here, not --app or connected_tenants
+    /// Repair each of `tenants`, the tenants the registry serves at boot,
+    /// including apps restored from the store; not --app or connected_tenants
     /// (the latter is empty on a single Turso store). An unavailable replay spec
     /// withholds its tenant from serving while other tenants continue booting.
     /// Other failed repairs keep boot pending; a server must not expose a row
     /// it knows is behind its journal.
     #[instrument(skip_all, fields(otel.name = "boot.projection_repair"))]
-    pub(crate) async fn repair_query_projections_at_boot(&self) -> Vec<(TenantId, EntityState)> {
-        if self.query_plane_store().is_none() || self.event_journal().is_none() {
-            return Vec::new();
-        }
-        let tenants: Vec<_> = self
-            .registry
-            .read()
-            .expect("registry lock poisoned")
-            .tenant_ids()
-            .into_iter()
-            .cloned()
-            .collect();
+    pub(crate) async fn repair_query_projections_at_boot(
+        &self,
+        tenants: &[TenantId],
+    ) -> Vec<(TenantId, EntityState)> {
         let mut repaired = Vec::new();
         for tenant in tenants {
             let mut delay = Duration::from_secs(1);
-            let mut pending = loop {
-                match self.projection_repair_candidates(&tenant).await {
-                    Ok(rows) => break rows,
-                    Err(error) => {
-                        tracing::error!(%tenant, %error, "boot projection comparison failed; tenant cannot serve yet");
-                        tokio::time::sleep(delay).await; // determinism-ok: boot retry on runtime clock
-                        delay = (delay * 2).min(Duration::from_secs(60));
-                    }
-                }
-            };
+            // Boxed: the boot's future already nests deep, and each level counts.
+            while let Err(error) =
+                Box::pin(self.repair_tenant_projections(tenant, &mut repaired)).await
             {
-                let mut registry = self.registry.write().expect("registry lock poisoned");
-                // Replace-mode installs retire a type's spec and routes but keep
-                // its journal and catalog. Those histories no longer serve.
-                // Keep types still exposed by CSDL even if their spec failed to
-                // restore: they must withhold the tenant below, not serve stale rows.
-                pending.retain(|candidate| {
-                    let entity_type = &candidate.journal.entity_type;
-                    registry.get_tenant(&tenant).is_some_and(|config| {
-                        config.entities.contains_key(entity_type)
-                            || config.entity_set_map.values().any(|ty| ty == entity_type)
-                    }) || self.transition_tables.contains_key(entity_type)
-                });
-                // Match transition_table_for's registry and legacy table lookup.
-                if let Some(candidate) = pending.iter().find(|candidate| {
-                    registry
-                        .get_table_live(&tenant, &candidate.journal.entity_type)
-                        .is_none()
-                        && !self
-                            .transition_tables
-                            .contains_key(&candidate.journal.entity_type)
-                }) {
-                    let entity_type = &candidate.journal.entity_type;
-                    let reason = format!(
-                        "Boot projection repair cannot replay type '{entity_type}': its spec is unavailable"
-                    );
-                    tracing::error!(%tenant, %entity_type,
-                        entity_id = %candidate.journal.entity_id, %reason,
-                        "tenant withheld from serving; other tenants continue booting");
-                    // Restoration can omit an unreadable type while keeping
-                    // its CSDL routes. Withhold the whole affected tenant via
-                    // the existing 503 gate, just as a failed tenant restore
-                    // does. Removing only the in-memory registration also
-                    // excludes it from timer recovery and background walks;
-                    // all durable specs, journals and rows remain untouched.
-                    registry.mark_tenant_unavailable(tenant.clone(), reason);
-                    registry.remove_tenant(&tenant);
-                    continue;
-                }
+                tracing::error!(%tenant, %error, retry_in_secs = delay.as_secs(),
+                    "boot projection repair failed; tenant cannot serve yet");
+                tokio::time::sleep(delay).await; // determinism-ok: boot retry on runtime clock
+                delay = (delay * 2).min(Duration::from_secs(60));
             }
-            // Only lagging records load snapshots/events. Healthy records never
-            // acquire actors, replay their history or rewrite their projections.
-            let replay = tracing::info_span!("boot.projection_replay", tenant = %tenant, records = pending.len());
-            async {
-                while !pending.is_empty() {
-                    let mut retry = Vec::new();
-                    for candidate in pending {
-                        match self.repair_query_projection(&tenant, &candidate).await {
-                            Ok(current) => repaired.push((tenant.clone(), current)),
-                            Err(error) => {
-                                tracing::error!(%tenant, entity_type = %candidate.journal.entity_type,
-                                    entity_id = %candidate.journal.entity_id, %error,
-                                    "boot projection repair failed; tenant cannot serve yet");
-                                retry.push(candidate);
-                            }
-                        }
-                    }
-                    pending = retry;
-                    if !pending.is_empty() {
-                        tokio::time::sleep(delay).await; // determinism-ok: boot retry on runtime clock
-                        delay = (delay * 2).min(Duration::from_secs(60));
-                    }
-                }
-            }
-            .instrument(replay)
-            .await;
         }
         repaired
+    }
+
+    /// One pass of the boot repair over `tenant`, adding each record it
+    /// repaired to `repaired`. Err when the store could not be compared or a
+    /// record not replayed: the records repaired stay repaired, and a later
+    /// pass finds only those still behind.
+    pub(crate) async fn repair_tenant_projections(
+        &self,
+        tenant: &TenantId,
+        repaired: &mut Vec<(TenantId, EntityState)>,
+    ) -> Result<(), String> {
+        if self.query_plane_store().is_none() || self.event_journal().is_none() {
+            return Ok(());
+        }
+        let mut pending = self
+            .projection_repair_candidates(tenant)
+            .await
+            .map_err(|error| format!("boot projection comparison failed: {error}"))?;
+        {
+            let mut registry = self.registry.write().expect("registry lock poisoned");
+            // Replace-mode installs retire a type's spec and routes but keep
+            // its journal and catalog. Those histories no longer serve.
+            // Keep types still exposed by CSDL even if their spec failed to
+            // restore: they must withhold the tenant below, not serve stale rows.
+            pending.retain(|candidate| {
+                let entity_type = &candidate.journal.entity_type;
+                registry.get_tenant(tenant).is_some_and(|config| {
+                    config.entities.contains_key(entity_type)
+                        || config.entity_set_map.values().any(|ty| ty == entity_type)
+                }) || self.transition_tables.contains_key(entity_type)
+            });
+            // Match transition_table_for's registry and legacy table lookup.
+            if let Some(candidate) = pending.iter().find(|candidate| {
+                registry
+                    .get_table_live(tenant, &candidate.journal.entity_type)
+                    .is_none()
+                    && !self
+                        .transition_tables
+                        .contains_key(&candidate.journal.entity_type)
+            }) {
+                let entity_type = &candidate.journal.entity_type;
+                let reason = format!(
+                    "Boot projection repair cannot replay type '{entity_type}': its spec is unavailable"
+                );
+                tracing::error!(%tenant, %entity_type,
+                    entity_id = %candidate.journal.entity_id, %reason,
+                    "tenant withheld from serving; other tenants continue booting");
+                // Restoration can omit an unreadable type while keeping
+                // its CSDL routes. Withhold the whole affected tenant via
+                // the existing 503 gate, just as a failed tenant restore
+                // does. Removing only the in-memory registration also
+                // excludes it from timer recovery and background walks;
+                // all durable specs, journals and rows remain untouched.
+                registry.mark_tenant_unavailable(tenant.clone(), reason);
+                registry.remove_tenant(tenant);
+                return Ok(());
+            }
+        }
+        // Only lagging records load snapshots/events. Healthy records never
+        // acquire actors, replay their history or rewrite their projections.
+        let replay = tracing::info_span!("boot.projection_replay", tenant = %tenant, records = pending.len());
+        async {
+            let mut failed = 0usize;
+            for candidate in pending {
+                match self.repair_query_projection(tenant, &candidate).await {
+                    Ok(current) => repaired.push((tenant.clone(), current)),
+                    Err(error) => {
+                        tracing::error!(%tenant, entity_type = %candidate.journal.entity_type,
+                            entity_id = %candidate.journal.entity_id, %error,
+                            "boot projection repair failed; tenant cannot serve yet");
+                        failed += 1;
+                    }
+                }
+            }
+            match failed {
+                0 => Ok(()),
+                failed => Err(format!("{failed} records not replayed")),
+            }
+        }
+        .instrument(replay)
+        .await
     }
 
     #[instrument(skip_all, fields(otel.name = "boot.projection_compare", tenant = %tenant))]

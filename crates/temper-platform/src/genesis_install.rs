@@ -50,8 +50,10 @@ use registry::{RegistryUrl, registry_client};
 pub(crate) use restore::installed_version_files;
 use restore::rollback_to_prior;
 pub use restore::{
-    CacheFetchSummary, CacheFetches, GenesisCacheRecovery, restore_genesis_app_cache_roots,
-    restore_genesis_registry_cache_roots, start_genesis_registry_cache_recovery,
+    CacheFetchSummary, CacheFetches, GenesisCacheRecovery, PlannedCacheRoot, plan_app_cache_roots,
+    restore_genesis_app_cache_roots, restore_genesis_registry_cache_roots,
+    restore_planned_cache_roots, start_genesis_registry_cache_recovery,
+    start_registry_cache_recovery_of,
 };
 use written::Written;
 

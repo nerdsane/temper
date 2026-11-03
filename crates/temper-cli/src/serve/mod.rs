@@ -8,14 +8,20 @@
 //! runs in the background so the observe UI can stream progress.
 
 mod actor_runtime;
+mod boot;
 mod bootstrap;
 mod data_dir;
+mod installed_apps;
+mod later;
 mod loader;
 mod local_sandbox;
 mod observe_ui;
 pub(crate) mod options;
 #[cfg(test)]
 mod pushed_boot_tests;
+mod restore;
+#[cfg(test)]
+mod serve_first_tests;
 mod storage;
 mod sync_copy;
 #[cfg(test)]
@@ -89,8 +95,11 @@ pub async fn run(
         bootstrap::init_storage(storage.clone(), storage_explicit).await?;
 
     // Phase 2: Registry (restore + disk apps)
-    let (registry, tenant_policy_seed) =
-        bootstrap::build_registry(pg_pool.as_ref(), storage_stack.as_ref(), &apps).await?;
+    let boot::Stored {
+        registry,
+        policy_seed: tenant_policy_seed,
+        mut later,
+    } = boot::read_stored(pg_pool.as_ref(), storage_stack.as_ref(), &apps).await?;
     // build_registry already said which disk apps it skipped; the later phases
     // (webhooks, hydration, tenant bootstrap, verification) skip them as well.
     let apps: Vec<(String, String)> = apps
@@ -122,9 +131,6 @@ pub async fn run(
     // caches) where they outlive the machine, such as a mounted volume.
     state.server.data_dir = data_dir::data_dir();
     state.server.files_need_object_store = storage::files_need_object_store();
-
-    seed_cedar_policies(&state, tenant_policy_seed);
-    state.server.rebuild_reaction_dispatcher();
 
     // Configure subprocess verification if requested.
     if verify_subprocess {
@@ -174,14 +180,6 @@ pub async fn run(
         state.server.secrets_vault = Some(std::sync::Arc::new(vault));
         println!("  Secrets vault: configured");
     }
-
-    // Phase 6: Entity hydration
-    bootstrap::hydrate_entities(&state, &apps).await;
-
-    // Phase 7: Recovery (Cedar policies + WASM modules + secrets)
-    bootstrap::recover_cedar_policies(&state).await;
-    bootstrap::recover_wasm_modules(&state).await;
-    bootstrap::recover_secrets(&state).await;
 
     // Seed secrets from env into the vault for all tenants.
     if let Some(ref vault) = state.server.secrets_vault {
@@ -245,10 +243,16 @@ pub async fn run(
         println!();
     }
 
-    // Phase 8: Bootstrap system + agent tenants
-    bootstrap::bootstrap_tenants(&state, &apps, bootstrap::EarlierOperatorKeys::from_env()).await;
-    // Phase 8b: Restore persisted apps + apply CLI `--app` requests.
-    bootstrap::bootstrap_installed_apps(&state, &os_app_installs).await?;
+    // Phases 6-8b: the server's own tenants: entities, Cedar, WASM, secrets,
+    // system and agent specs, installed apps and CLI `--app` requests.
+    boot::restore_own(
+        &state,
+        tenant_policy_seed,
+        &apps,
+        &os_app_installs,
+        &mut later,
+    )
+    .await?;
     if actor_runtime == ActorRuntimeBackend::Postgres {
         pg_actor_runtime_cancel = Some(
             actor_runtime::install_postgres_actor_runtime(
@@ -309,26 +313,6 @@ pub async fn run(
         println!("    Set DISCORD_BOT_TOKEN env var or store 'discord_bot_token' in vault");
     }
 
-    // Spawn the HttpEndpoint reconciler (ADR-0056 Phase 2 slice 3b).
-    // Subscribes to entity state changes; rebuilds the per-tenant
-    // route table on every HttpEndpoint transition. Must run before
-    // axum::serve so the first request sees a populated table.
-    temper_server::http_endpoint::spawn_reconciler(state.server.clone());
-
-    // Prime the route tables for all existing tenants so
-    // HttpEndpoint rows already in the event store are routable on
-    // the first request (the reconciler only reacts to changes
-    // after startup).
-    {
-        let tenants: Vec<temper_runtime::tenant::TenantId> = {
-            let reg = state.server.registry.read().unwrap();
-            reg.tenant_ids().iter().map(|t| (*t).clone()).collect()
-        };
-        for tenant in tenants {
-            temper_server::http_endpoint::rebuild_tenant_table(&state.server, &tenant).await;
-        }
-    }
-
     // Where this process reports its earliest due time, so a control plane
     // that suspends it can wake it then. Both are needed; either alone is a
     // misconfiguration, logged and otherwise ignored.
@@ -363,9 +347,8 @@ pub async fn run(
         }
     }
 
-    // The kernel runtime: state timers re-armed from their rows (ADR-0056)
-    // before the first request can act on their records, and runtime metrics.
-    let _boot_timers = state.server.start_runtime().await;
+    // Phase 10: route tables and the kernel runtime, before the first request.
+    boot::start_serving(&state, later).await;
 
     println!("Listening on http://{bind}:{actual_port}");
     // A stop signal ends the server. The kernel then logs and counts each
@@ -405,24 +388,6 @@ async fn stop_signal() {
     tokio::select! {
         () = interrupt => {}
         () = terminate => {}
-    }
-}
-
-fn seed_cedar_policies(state: &PlatformState, tenant_policy_seed: BTreeMap<String, String>) {
-    for (tenant, policy_text) in &tenant_policy_seed {
-        if let Err(e) = state
-            .server
-            .authz
-            .reload_tenant_policies(tenant, policy_text)
-        {
-            eprintln!("  Warning: failed to load Cedar policies for tenant '{tenant}': {e}");
-            continue;
-        }
-    }
-    // Update in-memory text cache.
-    let mut policies = state.server.tenant_policies.write().unwrap(); // ci-ok: infallible lock
-    for (tenant, policy_text) in tenant_policy_seed {
-        policies.insert(tenant, policy_text);
     }
 }
 

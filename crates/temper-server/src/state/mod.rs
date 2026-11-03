@@ -551,6 +551,9 @@ pub struct ServerState {
     pub(crate) owed_writes: Arc<Mutex<BTreeMap<String, dispatch::owed_writes::OwedWrite>>>,
     /// Published under the registry lock after durable timer recovery.
     pub(crate) timer_recovery_complete: Arc<std::sync::atomic::AtomicBool>,
+    /// Tenants restored after the server serves, which are starting until
+    /// then (see [`crate::tenant_restore`]).
+    pub tenant_restore: Arc<crate::tenant_restore::TenantRestore>,
     /// Set once [`Self::start_runtime`] has run in this process.
     pub(crate) runtime_started: Arc<std::sync::atomic::AtomicBool>,
     /// Held by each carry pass, so a pass derives its carries only after
@@ -858,6 +861,7 @@ impl ServerState {
             call_process_id: temper_runtime::scheduler::sim_uuid(),
             owed_writes: Arc::default(),
             timer_recovery_complete: Arc::default(),
+            tenant_restore: Arc::default(),
             runtime_started: Arc::default(),
             carry_pass: Arc::default(),
             eventual_tracker: Arc::new(RwLock::new(
@@ -1143,6 +1147,7 @@ impl ServerState {
             call_process_id: temper_runtime::scheduler::sim_uuid(),
             owed_writes: Arc::default(),
             timer_recovery_complete: Arc::default(),
+            tenant_restore: Arc::default(),
             runtime_started: Arc::default(),
             carry_pass: Arc::default(),
             eventual_tracker: Arc::new(RwLock::new(

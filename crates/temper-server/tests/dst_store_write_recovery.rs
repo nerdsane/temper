@@ -452,7 +452,7 @@ fn run_seed(seed: u64) -> Result<(), String> {
             ));
         }
         let (code, body) = healthz(&state).await;
-        if code != StatusCode::OK || body != json!({ "ok": true }) {
+        if code != StatusCode::OK || body["ok"] != json!(true) || body.get("writes").is_some() {
             return Err(run.fail(
                 "/healthz is healthy once a write has landed",
                 format!("{code} {body}"),

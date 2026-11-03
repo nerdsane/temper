@@ -34,16 +34,39 @@ pub async fn bearer_auth_check(
     let bearer = bearer_credential(&req);
     let tenant = requested_tenant(&req)?;
 
-    if bearer
+    // A module's one-time credential is spent as it arrives: its check reads
+    // only the in-memory credential store, never the tenant's records, and its
+    // life (`INTERNAL_INVOCATION_CREDENTIAL_TTL`) must not run out while the
+    // call waits for its tenant below, which has no deadline.
+    let internal = match bearer
         .as_deref()
-        .is_some_and(temper_server::internal_invocation::is_internal_invocation_bearer)
+        .filter(|token| temper_server::internal_invocation::is_internal_invocation_bearer(token))
     {
-        let token = bearer.as_deref().ok_or(StatusCode::UNAUTHORIZED)?;
-        let authenticated = state
-            .server
-            .internal_invocation_credentials
-            .consume_for_request(token, &tenant, req.method(), req.uri())
-            .map_err(|_| StatusCode::UNAUTHORIZED)?;
+        Some(token) => Some(
+            state
+                .server
+                .internal_invocation_credentials
+                .consume_for_request(token, &tenant, req.method(), req.uri())
+                .map_err(|_| StatusCode::UNAUTHORIZED)?,
+        ),
+        None => None,
+    };
+
+    // A tenant still starting, or one startup could not restore, has no
+    // credential records, policies or types loaded, so any answer now could be
+    // wrong: a 401 for a valid credential, a 404, an empty list, a default-deny
+    // 403. A starting tenant is waited for; otherwise its state is named.
+    // Before every branch: an internal invocation or a public route acts in
+    // the tenant too.
+    // A webhook acts in the tenant its path names.
+    let acting = webhook_tenant(&req).unwrap_or_else(|| tenant.clone());
+    if let Some(response) =
+        temper_server::odata::tenant_not_ready_response(&state.server, &acting).await
+    {
+        return Ok(response);
+    }
+
+    if let Some(authenticated) = internal {
         // The capability has already been consumed; do not expose it to
         // downstream handlers, logs, or accidental forwarding.
         req.headers_mut().remove("authorization");
@@ -56,14 +79,6 @@ pub async fn bearer_auth_check(
             req.headers_mut().remove("authorization");
         }
         return Ok(next.run(req).await);
-    }
-
-    // A tenant startup could not restore has no credential records loaded, so
-    // a lookup would answer 401 for a valid credential. Name its state instead.
-    if let Some(response) =
-        temper_server::odata::unavailable_tenant_response(&state.server, &tenant)
-    {
-        return Ok(response);
     }
 
     let matched_endpoint = match state.server.http_endpoint_tables.get(&tenant).await {
@@ -309,6 +324,17 @@ fn is_public_request(req: &Request) -> bool {
                 | (&Method::GET, "/version")
                 | (&Method::POST, "/api/identity/resolve")
         )
+}
+
+/// The tenant a `/webhooks/{tenant}/...` request names in its path.
+fn webhook_tenant(req: &Request) -> Option<TenantId> {
+    let tenant = req
+        .uri()
+        .path()
+        .strip_prefix("/webhooks/")?
+        .split('/')
+        .next()?;
+    TenantId::try_new(tenant).ok()
 }
 
 fn requested_tenant(req: &Request) -> Result<TenantId, StatusCode> {

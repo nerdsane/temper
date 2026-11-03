@@ -663,7 +663,7 @@ async fn install_once(
     swap: Swap,
     attempt: &proofs::Attempt,
 ) -> Result<ControlFlow<InstallResult, proofs::Wait>, String> {
-    install_checks::refuse_unavailable_tenant(state, tenant, app_name)?;
+    install_checks::refuse_unready_tenant(state, tenant, app_name, origin).await?;
     let mut install = install_guard::tenant(&state.server, tenant).await;
     let app_files = {
         let cat = catalog().read().unwrap(); // ci-ok: infallible lock

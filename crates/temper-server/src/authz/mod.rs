@@ -25,5 +25,6 @@ pub(crate) use helpers::{
 pub(crate) use helpers::{ResourceAuthorization, require_resource_authorization};
 pub use policy_persistence::{
     load_and_activate_tenant_policies, persist_and_activate_policy, record_policy_change,
+    try_load_and_activate_tenant_policies,
 };
 pub use wasm_gate::{CedarWasmAuthzGate, PermissiveWasmAuthzGate};

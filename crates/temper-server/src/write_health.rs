@@ -18,11 +18,16 @@ use crate::storage::WriteHealth;
 /// recovers it. A refusal for room answers 200 with the refusal in the body: a
 /// restart makes no room (growing the disk does), and while it starts this
 /// server serves no reads either.
+///
+/// It also counts the tenants not serving: those still starting, restored
+/// after the server serves (see [`crate::tenant_restore`]), and those startup
+/// could not restore. Neither makes this server unhealthy: a restart would
+/// not restore them sooner.
 pub async fn healthz(State(state): State<ServerState>) -> Response {
     let health = state
         .event_journal()
         .map_or(WriteHealth::Writing, |(store, _)| store.write_health());
-    let (status, body) = match health {
+    let (status, mut body) = match health {
         WriteHealth::Writing => (StatusCode::OK, serde_json::json!({ "ok": true })),
         WriteHealth::Refusing(error) => (
             StatusCode::OK,
@@ -33,6 +38,14 @@ pub async fn healthz(State(state): State<ServerState>) -> Response {
             serde_json::json!({ "ok": false, "writes": format!("failing: {error}") }),
         ),
     };
+    let unavailable = state
+        .registry
+        .read()
+        .map_or(0, |registry| registry.unavailable_tenants().len());
+    body["tenants"] = serde_json::json!({
+        "starting": state.tenant_restore.starting_count(),
+        "unavailable": unavailable,
+    });
     (status, axum::Json(body)).into_response()
 }
 

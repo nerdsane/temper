@@ -53,6 +53,7 @@ pub mod sentinel;
 pub mod state;
 mod static_web;
 pub mod storage;
+pub mod tenant_restore;
 #[cfg(test)]
 pub(crate) mod test_spans;
 pub(crate) mod trace_context;
