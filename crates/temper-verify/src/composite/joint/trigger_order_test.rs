@@ -182,3 +182,83 @@ permit(principal, action, resource) when { context has via && context.via != "re
         "{result}"
     );
 }
+
+/// `Go` notes `A` once `B` is shut. `Shut`, allowed only once `A` has gone,
+/// pings `B` only while `A` is idle, which it no longer is. For `A` to be
+/// noted, `Shut` commits while `note`'s guard is unread, so both commits
+/// wait on one guard at once.
+const NOTE: &str = r#"
+[automaton]
+name = "A"
+states = ["Idle", "Went", "Noted"]
+initial = "Idle"
+
+[[action]]
+name = "Go"
+kind = "input"
+from = ["Idle"]
+to = "Went"
+
+[[action.triggers]]
+name = "note"
+kind = "entity"
+target_entity = "A"
+target_action = "Note"
+guard = "B[Id].status == 'Shut'"
+
+[action.triggers.resolve_target]
+kind = "same_id"
+
+[[action]]
+name = "Note"
+kind = "internal"
+from = ["Went"]
+to = "Noted"
+
+[[invariant]]
+name = "rule"
+assert = "status == 'Noted' => B[Id].status == 'Open'"
+"#;
+
+const PING: &str = r#"
+[automaton]
+name = "B"
+states = ["Open", "Shut"]
+initial = "Open"
+
+[[action]]
+name = "Shut"
+kind = "input"
+from = ["Open"]
+to = "Shut"
+guard = "A[Id].status == 'Went'"
+
+[[action.triggers]]
+name = "ping"
+kind = "entity"
+target_entity = "B"
+target_action = "Ping"
+guard = "A[Id].status == 'Idle'"
+
+[action.triggers.resolve_target]
+kind = "same_id"
+
+[[action]]
+name = "Ping"
+kind = "internal"
+from = ["Shut"]
+to = "Shut"
+"#;
+
+#[test]
+fn unread_guards_of_two_commits_fit_the_in_flight_bound() {
+    // Go, then Shut, then both guards read: A is noted with B shut. Two
+    // commits each waiting on one guard are within the bound the walk keeps.
+    let policies = r#"permit(principal, action in [Action::"Go", Action::"Shut"], resource);
+permit(principal, action in [Action::"Note", Action::"Ping"], resource) when { context.via == "reaction" };"#;
+    let result = invariant(&[NOTE, PING], Some(policies));
+    assert!(
+        matches!(result.outcome, JointOutcome::Broken { .. }),
+        "{result}"
+    );
+}
