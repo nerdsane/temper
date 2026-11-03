@@ -34,5 +34,6 @@ tokio = { workspace = true, features = ["test-util"] }
 uuid = { workspace = true }
 chrono = { workspace = true }
 tempfile = "3"
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
 tracing-subscriber = { workspace = true }
 wiremock = { workspace = true }
