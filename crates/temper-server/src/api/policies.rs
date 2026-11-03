@@ -10,7 +10,7 @@ use axum::response::IntoResponse;
 use temper_authz::AuthenticatedRequestContext;
 use tracing::instrument;
 
-use super::{PolicyAuthed, PolicyReadAuthed};
+use super::PolicyAuthed;
 use crate::state::ServerState;
 
 mod replacement;
@@ -171,12 +171,12 @@ pub(crate) async fn handle_add_policy_rule(
 /// GET /api/tenants/{tenant}/policies/list — list individual policy entries.
 ///
 /// Returns structured JSON with per-policy details (id, cedar_text, enabled, etc.).
-/// Cedar-gated: requires `read_policies` or `manage_policies` on `PolicySet`.
+/// Cedar-gated: requires `manage_policies` action on `PolicySet` resource.
 #[instrument(skip_all, fields(tenant, otel.name = "GET /api/tenants/{tenant}/policies/list"))]
 pub(crate) async fn handle_list_policies(
     State(state): State<ServerState>,
     Path(_tenant): Path<String>,
-    auth: PolicyReadAuthed,
+    auth: PolicyAuthed,
 ) -> impl IntoResponse {
     let tenant = auth.tenant().as_str().to_string();
     let Some(store) = state.policy_store() else {
