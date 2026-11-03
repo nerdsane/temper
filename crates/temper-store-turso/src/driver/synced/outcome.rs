@@ -110,6 +110,32 @@ fn pushes() -> &'static Counter<u64> {
     })
 }
 
+/// Count the `count` changes a confirmed push sent in
+/// `temper_turso_sync_changes_pushed`, so the rows each app writes to its
+/// remote can be watched per app.
+///
+/// Turso bills an org by rows written, and its usage page has no per-app
+/// view in monitoring: on 3 Nov 2026 one staging test app's timers used up
+/// the org's whole month (27M of 25M rows) and nothing said so until the org
+/// refused every write. A change is one row of the change log; Turso counts
+/// it with its indexes, about three rows written per change (20 Oct 2026:
+/// about 50 rows per action against 14 to 18 changes).
+pub(super) fn record_changes_pushed(count: u64) {
+    static CHANGES: OnceLock<Counter<u64>> = OnceLock::new();
+    CHANGES
+        .get_or_init(|| {
+            opentelemetry::global::meter("temper-store-turso")
+                .u64_counter("temper_turso_sync_changes_pushed")
+                .with_description(
+                    "Changes a synced database's confirmed pushes sent to its remote copy: one per \
+                     row change above the remote's record. Turso bills rows written, about three \
+                     per change.",
+                )
+                .build()
+        })
+        .add(count, &[]);
+}
+
 /// The code in `code: "X"` (the engine's form) or `"code":"X"` (an answer's
 /// JSON), the last one in `text`, when it looks like a code.
 fn quoted_code(text: &str) -> Option<&str> {

@@ -8,7 +8,7 @@ use temper_runtime::persistence::{PersistenceError, storage_error};
 use tracing::Instrument;
 use tracing::field::Empty;
 
-use super::outcome::PushOutcome;
+use super::outcome::{PushOutcome, record_changes_pushed};
 use super::{
     CopyState, DriverError, PUSH_ATTEMPT_TIMEOUT, REMOTE_STATEMENT_FAILED, SyncCopy, files,
 };
@@ -128,7 +128,7 @@ impl SyncCopy {
         // A refusal or no answer still is: it says the remote cannot be
         // written. Changes above the record count as sent even if the engine
         // leaves some out; Temper sets none of its filters that would.
-        let sends = self.row_changes_between(remote_had, covered).await? > 0;
+        let sends = self.row_changes_between(remote_had, covered).await?;
         // Until it is known to have succeeded, a push may have committed on
         // the remote past the engine's own record: set before it starts, so
         // a caller that gives up on it (an answer's time limit) leaves it set.
@@ -141,8 +141,9 @@ impl SyncCopy {
             Ok(Ok(())) => {
                 self.inner.unsure.store(false, Ordering::Release);
                 self.inner.timeouts.store(0, Ordering::Release);
-                if sends {
+                if sends > 0 {
                     PushOutcome::Confirmed.record();
+                    record_changes_pushed(sends.unsigned_abs());
                 }
             }
             Ok(Err(error)) => {
