@@ -409,3 +409,7 @@ mod chain_test;
 #[cfg(test)]
 #[path = "literals_test.rs"]
 mod literals_tests;
+
+#[cfg(test)]
+#[path = "sure_test.rs"]
+mod sure_tests;

@@ -251,7 +251,7 @@ impl LivenessProof<'_> {
                 return result;
             }
         };
-        let mut explored = model.walk_with(bound, true, |_, _| false);
+        let mut explored = model.walk_with(bound, model::Keep::Edges, |_, _, _| false);
         result.states = explored.len();
         result.in_flight_bound = explored.held_back.then_some(model::MAX_IN_FLIGHT);
         result.unwalked = explored.unwalked();

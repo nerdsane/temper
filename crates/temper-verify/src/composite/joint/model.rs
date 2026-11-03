@@ -39,6 +39,7 @@ use read::{
     Kernel, Reaction, Unchecked, named_literals, reactions_into, tracked, unchecked_constraints,
 };
 pub(super) use step::Move;
+pub(super) use walk::Keep;
 pub(super) use walk::{Explored, Unwalked, unwalked_reason};
 
 /// Counter ceiling for the joint models, as for the composite plans.

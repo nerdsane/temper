@@ -141,8 +141,8 @@ fn duplicate_outcomes_only_reserve_distinct_states() {
             room: &room,
             progress: &progress,
         },
-        true,
-        |_, _| false,
+        super::super::Keep::Edges,
+        |_, _, _| false,
     );
     assert!(explored.stopped.is_none(), "{:?}", explored.stopped);
     assert!(explored.edges.len() >= 512, "exercise duplicate edges");

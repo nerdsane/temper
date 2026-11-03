@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use temper_spec::predicate::{Truth, eval};
+use temper_spec::predicate::{Expr, Name, Truth, eval};
 
 use super::super::env::Blind;
 use super::super::state::ReactionStep;
@@ -210,6 +210,11 @@ impl JointModel {
                 _ => carried = false,
             }
         }
+        match self.exceeds(&dispatch.to, &t.name, &dispatch.params, target) {
+            Truth::False => return Arrival::Refused,
+            Truth::Unknown => carried = false,
+            Truth::True => {}
+        }
         for param in self.unchecked.nonempty(&dispatch.to, &t.name) {
             match dispatch.params.get(param) {
                 Some(ParamValue::Str(sent)) if sent.is_blank() => return Arrival::Refused,
@@ -224,7 +229,15 @@ impl JointModel {
         // Taken or refused, and nothing else, unless another transition
         // might be the one taken, the model chose a value it was not sent, or
         // a count behind its family's newest moves up by an unknown amount.
-        let decided = eval(&t.guard, &self.env(&dispatch.to, state)) == Truth::True
+        // With one transition whose related records are read by the model,
+        // the dispatch path let those parts of its guard through. A guard
+        // reading only types outside scope skips Read, so it stays unknown.
+        let guard = if self.reads_related(t) && self.transitions_for(dispatch).nth(1).is_none() {
+            self.actor_holds(&dispatch.to, t, state)
+        } else {
+            eval(&t.guard, &self.env(&dispatch.to, state)) == Truth::True
+        };
+        let decided = guard
             && self.unchecked.decides(&dispatch.to, &t.name)
             && carried
             && newer == Truth::True;
@@ -239,6 +252,42 @@ impl JointModel {
             action: t.name.clone(),
             certainty,
         }
+    }
+
+    /// Whether the parts of `t`'s guard that `entity`'s actor checks hold in
+    /// `state`: each conjunct that reads the record itself. A conjunct that
+    /// reads only related records was read on the dispatch path; on a way
+    /// sure moves alone take, that read let the dispatch through.
+    fn actor_holds(&self, entity: &str, t: &ResolvedTransition, state: &JointState) -> bool {
+        let env = self.env(entity, state);
+        let mut parts = Vec::new();
+        conjuncts(&t.guard, &mut parts);
+        parts
+            .into_iter()
+            .all(|part| related_only(part) || eval(part, &env) == Truth::True)
+    }
+
+    /// Whether `params` exceed each counter of `record` that `entity`'s
+    /// `action` needs a count parameter to exceed, where the model holds the
+    /// counter as a value: unknown when `params` lacks one.
+    pub(super) fn exceeds(
+        &self,
+        entity: &str,
+        action: &str,
+        params: &BTreeMap<String, ParamValue>,
+        record: &TemperModelState,
+    ) -> Truth {
+        let mut truth = Truth::True;
+        for (param, field) in self.unchecked.greater(entity, action) {
+            match (params.get(param), record.counters.get(field)) {
+                (Some(ParamValue::Count(sent)), Some(held)) if sent <= held => {
+                    return Truth::False;
+                }
+                (Some(ParamValue::Count(_)), Some(_)) => {}
+                _ => truth = Truth::Unknown,
+            }
+        }
+        truth
     }
 
     /// The transitions `dispatch` may take on its record.
@@ -274,6 +323,33 @@ pub(super) enum Arrival {
         /// Sure, or one of taking and refusing, or unsure.
         certainty: Certainty,
     },
+}
+
+/// The conjuncts of `guard`, flattened.
+fn conjuncts<'a>(guard: &'a Expr, parts: &mut Vec<&'a Expr>) {
+    match guard {
+        Expr::And(inner) => inner.iter().for_each(|part| conjuncts(part, parts)),
+        _ => parts.push(guard),
+    }
+}
+
+/// Whether `part` reads related records and nothing of its own record but
+/// the fields that name them.
+fn related_only(part: &Expr) -> bool {
+    // Each read of a related record also reads the field naming it, just
+    // before: a field read more often than that is read for itself.
+    let mut reads: BTreeMap<String, isize> = BTreeMap::new();
+    let (mut related, mut status) = (false, false);
+    part.for_each_name(&mut |name| match name {
+        Name::CrossStatus { id_field, .. } | Name::CrossField { id_field, .. } => {
+            related = true;
+            *reads.entry(id_field.to_string()).or_default() -= 1;
+        }
+        Name::Var(field) => *reads.entry(field.to_string()).or_default() += 1,
+        Name::Status => status = true,
+        Name::Param(_) => {}
+    });
+    related && !status && reads.values().all(|&count| count <= 0)
 }
 
 /// Put `dispatch` in flight, kept in order.

@@ -2,15 +2,15 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
-use super::super::JointOutcome;
 use super::super::pack::{Packed, Packer};
 use super::super::room::{Bound, Held, MB, block};
 use super::super::state::render;
-use super::super::{JointState, JointStep, premise};
+use super::super::{JointState, JointStep};
+use super::JointModel;
 use super::held::Tables;
 use super::step::Certainty;
-use super::{JointModel, Walk};
-use temper_spec::predicate::{Expr, Name, Truth, eval};
+
+mod invariants;
 
 /// One move made from a walked state.
 #[derive(Debug, Clone, Copy)]
@@ -35,11 +35,35 @@ pub(in crate::composite::joint) struct Edge {
     pub(in crate::composite::joint) sure: bool,
 }
 
+/// What a walk keeps beyond each state and the way it first reached it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::composite::joint) enum Keep {
+    /// Nothing more.
+    States,
+    /// Every move made from a walked state, and every way it leads.
+    Edges,
+    /// Which states sure moves alone reach from a start. A state first
+    /// reached otherwise, and later by a sure move from such a state, is
+    /// walked again, so the states its sure moves lead to learn it too.
+    Sure,
+}
+
+/// A state walked.
+pub(super) struct Node {
+    pub(super) packed: Packed,
+    /// The state and move (a name in `packer`) it was first reached by, or
+    /// once sure moves alone reach it, the first sure one.
+    pub(super) parent: Option<(u32, u32)>,
+    /// Sure moves alone reach it from a start.
+    pub(super) sure: bool,
+    /// It waits in the walk's queue.
+    queued: bool,
+}
+
 /// What a walk saw, and the memory it holds for it.
 pub(in crate::composite::joint) struct Explored<'a> {
-    /// Each state walked, packed, with the state and move (a name in
-    /// `packer`) it was first reached by.
-    pub(super) nodes: Vec<(Packed, Option<(u32, u32)>)>,
+    /// Each state walked.
+    pub(super) nodes: Vec<Node>,
     pub(super) packer: Packer,
     /// Every move made from a walked state, when asked for.
     pub(in crate::composite::joint) made: Vec<Made>,
@@ -85,14 +109,14 @@ impl Explored<'_> {
 
     /// The state walked `index`th.
     pub(in crate::composite::joint) fn state(&self, index: usize) -> JointState {
-        self.packer.unpack(&self.nodes[index].0)
+        self.packer.unpack(&self.nodes[index].packed)
     }
 
     /// The moves from the start to the state walked `index`th.
     pub(in crate::composite::joint) fn path(&self, mut index: usize) -> Vec<JointStep> {
         let mut steps = Vec::new();
         loop {
-            let parent = self.nodes[index].1;
+            let parent = self.nodes[index].parent;
             steps.push(JointStep {
                 action: parent.map(|(_, label)| self.packer.name(label).to_string()),
                 state: render(&self.state(index)),
@@ -104,6 +128,20 @@ impl Explored<'_> {
         }
         steps.reverse();
         steps
+    }
+
+    /// The first move on the way to the state walked `index`th that the
+    /// walk cannot be sure the runtime makes, when there is one: the move
+    /// into the first state on it that sure moves alone do not reach.
+    pub(in crate::composite::joint) fn first_unsure(&self, mut index: usize) -> Option<String> {
+        let mut first = None;
+        while let Some((from, label)) = self.nodes[index].parent {
+            if !self.nodes[index].sure && self.nodes[from as usize].sure {
+                first = Some(self.packer.name(label).to_string());
+            }
+            index = from as usize;
+        }
+        first
     }
 
     /// The moves the runtime could make that the walk never took, one line
@@ -148,15 +186,18 @@ impl JointModel {
 
     /// Walk every reachable joint state breadth first, so each state is
     /// first reached by a shortest path. `visit` sees each state as it is
-    /// taken from the queue and returns true to stop the walk. With `edges`,
-    /// every move between walked states is kept. The walk takes the memory
-    /// it holds from `bound`'s room and stops when the room says no.
+    /// taken from the queue, with whether sure moves alone reach it, and
+    /// returns true to stop the walk. `keep` says what else the walk keeps;
+    /// only with [`Keep::Sure`] is every state sure moves reach seen as one.
+    /// The walk takes the memory it holds from `bound`'s room and stops when
+    /// the room says no.
     pub(in crate::composite::joint) fn walk_with<'a>(
         &self,
         bound: Bound<'a>,
-        edges: bool,
-        mut visit: impl FnMut(usize, &JointState) -> bool,
+        keep: Keep,
+        mut visit: impl FnMut(usize, &JointState, bool) -> bool,
     ) -> Explored<'a> {
+        let edges = keep == Keep::Edges;
         // The room bounds what the walk holds; a model's expansion work has
         // no count or clock of its own here.
         self.expansion.reset(usize::MAX, None);
@@ -211,12 +252,19 @@ impl JointModel {
             tables.states += block(size_of::<[usize; 2]>() + 4 * packed.len());
             seen.insert(packed.clone(), explored.nodes.len() as u32);
             queue.push_back(explored.nodes.len());
-            explored.nodes.push((packed, None));
+            explored.nodes.push(Node {
+                packed,
+                parent: None,
+                sure: true,
+                queued: true,
+            });
         }
         while let Some(index) = queue.pop_front() {
+            explored.nodes[index].queued = false;
+            let sure = explored.nodes[index].sure;
             let state = explored.state(index);
             self.note_unwalked(&state, &mut explored.unwalked);
-            if visit(index, &state) {
+            if visit(index, &state, sure) {
                 break;
             }
             explored.held.walked(explored.nodes.len());
@@ -272,7 +320,36 @@ impl JointModel {
                 let made = explored.made.len().saturating_sub(1) as u32;
                 for next in nexts {
                     let packed = explored.packer.pack(&next.state);
+                    let surely = sure && next.certainty == Certainty::Sure;
                     let at = match seen.get(&packed) {
+                        Some(&at)
+                            if keep == Keep::Sure
+                                && surely
+                                && !explored.nodes[at as usize].sure =>
+                        {
+                            // Sure moves alone reach it now: walk it again
+                            // unless it still waits to be walked.
+                            if !explored.nodes[at as usize].queued {
+                                if let Err(reason) = tables.reserve(
+                                    &mut explored,
+                                    &mut seen,
+                                    &mut queue,
+                                    false,
+                                    1,
+                                    0,
+                                ) {
+                                    explored.stop_for_room(reason);
+                                    break;
+                                }
+                                queue.push_back(at as usize);
+                            }
+                            let label = explored.packer.id(&next.label);
+                            let node = &mut explored.nodes[at as usize];
+                            node.sure = true;
+                            node.queued = true;
+                            node.parent = Some((index as u32, label));
+                            at
+                        }
                         Some(&at) => at,
                         None => {
                             if let Err(reason) =
@@ -285,7 +362,12 @@ impl JointModel {
                             let label = explored.packer.id(&next.label);
                             tables.states += block(size_of::<[usize; 2]>() + 4 * packed.len());
                             seen.insert(packed.clone(), at);
-                            explored.nodes.push((packed, Some((index as u32, label))));
+                            explored.nodes.push(Node {
+                                packed,
+                                parent: Some((index as u32, label)),
+                                sure: surely,
+                                queued: true,
+                            });
                             queue.push_back(at as usize);
                             at
                         }
@@ -319,124 +401,5 @@ impl JointModel {
             explored.stopped = Some("the joint expansion exhausted its work or time budget".into());
         }
         explored
-    }
-}
-
-impl JointModel {
-    /// Walk every reachable joint state breadth first, checking `invariants`
-    /// of `owner` in each settled one (nothing in flight).
-    pub(in crate::composite::joint) fn walk(
-        &self,
-        owner: &str,
-        invariants: &[&Expr],
-        bound: Bound<'_>,
-    ) -> Walk {
-        let mut unsupported = BTreeSet::new();
-        let modeled = |entity: &str, field: &str| {
-            self.models.get(entity).is_some_and(|model| {
-                matches!(field, "Id" | "id")
-                    || match model.var_kinds.get(field) {
-                        Some(temper_spec::predicate::VarKind::Str) => {
-                            model.tracked_strings.contains(field)
-                        }
-                        Some(
-                            temper_spec::predicate::VarKind::Counter
-                            | temper_spec::predicate::VarKind::Bool
-                            | temper_spec::predicate::VarKind::List,
-                        ) => true,
-                        _ => false,
-                    }
-            })
-        };
-        for inv in invariants {
-            inv.for_each_name(&mut |name| {
-                let mut check = |entity: &str, field: &str| {
-                    if !modeled(entity, field) {
-                        unsupported.insert(format!("{entity}.{field}"));
-                    }
-                };
-                match name {
-                    Name::Var(field) => check(owner, field),
-                    Name::CrossStatus { id_field, .. } => check(owner, id_field),
-                    Name::CrossField {
-                        entity_type,
-                        id_field,
-                        field,
-                    } => {
-                        check(owner, id_field);
-                        check(entity_type, field);
-                    }
-                    Name::Status | Name::Param(_) => {}
-                }
-            });
-        }
-        if !unsupported.is_empty() {
-            let reason = format!(
-                "unsupported reads or expansion: {}",
-                unsupported.into_iter().collect::<Vec<_>>().join(", ")
-            );
-            return Walk {
-                states: 0,
-                held_back: false,
-                outcomes: invariants
-                    .iter()
-                    .map(|_| JointOutcome::Incomplete {
-                        reason: reason.clone(),
-                    })
-                    .collect(),
-            };
-        }
-        let mut unknown = vec![false; invariants.len()];
-        let mut broken: Vec<Option<usize>> = vec![None; invariants.len()];
-        let premises: Vec<Option<&Expr>> = invariants.iter().map(|inv| premise(inv)).collect();
-        let mut met: Vec<bool> = premises.iter().map(Option::is_none).collect();
-        let explored = self.walk_with(bound, false, |index, state| {
-            if state.settled() {
-                let env = self.env(owner, state);
-                for (i, inv) in invariants.iter().enumerate() {
-                    match eval(inv, &env) {
-                        Truth::False if broken[i].is_none() => broken[i] = Some(index),
-                        Truth::Unknown => unknown[i] = true,
-                        _ => {}
-                    }
-                    if let (false, Some(premise)) = (met[i], premises[i]) {
-                        met[i] = eval(premise, &env) != Truth::False;
-                    }
-                }
-            }
-            broken.iter().all(Option::is_some)
-        });
-        let unwalked = explored.unwalked();
-        let outcomes = broken
-            .iter()
-            .enumerate()
-            .map(|(i, found)| match found {
-                Some(index) => JointOutcome::Broken {
-                    path: explored.path(*index),
-                },
-                None if unknown[i] => JointOutcome::Incomplete {
-                    reason: "an invariant read is unknown".into(),
-                },
-                None => match &explored.stopped {
-                    Some(reason) => JointOutcome::Incomplete {
-                        reason: reason.clone(),
-                    },
-                    None if !unwalked.is_empty() => JointOutcome::Incomplete {
-                        reason: unwalked_reason(&unwalked),
-                    },
-                    None => match premises[i] {
-                        Some(premise) if !met[i] => JointOutcome::Vacuous {
-                            premise: premise.to_string(),
-                        },
-                        _ => JointOutcome::Holds,
-                    },
-                },
-            })
-            .collect();
-        Walk {
-            states: explored.len(),
-            outcomes,
-            held_back: explored.held_back,
-        }
     }
 }
