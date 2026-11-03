@@ -2,7 +2,7 @@
 """Decide what a CI run tests, for .github/workflows/ci.yml.
 
 Lane "full" (schedule, a plain dispatch, a first push of a branch) runs every check.
-Lane "pr" (a push, a pull request, a merge group, or a dispatch given changed paths)
+Lane "pr" (a push, a pull request, or a dispatch given changed paths)
 tests only the workspace packages a change can reach: the packages whose files
 changed plus every package that depends on them (normal, dev and build
 dependencies all count), worked out from `cargo metadata`. A change to anything outside a
@@ -10,10 +10,7 @@ package that a build or test could read (Cargo.lock, the toolchain, .github/,
 test-fixtures/, os-apps/, skills/, scripts/, ...) tests every package; only the
 paths in DOCS are known to be read by nothing.
 
-A push whose tree already passed CI in a merge group (VERIFIED_RUN names that
-run) has nothing new to test: the queue moves main to the commit it tested. It
-takes the pr lane with nothing changed, the same path as a docs-only change.
-The nightly schedule still runs the full lane.
+The nightly schedule runs the full lane.
 
 Writes key=value lines to $GITHUB_OUTPUT (stdout when unset):
   lane      full | pr
@@ -25,8 +22,8 @@ Writes key=value lines to $GITHUB_OUTPUT (stdout when unset):
             before) or the SDK itself did; packages/ is in DOCS for Rust's sake
   shards    JSON matrix of Tests shards for the pr lane
   specs     true when Spec Verification runs: the full lane, or a changed spec file
-  tests     false on a pull request: it only compiles and lints, and its merge group
-            runs every test once, before main takes it (Rita, 31 Oct 2026: "CI 2
+  tests     false on a pull request: it only compiles and lints, and the push to
+            main that lands it runs every test once (Rita, 31 Oct 2026: "CI 2
             times is insane"); true for every other event
 """
 
@@ -152,21 +149,16 @@ def test_args(packages):
 
 
 def main():
-    # A merge group takes the pr lane too: the full lane splits platform-random into seed
-    # shards, so the required "DST/Platform Tests (platform-random)" check would never report.
     # A push tests what it moved the branch by; the nightly full lane catches what that misses.
-    queued = os.environ.get("EVENT") in ("pull_request", "merge_group")
+    proposed = os.environ.get("EVENT") == "pull_request"
     pushed = os.environ.get("EVENT") == "push" and os.environ.get("BASE_SHA", "").strip("0")
-    verified = os.environ.get("VERIFIED_RUN", "").strip()
-    lane = "pr" if queued or pushed or verified or os.environ.get("CHANGED_PATHS", "").strip() else "full"
+    lane = "pr" if proposed or pushed or os.environ.get("CHANGED_PATHS", "").strip() else "full"
     dirs, names, dependents, libraries = workspace()
     out = {"lane": lane, "mode": "full", "packages": " ".join(sorted(names)), "test_args": "--workspace", "rust": "true",
            "specs": "true", "tests": "false" if os.environ.get("EVENT") == "pull_request" else "true"}
     if lane == "pr":
-        if verified:
-            print(f"This tree already passed in its merge group: {verified}", file=sys.stderr)
         direct, outside, docs_only, sdk_ts, specs = set(), [], True, False, False
-        for path in [] if verified else changed_paths():
+        for path in changed_paths():
             sdk_ts = sdk_ts or path.startswith("packages/temper-sdk-ts/")
             specs = specs or path.endswith(SPEC_FILES)
             name = owner(path, dirs)
