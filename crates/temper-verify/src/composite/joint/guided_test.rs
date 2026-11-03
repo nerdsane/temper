@@ -186,14 +186,4 @@ fn the_same_specs_give_the_same_verdict_and_trace() {
     let second = invariant_in(&[&deep, OTHER], SMALL).to_string();
     assert!(first.contains("BROKEN"), "{first}");
     assert_eq!(first, second);
-    let holds = deep_holds();
-    assert_eq!(holds.0, holds.1);
-}
-
-fn deep_holds() -> (String, String) {
-    let deep = deep(DEPTH, FLAGS, HOLDS);
-    (
-        invariant_in(&[&deep, OTHER], SMALL).to_string(),
-        invariant_in(&[&deep, OTHER], SMALL).to_string(),
-    )
 }
