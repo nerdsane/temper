@@ -60,7 +60,7 @@ pub(super) struct Node {
     /// Sure moves alone reach it from a start.
     pub(super) sure: bool,
     /// It waits in the walk's queue.
-    queued: bool,
+    pub(super) queued: bool,
 }
 
 /// What a walk saw, and the memory it holds for it.
@@ -78,10 +78,10 @@ pub(in crate::composite::joint) struct Explored<'a> {
     pub(in crate::composite::joint) held_back: bool,
     /// The moves the runtime could make in a walked state that the walk
     /// never takes.
-    unwalked: BTreeSet<Unwalked>,
+    pub(super) unwalked: BTreeSet<Unwalked>,
     /// The moves (names in `packer`) that are reactions from a type outside
     /// the scope, with the type and action each one sends.
-    outside: BTreeMap<u32, (String, String)>,
+    pub(super) outside: BTreeMap<u32, (String, String)>,
     /// The memory its tables hold, given back when it is dropped.
     pub(in crate::composite::joint) held: Held<'a>,
 }
@@ -203,7 +203,7 @@ const ANSWER: &str = "a module whose trigger names no on_success";
 impl JointModel {
     /// Note each move the runtime could make in `state` that the walk never
     /// takes.
-    fn note_unwalked(&self, state: &JointState, unwalked: &mut BTreeSet<Unwalked>) {
+    pub(super) fn note_unwalked(&self, state: &JointState, unwalked: &mut BTreeSet<Unwalked>) {
         for (entity, ways) in &self.unsent {
             let open = state
                 .calls

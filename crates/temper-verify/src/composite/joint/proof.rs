@@ -297,34 +297,36 @@ impl LivenessProof<'_> {
         result.in_flight_bound = explored.held_back.then_some(model::MAX_IN_FLIGHT);
         result.unwalked = explored.unwalked();
         let settling = settle_bytes(&explored);
-        result.outcome = match &explored.stopped {
-            Some(reason) => LivenessOutcome::Incomplete {
-                reason: reason.clone(),
-            },
-            None => match explored.held.add(settling) {
-                Ok(()) => match settle(model, &self.entity, &self.goal, &explored) {
-                    (LivenessOutcome::Holds, _) if !result.unwalked.is_empty() => {
-                        LivenessOutcome::Incomplete {
-                            reason: model::unwalked_reason(&result.unwalked),
-                        }
+        // Past where the walk stops, phase two (`model/guided.rs`).
+        if let Some(reason) = explored.stopped.clone() {
+            result.outcome =
+                model.guided_liveness(&self.entity, &self.goal, explored, reason, bound);
+            return result;
+        }
+        result.outcome = match explored.held.add(settling) {
+            Ok(()) => match settle(model, &self.entity, &self.goal, &explored) {
+                (LivenessOutcome::Holds, _) if !result.unwalked.is_empty() => {
+                    LivenessOutcome::Incomplete {
+                        reason: model::unwalked_reason(&result.unwalked),
                     }
-                    (LivenessOutcome::Holds, false) => LivenessOutcome::Vacuous {
-                        premise: super::premise(&self.goal)
-                            .map(ToString::to_string)
-                            .unwrap_or_default(),
-                    },
-                    (outcome, _) => outcome,
+                }
+                (LivenessOutcome::Holds, false) => LivenessOutcome::Vacuous {
+                    premise: super::premise(&self.goal)
+                        .map(ToString::to_string)
+                        .unwrap_or_default(),
                 },
-                Err(reason) => LivenessOutcome::Incomplete {
-                    reason: format!(
-                        "deciding the walk does not fit in the memory it may hold: {reason} \
-                         (it held {} MB at {} states and needs {} MB more)",
-                        explored.held.bytes / MB,
-                        explored.len(),
-                        settling / MB
-                    ),
-                },
+                (outcome, _) => outcome,
             },
+            Err(reason) => {
+                let reason = format!(
+                    "deciding the walk does not fit in the memory it may hold: {reason} \
+                         (it held {} MB at {} states and needs {} MB more)",
+                    explored.held.bytes / MB,
+                    explored.len(),
+                    settling / MB
+                );
+                model.guided_liveness(&self.entity, &self.goal, explored, reason, bound)
+            }
         };
         result
     }
