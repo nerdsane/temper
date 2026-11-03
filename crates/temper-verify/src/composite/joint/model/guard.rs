@@ -39,7 +39,11 @@ impl JointModel {
 
     /// Whether the guard of the trigger that sent `dispatch` holds on the
     /// related records as `state` holds them, read on its source as it
-    /// committed.
+    /// committed. The model holds one record of each type: a reference that
+    /// names another record (one of its source's own type, or one its id
+    /// field moved to) may find one in the runtime, so it reads as unknown.
+    /// Before this read, every trigger guard on a related record went both
+    /// ways; only the records the model holds decide one.
     fn trigger_guard(&self, dispatch: &Dispatch, state: &JointState) -> Truth {
         let (Some(committed), Some(index)) = (&dispatch.unread_guard, dispatch.via) else {
             return Truth::True;
@@ -51,6 +55,7 @@ impl JointModel {
         let own = committed.record();
         let mut env = self.env(&reaction.from, state);
         env.own = Some(&own);
+        env.unheld_unknown = true;
         eval(guard, &env)
     }
 }

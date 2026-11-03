@@ -455,6 +455,7 @@ impl JointModel {
             owner,
             blind,
             own: None,
+            unheld_unknown: false,
         }
     }
 }

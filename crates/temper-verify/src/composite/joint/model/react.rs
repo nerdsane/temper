@@ -281,7 +281,9 @@ impl JointModel {
     fn committed(&self, guard: &Expr, source: &str, state: &JointState) -> Option<Committed> {
         let model = &self.models[source];
         let record = &state.records[source];
-        if eval(guard, &self.env(source, state)) == Truth::Unknown {
+        let mut env = self.env(source, state);
+        env.unheld_unknown = true;
+        if eval(guard, &env) == Truth::Unknown {
             return None;
         }
         let mut fields = BTreeMap::new();

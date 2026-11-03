@@ -120,6 +120,9 @@ pub(super) struct JointEnv<'a> {
     /// The owner's record as this evaluation reads it, when not as the
     /// joint state holds it now: a trigger's source as it committed.
     pub(super) own: Option<&'a TemperModelState>,
+    /// A reference whose id field names another record than the one the
+    /// model holds of its type reads as unknown, not as no record.
+    pub(super) unheld_unknown: bool,
 }
 
 fn var_of<'a>(model: &TemperModel, state: &'a TemperModelState, name: &str) -> Val<'a> {
@@ -163,6 +166,7 @@ impl JointEnv<'_> {
             entity_type,
         ) {
             Found::Yes => Some(self.state.records.get(entity_type)),
+            Found::Missing if self.unheld_unknown => None,
             Found::Missing => Some(None),
             Found::Unknown => None,
         }
