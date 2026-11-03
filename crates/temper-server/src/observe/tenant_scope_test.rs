@@ -421,7 +421,13 @@ async fn reading_an_entity_deleted_during_its_load_does_not_start_it_again() {
             .oneshot(system_in("tenant-a", "GET", &uri))
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+        // A deleted record's trail stays readable; its state does not.
+        let expected = if route == "history" {
+            StatusCode::OK
+        } else {
+            StatusCode::NOT_FOUND
+        };
+        assert_eq!(response.status(), expected, "{uri}");
         assert!(
             !has_live_actor(&state, "tenant-a", "o-del"),
             "{uri} started the deleted entity again"
