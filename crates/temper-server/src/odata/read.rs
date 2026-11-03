@@ -221,7 +221,9 @@ fn resource_not_found_response(set_name: &str, key: &str) -> Response {
     .into_response()
 }
 
-pub(super) async fn load_existing_entity_descriptor_body(
+/// Load one existing entity's body for an authorization decision, or `404` when
+/// the entity does not exist in the tenant.
+pub(crate) async fn load_existing_entity_descriptor_body(
     state: &ServerState,
     tenant: &TenantId,
     entity_type: &str,
@@ -235,21 +237,20 @@ pub(super) async fn load_existing_entity_descriptor_body(
     {
         return Ok(body);
     }
-    if !state.entity_exists(tenant, entity_type, key)
-        && !state.ensure_entity_loaded(tenant, entity_type, key).await
-    {
-        return Err(resource_not_found_response(set_name, key));
-    }
-    state
-        .get_tenant_entity_state(tenant, entity_type, key)
+    // An existing-only read: a delete that finishes while this loads leaves
+    // no entity behind, and the deletion tombstone reads as not found.
+    match state
+        .get_existing_entity_state(tenant, entity_type, key)
         .await
-        .map(|response| {
+    {
+        Ok(Some(response)) => {
             let mut body = serde_json::to_value(&response.state).unwrap_or_default();
             super::read_defaults::ReadDefaults::for_entity(state, tenant, entity_type)
                 .apply(&mut body);
-            body
-        })
-        .map_err(|_| resource_not_found_response(set_name, key))
+            Ok(body)
+        }
+        Ok(None) | Err(_) => Err(resource_not_found_response(set_name, key)),
+    }
 }
 
 async fn load_authorized_entity_body(

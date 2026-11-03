@@ -38,7 +38,10 @@ async fn a_tenants_invocation_log_keeps_its_newest_rows_up_to_the_bound() {
             .await
             .unwrap();
     }
-    let rows = store.load_recent_wasm_invocations(2 * busy).await.unwrap();
+    let rows = store
+        .load_recent_wasm_invocations("busy", 2 * busy)
+        .await
+        .unwrap();
     let kept: Vec<&str> = rows
         .iter()
         .filter(|row| row.tenant == "busy")
@@ -52,11 +55,11 @@ async fn a_tenants_invocation_log_keeps_its_newest_rows_up_to_the_bound() {
     let newest = format!("e-{}", busy - 1);
     assert!(kept.contains(&newest.as_str()), "its newest row is kept");
     assert!(!kept.contains(&"e-0"), "its oldest rows are pruned");
-    assert_eq!(
-        rows.iter().filter(|row| row.tenant == "quiet").count(),
-        3,
-        "another tenant's rows are left alone"
-    );
+    let quiet = store
+        .load_recent_wasm_invocations("quiet", 2 * busy)
+        .await
+        .unwrap();
+    assert_eq!(quiet.len(), 3, "another tenant's rows are left alone");
 }
 
 #[tokio::test]
@@ -71,11 +74,11 @@ async fn interleaved_tenants_each_keep_their_newest_invocations() {
                 .unwrap();
         }
     }
-    let rows = store
-        .load_recent_wasm_invocations(2 * inserted)
-        .await
-        .unwrap();
     for tenant in ["odd", "even"] {
+        let rows = store
+            .load_recent_wasm_invocations(tenant, 2 * inserted)
+            .await
+            .unwrap();
         let mut ids: Vec<i64> = rows
             .iter()
             .filter(|row| row.tenant == tenant)
@@ -133,7 +136,7 @@ async fn a_journal_append_can_land_between_log_cleanup_batches() {
             .await
             .unwrap();
         store
-            .load_recent_wasm_invocations(backlog + 1)
+            .load_recent_wasm_invocations("backlog", backlog + 1)
             .await
             .unwrap()
             .len() as i64
@@ -144,7 +147,7 @@ async fn a_journal_append_can_land_between_log_cleanup_batches() {
         "the high-priority journal append finishes while cleanup still has work: {remaining}"
     );
     let rows = store
-        .load_recent_wasm_invocations(backlog + 1)
+        .load_recent_wasm_invocations("backlog", backlog + 1)
         .await
         .unwrap();
     assert_eq!(rows.len() as i64, WASM_INVOCATIONS_KEPT_PER_TENANT);

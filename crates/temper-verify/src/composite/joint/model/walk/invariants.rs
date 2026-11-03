@@ -149,10 +149,13 @@ impl JointModel {
                 },
             })
             .collect();
+        let (states, held_back) = (explored.len(), explored.held_back);
+        // Past where it stopped, phase two (`guided.rs`).
+        let outcomes = self.guided_invariants(owner, invariants, outcomes, explored, bound);
         Walk {
-            states: explored.len(),
+            states,
             outcomes,
-            held_back: explored.held_back,
+            held_back,
             outside,
         }
     }

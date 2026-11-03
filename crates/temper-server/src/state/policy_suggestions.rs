@@ -253,14 +253,17 @@ impl PolicySuggestionEngine {
                     role_value: None,
                     session_id: None,
                 };
-                let preview = temper_authz::generate_cedar_from_matrix(
+                // A pattern whose values are not valid Cedar has no policy to suggest.
+                let Ok(preview) = temper_authz::generate_cedar_from_matrix(
                     grouped.agent_type.as_deref().unwrap_or("*"),
                     "Agent",
                     "*",
                     &grouped.resource_type,
                     "*",
                     &matrix,
-                );
+                ) else {
+                    continue;
+                };
                 suggestions.push(PolicySuggestion {
                     description: format!(
                         "{} actions on {} denied {} times for {}",
@@ -299,14 +302,16 @@ impl PolicySuggestionEngine {
                 role_value: None,
                 session_id: None,
             };
-            let preview = temper_authz::generate_cedar_from_matrix(
+            let Ok(preview) = temper_authz::generate_cedar_from_matrix(
                 pattern.agent_type.as_deref().unwrap_or("*"),
                 "Agent",
                 &pattern.action,
                 &pattern.resource_type,
                 "*",
                 &matrix,
-            );
+            ) else {
+                continue;
+            };
             suggestions.push(PolicySuggestion {
                 description: format!(
                     "{} denied {} times on {} for {}",

@@ -11,6 +11,8 @@ mod compilation_tests;
 mod guest_read_bounds_test;
 mod guest_spans;
 mod host_functions;
+#[cfg(test)]
+mod outbound_failure_log_test;
 mod telemetry;
 #[cfg(test)]
 mod tests;
@@ -449,6 +451,10 @@ impl WasmEngine {
         tracing::Span::current().record("blob_cache_entries", blob_cache_entries);
         tracing::Span::current().record("blob_cache_bytes", blob_cache_bytes);
         let span = tracing::Span::current();
+        // The guest thread logs where its caller logs. A new thread starts on
+        // the global subscriber, so without this a scoped one (a test's, or a
+        // harness's) never sees the host calls' log lines.
+        let dispatch = tracing::dispatcher::get_default(|current| current.clone());
         let runtime_handle = tokio::runtime::Handle::current();
         let single_threaded =
             runtime_handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread;
@@ -463,7 +469,7 @@ impl WasmEngine {
             .name(thread_name)
             .stack_size(WASM_INVOKE_THREAD_STACK_BYTES)
             .spawn(move || {
-                let result = {
+                let result = tracing::dispatcher::with_default(&dispatch, || {
                     let _runtime_entered = runtime_handle.enter();
                     let _entered = span.enter();
                     Self::invoke_blocking(
@@ -475,7 +481,7 @@ impl WasmEngine {
                         streams,
                         blob_cache,
                     )
-                };
+                });
                 let _ = tx.send(result);
             })
             .map_err(|e| WasmError::Invocation(format!("failed to spawn WASM thread: {e}")))?;

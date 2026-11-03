@@ -67,6 +67,13 @@ impl SpecRegistry {
         ready.into_iter().collect()
     }
 
+    /// Forget `tenant`'s changed types: a restore that walks every timed
+    /// type of the tenant itself (`ServerState::start_tenant_runtime`), or
+    /// will try again, leaves no install walk to follow them.
+    pub fn discard_changed_types(&mut self, tenant: &TenantId) {
+        self.changed_types.retain(|(changed, _)| changed != tenant);
+    }
+
     /// An installation into `tenant` starts. It registers its specs before
     /// its policies and modules, and a record whose timer a walk reconciled
     /// in between could fire before they exist, so the tenant's changed

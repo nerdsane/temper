@@ -6,9 +6,9 @@ use temper_runtime::tenant::TenantId;
 use temper_server::storage::StorageStack;
 use temper_store_turso::TursoEventStore;
 
-use super::bootstrap::{
-    EarlierOperatorKeys, bootstrap_installed_apps, bootstrap_tenants, build_registry,
-};
+use super::bootstrap::{EarlierOperatorKeys, bootstrap_tenants, build_registry};
+use super::installed_apps::bootstrap_installed_apps;
+use super::later::Later;
 
 const ORDER_IOA: &str = include_str!("../../../../test-fixtures/specs/order.ioa.toml");
 const ORDER_CSDL: &str = include_str!("../../../../test-fixtures/specs/model.csdl.xml");
@@ -95,7 +95,12 @@ async fn startup_keeps_an_unavailable_tenants_stored_rows_unchanged() {
     );
 
     let stack = StorageStack::from_turso(store.clone());
-    let (registry, _) = build_registry(None, Some(&stack), &[])
+    // The tenant is one of the server's own, so this boot restores it.
+    let mut later = Later::new(Later::own_tenants(
+        &[(tenant.to_string(), String::new())],
+        None,
+    ));
+    let (registry, _) = build_registry(None, Some(&stack), &[], &mut later)
         .await
         .expect("startup restores the other tenants");
     assert!(
@@ -105,8 +110,8 @@ async fn startup_keeps_an_unavailable_tenants_stored_rows_unchanged() {
     );
     let mut state = PlatformState::with_registry(registry, None);
     state.server.set_storage_stack(stack);
-    bootstrap_tenants(&state, &[], EarlierOperatorKeys::Keep).await;
-    bootstrap_installed_apps(&state, &[])
+    bootstrap_tenants(&state, &[], EarlierOperatorKeys::Keep, &later).await;
+    bootstrap_installed_apps(&state, &[], &mut later)
         .await
         .expect("startup continues past the unavailable tenant");
 

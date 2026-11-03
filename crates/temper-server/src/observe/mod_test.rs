@@ -1501,22 +1501,14 @@ async fn test_entity_history_returns_events() {
 }
 
 #[tokio::test]
-async fn test_entity_history_empty_for_unknown() {
+async fn test_entity_history_not_found_for_unknown() {
     let app = build_test_app();
     let response = app
         .oneshot(system_get("/observe/entities/Order/nonexistent/history"))
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-        .await
-        .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["entity_type"], "Order");
-    assert_eq!(json["entity_id"], "nonexistent");
-    let events = json["events"].as_array().expect("events should be array");
-    assert!(events.is_empty());
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

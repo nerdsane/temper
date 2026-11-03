@@ -44,6 +44,9 @@ mod tests;
 mod stack_tests;
 
 #[cfg(test)]
+mod typed_uid_tests;
+
+#[cfg(test)]
 mod identity_records_tests;
 
 #[cfg(test)]
@@ -499,10 +502,9 @@ impl AuthzEngine {
             PrincipalKind::System => "System",
         };
 
-        let principal_uid = match EntityUid::from_str(&format!(
-            "{}::\"{}\"",
-            principal_type, security_ctx.principal.id
-        )) {
+        // UIDs are built from a parsed type name and the id as given, so an id
+        // is matched exactly as the caller wrote it.
+        let principal_uid = match typed_uid(principal_type, &security_ctx.principal.id) {
             Ok(uid) => uid,
             Err(e) => {
                 return recorder.fail(
@@ -514,7 +516,7 @@ impl AuthzEngine {
         recorder.finish_phase("principal_uid");
 
         // Build Cedar action
-        let action_uid = match EntityUid::from_str(&format!("Action::\"{}\"", action)) {
+        let action_uid = match typed_uid("Action", action) {
             Ok(uid) => uid,
             Err(e) => {
                 return recorder.fail("action_uid", AuthzDenial::InvalidAction(e.to_string()));
@@ -523,11 +525,7 @@ impl AuthzEngine {
         recorder.finish_phase("action_uid");
 
         // Build Cedar resource
-        let resource_uid = match EntityUid::from_str(&format!(
-            "{}::\"{}\"",
-            resource_type,
-            resource_id_from_attrs(resource_attrs)
-        )) {
+        let resource_uid = match typed_uid(resource_type, &resource_id_from_attrs(resource_attrs)) {
             Ok(uid) => uid,
             Err(e) => {
                 return recorder.fail("resource_uid", AuthzDenial::InvalidResource(e.to_string()));
@@ -943,6 +941,16 @@ fn insert_json_as_cedar(
             .collect();
         map.insert(key, cedar_policy::RestrictedExpression::new_set(items));
     }
+}
+
+/// Build an entity UID from a Cedar type name and an id taken verbatim.
+fn typed_uid(type_name: &str, id: &str) -> Result<EntityUid, String> {
+    let type_name = cedar_policy::EntityTypeName::from_str(type_name)
+        .map_err(|e| format!("{type_name:?} is not a Cedar entity type name: {e}"))?;
+    Ok(EntityUid::from_type_name_and_id(
+        type_name,
+        cedar_policy::EntityId::new(id),
+    ))
 }
 
 fn resource_id_from_attrs(attrs: &HashMap<String, serde_json::Value>) -> String {

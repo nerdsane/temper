@@ -42,10 +42,15 @@ async fn interleaved_tenants_each_keep_their_newest_invocations() {
                 .unwrap();
         }
     }
-    let rows = store
-        .load_recent_wasm_invocations(2 * inserted)
-        .await
-        .unwrap();
+    let mut rows = Vec::new();
+    for tenant in ["odd", "even"] {
+        rows.extend(
+            store
+                .load_recent_wasm_invocations(tenant, 2 * inserted)
+                .await
+                .unwrap(),
+        );
+    }
     // Clean up even when the assertions below catch a regression.
     sqlx::query(&format!("DROP SCHEMA {name} CASCADE"))
         .execute(&pool)

@@ -129,31 +129,24 @@ impl ServerState {
         }
     }
 
-    /// Arm again every scheduled action a previous process left waiting
-    /// (`rearm_state_timers` calls it at boot), each through `gate`, and
+    /// Arm again every scheduled action a previous process left waiting in
+    /// `tenants` (`rearm_state_timers` calls it at boot), each through `gate`, and
     /// count them per tenant and type into `counts`. A row that cannot be
     /// read is removed: it can never fire. A tenant whose rows cannot be
     /// listed is tried again in the background until they can.
     #[tracing::instrument(skip_all, fields(otel.name = "boot.scheduled_actions"))]
     pub(super) async fn rearm_scheduled_actions(
         &self,
+        tenants: &[TenantId],
         gate: &Arc<Semaphore>,
         counts: &mut BootTimers,
     ) {
-        let tenants = match self.registry.read() {
-            Ok(registry) => registry
-                .tenant_ids()
-                .into_iter()
-                .cloned()
-                .collect::<Vec<_>>(),
-            Err(_) => return,
-        };
         for tenant in tenants {
-            if let Err(error) = self.rearm_tenant_rows(&tenant, gate, counts).await {
+            if let Err(error) = self.rearm_tenant_rows(tenant, gate, counts).await {
                 tracing::error!(tenant = %tenant, %error,
                     retry_in_ms = FIRST_RETRY_WAIT.as_millis() as u64,
                     "scheduled action rows not readable at boot; retrying");
-                self.retry_tenant_rows(tenant, gate.clone());
+                self.retry_tenant_rows(tenant.clone(), gate.clone());
             }
         }
     }

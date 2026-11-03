@@ -136,7 +136,13 @@ impl PendingDecision {
     }
 
     /// Generate Cedar policy text from a scope matrix.
-    pub fn generate_policy_from_matrix(&self, matrix: &PolicyScopeMatrix) -> String {
+    ///
+    /// Fails when a stored value cannot be rendered as a typed Cedar value
+    /// (see [`temper_authz::generate_cedar_from_matrix`]).
+    pub fn generate_policy_from_matrix(
+        &self,
+        matrix: &PolicyScopeMatrix,
+    ) -> Result<String, String> {
         let kind = self.principal_kind.as_deref().unwrap_or("Agent");
         temper_authz::generate_cedar_from_matrix(
             &self.agent_id,

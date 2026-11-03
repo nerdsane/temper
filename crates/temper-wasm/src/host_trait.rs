@@ -1811,6 +1811,8 @@ impl WasmHost for ProductionWasmHost {
                 };
                 let req_body = reqwest::Body::wrap_stream(body_stream);
 
+                // `send` resolves on the response head, possibly before the server read the body: a success head keeps
+                // the reader open until the exchange ends; anything else closes it so the guest's next write fails.
                 let send_result = redirects
                     .send(
                         &client,
@@ -1818,7 +1820,9 @@ impl WasmHost for ProductionWasmHost {
                         "http_stream_begin_outbound",
                     )
                     .await;
-                let _ = streams.close(bridge_req).await;
+                if !matches!(&send_result, Ok(resp) if resp.status().is_success()) {
+                    let _ = streams.close(bridge_req).await;
+                }
                 let resp = match send_result {
                     Ok(r) => r,
                     Err(e) => {
@@ -1863,6 +1867,7 @@ impl WasmHost for ProductionWasmHost {
                 tracing::Span::current().record("response_bytes", response_bytes);
                 tracing::Span::current()
                     .record("duration_ms", started.elapsed().as_millis() as u64);
+                let _ = streams.close(bridge_req).await;
                 let _ = streams.close(bridge_resp).await;
             }
             .instrument(span),

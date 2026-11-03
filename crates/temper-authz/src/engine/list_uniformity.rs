@@ -17,6 +17,8 @@ use cedar_policy::{
 
 use crate::context::{PrincipalKind, SecurityContext, is_cedar_authority_context_key};
 
+use super::typed_uid;
+
 /// How a list read may share one Cedar decision across rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ListReadUniformity {
@@ -72,7 +74,7 @@ pub(super) fn split(
     resource_type: &str,
 ) -> Option<ListSplit> {
     let principal_uid = principal_uid(security_ctx)?;
-    let action_uid = EntityUid::from_str(&format!("Action::\"{action}\"")).ok()?;
+    let action_uid = typed_uid("Action", action).ok()?;
     let resource_type_name = EntityTypeName::from_str(resource_type).ok()?;
 
     // Use the engine's conversion: null, objects, and non-integer numbers
@@ -425,7 +427,7 @@ fn principal_uid(security_ctx: &SecurityContext) -> Option<EntityUid> {
         PrincipalKind::Admin => "Admin",
         PrincipalKind::System => "System",
     };
-    EntityUid::from_str(&format!("{kind}::\"{}\"", security_ctx.principal.id)).ok()
+    typed_uid(kind, &security_ctx.principal.id).ok()
 }
 
 #[cfg(test)]

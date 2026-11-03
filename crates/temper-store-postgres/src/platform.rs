@@ -2539,16 +2539,22 @@ impl PostgresEventStore {
         Ok(())
     }
 
+    /// Load one tenant's recent WASM invocation log entries (newest first, up
+    /// to `limit`). The tenant is bound in the query because all tenants share
+    /// this table.
     pub async fn load_recent_wasm_invocations(
         &self,
+        tenant: &str,
         limit: i64,
     ) -> Result<Vec<PostgresWasmInvocationRow>, PersistenceError> {
         let rows = crate::dbm::postgres_query!(&self.schema,
             "SELECT tenant, entity_type, entity_id, module_name, trigger_action, callback_action, success, error, duration_ms, created_at \
              FROM {schema}wasm_invocation_logs \
+             WHERE tenant = $1 \
              ORDER BY created_at DESC \
-             LIMIT $1",
+             LIMIT $2",
         )
+        .bind(tenant)
         .bind(limit)
         .fetch_all(self.pool())
         .await

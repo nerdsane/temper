@@ -27,6 +27,7 @@ use super::{Connection, DriverError, DriverHandle, Lease};
 
 mod checkpoint;
 mod files;
+mod outcome;
 mod pool;
 mod push;
 mod remote;

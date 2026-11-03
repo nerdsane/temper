@@ -10,7 +10,8 @@ use temper_runtime::tenant::TenantId;
 use temper_server::storage::StorageStack;
 use temper_store_turso::TursoEventStore;
 
-use super::bootstrap::{bootstrap_installed_apps, missing_app_line};
+use super::installed_apps::{bootstrap_installed_apps, missing_app_line};
+use super::later::Later;
 
 const ORDER_IOA: &str = include_str!("../../../../test-fixtures/specs/order.ioa.toml");
 const ORDER_CSDL: &str = include_str!("../../../../test-fixtures/specs/model.csdl.xml");
@@ -69,9 +70,13 @@ async fn an_app_with_no_files_anywhere_waits_and_boot_goes_on() {
     let app = format!("waits-{}", temper_runtime::scheduler::sim_uuid().simple());
     let state = server(data_dir.path(), &data_dir.path().join("temper.db")).await;
 
-    bootstrap_installed_apps(&state, std::slice::from_ref(&app))
-        .await
-        .expect("an app with no files does not stop the boot");
+    bootstrap_installed_apps(
+        &state,
+        std::slice::from_ref(&app),
+        &mut Later::new(Later::own_tenants(&[], None)),
+    )
+    .await
+    .expect("an app with no files does not stop the boot");
 
     assert!(registered_order(&state).is_none());
     assert!(
@@ -98,9 +103,13 @@ async fn a_catalog_app_is_adopted_and_replayed_on_later_boots_whatever_the_catal
     add_os_apps_dir(apps_root.path().to_path_buf());
 
     let first = server(data_dir.path(), &db).await;
-    bootstrap_installed_apps(&first, std::slice::from_ref(&app))
-        .await
-        .expect("first boot");
+    bootstrap_installed_apps(
+        &first,
+        std::slice::from_ref(&app),
+        &mut Later::new(Later::own_tenants(&[], None)),
+    )
+    .await
+    .expect("first boot");
     assert_eq!(registered_order(&first).as_deref(), Some(served.as_str()));
     let (kind, adopted) = stored_install(&first, &app)
         .await
@@ -141,9 +150,13 @@ async fn a_catalog_app_is_adopted_and_replayed_on_later_boots_whatever_the_catal
         &format!("{ORDER_IOA}\n# a later catalog\n"),
     );
     let second = server(data_dir.path(), &db).await;
-    bootstrap_installed_apps(&second, std::slice::from_ref(&app))
-        .await
-        .expect("second boot");
+    bootstrap_installed_apps(
+        &second,
+        std::slice::from_ref(&app),
+        &mut Later::new(Later::own_tenants(&[], None)),
+    )
+    .await
+    .expect("second boot");
     assert_eq!(registered_order(&second).as_deref(), Some(served.as_str()));
     assert_eq!(
         stored_install(&second, &app).await,

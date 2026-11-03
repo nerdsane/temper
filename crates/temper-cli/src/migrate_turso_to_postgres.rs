@@ -835,12 +835,10 @@ async fn migrate_wasm_invocations(
     dry_run: bool,
     builder: &mut ManifestBuilder,
 ) -> Result<()> {
-    let all_rows = source.load_recent_wasm_invocations(MAX_ROWS).await?;
-    ensure_row_bound("wasm_invocation_logs", all_rows.len())?;
-    let rows = all_rows
-        .into_iter()
-        .filter(|row| row.tenant == tenant)
-        .collect::<Vec<_>>();
+    let rows = source
+        .load_recent_wasm_invocations(tenant, MAX_ROWS)
+        .await?;
+    ensure_row_bound("wasm_invocation_logs", rows.len())?;
     builder.record_source(
         tenant,
         "wasm_invocation_logs",

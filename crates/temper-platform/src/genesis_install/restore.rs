@@ -32,10 +32,31 @@ use super::*;
 /// `App`/`Commit`/`Tree`/`Blob` state, and the local OS-app catalog is rebuilt
 /// from those objects instead of from GitHub, submodules, or arbitrary app dirs.
 pub async fn restore_genesis_app_cache_roots(platform: &PlatformState) -> usize {
-    let source_tenants = genesis_source_tenants();
-    let mut restored = 0usize;
+    let planned = plan_app_cache_roots(platform).await;
+    restore_planned_cache_roots(platform, planned.into_values().flatten().collect()).await
+}
 
-    for source_tenant in source_tenants {
+/// A service-side install to bring back: the version it installed, and the
+/// cache directory its files go to for the tenant it installs into.
+pub struct PlannedCacheRoot {
+    source_tenant: String,
+    target_tenant: String,
+    app_id: String,
+    app_ref: String,
+    cache_root: std::path::PathBuf,
+    root: GenesisAppBundle,
+}
+
+/// Read the service-side `AppInstallation` rows and plan a cache root for
+/// each installed one, by the tenant it installs into, so a boot can bring
+/// back its own tenants' roots before it serves and each other tenant's
+/// with that tenant ([`restore_planned_cache_roots`]).
+pub async fn plan_app_cache_roots(
+    platform: &PlatformState,
+) -> std::collections::BTreeMap<String, Vec<PlannedCacheRoot>> {
+    let mut planned: std::collections::BTreeMap<String, Vec<PlannedCacheRoot>> =
+        std::collections::BTreeMap::new();
+    for source_tenant in genesis_source_tenants() {
         let tenant = TenantId::new(&source_tenant);
         let installation_ids = platform
             .server
@@ -98,25 +119,57 @@ pub async fn restore_genesis_app_cache_roots(platform: &PlatformState) -> usize 
                 repository_id,
                 version_hash,
             };
-            match materialize_app_closure(&platform.server, &tenant, &cache_root, root).await {
-                Ok(written) => {
-                    legacy_specs::convert_legacy_bundle_specs(&cache_root);
-                    register_written_apps(&target_tenant, cache_root, written);
-                    restored += 1;
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        source_tenant = %source_tenant,
-                        app_id = %app_id,
-                        app_ref = %app_ref,
-                        error = %error,
-                        "Failed to restore Genesis app cache root"
-                    );
-                }
+            planned
+                .entry(target_tenant.clone())
+                .or_default()
+                .push(PlannedCacheRoot {
+                    source_tenant: source_tenant.clone(),
+                    target_tenant,
+                    app_id,
+                    app_ref,
+                    cache_root,
+                    root,
+                });
+        }
+    }
+    planned
+}
+
+/// Write each of `planned`'s files from the service's own records into its
+/// cache directory and register its apps for the tenant it installs into.
+/// Returns how many were restored; a failure is logged and skipped.
+pub async fn restore_planned_cache_roots(
+    platform: &PlatformState,
+    planned: Vec<PlannedCacheRoot>,
+) -> usize {
+    let mut restored = 0usize;
+    for planned in planned {
+        let PlannedCacheRoot {
+            source_tenant,
+            target_tenant,
+            app_id,
+            app_ref,
+            cache_root,
+            root,
+        } = planned;
+        let tenant = TenantId::new(&source_tenant);
+        match materialize_app_closure(&platform.server, &tenant, &cache_root, root).await {
+            Ok(written) => {
+                legacy_specs::convert_legacy_bundle_specs(&cache_root);
+                register_written_apps(&target_tenant, cache_root, written);
+                restored += 1;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    source_tenant = %source_tenant,
+                    app_id = %app_id,
+                    app_ref = %app_ref,
+                    error = %error,
+                    "Failed to restore Genesis app cache root"
+                );
             }
         }
     }
-
     restored
 }
 
@@ -162,21 +215,16 @@ pub struct GenesisCacheRecovery {
 pub async fn start_genesis_registry_cache_recovery(
     platform: &PlatformState,
 ) -> GenesisCacheRecovery {
-    let nothing = || GenesisCacheRecovery {
-        restored: 0,
-        fetching: CacheFetches::none(),
-    };
     let Some(ps) = platform
         .server
         .storage_stack
         .as_ref()
         .and_then(|stack| stack.platform.clone())
     else {
-        return nothing();
+        return GenesisCacheRecovery::nothing();
     };
-
-    let installed = match ps.list_all_installed_apps().await {
-        Ok(installed) => installed,
+    match ps.list_all_installed_apps().await {
+        Ok(installed) => start_registry_cache_recovery_of(platform, installed).await,
         Err(error) => {
             tracing::warn!(
                 recovery = "genesis_cache",
@@ -184,8 +232,34 @@ pub async fn start_genesis_registry_cache_recovery(
                 error = %error,
                 "Failed to list installed apps for Genesis cache recovery"
             );
-            return nothing();
+            GenesisCacheRecovery::nothing()
         }
+    }
+}
+
+impl GenesisCacheRecovery {
+    fn nothing() -> Self {
+        Self {
+            restored: 0,
+            fetching: CacheFetches::none(),
+        }
+    }
+}
+
+/// [`start_genesis_registry_cache_recovery`] for the `installed` apps given,
+/// as `(tenant, app)`: a boot passes its own tenants' before it serves, and
+/// each other tenant's with that tenant's restore.
+pub async fn start_registry_cache_recovery_of(
+    platform: &PlatformState,
+    installed: Vec<(String, String)>,
+) -> GenesisCacheRecovery {
+    let Some(ps) = platform
+        .server
+        .storage_stack
+        .as_ref()
+        .and_then(|stack| stack.platform.clone())
+    else {
+        return GenesisCacheRecovery::nothing();
     };
 
     let mut restored = 0usize;

@@ -8,27 +8,48 @@ use std::ops::ControlFlow;
 
 use temper_authz::{Asker, Cause, May, SendAnalysis};
 use temper_runtime::tenant::TenantId;
+use temper_server::tenant_restore::Standing;
 use temper_spec::automaton::Automaton;
 use temper_spec::cross_invariant;
 use temper_verify::composite::{Bound, JointOutcome, JointProof, LivenessOutcome};
 
 use super::InstallWarning;
 use super::proofs::{self, Attempt, Keys, Proof, Verdict, Wait, Walked};
+use super::reconcile::InstallOrigin;
 
 use crate::state::PlatformState;
 
 /// Types by name, each with its spec source and parsed.
 type Sourced = BTreeMap<String, (String, Automaton)>;
 
-/// Refuse an install into a tenant whose stored specs did not load at startup.
+/// Refuse an install into a tenant the server cannot serve yet, or at all.
 ///
-/// An install rewrites the tenant's spec and constraints rows; for such a
-/// tenant those stored rows are what needs repair, so they are kept as they are.
-pub(super) fn refuse_unavailable_tenant(
+/// An install request for a tenant still starting (restored after the
+/// server serves) waits for its restore first: an install before it would
+/// write rows the restore then registers over. It is refused if the restore
+/// cannot finish. A boot replay is part of that restore, so it does not wait.
+///
+/// A tenant whose stored specs did not load at startup is refused: an install
+/// rewrites the tenant's spec and constraints rows, and for such a tenant
+/// those stored rows are what needs repair, so they are kept as they are.
+pub(super) async fn refuse_unready_tenant(
     state: &PlatformState,
     tenant: &str,
     app_name: &str,
+    origin: InstallOrigin,
 ) -> Result<(), String> {
+    if matches!(origin, InstallOrigin::Request)
+        && let Standing::Starting { reason, .. } = state
+            .server
+            .tenant_restore
+            .wait_for(&TenantId::new(tenant))
+            .await
+    {
+        return Err(format!(
+            "tenant '{tenant}' is starting (its restore could not finish: {reason}), so \
+             os-app '{app_name}' is not installed yet"
+        ));
+    }
     if state.tenant_unavailable_reason(tenant).is_none() {
         return Ok(());
     }

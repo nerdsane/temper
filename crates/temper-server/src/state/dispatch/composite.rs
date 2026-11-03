@@ -133,13 +133,13 @@ impl crate::state::ServerState {
         let metadata = self
             .composite_metadata_for(tenant, entity_type, action)?
             .ok_or_else(|| {
-                DispatchError::Internal(format!(
+                DispatchError::WasmFailed(format!(
                     "Integration result for non-Composite action {entity_type}.{action} included sub_writes"
                 ))
             })?;
 
         let sub_writes = parse_sub_writes(callback_params)?;
-        validate_sub_writes(&metadata, &sub_writes)?;
+        validate_sub_writes(entity_type, action, &metadata, &sub_writes)?;
         let parent_idempotency = composite_parent_idempotency(agent_ctx, callback_params);
 
         let _commons_guardrail_lock = self.acquire_commons_write_guardrail_lock(tenant).await;

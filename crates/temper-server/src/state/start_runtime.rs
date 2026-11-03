@@ -2,6 +2,8 @@
 
 use std::sync::atomic::Ordering;
 
+use temper_runtime::tenant::TenantId;
+
 use super::{BootTimers, ServerState};
 
 impl ServerState {
@@ -32,5 +34,25 @@ impl ServerState {
         self.due_times.start();
         self.spawn_carry_stranded(self.tenants_with_carries());
         Some(boot)
+    }
+
+    /// Start the runtime of `tenant`, restored after this server serves (see
+    /// [`crate::tenant_restore`]): what [`Self::start_runtime`] did at boot
+    /// for the tenants it served then. Call it once the tenant's specs, Cedar
+    /// policies and WASM modules are loaded and its apps installed, while it
+    /// is still starting, so no request acts on its records first. Err, with
+    /// nothing armed, when its store could not be read: a later call starts
+    /// over.
+    #[tracing::instrument(skip_all, fields(otel.name = "restore.start_tenant_runtime", tenant = %tenant))]
+    pub async fn start_tenant_runtime(&self, tenant: &TenantId) -> Result<(), String> {
+        assert!(
+            self.runtime_started.load(Ordering::SeqCst),
+            "a tenant restored after serving starts after the server's runtime"
+        );
+        let _walk = self.rearm_tenant_timers(tenant).await?;
+        if self.tenants_with_carries().contains(tenant) {
+            self.spawn_carry_stranded(vec![tenant.clone()]);
+        }
+        Ok(())
     }
 }

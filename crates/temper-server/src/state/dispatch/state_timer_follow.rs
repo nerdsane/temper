@@ -151,7 +151,7 @@ impl ServerState {
     }
 
     /// At boot, after the rows are re-armed: make every record of every type
-    /// that declares a timeout follow its state, arming a record left in a
+    /// of `tenants` that declares a timeout follow its state, arming a record left in a
     /// timed state with no row, and count the records that wait for a caller
     /// and those it replayed into `counts`, which it logs. A record the
     /// catalog shows already following its state, by `rows`, is not replayed
@@ -159,15 +159,15 @@ impl ServerState {
     #[tracing::instrument(skip_all, fields(otel.name = "boot.timed_type_walk"))]
     pub(super) async fn follow_timed_types(
         &self,
+        tenants: &[TenantId],
         callers: BootCallers,
         gate: Arc<Semaphore>,
         mut counts: BootTimers,
         rows: BootRows,
     ) -> BootTimers {
         let types: Vec<(TenantId, String)> = match self.registry.read() {
-            Ok(registry) => registry
-                .tenant_ids()
-                .into_iter()
+            Ok(registry) => tenants
+                .iter()
                 .flat_map(|tenant| {
                     registry
                         .entity_types(tenant)

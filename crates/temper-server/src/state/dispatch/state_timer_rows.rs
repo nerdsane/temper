@@ -43,6 +43,17 @@ const BOOT_FIRES_AT_ONCE: usize = 8;
 /// `(after_seconds, on_timeout)`.
 type DeclaredTimeouts = BTreeMap<(String, String), (u64, String)>;
 
+/// How a re-arm reads a tenant's timer rows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Listing {
+    /// Until they read: the boot serves no tenant whose saved callers it
+    /// has not restored.
+    UntilRead,
+    /// Once: a tenant restored after the server serves stays starting, and
+    /// its restore is tried again.
+    Once,
+}
+
 impl ServerState {
     /// Where `tenant`'s timer rows are kept: [`Self::state_timer_rows`] when
     /// set, else the tenant's metadata store. None: rows are not kept.
@@ -147,15 +158,28 @@ impl ServerState {
     /// with the boot's counts per tenant and type, and logs them as
     /// `state timers after boot`.
     pub(crate) async fn rearm_state_timers(&self) -> tokio::task::JoinHandle<BootTimers> {
-        let repaired = self.repair_query_projections_at_boot().await;
+        let tenants: Vec<TenantId> = self
+            .registry
+            .read()
+            .expect("registry lock poisoned")
+            .tenant_ids()
+            .into_iter()
+            .cloned()
+            .collect();
+        let repaired = self.repair_query_projections_at_boot(&tenants).await;
         let started = Instant::now();
         let gate = Arc::new(Semaphore::new(BOOT_FIRES_AT_ONCE));
         let mut callers = BootCallers::new();
         let mut counts = BootTimers::new();
         let mut rows = BootRows::new();
         let (armed, overdue) = self
-            .rearm_state_timer_rows(&gate, &mut callers, &mut counts, &mut rows)
-            .await;
+            .rearm_state_timer_rows(
+                &tenants,
+                Listing::UntilRead,
+                (&gate, &mut callers, &mut counts, &mut rows),
+            )
+            .await
+            .expect("a listing tried until it reads does not fail");
         self.follow_repaired_records(repaired, &callers, &gate)
             .await;
         tracing::info!(
@@ -164,7 +188,8 @@ impl ServerState {
             elapsed_ms = started.elapsed().as_millis() as u64,
             "re-armed state timers from the store"
         );
-        self.rearm_scheduled_actions(&gate, &mut counts).await;
+        self.rearm_scheduled_actions(&tenants, &gate, &mut counts)
+            .await;
         {
             // Serialize with install walks so none can consume startup changes
             // before saved identities and gates have been restored. The boot
@@ -176,7 +201,49 @@ impl ServerState {
         }
         let server = self.clone();
         // determinism-ok: boot follow-up runs in the background, as boot timers do.
-        tokio::spawn(async move { server.follow_timed_types(callers, gate, counts, rows).await })
+        tokio::spawn(async move {
+            server
+                .follow_timed_types(&tenants, callers, gate, counts, rows)
+                .await
+        })
+    }
+
+    /// [`Self::rearm_state_timers`] for one tenant restored after the server
+    /// serves, which the boot left out: its catalog rows repaired, its timer
+    /// rows armed, its repaired records followed and its scheduled actions
+    /// armed again, through a fire gate of its own. Err, with nothing armed,
+    /// when its store could not be compared or its timer rows listed: the
+    /// tenant is not ready, and a later try starts over. Returns the
+    /// background walk of its timed types, as the boot's.
+    pub(crate) async fn rearm_tenant_timers(
+        &self,
+        tenant: &TenantId,
+    ) -> Result<tokio::task::JoinHandle<BootTimers>, String> {
+        let tenants = vec![tenant.clone()];
+        let mut repaired = Vec::new();
+        self.repair_tenant_projections(tenant, &mut repaired)
+            .await?;
+        let gate = Arc::new(Semaphore::new(BOOT_FIRES_AT_ONCE));
+        let mut callers = BootCallers::new();
+        let mut counts = BootTimers::new();
+        let mut rows = BootRows::new();
+        self.rearm_state_timer_rows(
+            &tenants,
+            Listing::Once,
+            (&gate, &mut callers, &mut counts, &mut rows),
+        )
+        .await?;
+        self.follow_repaired_records(repaired, &callers, &gate)
+            .await;
+        self.rearm_scheduled_actions(&tenants, &gate, &mut counts)
+            .await;
+        let server = self.clone();
+        // determinism-ok: the tenant's follow-up runs in the background, as the boot's does.
+        Ok(tokio::spawn(async move {
+            server
+                .follow_timed_types(&tenants, callers, gate, counts, rows)
+                .await
+        }))
     }
 
     /// Arm again each state timer row the last process left, as
@@ -187,14 +254,18 @@ impl ServerState {
     #[instrument(skip_all, fields(otel.name = "boot.state_timer_rows"))]
     async fn rearm_state_timer_rows(
         &self,
-        gate: &Arc<Semaphore>,
-        callers: &mut BootCallers,
-        counts: &mut BootTimers,
-        rows_armed: &mut BootRows,
-    ) -> (usize, usize) {
+        tenants: &[TenantId],
+        listing: Listing,
+        (gate, callers, counts, rows_armed): (
+            &Arc<Semaphore>,
+            &mut BootCallers,
+            &mut BootTimers,
+            &mut BootRows,
+        ),
+    ) -> Result<(usize, usize), String> {
         let mut armed = 0usize;
         let mut overdue = 0usize;
-        for (tenant, timeouts) in self.declared_state_timeouts() {
+        for (tenant, timeouts) in self.declared_state_timeouts(tenants) {
             let Some(store) = self.timer_rows_for_tenant(tenant.as_str()).await else {
                 continue;
             };
@@ -205,6 +276,9 @@ impl ServerState {
             let rows = loop {
                 match store.list_state_timers(tenant.as_str()).await {
                     Ok(rows) => break rows,
+                    Err(error) if listing == Listing::Once => {
+                        return Err(format!("state timer rows not readable: {error}"));
+                    }
                     Err(error) => {
                         tracing::error!(tenant = %tenant, %error,
                             retry_in_secs = wait.as_secs(),
@@ -291,7 +365,7 @@ impl ServerState {
                 armed += 1;
             }
         }
-        (armed, overdue)
+        Ok((armed, overdue))
     }
 
     /// Make each record the boot repair rewrote follow its replayed state,
@@ -328,11 +402,12 @@ impl ServerState {
         }
     }
 
-    /// Every tenant's declared timeouts. Tenants without any are left out.
-    fn declared_state_timeouts(&self) -> Vec<(TenantId, DeclaredTimeouts)> {
+    /// The declared timeouts of each of `tenants` the registry holds.
+    /// Tenants without any are left out.
+    fn declared_state_timeouts(&self, tenants: &[TenantId]) -> Vec<(TenantId, DeclaredTimeouts)> {
         let registry = self.registry.read().expect("registry lock poisoned");
         let mut declared = Vec::new();
-        for tenant in registry.tenant_ids() {
+        for tenant in tenants.iter().filter(|t| registry.get_tenant(t).is_some()) {
             let mut timeouts = BTreeMap::new();
             for entity_type in registry.entity_types(tenant) {
                 let Some(spec) = registry.get_spec(tenant, entity_type) else {

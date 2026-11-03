@@ -330,15 +330,33 @@ async fn response_stream_obeys_byte_budget() {
 async fn noncanonical_cedar_id_is_not_rewritten_to_bypass_authorization() {
     let (state, count) = fixture();
     install(&state, config()).await;
-    let mut req = request("alice");
-    *req.uri_mut() = "/things/a%27%29%2Fb/tdata/Items".parse().unwrap();
-    let response = crate::build_router(state.clone())
-        .oneshot(req)
-        .await
+    // The policy names one exact id. An id spelled with Cedar escapes is a
+    // different id and must not be read back as the permitted one.
+    state
+        .authz
+        .reload_tenant_policies(
+            "default",
+            r#"permit(principal == Agent::"alice", action == Action::"Serve", resource == Target::"a')/b");"#,
+        )
         .unwrap();
-    assert_eq!(response.status(), 403);
-    let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
-    assert!(String::from_utf8_lossy(&body).contains("invalid resource"));
+    let send = |path: &str| {
+        let mut req = request("alice");
+        *req.uri_mut() = format!("/things/{path}/tdata/Items?$filter=Value%20gt%205")
+            .parse()
+            .unwrap();
+        crate::build_router(state.clone()).oneshot(req)
+    };
+
+    let escaped = send("a%5C%27%29%2Fb").await.unwrap();
+    assert_eq!(escaped.status(), 403);
     assert_eq!(count.load(Ordering::SeqCst), 0);
+    assert!(!state.entity_exists(&TenantId::default(), "Target", r"a\')/b"));
     assert!(!state.entity_exists(&TenantId::default(), "Target", "a')/b"));
+
+    let exact = send("a%27%29%2Fb").await.unwrap();
+    let status = exact.status();
+    let body = to_bytes(exact.into_body(), 1024 * 1024).await.unwrap();
+    assert_eq!(status, 201, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    assert!(state.entity_exists(&TenantId::default(), "Target", "a')/b"));
 }

@@ -23,6 +23,12 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
+  # apt normally finishes in 6 to 18 seconds (66 steps on main, 27 Oct). That day a stalled
+  # Ubuntu mirror held two runners in apt-get update for their jobs' whole 60 minutes and
+  # took a pull request out of the merge queue. A request that stalls for 30 s is retried,
+  # and an install step still running after 5 minutes is failed, so a stalled mirror costs
+  # minutes and a re-run, not an hour of the queue.
+  APT_OPTS: -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30
 
 jobs:
   build:
@@ -33,7 +39,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libz3-dev
+        timeout-minutes: 5  # a stalled mirror, see APT_OPTS
+        run: sudo apt-get $APT_OPTS update && sudo apt-get $APT_OPTS install -y libz3-dev
 
       - name: Read the pinned toolchain
         id: toolchain
