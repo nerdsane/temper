@@ -11,10 +11,10 @@ use super::super::room::Heap;
 use super::super::senders::Senders;
 use super::super::state::ReactionStep;
 use super::super::{Call, Committed, Dispatch, JointState};
-use super::JointModel;
 use super::commit::add;
 use super::read::Reaction;
 use super::step::Certainty;
+use super::{Delivery, JointModel, MAX_IN_FLIGHT};
 use crate::model::ParamValue;
 
 impl JointModel {
@@ -242,10 +242,34 @@ impl JointModel {
                 }
             }
             self.expansion.give(before);
-            outcomes = after;
+            outcomes = self.within_flight(after);
         }
         // Keep the states charged through module calls and next-state packing.
         outcomes
+    }
+
+    /// `ways` without those holding more dispatches and calls in flight than
+    /// the walk keeps, but one: a later reaction or call only adds to them,
+    /// so the walk would hold each back ([`MAX_IN_FLIGHT`]), and the one
+    /// kept says that it did. Without it, `k` reactions whose guards the
+    /// model cannot decide make `2^k` ways, nearly all held back.
+    fn within_flight(
+        &self,
+        mut ways: Vec<(JointState, Certainty)>,
+    ) -> Vec<(JointState, Certainty)> {
+        if self.delivery != Delivery::Any {
+            return ways;
+        }
+        let before = ways.heap();
+        let mut over = false;
+        ways.retain(|(state, _)| {
+            if state.inflight.len() + state.calls.len() <= MAX_IN_FLIGHT {
+                return true;
+            }
+            !std::mem::replace(&mut over, true)
+        });
+        self.expansion.give(before.saturating_sub(ways.heap()));
+        ways
     }
 
     /// What `guard`, a trigger's guard on `source`, reads of `source` as it
