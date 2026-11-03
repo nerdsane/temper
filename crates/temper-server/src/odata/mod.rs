@@ -11,6 +11,7 @@ mod content_addressed;
 mod file_content;
 mod filter_sql;
 mod nearest;
+mod property_read;
 mod query_plane_read;
 mod rate_limit;
 mod read;

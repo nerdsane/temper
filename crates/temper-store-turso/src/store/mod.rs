@@ -34,6 +34,7 @@ macro_rules! tombstone_sql {
 mod append_commit;
 mod append_config;
 mod authz;
+mod blob_chunks;
 mod blobs;
 mod catalog_groups;
 mod commit_probe;
@@ -80,6 +81,8 @@ pub(crate) use write_gate::WritePriority;
 #[derive(Clone, Debug)]
 pub struct TursoEventStore {
     db: Arc<Database>,
+    /// SQLite-compatible local file, used only for incremental legacy blob reads.
+    blob_read_path: Option<std::path::PathBuf>,
     write_gate: Arc<write_gate::WriteGate>,
     /// Trajectory rows waiting for their batch's transaction.
     trajectory_batch: Arc<trajectory_batch::TrajectoryBatch>,
@@ -112,7 +115,11 @@ impl TursoEventStore {
         };
 
         let is_remote = url.starts_with("libsql://");
-        Self::open(db, is_remote, None).await
+        let mut store = Self::open(db, is_remote, None).await?;
+        if !is_remote && url != ":memory:" && url != "file::memory:" {
+            store.blob_read_path = Some(url.strip_prefix("file:").unwrap_or(url).into());
+        }
+        Ok(store)
     }
 
     /// Open a local database file whose commits are copied to its own Turso
@@ -131,7 +138,8 @@ impl TursoEventStore {
         let copy = SyncCopy::open(local_path, sync_url, auth_token)
             .await
             .map_err(storage_error)?;
-        let store = Self::open(Database::synced(copy.clone()), false, Some(copy)).await?;
+        let mut store = Self::open(Database::synced(copy.clone()), false, Some(copy)).await?;
+        store.blob_read_path = Some(local_path.into());
         store.require_primary_keys().await?;
         // What this start adds to the schema goes out with the next push, as
         // anything else it commits does: a start never waits on the remote to
@@ -147,6 +155,7 @@ impl TursoEventStore {
     ) -> Result<Self, PersistenceError> {
         let store = Self {
             db: Arc::new(db),
+            blob_read_path: None,
             write_gate: Arc::new(write_gate::WriteGate::new()),
             trajectory_batch: Arc::default(),
             is_remote,

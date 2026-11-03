@@ -29,7 +29,7 @@ const BLOB_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const BLOB_STREAM_TOTAL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const DEFAULT_BLOB_STREAM_MAX_CONCURRENCY: usize = 32;
 
-fn blob_stream_semaphore() -> Arc<tokio::sync::Semaphore> {
+pub(super) fn blob_stream_semaphore() -> Arc<tokio::sync::Semaphore> {
     static SEMAPHORE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
     Arc::clone(SEMAPHORE.get_or_init(|| {
         let limit = std::env::var("TEMPER_BLOB_STREAM_MAX_CONCURRENCY") // determinism-ok: startup-only tuning knob
@@ -55,19 +55,8 @@ pub struct BlobObjectStream {
 }
 
 impl BlobObjectStream {
-    /// Wrap bytes already in memory as a bounded stream.
-    ///
-    /// Used by the legacy DB blob fallback, whose store returns whole objects
-    /// rather than a stream. Keeping the same `BlobObjectStream` shape means
-    /// callers cannot tell which store answered, which is the point: the
-    /// streaming and non-streaming reads must agree about what exists.
-    pub(crate) fn from_bytes(bytes: Vec<u8>) -> Self {
-        let content_length = bytes.len() as u64;
-        let source: BlobByteStream = Box::pin(async_stream::try_stream! {
-            if !bytes.is_empty() {
-                yield Bytes::from(bytes);
-            }
-        });
+    /// Wrap a source with the same length and time checks as object storage.
+    pub(crate) fn from_stream(content_length: u64, source: BlobByteStream) -> Self {
         Self {
             content_length,
             stream: enforce_stream_bounds(source, content_length),

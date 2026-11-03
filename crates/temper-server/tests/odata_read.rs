@@ -374,6 +374,18 @@ async fn composite_entity_key_resolves_through_query_plane_index() {
     assert_eq!(body["entity_id"].as_str(), Some("entry-1199"));
     assert_eq!(body["fields"]["SessionId"].as_str(), Some("session-hot"));
     assert_eq!(body["fields"]["EntryId"].as_str(), Some("entry-1199"));
+
+    let (status, body) = get_json(
+        &state,
+        "/tdata/Orders(SessionId='session-hot',EntryId='entry-1199')/EntryId",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["value"], "entry-1199");
+    assert_eq!(
+        body["@odata.context"],
+        "$metadata#Orders('entry-1199')/EntryId"
+    );
 }
 
 #[tokio::test]

@@ -2194,6 +2194,32 @@ impl PostgresEventStore {
         .map_err(|e| format!("blob get failed: {e}"))
     }
 
+    /// Read a bounded byte slice of a legacy blob with its actual total length.
+    pub async fn get_blob_chunk(
+        &self,
+        key: &str,
+        offset: u64,
+        max_bytes: usize,
+    ) -> Result<Option<(u64, Vec<u8>)>, String> {
+        let start = i32::try_from(offset)
+            .ok()
+            .and_then(|n| n.checked_add(1))
+            .ok_or_else(|| "blob offset exceeds Postgres bytea range".to_string())?;
+        let count = i32::try_from(max_bytes).map_err(|_| "blob chunk exceeds i32".to_string())?;
+        let row = crate::dbm::postgres_query!(
+            &self.schema,
+            "SELECT octet_length(data) AS length, substring(data FROM $2 FOR $3) AS chunk \
+             FROM {schema}blobs WHERE blob_key = $1"
+        )
+        .bind(key)
+        .bind(start)
+        .bind(count)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|e| format!("blob chunk read failed: {e}"))?;
+        Ok(row.map(|row| (row.get::<i32, _>("length") as u64, row.get("chunk"))))
+    }
+
     /// Retrieve a blob only when its durable size metadata is within the
     /// caller's allocation budget. `None` means missing or over budget.
     pub async fn get_blob_if_size_at_most(
