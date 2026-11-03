@@ -24,6 +24,7 @@ use temper_store_turso::{TenantStoreRouter, TursoEventStore};
 
 use crate::StorageBackend;
 
+use super::data_dir::{self, data_dir};
 use super::loader::load_into_registry;
 use super::storage::{
     connect_postgres_store, redact_connection_url, upsert_loaded_specs_to_postgres,
@@ -74,10 +75,7 @@ pub(super) async fn init_storage(
                     );
                 }
                 let platform_token = std::env::var("TURSO_PLATFORM_AUTH_TOKEN").ok();
-                let local_base_dir = std::env::var("TURSO_LOCAL_BASE_DIR").ok().or_else(|| {
-                    let home = std::env::var("HOME").ok()?;
-                    Some(format!("{home}/.local/share/temper/tenants"))
-                });
+                let local_base_dir = data_dir::routed_local_base_dir(&data_dir::env);
 
                 let room = local_base_dir.clone().map(StorageRoom::on_disk);
                 let mut router = TenantStoreRouter::new(
@@ -107,8 +105,7 @@ pub(super) async fn init_storage(
                 let turso_url = match std::env::var("TURSO_URL") {
                     Ok(url) => url,
                     Err(_) => {
-                        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-                        let db_path = Path::new(&home).join(".local/share/temper/agents.db");
+                        let db_path = data_dir().join("agents.db");
                         let parent_dir = db_path.parent().context(
                             "Failed to determine parent directory for default Turso DB path",
                         )?;

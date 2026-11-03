@@ -9,6 +9,7 @@
 
 mod actor_runtime;
 mod bootstrap;
+mod data_dir;
 mod loader;
 mod local_sandbox;
 mod observe_ui;
@@ -119,14 +120,7 @@ pub async fn run(
     }
     // TEMPER_DATA_DIR puts this server's files (pushed app versions, blobs,
     // caches) where they outlive the machine, such as a mounted volume.
-    let data_dir = match std::env::var_os("TEMPER_DATA_DIR").filter(|dir| !dir.is_empty()) {
-        Some(dir) => std::path::PathBuf::from(dir),
-        None => {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-            Path::new(&home).join(".local/share/temper")
-        }
-    };
-    state.server.data_dir = data_dir;
+    state.server.data_dir = data_dir::data_dir();
     state.server.files_need_object_store = storage::files_need_object_store();
 
     seed_cedar_policies(&state, tenant_policy_seed);
