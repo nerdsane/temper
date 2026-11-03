@@ -99,7 +99,8 @@ fn digests(sources: &[&str], cedar: Option<&str>) -> Vec<String> {
     let automatons = parse(sources);
     let refs: Vec<&Automaton> = automatons.iter().collect();
     let analysis = cedar.map(|text| SendAnalysis::new(text).expect("fixture policies parse"));
-    joint_proofs(&refs, analysis.as_ref())
+    let room = Bytes::new(1 << 30);
+    joint_proofs(&refs, analysis.as_ref(), &room)
         .iter()
         .map(JointProof::digest)
         .collect()

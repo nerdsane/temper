@@ -135,7 +135,11 @@ pub(super) async fn prove(
     // scope, so it runs off the async threads too.
     let joint = tokio::task::spawn_blocking(move || {
         let refs: Vec<&Automaton> = automatons.values().map(|(_, a)| a).collect();
-        temper_verify::composite::joint_proofs(&refs, Some(&policies))
+        temper_verify::composite::joint_proofs(
+            &refs,
+            Some(&policies),
+            &temper_server::host_room::HOST_ROOM,
+        )
     })
     .await
     .map_err(|e| {

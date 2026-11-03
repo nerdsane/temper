@@ -9,19 +9,19 @@ use temper_spec::predicate::Expr;
 
 use super::liveness::{settle, settle_bytes};
 use super::model::{self, JointModel, Sending};
-use super::room::{Bound, MB};
+use super::room::{Bound, Construction, MB, Room};
 use super::{JointInvariantResult, JointLivenessResult, JointOutcome, LivenessOutcome};
 
 /// One walk of the joint checks: an entity's invariants that read related
 /// records, or one liveness property. It holds all its walk reads, so its
 /// verdict depends on nothing else.
 #[derive(Debug)]
-pub enum JointProof {
-    Invariants(InvariantProof),
-    Liveness(LivenessProof),
+pub enum JointProof<'room> {
+    Invariants(InvariantProof<'room>),
+    Liveness(LivenessProof<'room>),
 }
 
-impl JointProof {
+impl JointProof<'_> {
     /// What it proves, in words.
     pub fn name(&self) -> String {
         match self {
@@ -49,13 +49,18 @@ impl JointProof {
 
 /// Every walk the joint checks make for `automatons`: the invariants'
 /// ([`invariant_proofs`]), then the liveness properties'
-/// ([`liveness_proofs`]).
-pub fn joint_proofs(automatons: &[&Automaton], policies: Option<&SendAnalysis>) -> Vec<JointProof> {
-    invariant_proofs(automatons, policies)
+/// ([`liveness_proofs`]). Construction, retained sender profiles and answer
+/// tables take their memory from `room`, returning it when each proof is dropped.
+pub fn joint_proofs<'room>(
+    automatons: &[&Automaton],
+    policies: Option<&SendAnalysis>,
+    room: &'room dyn Room,
+) -> Vec<JointProof<'room>> {
+    invariant_proofs(automatons, policies, room)
         .into_iter()
         .map(JointProof::Invariants)
         .chain(
-            liveness_proofs(automatons, policies)
+            liveness_proofs(automatons, policies, room)
                 .into_iter()
                 .map(JointProof::Liveness),
         )
@@ -67,16 +72,18 @@ pub fn joint_proofs(automatons: &[&Automaton], policies: Option<&SendAnalysis>) 
 /// and the types they name, cut to what they read. Its
 /// [`JointProof::digest`] is of this value.
 #[derive(Debug)]
-pub struct InvariantProof {
+pub struct InvariantProof<'room> {
     pub(super) entity: String,
     invariants: Vec<Invariant>,
     scope: BTreeSet<String>,
     /// The model, or why there is none: a type the invariants read that the
     /// app does not declare.
     model: Result<JointModel, String>,
+    // Declared last so the model releases its allocations before its room.
+    _memory: Construction<'room>,
 }
 
-impl InvariantProof {
+impl InvariantProof<'_> {
     /// Walk the model, one result per invariant.
     pub fn check(&self, bound: Bound<'_>) -> Vec<JointInvariantResult> {
         let result = |inv: &Invariant, states, outcome| JointInvariantResult {
@@ -124,11 +131,13 @@ impl InvariantProof {
 /// The walks that check every `[[invariant]]` in `automatons` that reads a
 /// related entity: one per entity, on the joint model of it and the types
 /// its invariants name. `policies` decide each move as its sender, as for
-/// liveness; without them every sender may send everything.
-pub fn invariant_proofs(
+/// liveness; without them every sender may send everything. `room` bounds
+/// sender construction and retains its charge until each proof is dropped.
+pub fn invariant_proofs<'room>(
     automatons: &[&Automaton],
     policies: Option<&SendAnalysis>,
-) -> Vec<InvariantProof> {
+    room: &'room dyn Room,
+) -> Vec<InvariantProof<'room>> {
     let by_name: BTreeMap<&str, &Automaton> = automatons
         .iter()
         .map(|a| (a.automaton.name.as_str(), *a))
@@ -155,6 +164,8 @@ pub fn invariant_proofs(
                 }
             }
         }
+        let memory = Construction::new(room);
+        let reserve = |bytes| memory.set(bytes);
         let model = if missing.is_empty() {
             let exprs: Vec<&Expr> = invariants.iter().map(|inv| &inv.assert).collect();
             // Code outside the specs sends what a liveness property relies
@@ -175,13 +186,13 @@ pub fn invariant_proofs(
                 .collect();
             let sending = Sending {
                 policies,
+                reserve: Some(&reserve),
                 kernel_moves: true,
                 relies_on,
             };
-            Ok(
-                JointModel::new(&by_name, &scope, name, &exprs, sending, true)
-                    .without_silent(&by_name),
-            )
+            JointModel::new(&by_name, &scope, name, &exprs, sending, true)
+                .without_silent(&by_name)
+                .built(&memory)
         } else {
             Err(format!(
                 "it reads {}, which this app does not declare",
@@ -189,6 +200,7 @@ pub fn invariant_proofs(
             ))
         };
         proofs.push(InvariantProof {
+            _memory: memory,
             entity: name.to_string(),
             invariants,
             scope,
@@ -203,7 +215,7 @@ pub fn invariant_proofs(
 /// condition names, cut to what it reads. Its
 /// [`JointProof::digest`] is of this value.
 #[derive(Debug)]
-pub struct LivenessProof {
+pub struct LivenessProof<'room> {
     pub(super) entity: String,
     pub(super) name: String,
     goal: Expr,
@@ -212,9 +224,11 @@ pub struct LivenessProof {
     /// The model, or why there is none: a type the condition reads that the
     /// app does not declare.
     model: Result<JointModel, String>,
+    // Declared last so the model releases its allocations before its room.
+    _memory: Construction<'room>,
 }
 
-impl LivenessProof {
+impl LivenessProof<'_> {
     /// Walk the model and decide whether the records reach the condition.
     pub fn check(&self, bound: Bound<'_>) -> JointLivenessResult {
         let mut result = JointLivenessResult {
@@ -278,11 +292,13 @@ impl LivenessProof {
 /// The walks that check every `[[liveness]]` with `eventually` in
 /// `automatons`: one per property, on the joint model of its entity and the
 /// types its condition names. `policies` decide each move as its sender;
-/// without them every sender may send everything.
-pub fn liveness_proofs(
+/// without them every sender may send everything. `room` bounds sender
+/// construction and retains its charge until each proof is dropped.
+pub fn liveness_proofs<'room>(
     automatons: &[&Automaton],
     policies: Option<&SendAnalysis>,
-) -> Vec<LivenessProof> {
+    room: &'room dyn Room,
+) -> Vec<LivenessProof<'room>> {
     let by_name: BTreeMap<&str, &Automaton> = automatons
         .iter()
         .map(|a| (a.automaton.name.as_str(), *a))
@@ -302,9 +318,12 @@ pub fn liveness_proofs(
                     missing.push(entity_type);
                 }
             }
+            let memory = Construction::new(room);
+            let reserve = |bytes| memory.set(bytes);
             let model = if missing.is_empty() {
                 let sending = Sending {
                     policies,
+                    reserve: Some(&reserve),
                     kernel_moves: true,
                     relies_on: live
                         .relies_on
@@ -312,10 +331,9 @@ pub fn liveness_proofs(
                         .map(|action| (name.to_string(), action.clone()))
                         .collect(),
                 };
-                Ok(
-                    JointModel::new(&by_name, &scope, name, &[goal], sending, true)
-                        .without_silent(&by_name),
-                )
+                JointModel::new(&by_name, &scope, name, &[goal], sending, true)
+                    .without_silent(&by_name)
+                    .built(&memory)
             } else {
                 Err(format!(
                     "it reads {}, which this app does not declare",
@@ -323,6 +341,7 @@ pub fn liveness_proofs(
                 ))
             };
             proofs.push(LivenessProof {
+                _memory: memory,
                 entity: name.to_string(),
                 name: live.name.clone(),
                 goal: goal.clone(),

@@ -89,3 +89,251 @@ fn a_known_cause_is_read_as_the_engine_reads_it() {
         }
     }
 }
+
+#[test]
+fn every_outside_principal_is_of_one_kind_that_answers_as_the_engine_does() {
+    use crate::{MoveCause, ReactionHop};
+    let policies = r#"
+permit(principal, action == Action::"Add", resource is Note)
+when { principal has role && (principal.role == "member" || principal.role like "guest*") };
+permit(principal, action == Action::"Address", resource is Note)
+when { context has via && context.via != "request" };
+forbid(principal, action == Action::"Address", resource is Note)
+when { principal has role && principal.role like "guest*" };
+"#;
+    let analysis = SendAnalysis::new(policies).expect("policies parse");
+    let engine = AuthzEngine::new(policies).expect("policies parse");
+    let questions = [
+        Question {
+            action: "Add",
+            resource_type: "Note",
+            cause: Cause::request(),
+        },
+        Question {
+            action: "Address",
+            resource_type: "Note",
+            cause: Cause::reaction(false, Hop::unknown()),
+        },
+    ];
+    let kinds = analysis.outside_kinds(&questions, &|_| Ok(())).unwrap();
+    let answers = |kind: &Kind| -> Vec<May> {
+        let asker = Asker::OutsideAs(kind.clone());
+        questions
+            .iter()
+            .map(|q| {
+                analysis.may(
+                    &asker,
+                    q.action,
+                    q.resource_type,
+                    &BTreeMap::new(),
+                    Some(&q.cause),
+                )
+            })
+            .collect()
+    };
+    // The policies decide both moves for each kind.
+    for kind in &kinds {
+        assert!(
+            !answers(kind).contains(&May::Maybe),
+            "{kind}: {:?}",
+            answers(kind)
+        );
+    }
+    let hop = ReactionHop {
+        rule: "Note:Add:address".into(),
+        action: "Add".into(),
+        entity_type: "Note".into(),
+        entity_id: "n1".into(),
+    };
+    for role in [
+        None,
+        Some("member"),
+        Some("guest:link"),
+        Some("guestbook"),
+        Some("visitor"),
+    ] {
+        let mut context = SecurityContext::from_resolved_identity("someone", "agent", None);
+        context.principal.role = role.map(str::to_string);
+        let request = engine
+            .authorize(&context, "Add", "Note", &HashMap::new())
+            .is_allowed();
+        context.cause = Some(MoveCause::reaction(hop.clone(), None));
+        let reaction = engine
+            .authorize(&context, "Address", "Note", &HashMap::new())
+            .is_allowed();
+        let engine_answers =
+            [request, reaction].map(|allowed| if allowed { May::Yes } else { May::No });
+        // Its Add and its Address are answered for the same kind.
+        assert!(
+            kinds.iter().any(|kind| answers(kind) == engine_answers),
+            "{role:?}: {engine_answers:?} in none of {:?}",
+            kinds.iter().map(answers).collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn like_errors_keep_the_senders_real_request_and_reaction_answers() {
+    let policies = r#"
+permit(principal, action == Action::"Add", resource is Note)
+when { principal has flag };
+forbid(principal, action == Action::"Add", resource is Note)
+when { !(principal.flag like "x*") };
+permit(principal, action == Action::"Address", resource is Note)
+when { principal.flag like "x*" };
+permit(principal, action == Action::"Other", resource is Note)
+when { principal.flag like "y*" };
+"#;
+    let analysis = SendAnalysis::new(policies).unwrap();
+    let engine = AuthzEngine::new(policies).unwrap();
+    let actions = ["Add", "Address", "Other"];
+    let questions: Vec<_> = actions
+        .iter()
+        .map(|action| Question {
+            action,
+            resource_type: "Note",
+            cause: Cause::request(),
+        })
+        .collect();
+    let kinds = analysis.outside_kinds(&questions, &|_| Ok(())).unwrap();
+    let answers: Vec<Vec<May>> = kinds
+        .iter()
+        .map(|kind| {
+            questions
+                .iter()
+                .map(|q| {
+                    analysis.may(
+                        &Asker::OutsideAs(kind.clone()),
+                        q.action,
+                        q.resource_type,
+                        &BTreeMap::new(),
+                        Some(&q.cause),
+                    )
+                })
+                .collect()
+        })
+        .collect();
+    for value in [
+        None,
+        Some(serde_json::json!(false)),
+        Some(serde_json::json!(true)),
+        Some(serde_json::json!(42)),
+        Some(serde_json::json!([])),
+        Some(serde_json::json!({"nested": "x"})),
+        Some(serde_json::json!("xylophone")),
+        Some(serde_json::json!("yes")),
+        Some(serde_json::json!("neither")),
+    ] {
+        let mut context = SecurityContext::from_resolved_identity("someone", "agent", None);
+        if let Some(value) = &value {
+            context
+                .principal
+                .attributes
+                .insert("flag".into(), value.clone());
+        }
+        let expected: Vec<_> = actions
+            .iter()
+            .map(|action| {
+                if engine
+                    .authorize(&context, action, "Note", &HashMap::new())
+                    .is_allowed()
+                {
+                    May::Yes
+                } else {
+                    May::No
+                }
+            })
+            .collect();
+        assert!(
+            answers.contains(&expected),
+            "flag={value:?}: {expected:?} missing from {answers:?}"
+        );
+    }
+    assert!(
+        answers.iter().all(|answers| !answers.contains(&May::Maybe)),
+        "{answers:?}"
+    );
+}
+
+#[test]
+fn combined_sender_checks_split_even_when_each_alone_leaves_maybe() {
+    let analysis = SendAnalysis::new(
+        r#"
+permit(principal, action == Action::"Add", resource is Note)
+when { (principal has role) == (principal has agent_type) };
+permit(principal, action == Action::"Address", resource is Note)
+when { (principal has role) == (principal has agent_type) && context.via != "request" };
+"#,
+    )
+    .unwrap();
+    let questions = [
+        Question {
+            action: "Add",
+            resource_type: "Note",
+            cause: Cause::request(),
+        },
+        Question {
+            action: "Address",
+            resource_type: "Note",
+            cause: Cause::reaction(false, Hop::unknown()),
+        },
+    ];
+    let answers: Vec<Vec<_>> = analysis
+        .outside_kinds(&questions, &|_| Ok(()))
+        .unwrap()
+        .into_iter()
+        .map(|kind| {
+            questions
+                .iter()
+                .map(|q| {
+                    analysis.may(
+                        &Asker::OutsideAs(kind.clone()),
+                        q.action,
+                        q.resource_type,
+                        &BTreeMap::new(),
+                        Some(&q.cause),
+                    )
+                })
+                .collect()
+        })
+        .collect();
+    assert!(answers.contains(&vec![May::Yes, May::Yes]), "{answers:?}");
+    assert!(answers.contains(&vec![May::No, May::No]), "{answers:?}");
+    assert!(
+        answers.iter().all(|answers| !answers.contains(&May::Maybe)),
+        "{answers:?}"
+    );
+}
+
+#[test]
+fn a_denied_partition_reservation_never_returns_a_partial_cover() {
+    let condition = (1..8).fold("(principal has flag0)".to_string(), |left, at| {
+        format!("({left} == (principal has flag{at}))")
+    });
+    let analysis = SendAnalysis::new(&format!(
+        "permit(principal, action, resource) when {{ {condition} }};"
+    ))
+    .unwrap();
+    let calls = std::cell::Cell::new(0);
+    let result = analysis.outside_kinds(
+        &[Question {
+            action: "Add",
+            resource_type: "Note",
+            cause: Cause::request(),
+        }],
+        &|bytes| {
+            assert!(bytes > 0);
+            calls.set(calls.get() + 1);
+            if calls.get() == 3 {
+                Err("test room is full".into())
+            } else {
+                Ok(())
+            }
+        },
+    );
+    assert_eq!(
+        result.expect_err("denial must return no sender cover"),
+        "test room is full"
+    );
+    assert_eq!(calls.get(), 3, "construction must stop at the first denial");
+}

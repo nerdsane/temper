@@ -170,6 +170,10 @@ impl JointModel {
             unwalked: BTreeSet::new(),
             held: Held::new(bound),
         };
+        if let Some(reason) = &self.senders.problem {
+            explored.stopped = Some(reason.clone());
+            return explored;
+        }
         // Check the sliced models before either caller can expand a move.
         let oversized: Vec<_> = self
             .models

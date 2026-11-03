@@ -20,6 +20,7 @@ fn move_capacity_counts_against_the_room() {
                     target_state: None,
                     params: BTreeMap::new(),
                 },
+                0,
             ),
         ) {
             break;
@@ -69,6 +70,7 @@ fn calling_model(calls: usize) -> JointModel {
         &[],
         Sending {
             policies: None,
+            reserve: None,
             kernel_moves: true,
             relies_on: BTreeSet::new(),
         },
@@ -87,7 +89,7 @@ fn module_calls_count_before_inflight_pruning_and_stay_charged() {
         params: BTreeMap::new(),
     };
     model.expansion.allow(64 << 10);
-    model.next(&state, &Move::Take("Ask".into(), action));
+    model.next(&state, &Move::Take("Ask".into(), action, OUTSIDE));
     assert!(
         model.expansion.short(),
         "pruned calls still consume room while built"

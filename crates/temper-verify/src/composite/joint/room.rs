@@ -7,6 +7,9 @@
 //! not bounded: a walk that fits finishes, since each state it walks is one
 //! more it holds.
 
+mod construction;
+pub(super) use construction::Construction;
+
 use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
 use std::sync::atomic::{AtomicUsize, Ordering};

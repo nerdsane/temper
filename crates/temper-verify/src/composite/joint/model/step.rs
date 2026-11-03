@@ -19,13 +19,14 @@ use crate::model::{ModelString, TemperModelAction};
 /// One move of the walk.
 #[derive(Debug, Clone)]
 pub(in crate::composite::joint) enum Move {
-    /// An action whose guard and constraints read only its own record: its
-    /// actor checks them as it writes, so sending and taking are one step.
-    Take(String, TemperModelAction),
-    /// An action whose guard reads related records, sent from outside: the
-    /// dispatch path read them and they allowed it; its actor takes it
-    /// later.
-    Send(String, TemperModelAction),
+    /// An action whose guard and constraints read only its own record, sent
+    /// from outside by a sender: its actor checks them as it writes, so
+    /// sending and taking are one step.
+    Take(String, TemperModelAction, u32),
+    /// An action whose guard reads related records, sent from outside by a
+    /// sender: the dispatch path read them and they allowed it; its actor
+    /// takes it later.
+    Send(String, TemperModelAction, u32),
     /// A record's state timer fires its action, with no parameters, as
     /// whoever armed it.
     Timer(String, String),
@@ -53,7 +54,9 @@ impl Move {
     /// The entity and action an outside move sends.
     pub(in crate::composite::joint) fn outside_action(&self) -> Option<(&str, &str)> {
         match self {
-            Move::Take(entity, action) | Move::Send(entity, action) => Some((entity, &action.name)),
+            Move::Take(entity, action, _) | Move::Send(entity, action, _) => {
+                Some((entity, &action.name))
+            }
             _ => None,
         }
     }
@@ -111,15 +114,15 @@ impl JointModel {
         use Certainty::{OneOf, Sure, Unsure};
         let mut outcomes: Vec<(JointState, String, Certainty)> = Vec::new();
         match mv {
-            Move::Take(entity, action) => {
+            Move::Take(entity, action, by) => {
                 // An outside move the model cannot decide may also be
                 // refused, which leaves the state as it is.
                 let known = self.truth(entity, action, state) == Truth::True
-                    && self.outside_may(entity, &action.name) == May::Yes
+                    && self.outside_may(*by, entity, &action.name) == May::Yes
                     && self.unchecked.meets(entity, &action.name)
                     && self.exact(entity, &action.name, state);
-                let text = format!("{entity}.{action}");
-                for (outcome, then) in self.commit(state.clone(), entity, action, &[], OUTSIDE) {
+                let text = format!("{entity}.{action}{}", self.as_sender(*by));
+                for (outcome, then) in self.commit(state.clone(), entity, action, &[], *by) {
                     let certainty = Certainty::unless(known, Unsure).then(then);
                     if !self
                         .expansion
@@ -129,13 +132,13 @@ impl JointModel {
                     };
                 }
             }
-            Move::Send(entity, action) => {
+            Move::Send(entity, action, by) => {
                 // Its record's guard is read on the dispatch path and in its
                 // actor, which decide it later.
-                let known = self.outside_may(entity, &action.name) == May::Yes;
+                let known = self.outside_may(*by, entity, &action.name) == May::Yes;
                 let mut next = state.clone();
-                add(&mut next, sent(entity, action, OUTSIDE));
-                let text = format!("{entity}.{action} sent");
+                add(&mut next, sent(entity, action, *by));
+                let text = format!("{entity}.{action} sent{}", self.as_sender(*by));
                 if !self.expansion.push(
                     &mut outcomes,
                     (next, text, Certainty::unless(known, Unsure)),
@@ -376,23 +379,6 @@ impl JointModel {
                     .iter()
                     .any(|field| call.asked.get(field) != strings.get(field))
             })
-    }
-
-    /// Whether someone outside may send `action` to an `entity` record.
-    pub(super) fn sendable(&self, entity: &str, action: &str) -> bool {
-        self.outside_may(entity, action) != May::No
-    }
-
-    /// What Cedar lets someone outside send; an action outside code is
-    /// relied on to send is taken as allowed for whoever sends it.
-    fn outside_may(&self, entity: &str, action: &str) -> May {
-        if self
-            .relies_on
-            .contains(&(entity.to_string(), action.to_string()))
-        {
-            return May::Yes;
-        }
-        self.senders.request(entity, action)
     }
 
     /// Whether the guard of the transition `action` names holds on `state`,

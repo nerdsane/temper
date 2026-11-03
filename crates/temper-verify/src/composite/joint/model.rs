@@ -9,6 +9,7 @@ mod initial;
 mod labels;
 mod moves;
 mod order;
+mod outside;
 mod react;
 mod read;
 mod silent;
@@ -69,6 +70,8 @@ pub(super) struct Sending<'s> {
     /// The policies that decide each move as its sender; `None` lets every
     /// sender send everything.
     pub(super) policies: Option<&'s SendAnalysis>,
+    /// Reserve construction bytes before growing sender profiles or answer tables.
+    pub(super) reserve: Option<&'s dyn Fn(usize) -> Result<(), String>>,
     /// Whether the model makes the kernel's own moves: state timers, module
     /// answers and failures, and module calls lost to a restart. Without
     /// them anyone may send any action, which covers what they do.
@@ -85,6 +88,7 @@ impl Sending<'_> {
     pub(super) fn anyone() -> Self {
         Self {
             policies: None,
+            reserve: None,
             kernel_moves: false,
             relies_on: BTreeSet::new(),
         }
@@ -233,7 +237,21 @@ impl JointModel {
         } else {
             Kernel::default()
         };
-        let senders = Senders::new(by_name, scope, sending.policies);
+        // A reaction that declares no principal runs as whoever sent its
+        // source action.
+        let inherits = reactions.iter().filter(|r| r.principal.is_none());
+        let sender_matters: BTreeSet<String> = inherits.clone().map(|r| r.from.clone()).collect();
+        let inheriting = inherits
+            .map(|r| (r.to.clone(), r.target_action.clone()))
+            .collect();
+        let senders = Senders::new(
+            by_name,
+            scope,
+            sending.policies,
+            &sender_matters,
+            &inheriting,
+            sending.reserve,
+        );
         let chosen = |entity: &str, action: &str| {
             sending
                 .relies_on
@@ -260,11 +278,6 @@ impl JointModel {
             })
             .collect();
         let unchecked = unchecked_constraints(by_name, &models, &order);
-        let sender_matters = reactions
-            .iter()
-            .filter(|r| r.principal.is_none())
-            .map(|r| r.from.clone())
-            .collect();
         let into = reactions_into(by_name, scope);
         let open: BTreeSet<&String> = kernel
             .calls_on
@@ -312,6 +325,16 @@ impl JointModel {
             sender_matters,
             unsent,
         }
+    }
+
+    /// Retain the finished profiles and answer tables, or propagate construction failure.
+    pub(super) fn built(self, memory: &super::room::Construction<'_>) -> Result<Self, String> {
+        if let Some(reason) = &self.senders.problem {
+            memory.set(0)?;
+            return Err(reason.clone());
+        }
+        memory.set(self.senders.construction_bytes())?;
+        Ok(self)
     }
 
     /// Note each move the runtime could make in `state` that the walk never

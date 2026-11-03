@@ -27,7 +27,7 @@ mod permit_reach;
 mod platform_policy;
 
 pub use list_uniformity::ListReadUniformity;
-pub use may::{Asker, Attr, Cause, Hop, May, SendAnalysis};
+pub use may::{Asker, Attr, Cause, Hop, Kind, May, Question, SendAnalysis};
 pub use permit_reach::permitted_resource_types;
 pub use platform_policy::VERIFIED_OPERATOR_WHEN;
 use platform_policy::{

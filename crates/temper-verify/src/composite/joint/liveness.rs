@@ -213,7 +213,7 @@ pub fn verify_joint_liveness(
     policies: Option<&SendAnalysis>,
     bound: Bound<'_>,
 ) -> Vec<JointLivenessResult> {
-    liveness_proofs(automatons, policies)
+    liveness_proofs(automatons, policies, bound.room)
         .iter()
         .map(|proof| proof.check(bound))
         .collect()

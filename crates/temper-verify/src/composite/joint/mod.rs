@@ -210,7 +210,7 @@ pub fn verify_joint_invariants(
     policies: Option<&SendAnalysis>,
     bound: Bound<'_>,
 ) -> Vec<JointInvariantResult> {
-    invariant_proofs(automatons, policies)
+    invariant_proofs(automatons, policies, bound.room)
         .iter()
         .flat_map(|proof| proof.check(bound))
         .collect()
@@ -319,7 +319,7 @@ pub fn replay_joint_invariants(
                 })
                 .or_else(|| {
                     moves.iter().find(|mv| match mv {
-                        Move::Take(e, action) | Move::Send(e, action) => {
+                        Move::Take(e, action, _) | Move::Send(e, action, _) => {
                             e == &wanted.entity
                                 && action.name == wanted.action
                                 && fits(&action.params)
@@ -346,7 +346,7 @@ pub fn replay_joint_invariants(
                     }
                 },
             };
-            if let Move::Take(_, action) | Move::Send(_, action) = &mv {
+            if let Move::Take(_, action, _) | Move::Send(_, action, _) = &mv {
                 for (param, name) in &wanted.params {
                     if let Some(ParamValue::Str(value)) = action.params.get(param)
                         && !name.is_empty()

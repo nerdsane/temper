@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 
 impl JointModel {
     /// Every move from `state`: each record's enabled actions someone
-    /// outside may send, with string parameters chosen among the values held
+    /// outside may send, as each sender that may, with string parameters chosen among the values held
     /// anywhere in the joint state, and each state timer due (when its
     /// delivery lets a move from outside come now); each module call's
     /// answers and failure; and each dispatch in flight.
@@ -24,9 +24,8 @@ impl JointModel {
                 if !self.expansion.take() {
                     return out;
                 }
-                if !self.sendable(entity, &t.name)
-                    || !self.enabled(entity, t, state, Blind::Nothing)
-                {
+                let senders = self.outside_senders(entity, &t.name);
+                if senders.is_empty() || !self.enabled(entity, t, state, Blind::Nothing) {
                     continue;
                 }
                 let reads = self.reads_related(t);
@@ -36,13 +35,15 @@ impl JointModel {
                         target_state: t.to_state.clone(),
                         params,
                     };
-                    let mv = if reads {
-                        Move::Send(entity.clone(), action)
-                    } else {
-                        Move::Take(entity.clone(), action)
-                    };
-                    if !self.keep_move(&mut out, mv) {
-                        return out;
+                    for &by in &senders {
+                        let mv = if reads {
+                            Move::Send(entity.clone(), action.clone(), by)
+                        } else {
+                            Move::Take(entity.clone(), action.clone(), by)
+                        };
+                        if !self.keep_move(&mut out, mv) {
+                            return out;
+                        }
                     }
                 }
             }
