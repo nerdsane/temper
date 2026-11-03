@@ -421,3 +421,7 @@ mod sure_tests;
 #[cfg(test)]
 #[path = "outside_test.rs"]
 mod outside_tests;
+
+#[cfg(test)]
+#[path = "widen_test.rs"]
+mod widen_tests;

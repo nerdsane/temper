@@ -150,14 +150,18 @@ fn an_invariant_a_reaction_from_outside_the_scope_breaks_is_broken() {
     // Push's reaction takes Done while the box is still empty. The rule
     // names Ask and Box, not Push.
     let rule = "[[invariant]]\nname = \"rule\"\nassert = \"status == 'Done' => Box[Id].status == 'Full'\"\n";
+    // The walk sends that reaction with any sender, so it walks once more
+    // with Push in the scope, where sure moves alone break the rule.
     let result = invariant(&[&ask(false, rule), BOX, &push(false)], POLICIES);
     let text = result.to_string();
+    let JointOutcome::Broken { path } = &result.outcome else {
+        panic!("expected broken, got {text}");
+    };
     assert!(
-        matches!(result.outcome, JointOutcome::Broken { .. }),
-        "{text}"
-    );
-    assert!(
-        text.contains("Ask.Done -> Done (a reaction from Push)"),
+        path.iter().any(|step| step
+            .action
+            .as_deref()
+            .is_some_and(|a| a.starts_with("Push.Poke"))),
         "{text}"
     );
 }
