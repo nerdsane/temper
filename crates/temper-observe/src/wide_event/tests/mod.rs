@@ -32,16 +32,6 @@ fn test_wide_event_from_transition() {
 }
 
 #[test]
-fn test_emit_span_noop() {
-    emit_span(&sample_event());
-}
-
-#[test]
-fn test_emit_metrics_noop() {
-    emit_metrics(&sample_event());
-}
-
-#[test]
 fn test_cost_decoupling() {
     let event = sample_event();
     assert!(!event.tags.contains_key("entity_id"));

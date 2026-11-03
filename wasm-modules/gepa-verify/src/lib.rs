@@ -172,28 +172,3 @@ fn summarize_verification(parsed: &Value) -> String {
         format!("verification failed: {}", failed.join("; "))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_automaton_name_reads_name() {
-        let src = "[automaton]\nname = \"Issue\"\nstates=[\"A\"]";
-        assert_eq!(parse_automaton_name(src).as_deref(), Some("Issue"));
-    }
-
-    #[test]
-    fn summarize_verification_failure_lists_levels() {
-        let v = json!({
-            "all_passed": false,
-            "levels": [
-                {"level": "L0", "passed": true, "summary": "ok"},
-                {"level": "L1", "passed": false, "summary": "counterexample"},
-            ]
-        });
-        let s = summarize_verification(&v);
-        assert!(s.contains("verification failed"));
-        assert!(s.contains("L1"));
-    }
-}

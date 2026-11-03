@@ -1,10 +1,14 @@
 //! Generic HTTP fetch WASM module for Temper integrations.
 //!
-//! Reads URL, method, and headers from `integration_config` in the invocation
-//! context, appends `trigger_params` as query parameters (GET) or JSON body
-//! (POST), calls the host HTTP function, and returns the response via callback.
+//! Reads URL, method, and headers from the context's top-level
+//! `integration_config` (the spec's own integration config), appends
+//! `trigger_params` as query parameters (GET) or JSON body (POST), calls the
+//! host HTTP function, and returns the response via callback. Action params and
+//! entity fields are request data only; they never choose where the request
+//! goes.
 //!
-//! Build: `cargo build -p http-fetch-module --target wasm32-unknown-unknown --release`
+//! Build: `scripts/build-http-fetch-wasm.sh` rebuilds this module and copies it to
+//! `crates/temper-wasm/modules/http_fetch.wasm`, the binary the server embeds.
 
 use temper_wasm_sdk::prelude::*;
 
@@ -24,12 +28,7 @@ temper_module! {
             .cloned()
             .unwrap_or_default();
 
-        // Parse headers JSON string into Vec<(String, String)> if present.
-        let headers: Vec<(String, String)> = if headers_str.is_empty() {
-            vec![]
-        } else {
-            serde_json::from_str(&headers_str).unwrap_or_default()
-        };
+        let headers = parse_headers(&headers_str)?;
 
         let trigger_json = ctx.trigger_params.to_string();
 
@@ -60,6 +59,33 @@ temper_module! {
             "status_code": resp.status,
             "response": response_value,
         }))
+    }
+}
+
+/// The configured `headers` value: a JSON object (`{"Name": "value"}`) or a
+/// JSON array of `[name, value]` pairs. Empty means no headers. A value that is
+/// neither is an error, so a misconfigured integration fails visibly instead of
+/// sending its request without the headers it declared.
+fn parse_headers(raw: &str) -> Result<Vec<(String, String)>, String> {
+    if raw.trim().is_empty() {
+        return Ok(vec![]);
+    }
+    let value: Value = serde_json::from_str(raw)
+        .map_err(|e| format!("integration_config 'headers' is not JSON: {e}"))?;
+    match value {
+        Value::Object(map) => map
+            .into_iter()
+            .map(|(name, value)| match value {
+                Value::String(value) => Ok((name, value)),
+                other => Err(format!("header '{name}' must be a string, got {other}")),
+            })
+            .collect(),
+        Value::Array(_) => serde_json::from_value(value).map_err(|e| {
+            format!("integration_config 'headers' must be [name, value] pairs: {e}")
+        }),
+        other => Err(format!(
+            "integration_config 'headers' must be an object or a list of pairs, got {other}"
+        )),
     }
 }
 

@@ -3,6 +3,7 @@
 pub(crate) mod account_verification;
 pub mod admission;
 pub(crate) mod app_uniqueness;
+pub(crate) mod batch_delete;
 pub mod custom_effects;
 mod dispatch;
 mod entity_ops;
@@ -12,25 +13,36 @@ mod file_read_blobs;
 mod file_read_projection;
 mod file_reads;
 mod file_writes;
+mod host_metrics;
 pub mod metrics;
 pub mod pending_decisions;
 mod persistence;
 pub mod policy_suggestions;
 mod projection_backfill;
 mod published_artifacts;
-mod query_projection_queue;
 pub(crate) mod rate_limit;
-mod runtime_metrics;
+pub(crate) mod redecide;
+pub(crate) mod runtime_metrics;
+mod spec_change;
+mod start_runtime;
+pub mod status_cache;
 pub(crate) mod storage_caps;
 pub mod trajectory;
 pub mod wasm_invocation_log;
+pub(crate) mod write_record;
 
 pub use admission::{AdmissionController, AdmissionOutcome, AdmissionPermit};
 pub(crate) use dispatch::authorized_http_endpoint_host;
 #[cfg(feature = "observe")]
 pub(crate) use dispatch::internal_http_capability_issuer;
-pub use dispatch::{DispatchCommand, DispatchError, DispatchExtOptions, StateTimeoutTracker};
-pub use entity_ops::{FailedLevelInfo, PASSIVATE_IDLE_ACTORS_PER_TICK, VerificationGateError};
+pub(crate) use dispatch::owed_writes;
+pub use dispatch::{
+    BootTimerCounts, BootTimers, DispatchCommand, DispatchError, DispatchExtOptions, StaleWrite,
+    StateTimeoutTracker, TimerFollowHold,
+};
+pub use entity_ops::{
+    CreateError, FailedLevelInfo, PASSIVATE_IDLE_ACTORS_PER_TICK, VerificationGateError,
+};
 #[cfg(feature = "observe")]
 pub(crate) use file_reads::{BatchTextReadError, validate_batch_text_ids};
 pub use file_reads::{IndexedFileStreamRead, TextFileReadResult, TextFileVersionReadResult};
@@ -40,14 +52,16 @@ pub use pending_decisions::{
     ActionScope, DecisionStatus, DurationScope, PendingDecision, PolicyScopeMatrix, PrincipalScope,
     ResourceScope,
 };
-pub use persistence::WasmModuleSource;
+pub use persistence::{SecretWriteOutcome, WasmModuleSource};
 pub use policy_suggestions::PolicySuggestionEngine;
 pub use published_artifacts::PublishFileArtifactRequest;
 #[cfg(feature = "observe")]
 pub(crate) use published_artifacts::{
     PUBLISH_ARTIFACT_STALE_AUTHORIZATION, PublishArtifactAuthorization,
 };
-pub(crate) use query_projection_queue::{ProjectionEnqueueOutcome, QueryProjectionWriteQueue};
+pub use spec_change::{
+    CarryMove, CarryReport, SpecChange, SpecChangePlan, SpecChangeRefused, StuckRecords,
+};
 pub use trajectory::{TrajectoryEntry, TrajectorySource};
 pub use wasm_invocation_log::WasmInvocationEntry;
 
@@ -78,8 +92,8 @@ use crate::ots_trajectory_outbox::OtsTrajectoryOutbox;
 use crate::registry::SpecRegistry;
 use crate::secrets::vault::SecretsVault;
 use crate::storage::{
-    BackendLabel, BoxedEventStore, DataOnlyCreateStore, MetadataStore, PolicyStore,
-    QueryPlaneStore, StorageStack, TrajectorySink,
+    BackendLabel, BoxedEventStore, MetadataStore, PolicyStore, QueryPlaneStore, StorageStack,
+    TrajectorySink,
 };
 use crate::trigger::ReactionDispatcher;
 use crate::wasm_registry::WasmModuleRegistry;
@@ -226,11 +240,14 @@ fn env_bool(name: &str, default: bool) -> bool {
     }
 }
 
+/// Default per-attempt ask deadline, also used for entity watchdog reports.
+pub(crate) const DEFAULT_ACTION_DISPATCH_TIMEOUT: Duration = Duration::from_secs(5);
+
 fn env_timeout() -> Duration {
     let secs: u64 = std::env::var("TEMPER_ACTION_TIMEOUT_SECS") // determinism-ok: read once at startup
         .ok()
         .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(5);
+        .unwrap_or(DEFAULT_ACTION_DISPATCH_TIMEOUT.as_secs());
     debug_assert!(secs > 0 && secs <= 300, "action timeout must be 1-300s");
     Duration::from_secs(secs)
 }
@@ -337,6 +354,12 @@ fn state_cache_budget() -> usize {
     *STATE_CACHE_BUDGET.get_or_init(|| env_usize("TEMPER_STATE_CACHE_BUDGET", 10_000))
 }
 
+/// A `[[state]]` declared `query_indexed = false` stays in entity state but is
+/// kept out of the durable query projection and its field index.
+fn left_out_of_query_projection(state_var: &temper_spec::automaton::StateVar) -> bool {
+    state_var.query_indexed == Some(false)
+}
+
 /// Summary of a query-projection replay parity verification run.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct QueryProjectionReplayParityReport {
@@ -426,8 +449,6 @@ pub struct ServerState {
     pub last_accessed: Arc<RwLock<BTreeMap<String, chrono::DateTime<chrono::Utc>>>>,
     /// First-class storage capabilities selected for this runtime.
     pub storage_stack: Option<Arc<StorageStack>>,
-    /// Bounded background writer for derived query-plane projection rows.
-    pub(crate) query_projection_queue: Arc<Mutex<Option<Arc<QueryProjectionWriteQueue>>>>,
     /// Bounded background writer for durable actor recovery snapshots.
     pub(crate) snapshot_write_queue: Arc<Mutex<Option<Arc<SnapshotWriteQueue>>>>,
     /// Bounded background writer for full OTS trajectory artifacts.
@@ -496,12 +517,10 @@ pub struct ServerState {
     pub cross_invariant_eventual_enforce: bool,
     /// Broadcast channel for design-time events (spec loading, verification progress).
     pub design_time_tx: Arc<tokio::sync::broadcast::Sender<DesignTimeEvent>>,
-    /// LRU cache of entity current state, updated on every state change broadcast.
-    /// Key: "{tenant}:{entity_type}:{entity_id}", Value: (current_state, last_updated).
-    /// Capped at [`state_cache_budget()`] entries; oldest entry evicted automatically.
-    #[allow(clippy::type_complexity)]
-    pub entity_state_cache:
-        Arc<Mutex<lru::LruCache<String, (String, chrono::DateTime<chrono::Utc>)>>>,
+    /// Each record's newest committed status, keyed "{tenant}:{entity_type}:{entity_id}"
+    /// (see [`status_cache`]). Capped at [`state_cache_budget()`] entries; the least
+    /// recently used is evicted.
+    pub entity_state_cache: Arc<Mutex<status_cache::StatusCache>>,
     /// Configurable timeout for actor ask operations (default: 5s).
     pub action_dispatch_timeout: Duration,
     /// Admission control (ADR-0051). Gates concurrent action dispatches per
@@ -512,6 +531,31 @@ pub struct ServerState {
     /// counter used to cancel stale timers when the entity transitions out
     /// of a declared state or reset_on fires.
     pub state_timeout_tracker: Arc<StateTimeoutTracker>,
+    /// Where armed timer rows are kept when the storage stack has no metadata
+    /// store to keep them, as under simulation. None: the metadata store.
+    pub state_timer_rows: Option<Arc<dyn crate::storage::StateTimerStore>>,
+    /// The scheduled actions armed in this process: how many live timers
+    /// each row has. A row is armed only while it has none, however many
+    /// replies hand it back (a cached reply to a retried fire carries the
+    /// schedules it armed), and leaves the map when its fire ends.
+    pub(crate) scheduled_armed:
+        Arc<std::sync::Mutex<BTreeMap<crate::request_context::ScheduledFire, usize>>>,
+    /// When each live timer is due by the wall clock: what its wait runs to,
+    /// and what the wake reports name (`wake`).
+    pub(crate) due_times: Arc<crate::wake::DueTimes>,
+    /// This process's background calls are live, even during boot retries.
+    pub(crate) call_process_id: uuid::Uuid,
+    /// The writes committed moves owe that the store has not taken yet, by
+    /// idempotency key, each tried again until it lands or fails otherwise
+    /// (`dispatch::owed_writes`). In memory only: a restart loses them.
+    pub(crate) owed_writes: Arc<Mutex<BTreeMap<String, dispatch::owed_writes::OwedWrite>>>,
+    /// Published under the registry lock after durable timer recovery.
+    pub(crate) timer_recovery_complete: Arc<std::sync::atomic::AtomicBool>,
+    /// Set once [`Self::start_runtime`] has run in this process.
+    pub(crate) runtime_started: Arc<std::sync::atomic::AtomicBool>,
+    /// Held by each carry pass, so a pass derives its carries only after
+    /// the one before it has made its own (see `spec_change::carry_pass`).
+    pub(crate) carry_pass: Arc<tokio::sync::Mutex<()>>,
     /// Eventual invariant convergence tracker.
     pub eventual_tracker: Arc<RwLock<crate::eventual_invariants::EventualInvariantTracker>>,
     /// Idempotency cache for deduplicating agent retries.
@@ -546,6 +590,10 @@ pub struct ServerState {
     /// Pending owner-byte reservations held by admitted raw Blob uploads.
     commons_storage_reservations:
         Arc<Mutex<BTreeMap<String, storage_caps::CommonsStorageReservationEntry>>>,
+    /// Passing checks, by the digest of what their levels read, when this
+    /// server has no platform store to keep them in (`observe::specs::kept`).
+    #[cfg(feature = "observe")]
+    pub(crate) check_verdicts: Arc<Mutex<BTreeMap<String, temper_verify::CascadeResult>>>,
     /// Coarse commons-mode write guardrail lock.
     ///
     /// Held from preflight through persistence for commons writes so exact
@@ -571,6 +619,9 @@ pub struct ServerState {
     pub observe_refresh_tx: Arc<tokio::sync::broadcast::Sender<ObserveRefreshHint>>,
     /// Listening port for HTTP REPL self-referencing calls.
     pub listen_port: Arc<std::sync::OnceLock<u16>>,
+    /// The local sandbox `temper serve` started, if any: WASM requests to its
+    /// origin carry its token. Set once by [`ServerState::set_local_sandbox`].
+    pub(crate) local_sandbox: Arc<std::sync::OnceLock<temper_wasm::LocalSandboxAccess>>,
     /// When true, missing `X-Tenant-Id` headers fall back to the first
     /// registered tenant (legacy single-tenant compat).  When false
     /// (multi-tenant mode), a missing header is rejected with 400.
@@ -606,8 +657,6 @@ pub struct ServerState {
     /// receive a clone of this Arc via `with_shared_streams` so
     /// FFI calls from the guest resolve to the same handle IDs.
     pub http_stream_registry: Arc<temper_wasm::http_stream::HttpStreamRegistry>,
-    /// Long-lived workflow root spans keyed by workflow.run_id.
-    pub(crate) workflow_spans: Arc<crate::workflow_tracing::WorkflowSpanRegistry>,
     /// Public hostnames owned by this process that may use in-process TData
     /// dispatch from WASM guests instead of leaving through the public edge.
     pub(crate) local_tdata_hosts: Arc<BTreeSet<String>>,
@@ -650,6 +699,16 @@ impl ServerState {
         tenant_exports_llm_content(&self.llm_content_export_tenants, tenant)
     }
 
+    /// Record the local sandbox this process started at `base_url` and the
+    /// token it requires. WASM requests to that origin carry the token; guests
+    /// never see it. A process starts at most one, so a second call is refused.
+    pub fn set_local_sandbox(&self, base_url: &str, token: String) -> Result<(), String> {
+        let sandbox = temper_wasm::LocalSandboxAccess::new(base_url, token)?;
+        self.local_sandbox
+            .set(sandbox)
+            .map_err(|_| "a local sandbox is already set for this server".to_string())
+    }
+
     /// Whether commons-mode write guardrails are active for a tenant.
     pub fn commons_guardrails_enabled(&self, tenant: &TenantId) -> bool {
         self.commons_guardrail_tenants
@@ -665,12 +724,15 @@ impl ServerState {
         if let Ok(mut slot) = self.snapshot_write_queue.lock() {
             *slot = Some(snapshot_queue);
         }
-        if let Some(query_plane) = stack.query_plane.clone() {
-            let queue = QueryProjectionWriteQueue::start(query_plane);
-            if let Ok(mut slot) = self.query_projection_queue.lock() {
-                *slot = Some(queue);
-            }
-        }
+        // A stack reads only the query plane its journal writes
+        // (`StorageStack::with_query_plane`); `events` is public, so a stack
+        // whose journal was replaced since is refused here.
+        assert!(
+            stack.query_plane().is_none()
+                || stack.query_plane_is_journal()
+                || stack.reads_through_probe(),
+            "the storage stack's query plane is not its journal's store"
+        );
         if let Some(metadata) = stack.metadata.clone() {
             let queue = OtsTrajectoryOutbox::start();
             queue.recover_queued_metadata_stores(stack.backend.as_str(), metadata);
@@ -685,14 +747,7 @@ impl ServerState {
     pub(crate) fn query_plane_store(&self) -> Option<Arc<dyn QueryPlaneStore>> {
         self.storage_stack
             .as_ref()
-            .and_then(|stack| stack.query_plane.clone())
-    }
-
-    /// Return the native data-only create capability when the backend supports it.
-    pub(crate) fn data_only_create_store(&self) -> Option<Arc<dyn DataOnlyCreateStore>> {
-        self.storage_stack
-            .as_ref()
-            .and_then(|stack| stack.data_only_create.clone())
+            .and_then(|stack| stack.query_plane().cloned())
     }
 
     /// Return the runtime event journal capability plus backend label.
@@ -763,7 +818,6 @@ impl ServerState {
             actor_registry: Arc::new(RwLock::new(BTreeMap::new())),
             last_accessed: Arc::new(RwLock::new(BTreeMap::new())),
             storage_stack: None,
-            query_projection_queue: Arc::new(Mutex::new(None)),
             snapshot_write_queue: Arc::new(Mutex::new(None)),
             ots_trajectory_outbox: Arc::new(Mutex::new(None)),
             data_dir: std::path::PathBuf::new(),
@@ -798,6 +852,14 @@ impl ServerState {
             action_dispatch_timeout: env_timeout(),
             admission: Arc::new(AdmissionController::new()),
             state_timeout_tracker: Arc::new(StateTimeoutTracker::new()),
+            state_timer_rows: None,
+            scheduled_armed: Arc::default(),
+            due_times: Arc::default(),
+            call_process_id: temper_runtime::scheduler::sim_uuid(),
+            owed_writes: Arc::default(),
+            timer_recovery_complete: Arc::default(),
+            runtime_started: Arc::default(),
+            carry_pass: Arc::default(),
             eventual_tracker: Arc::new(RwLock::new(
                 crate::eventual_invariants::EventualInvariantTracker::new(),
             )),
@@ -811,6 +873,8 @@ impl ServerState {
             commons_rate_limit_buckets: Arc::new(Mutex::new(BTreeMap::new())),
             commons_storage_projection_cache: Arc::new(Mutex::new(BTreeMap::new())),
             commons_storage_reservations: Arc::new(Mutex::new(BTreeMap::new())),
+            #[cfg(feature = "observe")]
+            check_verdicts: Arc::new(Mutex::new(BTreeMap::new())),
             commons_write_guardrail_lock: Arc::new(tokio::sync::Mutex::new(())),
             raw_blob_ingest_budget: crate::blob_store::BlobIngestBudget::runtime(),
             file_ingest_budget: crate::blob_store::BlobIngestBudget::files(),
@@ -820,6 +884,7 @@ impl ServerState {
             entity_observe_log: Arc::new(Mutex::new(BTreeMap::new())),
             observe_refresh_tx: Arc::new(observe_refresh_tx), // determinism-ok: broadcast for external observation
             listen_port: Arc::new(std::sync::OnceLock::new()),
+            local_sandbox: Arc::new(std::sync::OnceLock::new()),
             single_tenant_mode: true,
             suggestion_engine: Arc::new(RwLock::new(PolicySuggestionEngine::new())),
             verify_subprocess_bin: None,
@@ -828,7 +893,6 @@ impl ServerState {
             http_endpoint_tables: Arc::new(crate::http_endpoint::HttpEndpointTables::new()),
             http_transports: Arc::new(Default::default()),
             http_stream_registry: Arc::new(temper_wasm::http_stream::HttpStreamRegistry::new()),
-            workflow_spans: Arc::new(crate::workflow_tracing::WorkflowSpanRegistry::default()),
             local_tdata_hosts: Arc::new(env_local_tdata_hosts()),
             llm_content_export_tenants: Arc::new(env_llm_content_export_tenants()),
         };
@@ -1040,7 +1104,6 @@ impl ServerState {
             actor_registry: Arc::new(RwLock::new(BTreeMap::new())),
             last_accessed: Arc::new(RwLock::new(BTreeMap::new())),
             storage_stack: None,
-            query_projection_queue: Arc::new(Mutex::new(None)),
             snapshot_write_queue: Arc::new(Mutex::new(None)),
             ots_trajectory_outbox: Arc::new(Mutex::new(None)),
             data_dir: std::path::PathBuf::new(),
@@ -1074,6 +1137,14 @@ impl ServerState {
             action_dispatch_timeout: env_timeout(),
             admission: Arc::new(AdmissionController::new()),
             state_timeout_tracker: Arc::new(StateTimeoutTracker::new()),
+            state_timer_rows: None,
+            scheduled_armed: Arc::default(),
+            due_times: Arc::default(),
+            call_process_id: temper_runtime::scheduler::sim_uuid(),
+            owed_writes: Arc::default(),
+            timer_recovery_complete: Arc::default(),
+            runtime_started: Arc::default(),
+            carry_pass: Arc::default(),
             eventual_tracker: Arc::new(RwLock::new(
                 crate::eventual_invariants::EventualInvariantTracker::new(),
             )),
@@ -1087,6 +1158,8 @@ impl ServerState {
             commons_rate_limit_buckets: Arc::new(Mutex::new(BTreeMap::new())),
             commons_storage_projection_cache: Arc::new(Mutex::new(BTreeMap::new())),
             commons_storage_reservations: Arc::new(Mutex::new(BTreeMap::new())),
+            #[cfg(feature = "observe")]
+            check_verdicts: Arc::new(Mutex::new(BTreeMap::new())),
             commons_write_guardrail_lock: Arc::new(tokio::sync::Mutex::new(())),
             raw_blob_ingest_budget: crate::blob_store::BlobIngestBudget::runtime(),
             file_ingest_budget: crate::blob_store::BlobIngestBudget::files(),
@@ -1096,6 +1169,7 @@ impl ServerState {
             entity_observe_log: Arc::new(Mutex::new(BTreeMap::new())),
             observe_refresh_tx: Arc::new(observe_refresh_tx), // determinism-ok: broadcast for external observation
             listen_port: Arc::new(std::sync::OnceLock::new()),
+            local_sandbox: Arc::new(std::sync::OnceLock::new()),
             single_tenant_mode: false,
             suggestion_engine: Arc::new(RwLock::new(PolicySuggestionEngine::new())),
             verify_subprocess_bin: None,
@@ -1104,7 +1178,6 @@ impl ServerState {
             http_endpoint_tables: Arc::new(crate::http_endpoint::HttpEndpointTables::new()),
             http_transports: Arc::new(Default::default()),
             http_stream_registry: Arc::new(temper_wasm::http_stream::HttpStreamRegistry::new()),
-            workflow_spans: Arc::new(crate::workflow_tracing::WorkflowSpanRegistry::default()),
             local_tdata_hosts: Arc::new(env_local_tdata_hosts()),
             llm_content_export_tenants: Arc::new(env_llm_content_export_tenants()),
         };
@@ -1148,12 +1221,30 @@ impl ServerState {
 
         let mut projected = obj.clone();
         for state_var in &spec.automaton.state {
-            if state_var.query_indexed == Some(false) {
+            if left_out_of_query_projection(state_var) {
                 projected.remove(&state_var.name);
             }
         }
 
         serde_json::Value::Object(projected)
+    }
+
+    /// Whether the query projection's field index can hold `field_name` for
+    /// `entity_type`: false when the spec declares that field
+    /// `query_indexed = false`, which [`Self::query_projection_fields`] drops.
+    pub(crate) fn query_projection_indexes_field(
+        &self,
+        tenant: &TenantId,
+        entity_type: &str,
+        field_name: &str,
+    ) -> bool {
+        let registry = self.registry.read().unwrap();
+        let Some(spec) = registry.get_spec(tenant, entity_type) else {
+            return true;
+        };
+        !spec.automaton.state.iter().any(|state_var| {
+            state_var.name == field_name && left_out_of_query_projection(state_var)
+        })
     }
 
     pub(crate) fn query_projection_state(
@@ -1178,6 +1269,11 @@ impl ServerState {
             // The status clock is the actor's, for its timers; a query never
             // reads it, and rows written before it was kept stay comparable.
             obj.remove("status_clock");
+            // The idempotency keys are the actor's, to drop a repeated
+            // request; a query never reads them. Every dispatch records one
+            // (up to 1,000 per entity), so keeping them would make every
+            // action, a poll that changes nothing included, change the row.
+            obj.remove("processed_idempotency_keys");
         }
         projected
     }
@@ -1223,21 +1319,25 @@ impl ServerState {
                 .contains(&format!("{}:{entity_type}", tenant.as_str()))
     }
 
+    /// Whether `entity_type` takes only the actions its spec declares: its
+    /// entities are never changed or deleted by a generic write.
+    pub(crate) fn has_strict_action_params(&self, tenant: &TenantId, entity_type: &str) -> bool {
+        let registry = self.registry.read().expect("registry lock poisoned");
+        registry
+            .get_table(tenant, entity_type)
+            .map(|table| table.strict_action_params)
+            .or_else(|| {
+                self.transition_tables
+                    .get(entity_type)
+                    .map(|table| table.strict_action_params)
+            })
+            .unwrap_or(false)
+    }
+
     /// Attach an encrypted secrets vault.
     pub fn with_secrets_vault(mut self, vault: SecretsVault) -> Self {
         self.secrets_vault = Some(Arc::new(vault));
         self
-    }
-
-    /// Insert/update an entity status cache entry.
-    ///
-    /// The underlying [`lru::LruCache`] automatically evicts the least-recently-used
-    /// entry when the budget (see [`state_cache_budget`]) is exceeded, so no manual
-    /// eviction loop is needed here.
-    pub fn cache_entity_status(&self, cache_key: String, status: String) {
-        if let Ok(mut cache) = self.entity_state_cache.lock() {
-            cache.put(cache_key, (status, sim_now()));
-        }
     }
 
     /// Get a reference to the platform Turso event store.
@@ -1386,6 +1486,7 @@ impl ServerState {
             workflow_root_entity_id: agent_ctx.workflow_root_entity_id.clone(),
             workflow_run_id: agent_ctx.workflow_run_id.clone(),
             http_request: None,
+            trigger_principal: None,
         };
 
         let security_ctx = agent_ctx.security_ctx.as_ref().ok_or_else(|| {

@@ -1,11 +1,11 @@
 use temper_runtime::persistence::{PersistenceError, storage_error};
 
-use super::instrumentation::InstrumentedConnection;
+use super::instrumentation::WriteConnection;
 
 /// Execute a SQLite `ADD COLUMN` migration while rejecting every error except
 /// the duplicate-column result expected on an already-migrated database.
 pub(super) async fn add_column_if_missing(
-    connection: &InstrumentedConnection,
+    connection: &WriteConnection,
     statement: &str,
 ) -> Result<(), PersistenceError> {
     if let Err(error) = connection.execute(statement, ()).await {

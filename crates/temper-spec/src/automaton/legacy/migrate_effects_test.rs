@@ -181,7 +181,7 @@ module = "m"
     let trigger = &charge.triggers[0];
     assert_eq!(trigger.name, "charge");
     assert_eq!(trigger.module.as_deref(), Some("stripe"));
-    assert_eq!(trigger.on_success.as_deref(), Some("Done"));
+    assert_eq!(trigger.on_success, ["Done"]);
     assert_eq!(trigger.on_failure.as_deref(), Some("Failed"));
     assert_eq!(
         trigger.config.get("url").map(String::as_str),
@@ -268,6 +268,20 @@ fn an_unresolvable_trigger_effect_is_an_error() {
     ))
     .unwrap_err();
     assert!(err.contains("`trigger nowhere` matches no"), "{err}");
+}
+
+#[test]
+fn an_outbound_webhook_integration_is_an_error() {
+    // It used to become a kind = "webhook" trigger, which installs and never
+    // sends its request (ADR-0182).
+    let err = migrate_source(&format!(
+        "{HEADER}\n[[action]]\nname = \"Go\"\nfrom = [\"A\"]\neffect = \"trigger notify\"\n\n[[integration]]\nname = \"notify\"\ntrigger = \"notify\"\ntype = \"webhook\"\nurl = \"https://example.com/hook\"\n"
+    ))
+    .unwrap_err();
+    assert!(
+        err.contains("'notify'") && err.contains("http_fetch"),
+        "{err}"
+    );
 }
 
 #[test]

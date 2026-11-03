@@ -1,8 +1,11 @@
 name: CI
 
 on:
+  # Every pull request, whatever its base. A stacked pull request's base is another branch until that branch
+  # merges, and GitHub's move of the base to main is an 'edited' event that starts nothing, so a push made
+  # before the move got no CI at all (temper #330, 2 Nov 2026: fix-up 10bcdce3 at 05:47:00, base moved
+  # 05:48:07, no run). Its checks run against the base it had; the push to main that lands it runs its tests.
   pull_request:
-    branches: [main, staging]
   push:
     branches: [main, staging]
   schedule:
@@ -13,14 +16,23 @@ on:
         description: "Paths to treat as changed (space-separated). Set: the pull-request lane for those paths. Empty: every check, as on main."
         required: false
         default: ""
+      tests:
+        description: "A nextest filterset, e.g. test(=module::name). Set: only the tests it selects run, in the one job Focused tests; every other job is skipped. Ignored tests it selects run too."
+        required: false
+        default: ""
+      packages:
+        description: "With tests: the packages to build and test (space-separated). Empty: the whole workspace."
+        required: false
+        default: ""
       save_cache:
         description: "Save the Rust build caches from this run (only main saves them otherwise)."
         type: boolean
         required: false
         default: false
 
-# A new push to a pull request cancels its older run. Every push to main, schedule and
-# dispatch runs to the end in its own group, so each commit on main gets a full verdict.
+# A new push to a pull request cancels its older run. Every push to main,
+# schedule and dispatch runs to the end in its own group, so each commit on main gets a
+# full verdict.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -36,6 +48,17 @@ env:
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  # Every cargo build here resolves features across the whole workspace, as main's
+  # --workspace run does, whichever packages it selects with -p. The pr lane builds only
+  # the packages a change reaches, and cargo's default resolves features for those alone,
+  # so a dependency could build without a feature another package turns on: #147 gave
+  # temper-server's dev-dependency opentelemetry-otlp the http-json feature, the shards
+  # tested temper-observe without it and passed, and main's run failed for 11 hours
+  # (#179). This is cargo's feature-unification (unstable, on the pinned nightly); a -p
+  # build still compiles only its own dependency graph. Stable cargo, which affected.py's
+  # cargo metadata uses, ignores it with a warning.
+  CARGO_UNSTABLE_FEATURE_UNIFICATION: "true"
+  CARGO_RESOLVER_FEATURE_UNIFICATION: workspace
   # The Actions cache holds 10 GB per repository. When every pull request saved its own
   # 0.3 to 1.4 GB per job, main's caches were evicted within minutes and pull requests,
   # which can only restore their own ref's caches or main's, compiled from scratch.
@@ -44,19 +67,36 @@ env:
 
 jobs:
   # ─────────────────────────────────────────────────────
-  # What this run tests. Push, schedule and a plain dispatch: everything (lane "full").
-  # A pull request: only the packages its changes can reach (lane "pr"), see scripts/ci/affected.py.
+  # What this run tests. Schedule and a plain dispatch: everything (lane "full"). A push or a pull
+  # request: only the packages its changes can reach (lane "pr"), see scripts/ci/affected.py. A
+  # push's changes are what it moved main by. Changes land by pushing to main (trunk-based
+  # development, Rita, 3 Nov 2026; there is no merge queue), and every test runs once, on that push
+  # (Rita, 31 Oct 2026: "CI 2 times is insane"): a pull request only compiles and lints (Compile &
+  # Lint, Integrity, Instrumentation Hygiene, the SDK's type check), so its author sees a broken
+  # build in about four minutes, and every job that runs tests is skipped on it (output
+  # tests=false). To run on a branch, before pushing it to main, exactly what that push will:
+  #   gh workflow run ci.yml -R arni-labs/temper --ref <branch> -f changed="$(git diff --name-only origin/main...)"
+  # Jobs with nothing to do are skipped here rather than started; a skipped job satisfies
+  # a required check. The DST cells always start, because a matrix job skipped before it
+  # expands reports none of the cell names the branch rules require.
   # ─────────────────────────────────────────────────────
   changes:
     name: Changed packages
+    # A dispatch given tests runs only Focused tests. Every other job needs this one, so it
+    # is skipped too; Tests, which runs after skipped jobs, checks the input itself.
+    if: inputs.tests == ''
     runs-on: ubuntu-latest
     outputs:
       lane: ${{ steps.affected.outputs.lane }}
       mode: ${{ steps.affected.outputs.mode }}
       packages: ${{ steps.affected.outputs.packages }}
-      server: ${{ steps.affected.outputs.server }}
+      test_args: ${{ steps.affected.outputs.test_args }}
       rust: ${{ steps.affected.outputs.rust }}
+      sdk_ts: ${{ steps.affected.outputs.sdk_ts }}
       shards: ${{ steps.affected.outputs.shards }}
+      tests: ${{ steps.affected.outputs.tests }}
+      specs: ${{ steps.affected.outputs.specs }}
+      dst_matrix: ${{ steps.dst.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -65,12 +105,32 @@ jobs:
       - id: affected
         env:
           EVENT: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           CHANGED_PATHS: ${{ inputs.changed }}
           # cargo metadata --no-deps needs no particular toolchain; skip installing the pinned one.
           RUSTUP_TOOLCHAIN: stable
         run: python3 scripts/ci/affected.py
+
+      # Every suite always has a cell (each is a required check). platform-random: one smoke
+      # cell on the pr lane, four full-mode seed shards on the full lane.
+      - id: dst
+        env:
+          LANE: ${{ steps.affected.outputs.lane }}
+        run: |
+          SUITES='[
+            {"suite":"core","filter":"test(dst_) and not binary(/^dst_platform_/)"},
+            {"suite":"platform-boot","filter":"test(dst_) and binary(=dst_platform_boot)"},
+            {"suite":"platform-consistency","filter":"test(dst_) and binary(/^dst_platform_/) and not binary(=dst_platform_boot) and not binary(=dst_platform_random)"}
+          ]'
+          RANDOM_FILTER="test(dst_) and binary(=dst_platform_random)"
+          if [ "$LANE" = "pr" ]; then
+            RANDOM_CELLS=$(jq -cn --arg f "$RANDOM_FILTER" '[{suite:"platform-random",filter:$f}]')
+          else
+            RANDOM_CELLS=$(jq -cn --arg f "$RANDOM_FILTER" '[range(0;4) | {suite:"platform-random",shard_index:(.|tostring),shard_count:"4",filter:$f}]')
+          fi
+          MATRIX=$(jq -cn --argjson s "$SUITES" --argjson r "$RANDOM_CELLS" '{include: ($s + $r)}')
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
 
   # ─────────────────────────────────────────────────────
   # Gate 1: Fast checks (seconds)
@@ -78,6 +138,7 @@ jobs:
   check:
     name: Compile & Lint
     needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -115,19 +176,18 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --check
 
-      - name: cargo check --workspace
-        if: needs.changes.outputs.rust == 'true'
-        run: cargo check --workspace
-
+      # clippy --all-targets type-checks every target cargo check --workspace did, and the tests,
+      # benches and examples too; a separate check cost 64 s before it (31 Oct 2026).
       - name: cargo clippy --workspace --all-targets
-        if: needs.changes.outputs.rust == 'true'
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
   # ─────────────────────────────────────────────────────
   # Gate 1a: TypeScript SDK (packages/temper-sdk-ts)
   # ─────────────────────────────────────────────────────
   sdk-ts:
     name: TypeScript SDK
+    needs: changes
+    if: needs.changes.outputs.sdk_ts == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -143,6 +203,7 @@ jobs:
       - name: Type check
         run: npx tsc --noEmit
       - name: Tests
+        if: needs.changes.outputs.tests == 'true'
         run: npx vitest run
 
   # ─────────────────────────────────────────────────────
@@ -185,13 +246,15 @@ jobs:
           save-if: ${{ env.SAVE_RUST_CACHE }}
 
       - name: cargo bench --workspace --no-run
-        run: cargo bench --workspace --no-run
+        run: cargo bench --locked --workspace --no-run
 
   # ─────────────────────────────────────────────────────
   # Gate 2: Integrity checks (seconds)
   # ─────────────────────────────────────────────────────
   integrity:
     name: Integrity & DST Patterns
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -262,6 +325,13 @@ jobs:
       - name: Additive migrations
         run: bash scripts/check-additive-migrations.sh
 
+      # The server embeds a build of wasm-modules/http-fetch; a change to that source or to
+      # temper-wasm-sdk that was not rebuilt into the embedded binary fails here.
+      - name: Embedded http_fetch module matches its source
+        run: |
+          rustup target add wasm32-unknown-unknown
+          bash scripts/build-http-fetch-wasm.sh --check
+
       # DST pattern scan DISABLED (2026-02-17)
       # Reason: Grep-based pattern matching is too brittle and caused 5+ consecutive
       # CI failures from false positives. The DST reviewer agent (.claude/agents/dst-reviewer.md)
@@ -273,13 +343,13 @@ jobs:
       - name: Dependency isolation
         run: |
           # Check temper-jit has no production dep on temper-verify
-          if cargo tree --no-dev -p temper-jit 2>/dev/null | grep -q temper-verify; then
+          if cargo tree --locked --no-dev -p temper-jit 2>/dev/null | grep -q temper-verify; then
             echo "FAIL: temper-jit has production dependency on temper-verify"
             exit 1
           fi
           # Check no stateright/proptest in production crates
           for crate in temper-jit temper-server temper-runtime; do
-            if cargo tree --no-dev -p "$crate" 2>/dev/null | grep -qE 'stateright|proptest'; then
+            if cargo tree --locked --no-dev -p "$crate" 2>/dev/null | grep -qE 'stateright|proptest'; then
               echo "FAIL: $crate production binary includes stateright or proptest"
               exit 1
             fi
@@ -295,12 +365,30 @@ jobs:
   test-shards:
     name: Tests (${{ matrix.name }})
     needs: changes
-    if: needs.changes.outputs.lane == 'pr' && needs.changes.outputs.mode != 'none'
+    if: needs.changes.outputs.lane == 'pr' && needs.changes.outputs.mode != 'none' && needs.changes.outputs.tests == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.shards) }}
+    # Tests that need a database run or fail in CI (crates/temper-test-resource), so
+    # every machine that runs them has one. Each test isolates itself by a unique tenant
+    # or key, so a parallel run can share one database and one Redis.
+    services:
+      postgres:
+        image: ${{ matrix.args != '' && 'postgres:18' || '' }}
+        env:
+          POSTGRES_PASSWORD: temper
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s --health-timeout 5s --health-retries 30
+      redis:
+        image: ${{ matrix.args != '' && 'redis:7' || '' }}
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s --health-timeout 5s --health-retries 30
     steps:
       # temper-spec's migration_differential tests read older commits.
       - uses: actions/checkout@v4
@@ -343,13 +431,19 @@ jobs:
           rustup target add wasm32-unknown-unknown
           pids=()
           for module in gepa-replay gepa-reflective gepa-score gepa-pareto gepa-verify; do
-            (cd "wasm-modules/$module" && cargo build --quiet --target wasm32-unknown-unknown --release) &
+            (
+              cd "wasm-modules/$module"
+              lock_args=()
+              if [ -f Cargo.lock ]; then lock_args+=(--locked); fi
+              cargo build "${lock_args[@]}" --quiet --target wasm32-unknown-unknown --release
+            ) &
             pids+=($!)
           done
           for pid in "${pids[@]}"; do wait "$pid"; done
 
+      # Any package's tests may run against Turso's local sync server (the
+      # store's turso_sync tests, serve's push tests), as in the full lane.
       - name: Install tursodb for the Turso Sync tests
-        if: matrix.turso
         run: |
           set -euo pipefail
           curl -sSfL -o /tmp/tursodb.tar.xz \
@@ -358,26 +452,79 @@ jobs:
           tar -xJf /tmp/tursodb.tar.xz -C /tmp
           echo "TEMPER_TEST_TURSODB=/tmp/turso_cli-x86_64-unknown-linux-gnu/tursodb" >> "$GITHUB_ENV"
 
+      - run: echo "::add-matcher::.github/rust-test-failures.json"
+        if: matrix.args != ''
+
       - name: cargo nextest run (affected packages, skip dst_)
         if: matrix.args != ''
-        run: cargo nextest run ${{ matrix.args }} -E 'not test(dst_)' --partition ${{ matrix.partition }}
+        env:
+          DATABASE_URL: postgres://postgres:temper@localhost:5432/postgres
+          REDIS_URL: redis://localhost:6379
+        run: cargo nextest run --locked ${{ matrix.args }} -E 'not test(dst_)' --partition ${{ matrix.partition }}
 
       - name: cargo test --doc (affected packages)
         if: matrix.doc != ''
-        run: cargo test --doc ${{ matrix.doc }}
+        run: cargo test --locked --doc ${{ matrix.doc }}
+
+  # ─────────────────────────────────────────────────────
+  # Every Cargo workspace other than the root one: the os-app, GEPA and reference-app
+  # modules and the test fixtures, each a workspace of its own that no -p from the root
+  # reaches. scripts/ci/workspaces.py asks cargo which workspace each Cargo.toml on disk
+  # belongs to and runs cargo test in every other one, --locked where it has a lock file,
+  # so a new module is covered without a list here. Tests requires it. (Until 28 Oct 2026
+  # nothing built them, and 21 of their lock files were stale from 24 Apr.)
+  # ─────────────────────────────────────────────────────
+  workspaces:
+    name: Other workspaces
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' && needs.changes.outputs.mode != 'none' && needs.changes.outputs.tests == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Set up mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: cargo test, every other workspace
+        run: python3 scripts/ci/workspaces.py
 
   # ─────────────────────────────────────────────────────
   # Gate 3: Full test suite (minutes)
-  # The required "Tests" check. Full lane (push, schedule, plain dispatch): the
-  # whole workspace on one machine, exactly as before. Pull-request lane: passes
-  # when every test shard above passed, or nothing needed testing.
+  # The required "Tests" check. Full lane (schedule, plain dispatch): the
+  # whole workspace on one machine, exactly as before. Pull-request lane (also a push): passes
+  # when every test shard above passed, or nothing needed testing, or on a pull
+  # request, which runs no tests (the push to main runs them). Either lane also
+  # needs Other workspaces to have passed, or to have had nothing to test.
   # ─────────────────────────────────────────────────────
   test:
     name: Tests
-    needs: [changes, test-shards]
-    if: ${{ !cancelled() }}
+    needs: [changes, test-shards, workspaces]
+    if: ${{ !cancelled() && inputs.tests == '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    # Tests that need a database run or fail in CI (crates/temper-test-resource), so
+    # every machine that runs them has one. Each test isolates itself by a unique tenant
+    # or key, so a parallel run can share one database and one Redis.
+    services:
+      postgres:
+        image: ${{ needs.changes.outputs.lane == 'full' && 'postgres:18' || '' }}
+        env:
+          POSTGRES_PASSWORD: temper
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s --health-timeout 5s --health-retries 30
+      redis:
+        image: ${{ needs.changes.outputs.lane == 'full' && 'redis:7' || '' }}
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s --health-timeout 5s --health-retries 30
     steps:
       - name: Pull-request lane result
         if: needs.changes.outputs.lane != 'full'
@@ -386,7 +533,11 @@ jobs:
           SHARDS: ${{ needs.test-shards.result }}
           PACKAGES: ${{ needs.changes.outputs.packages }}
         run: |
-          echo "Packages tested: ${PACKAGES:-none}"
+          if [ "${{ needs.changes.outputs.tests }}" != true ]; then
+            echo "A pull request only compiles and lints; the push to main runs the tests of: ${PACKAGES:-none}"
+          else
+            echo "Packages tested: ${PACKAGES:-none}"
+          fi
           echo "changes: $CHANGES; test shards: $SHARDS"
           [ "$CHANGES" = success ] || exit 1
           case "$SHARDS" in success|skipped) ;; *) exit 1 ;; esac
@@ -437,7 +588,12 @@ jobs:
         if: needs.changes.outputs.lane == 'full'
         run: |
           for module in gepa-replay gepa-reflective gepa-score gepa-pareto gepa-verify; do
-            (cd "wasm-modules/$module" && cargo build --target wasm32-unknown-unknown --release)
+            (
+              cd "wasm-modules/$module"
+              lock_args=()
+              if [ -f Cargo.lock ]; then lock_args+=(--locked); fi
+              cargo build "${lock_args[@]}" --target wasm32-unknown-unknown --release
+            )
           done
 
       # temper-store-turso's turso_sync tests run against Turso's local sync
@@ -452,9 +608,15 @@ jobs:
           tar -xJf /tmp/tursodb.tar.xz -C /tmp
           echo "TEMPER_TEST_TURSODB=/tmp/turso_cli-x86_64-unknown-linux-gnu/tursodb" >> "$GITHUB_ENV"
 
+      - run: echo "::add-matcher::.github/rust-test-failures.json"
+        if: needs.changes.outputs.lane == 'full'
+
       - name: cargo nextest run --workspace (skip dst_)
         if: needs.changes.outputs.lane == 'full'
-        run: cargo nextest run --workspace -E 'not test(dst_)'
+        env:
+          DATABASE_URL: postgres://postgres:temper@localhost:5432/postgres
+          REDIS_URL: redis://localhost:6379
+        run: cargo nextest run --locked --workspace -E 'not test(dst_)'
 
       # spec_validate_endpoint declares required-features = ["observe"]. The
       # workspace run above usually still covers it via feature unification
@@ -467,12 +629,12 @@ jobs:
       - name: cargo test observe-gated tests
         if: needs.changes.outputs.lane == 'full'
         run: |
-          cargo test -p temper-server --features observe --test spec_validate_endpoint
-          cargo test -p temper-server --features observe --lib observe::
+          cargo test --locked -p temper-server --features observe --test spec_validate_endpoint
+          cargo test --locked -p temper-server --features observe --lib observe::
           # api::repl tests (incl. server_repl_config_never_allows_host_ops,
           # the ARN-166 host-op isolation guard) compile only under `observe`;
           # run them explicitly so coverage never depends on feature unification.
-          cargo test -p temper-server --features observe --lib api::repl::
+          cargo test --locked -p temper-server --features observe --lib api::repl::
 
       # nextest does NOT run (or compile) doctests, so the workspace nextest run
       # above drops doctest coverage — e.g. the no_run example in temper-sdk that
@@ -480,23 +642,35 @@ jobs:
       # exactly what nextest omits (compile-only for no_run; fast).
       - name: cargo test --doc --workspace
         if: needs.changes.outputs.lane == 'full'
-        run: cargo test --doc --workspace
+        run: cargo test --locked --doc --workspace
+
+      - name: Other workspaces result
+        env:
+          WORKSPACES: ${{ needs.workspaces.result }}
+        run: |
+          echo "Other workspaces: $WORKSPACES"
+          case "$WORKSPACES" in success|skipped) ;; *) exit 1 ;; esac
 
   # ─────────────────────────────────────────────────────
-  # A rollback boots: a release runs on a Postgres schema a newer release
-  # migrated (crates/temper-store-postgres/migrations/README.md).
+  # Tests that need a disposable PostgreSQL of their own: each is #[ignore]d with a
+  # reason naming TEMPER_TEST_POSTGRES_URL or TEST_POLICY_DATABASE_URL, and this job
+  # runs every such test in the packages this run tests (scripts/ci/postgres_ignored.py
+  # finds them by that reason). Among them: a rollback boots, a release runs on a
+  # Postgres schema a newer release migrated (crates/temper-store-postgres/migrations/README.md).
   # ─────────────────────────────────────────────────────
   postgres-migrations:
     name: Postgres rollback migrations
     needs: changes
-    if: needs.changes.outputs.lane == 'full' || contains(format(' {0} ', needs.changes.outputs.packages), ' temper-store-postgres ')
+    if: needs.changes.outputs.packages != '' && needs.changes.outputs.tests == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     services:
       postgres:
         image: postgres:18
         env:
           POSTGRES_PASSWORD: temper
+          # The policy-replacement test checks it runs on a database of this name.
+          POSTGRES_DB: morrow_temper
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U postgres"
@@ -504,34 +678,62 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Select the tests that need a disposable PostgreSQL
+        id: select
+        env:
+          PACKAGES: ${{ needs.changes.outputs.packages }}
+        run: python3 scripts/ci/postgres_ignored.py
+
       - name: Install system dependencies
+        if: steps.select.outputs.args != ''
         run: sudo apt-get update && sudo apt-get install -y libz3-dev
 
       - name: Install pinned Rust toolchain
+        if: steps.select.outputs.args != ''
         uses: dtolnay/rust-toolchain@nightly
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Set up mold linker
+        if: steps.select.outputs.args != ''
         uses: rui314/setup-mold@v1
 
+      # rust-cache hashes every installed toolchain into its key, so this job shares the
+      # test jobs' cache only with the runner image's own stable Rust gone, as in theirs.
+      - name: Keep only the pinned toolchain
+        if: steps.select.outputs.args != ''
+        run: rustup toolchain list --quiet | grep -v "^${{ env.RUST_TOOLCHAIN }}" | xargs -r -n1 rustup toolchain uninstall
+
       - name: Cache Rust build
+        if: steps.select.outputs.args != ''
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+          save-if: false
 
       - name: Install cargo-nextest
+        if: steps.select.outputs.args != ''
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
 
-      - name: A release boots on a schema a newer release migrated
+      # One at a time: each test expects the database to itself while it runs.
+      - name: Ignored tests that need a disposable PostgreSQL
+        if: steps.select.outputs.args != ''
         env:
           TEMPER_TEST_POSTGRES_URL: postgres://postgres:temper@localhost:5432/postgres
-        run: >-
-          cargo nextest run -p temper-store-postgres --run-ignored only
-          -E 'test(a_release_boots_on_a_schema_a_newer_release_migrated)'
+          TEST_POLICY_DATABASE_URL: postgres://postgres:temper@localhost:5432/morrow_temper
+          ARGS: ${{ steps.select.outputs.args }}
+          FILTER: ${{ steps.select.outputs.filter }}
+        run: cargo nextest run --locked $ARGS --run-ignored only --test-threads 1 --no-fail-fast -E "$FILTER"
 
   # ─────────────────────────────────────────────────────
   # Gate 3b: DST/platform coverage (matrixed)
+  #
+  # Every test whose name contains dst_ runs here, in the packages the Tests job
+  # tests: Tests runs `not test(dst_)`, these cells run `test(dst_)`, so between
+  # them every test of those packages runs. The cells split that one set by test
+  # binary; a dst_ test outside the dst_platform_* binaries lands in core.
   #
   # ARN-439: platform-random full mode is the main-branch tail. Off-PR it is sharded
   # by SEED across 4 jobs (TEMPER_DST_SHARD_INDEX/COUNT) — not nextest --partition —
@@ -539,50 +741,25 @@ jobs:
   # seed-level splitting balances the work. The union of the 4 shards is the full
   # seed set, so coverage is unchanged. On PRs platform-random runs as ONE smoke
   # cell (no shards): sharding a ~3-min smoke suite would just be 4x runner spin-up.
-  # The matrix is built dynamically per event by dst-matrix-setup. All cells share
-  # one rust-cache (shared-key: dst) since they compile the same test dep graph.
+  # The matrix is built per run by the changes job.
   # ─────────────────────────────────────────────────────
-  dst-matrix-setup:
-    name: DST matrix setup
-    needs: changes
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.gen.outputs.matrix }}
-    steps:
-      - id: gen
-        # core/boot/consistency always run. platform-random: one smoke cell on PRs,
-        # four full-mode seed shards on push/schedule/dispatch.
-        run: |
-          SUITES='[
-            {"suite":"core","command":"cargo nextest run -p temper-server --test dst_concurrency_retry --test dst_hotswap --test dst_lifecycle --test dst_multi_tenant --test dst_persistence"},
-            {"suite":"platform-boot","command":"cargo nextest run -p temper-server --test dst_platform_boot"},
-            {"suite":"platform-consistency","command":"cargo nextest run -p temper-server --test dst_platform_cedar --test dst_platform_index --test dst_platform_rollback"}
-          ]'
-          RANDOM_CMD="cargo nextest run -p temper-server --test dst_platform_random"
-          if [ "${{ needs.changes.outputs.lane }}" = "pr" ]; then
-            RANDOM_CELLS=$(jq -cn --arg cmd "$RANDOM_CMD" '[{suite:"platform-random",command:$cmd}]')
-          else
-            RANDOM_CELLS=$(jq -cn --arg cmd "$RANDOM_CMD" '[range(0;4) | {suite:"platform-random",shard_index:(.|tostring),shard_count:"4",command:$cmd}]')
-          fi
-          MATRIX=$(jq -cn --argjson s "$SUITES" --argjson r "$RANDOM_CELLS" '{include: ($s + $r)}')
-          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
-
   dst-platform-tests:
     name: DST/Platform Tests (${{ matrix.suite }}${{ matrix.shard_count && format(' {0}/{1}', matrix.shard_index, matrix.shard_count) || '' }})
-    needs: [changes, dst-matrix-setup]
+    needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.dst-matrix-setup.outputs.matrix) }}
-    # The cells always run so each required check reports; on a pull request that
-    # cannot reach temper-server their steps are skipped.
+      matrix: ${{ fromJSON(needs.changes.outputs.dst_matrix) }}
+    # The cells always run so each check reports; when no change reaches a package,
+    # their steps are skipped. A pull request runs none: the push to main that lands
+    # the change runs every suite it can reach.
     env:
-      DST_NEEDED: ${{ needs.changes.outputs.server }}
+      DST_NEEDED: ${{ needs.changes.outputs.test_args != '' && needs.changes.outputs.tests == 'true' }}
     steps:
       - name: Not affected
         if: env.DST_NEEDED != 'true'
-        run: echo "No change reaches temper-server; its DST suites are not run on this pull request."
+        run: echo "No dst_ tests run here. Nothing new to test, or a pull request, whose push to main runs this suite."
 
       - uses: actions/checkout@v4
         if: env.DST_NEEDED == 'true'
@@ -607,12 +784,13 @@ jobs:
         if: env.DST_NEEDED == 'true'
         run: rustup toolchain list --quiet | grep -v "^${{ env.RUST_TOOLCHAIN }}" | xargs -r -n1 rustup toolchain uninstall
 
+      # The same packages and features as Tests, so main's full Tests cache fits.
       - name: Cache Rust build
         if: env.DST_NEEDED == 'true'
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: dst
-          save-if: ${{ env.SAVE_RUST_CACHE }}
+          shared-key: test
+          save-if: false
 
       - name: Install cargo-nextest
         if: env.DST_NEEDED == 'true'
@@ -620,13 +798,20 @@ jobs:
         with:
           tool: cargo-nextest
 
+      - run: echo "::add-matcher::.github/rust-test-failures.json"
+        if: env.DST_NEEDED == 'true'
+
+      # A package set can hold no test of a cell (a change only to temper-cli), so an
+      # empty selection passes with a warning.
       - name: cargo nextest DST/platform suite
         if: env.DST_NEEDED == 'true'
         env:
+          TEST_ARGS: ${{ needs.changes.outputs.test_args }}
+          FILTER: ${{ matrix.filter }}
           TEMPER_DST_RANDOM_MODE: ${{ matrix.suite == 'platform-random' && needs.changes.outputs.lane == 'pr' && 'smoke' || 'full' }}
           TEMPER_DST_SHARD_INDEX: ${{ matrix.shard_index }}
           TEMPER_DST_SHARD_COUNT: ${{ matrix.shard_count }}
-        run: ${{ matrix.command }}
+        run: cargo nextest run --locked $TEST_ARGS --no-tests=warn -E "$FILTER"
 
   # ─────────────────────────────────────────────────────
   # Gate 4: Spec verification (minutes)
@@ -634,58 +819,44 @@ jobs:
   verify-specs:
     name: Spec Verification (L0-L3)
     needs: changes
+    # These are temper-cli's verify:: tests, which read every spec collection in the
+    # repository. The pr lane runs them here when a spec file
+    # changed (scripts/ci/affected.py, SPEC_FILES). A run that tests temper-cli runs them
+    # in Tests already, so this job only runs when it does not.
+    if: >-
+      needs.changes.outputs.specs == 'true' && needs.changes.outputs.tests == 'true'
+      && !contains(format(' {0} ', needs.changes.outputs.packages), ' temper-cli ')
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      FULL_LANE: ${{ needs.changes.outputs.lane == 'full' }}
     steps:
-      # These are temper-cli's verify:: tests. On a pull request the Tests shards run
-      # them whenever the change can reach temper-cli (every package except
-      # temper-agents, temper-macros, temper-wasm-sdk and the reference apps leads
-      # there), and any change outside a package tests everything.
-      - name: Pull-request lane
-        if: env.FULL_LANE != 'true'
-        run: echo "On pull requests temper-cli's verify tests run in the Tests shards."
-
       - uses: actions/checkout@v4
-        if: env.FULL_LANE == 'true'
 
       - name: Install system dependencies
-        if: env.FULL_LANE == 'true'
         run: sudo apt-get update && sudo apt-get install -y libz3-dev
 
       - name: Install pinned Rust toolchain
-        if: env.FULL_LANE == 'true'
         uses: dtolnay/rust-toolchain@nightly
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Set up mold linker
-        if: env.FULL_LANE == 'true'
         uses: rui314/setup-mold@v1
 
       # rust-cache hashes every installed toolchain into its key. The runner image's own
       # stable Rust changes between image versions, which split one cache into several.
       - name: Keep only the pinned toolchain
-        if: env.FULL_LANE == 'true'
         run: rustup toolchain list --quiet | grep -v "^${{ env.RUST_TOOLCHAIN }}" | xargs -r -n1 rustup toolchain uninstall
 
       - name: Cache Rust build
-        if: env.FULL_LANE == 'true'
         uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ env.SAVE_RUST_CACHE }}
-
-      - name: Build temper-cli
-        if: env.FULL_LANE == 'true'
-        run: cargo build -p temper-cli
 
       # Source collections include partial fixtures and examples whose Rust
       # hosts/build scripts supply policies and modules. Keep checking every
       # collection's CSDL and IOA behavior; test the strict CLI on assembled
       # application fixtures, including missing-policy/module failure cases.
       - name: Verify repository sources and complete application fixtures
-        if: env.FULL_LANE == 'true'
         run: |
           cargo test --locked -p temper-cli verify::
 
@@ -698,39 +869,133 @@ jobs:
   instrumentation-hygiene:
     name: Instrumentation Hygiene (ADR-0052)
     needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
-    env:
-      RUST_CHANGED: ${{ needs.changes.outputs.rust }}
     steps:
-      - name: Documentation only
-        if: env.RUST_CHANGED != 'true'
-        run: echo "Only documentation changed."
-
       - uses: actions/checkout@v4
-        if: env.RUST_CHANGED == 'true'
 
       - name: Install rust toolchain
-        if: env.RUST_CHANGED == 'true'
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Set up mold linker
-        if: env.RUST_CHANGED == 'true'
         uses: rui314/setup-mold@v1
 
       # rust-cache hashes every installed toolchain into its key. The runner image's own
       # stable Rust changes between image versions, which split one cache into several.
       - name: Keep only the pinned toolchain
-        if: env.RUST_CHANGED == 'true'
         run: rustup toolchain list --quiet | grep -v "^${{ env.RUST_TOOLCHAIN }}" | xargs -r -n1 rustup toolchain uninstall
 
       - name: Cache Rust build
-        if: env.RUST_CHANGED == 'true'
         uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ env.SAVE_RUST_CACHE }}
 
       - name: Run check_instrumentation
-        if: env.RUST_CHANGED == 'true'
-        run: cargo run -q -p temper-server --bin check_instrumentation
+        run: cargo run --locked -q -p temper-server --bin check_instrumentation
+
+  # ─────────────────────────────────────────────────────
+  # Focused tests: a dispatch given tests runs only the tests its filterset selects, so a
+  # fix can be shown failing on the old code and passing on the new without a whole run.
+  #   gh workflow run ci.yml -R arni-labs/temper --ref <branch> \
+  #     -f tests='test(=module::name)' -f packages=temper-server
+  # The tests get what Tests and the Postgres job give theirs: PostgreSQL (both database
+  # names), Redis, tursodb and the GEPA modules. Any test a lane runs can run here, dst_
+  # and the #[ignore]d PostgreSQL tests included.
+  # ─────────────────────────────────────────────────────
+  focused:
+    name: Focused tests
+    if: inputs.tests != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: temper
+          # The policy-replacement test checks it runs on a database of this name.
+          POSTGRES_DB: morrow_temper
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s --health-timeout 5s --health-retries 30
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s --health-timeout 5s --health-retries 30
+    steps:
+      # temper-spec's migration_differential tests read older commits.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libz3-dev
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Set up mold linker
+        uses: rui314/setup-mold@v1
+
+      # rust-cache hashes every installed toolchain into its key. The runner image's own
+      # stable Rust changes between image versions, which split one cache into several.
+      - name: Keep only the pinned toolchain
+        run: rustup toolchain list --quiet | grep -v "^${{ env.RUST_TOOLCHAIN }}" | xargs -r -n1 rustup toolchain uninstall
+
+      # Restores what main's full Tests job saved.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+          save-if: false
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Build GEPA test WASM modules
+        run: |
+          rustup target add wasm32-unknown-unknown
+          pids=()
+          for module in gepa-replay gepa-reflective gepa-score gepa-pareto gepa-verify; do
+            (
+              cd "wasm-modules/$module"
+              lock_args=()
+              if [ -f Cargo.lock ]; then lock_args+=(--locked); fi
+              cargo build "${lock_args[@]}" --quiet --target wasm32-unknown-unknown --release
+            ) &
+            pids+=($!)
+          done
+          for pid in "${pids[@]}"; do wait "$pid"; done
+
+      - name: Install tursodb for the Turso Sync tests
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/tursodb.tar.xz \
+            https://github.com/tursodatabase/turso/releases/download/v0.7.2/turso_cli-x86_64-unknown-linux-gnu.tar.xz
+          echo "321e401e44f7ee8ea656caff0f85304025f7e905acafe7bedf6a9304f1af1783  /tmp/tursodb.tar.xz" | sha256sum -c -
+          tar -xJf /tmp/tursodb.tar.xz -C /tmp
+          echo "TEMPER_TEST_TURSODB=/tmp/turso_cli-x86_64-unknown-linux-gnu/tursodb" >> "$GITHUB_ENV"
+
+      # The cargo arguments for the packages come from affected.py, so temper-server gets
+      # the features the Tests shards give it. A filterset that selects no test fails.
+      - name: cargo nextest run (the selected tests)
+        env:
+          TESTS: ${{ inputs.tests }}
+          PACKAGES: ${{ inputs.packages }}
+          DATABASE_URL: postgres://postgres:temper@localhost:5432/postgres
+          REDIS_URL: redis://localhost:6379
+          TEMPER_TEST_POSTGRES_URL: postgres://postgres:temper@localhost:5432/postgres
+          TEST_POLICY_DATABASE_URL: postgres://postgres:temper@localhost:5432/morrow_temper
+        run: |
+          set -f
+          ARGS=$(python3 -c 'import sys; sys.path.insert(0, "scripts/ci"); import affected; print(affected.test_args(set(sys.argv[1:])) or "--workspace")' $PACKAGES)
+          echo "cargo nextest run --locked $ARGS --run-ignored all --no-tests=fail -E '$TESTS'"
+          cargo nextest run --locked $ARGS --run-ignored all --no-tests=fail -E "$TESTS"

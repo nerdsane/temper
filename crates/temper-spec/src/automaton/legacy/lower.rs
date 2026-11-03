@@ -4,7 +4,7 @@
 //! differential tests in `lower_test.rs` compare both evaluators on
 //! generated states.
 
-use super::assert_parser::{AssertCompareOp, ParsedAssert, parse_assert_expr};
+use super::assert_parser::{AssertCompareOp, AssertRejection, ParsedAssert, parse_assert_expr};
 use super::field_predicate::FieldPredicate;
 use super::syntax::{Guard, TriggerGuard};
 use crate::predicate::{CmpOp, Expr, Literal, Operand, Set};
@@ -128,25 +128,35 @@ fn cross_entity(
 /// Lower an `[[invariant]]`'s `when` and `assert`.
 pub fn invariant_to_expr(when: &[String], assert: &str) -> Result<LoweredInvariant, String> {
     let body = match parse_assert_expr(assert) {
-        Some(ParsedAssert::NoFurtherTransitions) => {
+        Ok(ParsedAssert::NoFurtherTransitions) => {
             return Ok(LoweredInvariant::Terminal(when.to_vec()));
         }
-        Some(ParsedAssert::OrderingConstraint { .. }) => {
+        Ok(ParsedAssert::OrderingConstraint { .. }) => {
             return Ok(LoweredInvariant::Dropped(assert.to_string()));
         }
-        Some(parsed) => parsed_assert_to_expr(&parsed)?,
+        Ok(parsed) => parsed_assert_to_expr(&parsed)?,
         // Shapes the old assert parser never understood: guard syntax such as
         // `is_true x`, or comparisons it rejected such as `x != ''`.
-        None => match super::guard_syntax::parse_guard_clause(assert) {
-            Ok(guard) => guard_to_expr(&guard),
-            Err(_) => crate::predicate::parse(assert).map_err(|e| e.to_string())?,
-        },
+        Err(AssertRejection::Unrecognized) => {
+            match super::guard_syntax::parse_guard_clause(assert) {
+                Ok(guard) => guard_to_expr(&guard),
+                Err(_) => predicate(assert)?,
+            }
+        }
+        // Guard syntax has no nesting, so it would misread such text (`!!!a` as
+        // a variable named `!!a`). The predicate parser has the same budget
+        // and reports it.
+        Err(AssertRejection::NestedTooDeep) => predicate(assert)?,
     };
     Ok(LoweredInvariant::Assert(if when.is_empty() {
         body
     } else {
         Expr::Implies(Box::new(status_in(when)), Box::new(body))
     }))
+}
+
+fn predicate(text: &str) -> Result<Expr, String> {
+    crate::predicate::parse(text).map_err(|e| e.to_string())
 }
 
 fn parsed_assert_to_expr(parsed: &ParsedAssert) -> Result<Expr, String> {

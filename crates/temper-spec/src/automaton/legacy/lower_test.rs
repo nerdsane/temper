@@ -76,7 +76,7 @@ impl Env for State {
 }
 
 /// Reference: `temper_jit::table::Guard::check` plus the server's
-/// `resolve_cross_entity_guards` (state/dispatch/cross_entity.rs).
+/// `resolve_related_statuses` (state/dispatch/cross_entity.rs).
 fn reference_guard(guard: &Guard, s: &State) -> bool {
     match guard {
         Guard::StateIn { values } => values.contains(&s.status),
@@ -264,6 +264,24 @@ fn lowered_field_predicates_match_the_old_evaluator() {
                 "case {case}: {predicate:?} => `{expr}` on {fields}"
             );
         }
+    }
+}
+
+#[test]
+fn an_assert_nested_past_the_budget_is_a_validation_error() {
+    let over = crate::predicate::MAX_DEPTH + 1;
+    let deep = 200_000;
+    let cases = [
+        format!("{}a{}", "(".repeat(deep), ")".repeat(deep)),
+        format!("{}a", "!".repeat(over)),
+        format!("{}a", "!".repeat(deep)),
+        "!(".repeat(over) + "a" + &")".repeat(over),
+        format!("!{}a{}", "(".repeat(over), ")".repeat(over)),
+        format!("b && {}a", "!".repeat(over)),
+    ];
+    for assert in &cases {
+        let err = invariant_to_expr(&[], assert).expect_err("over-deep assert must be refused");
+        assert!(err.contains("nested too deeply"), "{err}");
     }
 }
 

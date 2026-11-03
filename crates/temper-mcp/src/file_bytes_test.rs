@@ -35,25 +35,27 @@ async fn server(
 ) -> (RuntimeContext, Captured, tokio::task::JoinHandle<()>) {
     let captures: Captured = Arc::new(Mutex::new(Vec::new()));
     let seen = captures.clone();
-    let app = Router::new().fallback(
-        move |method: Method, uri: Uri, headers: HeaderMap, bytes: Bytes| {
-            let seen = seen.clone();
-            async move {
-                if method == Method::GET && status != StatusCode::NOT_FOUND {
-                    return (StatusCode::OK, "{}").into_response();
+    let app = Router::new()
+        .fallback(
+            move |method: Method, uri: Uri, headers: HeaderMap, bytes: Bytes| {
+                let seen = seen.clone();
+                async move {
+                    if method == Method::GET && status != StatusCode::NOT_FOUND {
+                        return (StatusCode::OK, "{}").into_response();
+                    }
+                    seen.lock()
+                        .unwrap()
+                        .push((uri.to_string(), headers, bytes.to_vec()));
+                    (
+                        status,
+                        [("location", "http://127.0.0.1:1/never-follow")],
+                        body,
+                    )
+                        .into_response()
                 }
-                seen.lock()
-                    .unwrap()
-                    .push((uri.to_string(), headers, bytes.to_vec()));
-                (
-                    status,
-                    [("location", "http://127.0.0.1:1/never-follow")],
-                    body,
-                )
-                    .into_response()
-            }
-        },
-    );
+            },
+        )
+        .layer(axum::extract::DefaultBodyLimit::disable());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move {
@@ -142,24 +144,89 @@ async fn denial_preserved_and_redirect_not_followed() {
 }
 
 #[test]
-fn bounded_reads_missing_path_and_nonregular_file_reject() {
+fn missing_path_and_nonregular_file_reject() {
     let file = LocalFile::new(b"x");
     let digest = format!("{:x}", Sha256::digest(b"x"));
-    assert!(read_bytes(file.0.parent().unwrap().to_str().unwrap(), &digest).is_err());
-    assert!(read_bytes(file.0.with_extension("missing").to_str().unwrap(), &digest).is_err());
+    assert!(open_verified(file.0.parent().unwrap().to_str().unwrap(), &digest).is_err());
+    assert!(open_verified(file.0.with_extension("missing").to_str().unwrap(), &digest).is_err());
+    assert_eq!(
+        open_verified(file.0.to_str().unwrap(), &digest)
+            .unwrap()
+            .len,
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_file_past_32_mib_is_sent_whole() {
+    // The tool used to refuse anything over 32 MiB although the server takes
+    // Files up to 2 GiB; the size is now the server's to judge.
+    let len = 32 * 1024 * 1024 + 1;
+    let zeros = vec![0u8; len];
+    let file = LocalFile::new(b"");
     std::fs::File::options()
         .write(true)
         .open(&file.0)
         .unwrap()
-        .set_len(MAX_FILE_BYTES + 1)
+        .set_len(len as u64)
         .unwrap();
-    assert!(read_bytes(file.0.to_str().unwrap(), &digest).is_err());
+    let (ctx, seen, handle) = server(StatusCode::NO_CONTENT, "").await;
+    let (result, _) = upload_file_bytes(&ctx, &file.args(&zeros)).await;
+    let receipt: Value = serde_json::from_str(&result.unwrap()).unwrap();
+    assert_eq!(receipt["size_bytes"], len);
+    let captured = seen.lock().unwrap();
+    assert_eq!(captured[0].1["content-length"], len.to_string().as_str());
+    assert!(captured[0].2 == zeros, "the exact bytes arrive");
+    handle.abort();
+}
+
+/// Change the file after it was checked, then send it; returns what went out.
+fn send_after(change: impl FnOnce(&std::path::Path)) -> (Result<()>, Vec<Chunk>) {
+    let bytes: Vec<u8> = (0..200 * 1024).map(|i| (i % 251) as u8).collect();
+    let file = LocalFile::new(&bytes);
+    let digest = format!("{:x}", Sha256::digest(&bytes));
+    let verified = open_verified(file.0.to_str().unwrap(), &digest).unwrap();
+    change(&file.0);
+    let (sink, mut chunks) = tokio::sync::mpsc::channel(64);
+    let result = send_verified(verified, &digest, &sink);
+    drop(sink);
+    let mut sent = Vec::new();
+    while let Some(chunk) = chunks.blocking_recv() {
+        sent.push(chunk);
+    }
+    (result, sent)
+}
+
+fn assert_never_completes(result: Result<()>, sent: Vec<Chunk>, reason: &str) {
+    assert!(result.unwrap_err().to_string().contains(reason));
+    let (last, before) = sent.split_last().expect("chunks were sent");
     assert!(
-        read_bounded(std::io::repeat(0), &digest)
-            .unwrap_err()
-            .to_string()
-            .contains("exceeded 32 MiB")
+        last.is_err(),
+        "the upload ends in an error, not a last chunk"
     );
+    let delivered: usize = before.iter().map(|c| c.as_ref().unwrap().len()).sum();
+    assert!(delivered < 200 * 1024, "the final chunk was held back");
+}
+
+#[test]
+fn a_file_changed_after_its_check_never_completes_its_upload() {
+    let (result, sent) = send_after(|path| {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut file = std::fs::File::options().write(true).open(path).unwrap();
+        file.seek(SeekFrom::End(-1)).unwrap();
+        file.write_all(b"!").unwrap();
+    });
+    assert_never_completes(result, sent, "changed while it was being sent");
+}
+
+#[test]
+fn a_file_that_grew_after_its_check_never_completes_its_upload() {
+    let (result, sent) = send_after(|path| {
+        use std::io::Write;
+        let mut file = std::fs::File::options().append(true).open(path).unwrap();
+        file.write_all(&[0u8; 100 * 1024]).unwrap();
+    });
+    assert_never_completes(result, sent, "grew while it was being sent");
 }
 
 #[tokio::test]
@@ -199,7 +266,7 @@ fn fifo_is_rejected_without_waiting_for_a_writer() {
     let path = file.0.clone();
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let result = read_bytes(path.to_str().unwrap(), &"0".repeat(64));
+        let result = open_verified(path.to_str().unwrap(), &"0".repeat(64));
         let _ = sender.send(result);
     });
     let result = receiver

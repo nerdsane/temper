@@ -21,25 +21,40 @@ pub(crate) fn resolve_target_id(
     fields: &serde_json::Value,
 ) -> Option<String> {
     match resolver {
-        TargetResolver::Field { field } => fields
-            .get(field)
-            .and_then(|v| v.as_str())
-            .filter(|value| !value.is_empty())
-            .map(|s| s.to_string()),
+        TargetResolver::Field { field } => field_id(fields, field).map(str::to_string),
         TargetResolver::SameId => Some(source_entity_id.to_string()),
         TargetResolver::Static { entity_id } => Some(entity_id.clone()),
-        TargetResolver::CreateIfMissing { id_field } => fields
-            .get(id_field)
-            .and_then(|v| v.as_str())
-            .filter(|value| !value.is_empty())
-            .map(|s| s.to_string())
-            .or_else(|| Some(format!("{source_entity_id}-derived"))),
+        TargetResolver::CreateIfMissing { id_field } => Some(
+            field_id(fields, id_field)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("{source_entity_id}-derived")),
+        ),
         // Fresh UUID on every dispatch. `sim_uuid()` is DST-safe: in
         // simulation it comes from the seeded `DeterministicIdGen`, in
         // production it's `Uuid::now_v7()`. Reaction cascades under
         // `SimReactionSystem` stay reproducible across seeded runs.
         TargetResolver::Create => Some(sim_uuid().to_string()),
     }
+}
+
+/// Whether [`resolve_target_id`] made the target's id up rather than reading
+/// it from the source: `create`, or `create_if_missing` with no id in the
+/// fields. The target is then an entity the reaction makes, new each time.
+pub(crate) fn mints_target_id(resolver: &TargetResolver, fields: &serde_json::Value) -> bool {
+    match resolver {
+        TargetResolver::Create => true,
+        TargetResolver::CreateIfMissing { id_field } => field_id(fields, id_field).is_none(),
+        TargetResolver::Field { .. } | TargetResolver::SameId | TargetResolver::Static { .. } => {
+            false
+        }
+    }
+}
+
+fn field_id<'a>(fields: &'a serde_json::Value, field: &str) -> Option<&'a str> {
+    fields
+        .get(field)
+        .and_then(|v| v.as_str())
+        .filter(|value| !value.is_empty())
 }
 
 #[cfg(test)]

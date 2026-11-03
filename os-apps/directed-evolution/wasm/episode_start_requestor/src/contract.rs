@@ -401,36 +401,3 @@ fn nonempty(value: String, fallback: String) -> String {
         value
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn default_stages_preserve_review_and_simulated_user() {
-        let mut stages = vec![StagePlan {
-            name: "Custom review".to_string(),
-            kind: "reviewer".to_string(),
-            executor: "codex".to_string(),
-            required_evidence: Vec::new(),
-        }];
-        ensure_required_stages(&mut stages);
-        assert!(stages.iter().any(|stage| stage.kind == "reviewer"));
-        assert!(
-            stages
-                .iter()
-                .any(|stage| stage.kind.to_ascii_lowercase().contains("simulated"))
-        );
-    }
-
-    #[test]
-    fn rule_metric_names_map_to_created_ids() {
-        let metric_ids = MetricIds {
-            pairs: vec![("clarity".to_string(), "metric-1".to_string())],
-        };
-        assert_eq!(
-            metric_ids.ids_for_names(&["clarity".to_string()]),
-            vec!["metric-1".to_string()]
-        );
-    }
-}

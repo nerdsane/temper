@@ -287,7 +287,6 @@ pub(in crate::state) async fn verify_query_projection_replay_parity(
                 backend,
                 &serde_json::json!({}),
                 tenant_blob_store.as_ref(),
-                false, // replay-parity check: lenient (unchanged behavior)
             )
             .await;
             let replayed = match replayed {
@@ -329,7 +328,7 @@ pub(in crate::state) async fn verify_query_projection_replay_parity(
             };
             let catalog = catalog_rows.get(&entity_id);
 
-            if replayed.status == "Deleted" {
+            if replayed.is_tombstoned() {
                 if let Some(catalog) = catalog {
                     report.drifted += 1;
                     let (sequence_direction, sequence_gap) =

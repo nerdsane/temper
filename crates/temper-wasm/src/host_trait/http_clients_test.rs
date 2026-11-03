@@ -116,7 +116,7 @@ fn engine_handles_do_not_share_http_clients_even_when_they_share_compilation() {
 }
 
 #[tokio::test]
-async fn cached_hosts_reuse_real_connections_and_keep_internal_redirects_disabled() {
+async fn cached_hosts_reuse_real_connections_and_keep_redirects_disabled() {
     use axum::{Router, extract::ConnectInfo, http::HeaderMap, response::Redirect, routing::get};
 
     async fn echo(ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap) -> String {
@@ -181,7 +181,11 @@ async fn cached_hosts_reuse_real_connections_and_keep_internal_redirects_disable
         .send()
         .await
         .unwrap();
-    assert_eq!(redirected.status(), 200);
+    assert_eq!(
+        redirected.status(),
+        307,
+        "the client follows no redirect; the host follows them through the gate"
+    );
     let _ = redirected.bytes().await.unwrap();
     let internal = clients
         .internal_client

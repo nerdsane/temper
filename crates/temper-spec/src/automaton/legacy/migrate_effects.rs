@@ -177,6 +177,14 @@ fn statement(
             }
             format!("{var} = {value}")
         }
+        Old::SetString { var, value } => {
+            if kinds.get(&var) != Some(&VarKind::Str) {
+                return Err(fail(format!(
+                    "set_string writes '{var}', which is not a declared string"
+                )));
+            }
+            format!("{var} = {}", crate::predicate::Literal::Str(value))
+        }
         Old::ListAppend { var } => format!("append({var}, params.{var})"),
         Old::ListRemoveAt { var } => format!("remove_at({var}, params.{var}_index)"),
         Old::Schedule {
@@ -287,6 +295,8 @@ impl TriggerSources {
 
 /// The `[[action.triggers]]` block for an integration, or `None` for a
 /// webhook integration without a URL (the old runtime never fired those).
+/// A webhook integration with a URL is an error: no trigger kind sends it,
+/// so its call is rewritten by hand as an `http_fetch` WASM trigger.
 fn integration_trigger(ig: &Integration, notes: &mut Vec<String>) -> Result<Option<Table>, String> {
     let mut config = ig.config.clone();
     let mut table = Table::new();
@@ -313,17 +323,19 @@ fn integration_trigger(ig: &Integration, notes: &mut Vec<String>) -> Result<Opti
             table.insert("adapter", value(adapter));
         }
         "webhook" => {
-            let Some(url) = config.remove("url") else {
+            if !config.contains_key("url") {
                 notes.push(format!(
                     "integration '{}' dropped: a webhook without a url never fired",
                     ig.name
                 ));
                 return Ok(None);
-            };
-            table.insert("kind", value("webhook"));
-            table.insert("url", value(url));
-            let method = config.remove("method").unwrap_or_else(|| "POST".into());
-            table.insert("method", value(method));
+            }
+            // A kind = "webhook" trigger is refused at load (ADR-0182):
+            // nothing sends it, so converting to one would hide the call.
+            return Err(format!(
+                "integration '{}' is an outbound webhook; make the call with kind = \"wasm\" and module = \"http_fetch\" (config = {{ url = ..., method = ... }}) by hand",
+                ig.name
+            ));
         }
         other => {
             return Err(format!(

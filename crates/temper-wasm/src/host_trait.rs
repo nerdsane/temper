@@ -23,10 +23,13 @@ use temper_observe::wide_event::{self, EventKind, WideEvent};
 mod guest_progress;
 mod http_clients;
 mod internal_http;
+mod local_sandbox;
+mod redirects;
 pub(crate) mod span_hints;
 
 pub use http_clients::HttpClientCache;
 pub use internal_http::{InternalHttpCapability, InternalHttpCapabilityIssuerFn};
+pub use local_sandbox::LocalSandboxAccess;
 
 /// Re-exported so every channel that records guest-supplied `gen_ai.*` metadata
 /// bounds it the same way, including the dispatch callback path in
@@ -331,26 +334,19 @@ pub type BinaryHttpInterceptorFn = Arc<
         + Sync,
 >;
 
-/// Optional callback that can short-circuit text HTTP requests.
-///
-/// This lets the server handle specific local transport paths directly
-/// (for example, internal OData `$value` reads/writes) without going back
-/// through loopback HTTP when the guest expects a UTF-8 body.
-pub type TextHttpInterceptorFn = Arc<
-    dyn Fn(String, String, Vec<(String, String)>, String) -> TextHttpInterceptorFuture
-        + Send
-        + Sync,
->;
-
-type TextHttpInterceptorFuture =
-    Pin<Box<dyn Future<Output = Option<Result<(u16, String), String>>> + Send>>;
-
 /// Production host: real HTTP calls via reqwest, real secrets.
 pub struct ProductionWasmHost {
-    /// HTTP client for making real requests.
+    /// HTTP client for making real requests. It follows no redirects; the host
+    /// follows them, each hop checked by `redirect_gate` (`redirects.rs`).
     client: reqwest::Client,
-    /// Separate client whose redirect policy is disabled for capabilities.
+    /// Separate pool for capability-bearing internal calls, with no proxy.
     internal_client: reqwest::Client,
+    /// The gate and context that check each redirect hop: the same pair the
+    /// wrapping `AuthorizedWasmHost` checks the guest's calls with. Without
+    /// it, a 3xx goes back to the guest.
+    redirect_gate: Option<(Arc<dyn crate::WasmAuthzGate>, crate::WasmAuthzContext)>,
+    /// The clients' request timeout, which a followed redirect chain shares.
+    http_timeout: std::time::Duration,
     /// Secrets from env vars or a secret store.
     secrets: BTreeMap<String, String>,
     /// Optional lazy secret resolver authoritative for guest secret lookups.
@@ -359,6 +355,8 @@ pub struct ProductionWasmHost {
     internal_api_base_url: Option<String>,
     /// Trusted callback that issues one request-bound internal capability.
     internal_capability_issuer: Option<InternalHttpCapabilityIssuerFn>,
+    /// The server's local sandbox, whose requests carry its token.
+    local_sandbox: Option<LocalSandboxAccess>,
     /// Optional spec evaluator (provided by temper-server at construction).
     spec_evaluator: Option<SpecEvaluatorFn>,
     /// Optional progress emitter (provided by temper-server at construction).
@@ -367,8 +365,6 @@ pub struct ProductionWasmHost {
     trace_id: Option<String>,
     /// Optional short-circuit for binary HTTP calls.
     binary_http_interceptor: Option<BinaryHttpInterceptorFn>,
-    /// Optional short-circuit for text HTTP calls.
-    text_http_interceptor: Option<TextHttpInterceptorFn>,
     /// Invocation context for auto-enriching guest telemetry.
     invocation_context: Option<WasmInvocationContext>,
     /// Whether this invocation's tenant may export raw LLM content (prompts,
@@ -601,15 +597,17 @@ impl ProductionWasmHost {
         Self {
             client: clients.client.clone(),
             internal_client: clients.internal_client.clone(),
+            redirect_gate: None,
+            http_timeout: clients.timeout,
             secrets,
             secret_resolver: None,
             internal_api_base_url: None,
             internal_capability_issuer: None,
+            local_sandbox: None,
             spec_evaluator: None,
             progress_emitter: None,
             trace_id: None,
             binary_http_interceptor: None,
-            text_http_interceptor: None,
             invocation_context: None,
             export_llm_content: false,
             http_streams: Arc::new(crate::http_stream::HttpStreamRegistry::new()),
@@ -676,18 +674,23 @@ impl ProductionWasmHost {
         self
     }
 
-    /// Create with a text HTTP interceptor for local fast paths.
-    pub fn with_text_http_interceptor(mut self, interceptor: TextHttpInterceptorFn) -> Self {
-        self.text_http_interceptor = Some(interceptor);
-        self
-    }
-
     fn is_internal_temper_url(&self, url: &str) -> bool {
         // Only the server-owned configuration can classify a target as
         // internal. A tenant secret or guest integration value must never
         // redirect a request-bound capability to an attacker-controlled host.
         let configured = self.internal_api_base_url.iter().map(String::as_str);
         internal_http::is_internal_url(url, configured)
+    }
+
+    /// The connection pool for `url`. Internal Temper calls and requests to
+    /// the local sandbox carry a credential only this server holds, so they
+    /// use the pool that never goes through a configured HTTP proxy.
+    fn client_for(&self, url: &str, is_internal: bool) -> &reqwest::Client {
+        if is_internal || self.goes_to_local_sandbox(url) {
+            &self.internal_client
+        } else {
+            &self.client
+        }
     }
 
     fn add_internal_temper_headers(
@@ -697,6 +700,7 @@ impl ProductionWasmHost {
         url: &str,
         headers: &[(String, String)],
     ) -> Result<reqwest::RequestBuilder, String> {
+        builder = self.add_local_sandbox_token(builder, url);
         if !self.is_internal_temper_url(url) {
             return Ok(builder);
         }
@@ -728,7 +732,15 @@ impl ProductionWasmHost {
         let headers = if is_internal {
             internal_http::sanitize_internal_headers(headers)
         } else {
-            headers.to_vec()
+            // The `http_call` gate checked the URL's host, and the request
+            // connects there. A guest `Host` header could still make a shared
+            // front end (a CDN, a proxy) route it to another site, so the
+            // client sets `Host` from the URL instead.
+            headers
+                .iter()
+                .filter(|(name, _)| !name.eq_ignore_ascii_case("host"))
+                .cloned()
+                .collect()
         };
         (is_internal, headers)
     }
@@ -862,17 +874,6 @@ impl WasmHost for ProductionWasmHost {
         // ARN-243: drop LLM content from span hints unless this tenant opted in.
         redact_llm_content_hints(&mut span_hints, self.export_llm_content);
         let (is_internal, outbound_headers) = self.outbound_headers(url, &filtered_headers);
-        if let Some(interceptor) = &self.text_http_interceptor
-            && let Some(result) = interceptor(
-                method.to_string(),
-                url.to_string(),
-                outbound_headers.clone(),
-                body.to_string(),
-            )
-            .await
-        {
-            return result;
-        }
         let span = tracing::info_span!(
             "wasm.host.http_call",
             otel.name = %span_hint_otel_name(&span_hints, "wasm.host.http_call"),
@@ -927,11 +928,7 @@ impl WasmHost for ProductionWasmHost {
         apply_span_hints(&span, &span_hints);
         let _guard = span.enter();
 
-        let client = if is_internal {
-            &self.internal_client
-        } else {
-            &self.client
-        };
+        let client = self.client_for(url, is_internal);
         let mut builder = match method.to_uppercase().as_str() {
             "GET" => client.get(url),
             "POST" => client.post(url),
@@ -949,28 +946,32 @@ impl WasmHost for ProductionWasmHost {
         // determinism-ok: is_internal check uses non-deterministic URL comparison,
         // but this runs in WasmHost (not simulation), so wall-clock/network access is fine.
 
-        // Auto-inject traceparent for cross-request trace correlation.
-        if !outbound_headers
-            .iter()
-            .any(|(k, _)| k.eq_ignore_ascii_case("traceparent"))
-            && let Some(traceparent) =
-                current_traceparent_header(&tracing::Span::current(), self.trace_id.as_deref())
-        {
-            builder = builder.header("traceparent", traceparent);
-        }
+        // The call carries this request's trace (with_trace_headers).
+        builder = with_trace_headers(
+            builder,
+            &outbound_headers,
+            &tracing::Span::current(),
+            self.trace_id.as_deref(),
+        );
 
         if !body.is_empty() {
             builder = builder.body(body.to_string());
         }
 
-        let resp = builder.send().await.map_err(|e| {
-            tracing::warn!(
-                error = %e,
-                duration_ms = started.elapsed().as_millis() as u64,
-                "WASM host HTTP request failed"
-            );
-            format!("HTTP request failed: {e}")
-        })?;
+        let resp = self
+            .redirects()
+            .send(client, builder, "http_call")
+            .await
+            .map_err(|error| {
+                error.into_message(|e| {
+                    tracing::warn!(
+                        error = %e,
+                        duration_ms = started.elapsed().as_millis() as u64,
+                        "WASM host HTTP request failed"
+                    );
+                    format!("HTTP request failed: {e}")
+                })
+            })?;
         let status = resp.status().as_u16();
 
         // Loud auth failure logging for internal API calls (ADR-0043).
@@ -1043,6 +1044,7 @@ impl WasmHost for ProductionWasmHost {
                         }
                     }
                     Ok(Some(Err(e))) => {
+                        let e = e.without_url();
                         tracing::warn!(error = %e, chunks = chunk_count, "SSE chunk read error");
                         break;
                     }
@@ -1066,6 +1068,7 @@ impl WasmHost for ProductionWasmHost {
             accumulated_data
         } else {
             resp.text().await.map_err(|e| {
+                let e = e.without_url();
                 tracing::warn!(
                     status_code = status,
                     error = %e,
@@ -1231,11 +1234,7 @@ impl WasmHost for ProductionWasmHost {
             None
         };
 
-        let client = if is_internal {
-            &self.internal_client
-        } else {
-            &self.client
-        };
+        let client = self.client_for(url, is_internal);
         let mut builder = match method.to_uppercase().as_str() {
             "GET" => client.get(url),
             "POST" => client.post(url),
@@ -1251,29 +1250,34 @@ impl WasmHost for ProductionWasmHost {
 
         builder = self.add_internal_temper_headers(builder, method, url, &outbound_headers)?;
 
-        if !outbound_headers
-            .iter()
-            .any(|(k, _)| k.eq_ignore_ascii_case("traceparent"))
-            && let Some(traceparent) =
-                current_traceparent_header(&tracing::Span::current(), self.trace_id.as_deref())
-        {
-            builder = builder.header("traceparent", traceparent);
-        }
+        builder = with_trace_headers(
+            builder,
+            &outbound_headers,
+            &tracing::Span::current(),
+            self.trace_id.as_deref(),
+        );
 
         if !body.is_empty() {
             builder = builder.body(body.to_vec());
         }
 
-        let resp = builder.send().await.map_err(|e| {
-            tracing::warn!(
-                error = %e,
-                duration_ms = started.elapsed().as_millis() as u64,
-                "WASM host binary HTTP request failed"
-            );
-            format!("HTTP binary request failed: {e}")
-        })?;
+        let resp = self
+            .redirects()
+            .send(client, builder, "http_call_binary")
+            .await
+            .map_err(|error| {
+                error.into_message(|e| {
+                    tracing::warn!(
+                        error = %e,
+                        duration_ms = started.elapsed().as_millis() as u64,
+                        "WASM host binary HTTP request failed"
+                    );
+                    format!("HTTP binary request failed: {e}")
+                })
+            })?;
         let status = resp.status().as_u16();
         let resp_bytes = resp.bytes().await.map_err(|e| {
+            let e = e.without_url();
             tracing::warn!(
                 status_code = status,
                 error = %e,
@@ -1338,11 +1342,7 @@ impl WasmHost for ProductionWasmHost {
         apply_span_hints(&span, &span_hints);
         let _guard = span.enter();
 
-        let client = if is_internal {
-            &self.internal_client
-        } else {
-            &self.client
-        };
+        let client = self.client_for(url, is_internal);
         let mut builder = client.post(url);
 
         // Set Connect protocol headers.
@@ -1355,23 +1355,26 @@ impl WasmHost for ProductionWasmHost {
             builder = builder.header(k.as_str(), v.as_str());
         }
         builder = self.add_internal_temper_headers(builder, "POST", url, &outbound_headers)?;
-        if !outbound_headers
-            .iter()
-            .any(|(k, _)| k.eq_ignore_ascii_case("traceparent"))
-            && let Some(traceparent) =
-                current_traceparent_header(&tracing::Span::current(), self.trace_id.as_deref())
-        {
-            builder = builder.header("traceparent", traceparent);
-        }
+        builder = with_trace_headers(
+            builder,
+            &outbound_headers,
+            &tracing::Span::current(),
+            self.trace_id.as_deref(),
+        );
 
         if !body.is_empty() {
             builder = builder.body(encode_connect_json_frame(body));
         }
 
-        let resp = builder.send().await.map_err(|e| {
-            tracing::Span::current().record("duration_ms", started.elapsed().as_millis() as u64);
-            format!("Connect call failed: {e}")
-        })?;
+        let resp = self
+            .redirects()
+            .send(client, builder, "connect_call")
+            .await
+            .map_err(|error| {
+                tracing::Span::current()
+                    .record("duration_ms", started.elapsed().as_millis() as u64);
+                error.into_message(|e| format!("Connect call failed: {e}"))
+            })?;
 
         let status = resp.status().as_u16();
         tracing::Span::current().record("status_code", status);
@@ -1385,7 +1388,7 @@ impl WasmHost for ProductionWasmHost {
         let resp_bytes = resp
             .bytes()
             .await
-            .map_err(|e| format!("failed to read Connect response body: {e}"))?;
+            .map_err(|e| format!("failed to read Connect response body: {}", e.without_url()))?;
 
         let frames = parse_connect_frames(&resp_bytes)?;
         tracing::Span::current().record("response_frames", frames.len() as u64);
@@ -1715,11 +1718,7 @@ impl WasmHost for ProductionWasmHost {
         redact_llm_content_hints(&mut span_hints, self.export_llm_content);
         let (is_internal, outbound_headers) =
             self.outbound_headers(&request.url, &filtered_headers);
-        let client = if is_internal {
-            self.internal_client.clone()
-        } else {
-            self.client.clone()
-        };
+        let client = self.client_for(&request.url, is_internal).clone();
         let span = tracing::info_span!(
             "wasm.host.http_stream",
             otel.name = %span_hint_otel_name(&span_hints, "wasm.host.http_stream"),
@@ -1792,14 +1791,9 @@ impl WasmHost for ProductionWasmHost {
             &request.url,
             &outbound_headers,
         )?;
-        if !outbound_headers
-            .iter()
-            .any(|(k, _)| k.eq_ignore_ascii_case("traceparent"))
-            && let Some(traceparent) = current_traceparent_header(&span, self.trace_id.as_deref())
-        {
-            builder = builder.header("traceparent", traceparent);
-        }
+        builder = with_trace_headers(builder, &outbound_headers, &span, self.trace_id.as_deref());
 
+        let redirects = self.redirects();
         tokio::spawn(
             async move {
                 let started = Instant::now();
@@ -1817,7 +1811,13 @@ impl WasmHost for ProductionWasmHost {
                 };
                 let req_body = reqwest::Body::wrap_stream(body_stream);
 
-                let send_result = builder.body(req_body).send().await;
+                let send_result = redirects
+                    .send(
+                        &client,
+                        builder.body(req_body),
+                        "http_stream_begin_outbound",
+                    )
+                    .await;
                 let _ = streams.close(bridge_req).await;
                 let resp = match send_result {
                     Ok(r) => r,
@@ -2358,15 +2358,21 @@ fn datadog_span_id_decimal(span_id: &str) -> Option<String> {
         .map(|value| value.to_string())
 }
 
-fn telemetry_url(url: &str) -> String {
+/// What a span or a log keeps of a URL a module called: its host and path, with no credentials, query or fragment, and
+/// with any key-shaped run in the path taken out. A path can hold a key: Katagami's interface builder is reached at
+/// `https://host/<64 hex>/build`, and on 1 Nov 2026 that key was in Datadog on the span of every interface build.
+pub(crate) fn telemetry_url(url: &str) -> String {
     let after_scheme = url.find("://").map(|idx| &url[idx + 3..]).unwrap_or(url);
-    let after_auth = after_scheme
-        .find('@')
-        .map(|idx| &after_scheme[idx + 1..])
-        .unwrap_or(after_scheme);
-    let path_start = after_auth.find(['/', '?', '#']).unwrap_or(after_auth.len());
-    let authority = &after_auth[..path_start];
-    let path_and_query = &after_auth[path_start..];
+    // Credentials only belong to the authority; an @ in the path, query or
+    // fragment must not move that component into the host we keep.
+    let authority_end = after_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(after_scheme.len());
+    let (authority, path_and_query) = after_scheme.split_at(authority_end);
+    let authority = authority
+        .rsplit_once('@')
+        .map(|(_, host)| host)
+        .unwrap_or(authority);
     let path_end = path_and_query
         .find(['?', '#'])
         .unwrap_or(path_and_query.len());
@@ -2374,8 +2380,73 @@ fn telemetry_url(url: &str) -> String {
     if path.is_empty() {
         authority.to_string()
     } else {
-        format!("{authority}{path}")
+        format!("{authority}{}", without_keys(path))
     }
+}
+
+/// A key-shaped run of a path: unreserved characters, at least 20 long with a digit in it, or at least 32 long whatever
+/// they are. 20 is below the shortest secret a URL path carries in the services modules call (a Slack webhook's 24). A
+/// hyphenated UUID stays: entity and trace ids are what a reader of a span joins on, and an id is no credential. Only
+/// hyphenated: 32 bare hex also parses as a UUID, and is what many API keys look like.
+fn key_shaped(run: &str) -> bool {
+    let long = run.len() >= 32 || (run.len() >= 20 && run.bytes().any(|b| b.is_ascii_digit()));
+    let hyphenated_uuid = run.len() == 36 && uuid::Uuid::try_parse(run).is_ok();
+    long && !hyphenated_uuid
+}
+
+fn without_keys(path: &str) -> String {
+    let is_run = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '~');
+    let mut kept = String::with_capacity(path.len());
+    let mut rest = path;
+    while let Some(start) = rest.find(is_run) {
+        let (before, from) = rest.split_at(start);
+        kept.push_str(before);
+        let (run, after) = from.split_at(from.find(|c| !is_run(c)).unwrap_or(from.len()));
+        // Dots in ('...') separate entity-ID components that readers join spans
+        // on. Keep those IDs only when no individual component is key-shaped.
+        let readable_entity_id = before.ends_with("('")
+            && after.starts_with("')")
+            && run.split('.').all(|part| !key_shaped(part));
+        kept.push_str(if key_shaped(run) && !readable_entity_id {
+            "<redacted>"
+        } else {
+            run
+        });
+        rest = after;
+    }
+    kept.push_str(rest);
+    kept
+}
+
+/// The trace an outbound call carries: the module's own `traceparent` when it set one, else the current span's. It
+/// goes as `traceparent` and again as its copy (`temper_observe::otel::TRACEPARENT_COPY`), which a proxy in front of
+/// the other side leaves alone when it puts its own span into `traceparent`.
+fn with_trace_headers(
+    mut builder: reqwest::RequestBuilder,
+    outbound_headers: &[(String, String)],
+    span: &tracing::Span,
+    fallback_trace_id: Option<&str>,
+) -> reqwest::RequestBuilder {
+    let given = |name: &str| {
+        outbound_headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.clone())
+    };
+    let traceparent = match given("traceparent") {
+        Some(traceparent) => traceparent,
+        None => {
+            let Some(traceparent) = current_traceparent_header(span, fallback_trace_id) else {
+                return builder;
+            };
+            builder = builder.header("traceparent", traceparent.as_str());
+            traceparent
+        }
+    };
+    if given(temper_observe::otel::TRACEPARENT_COPY).is_none() {
+        builder = builder.header(temper_observe::otel::TRACEPARENT_COPY, traceparent);
+    }
+    builder
 }
 
 fn current_traceparent_header(

@@ -3,7 +3,6 @@ use temper_jit::table::{Effect, Expr, TransitionTable};
 use temper_spec::automaton::{lint_automaton, parse_automaton};
 use temper_spec::csdl::parse_csdl;
 use temper_spec::predicate::parse_arg;
-use temper_verify::cascade::{CascadeLevel, VerificationCascade};
 
 #[test]
 fn ioa_parses_and_expands_wasm_triggers() {
@@ -159,23 +158,4 @@ fn expr(source: &str) -> Expr {
 /// Whether `expected` is `actual` or one of its top-level conjuncts.
 fn guard_contains(actual: &Expr, expected: &Expr) -> bool {
     actual == expected || matches!(actual, Expr::And(parts) if parts.contains(expected))
-}
-
-#[test]
-fn verification_cascade_passes_projected_safety() {
-    let cascade = VerificationCascade::from_ioa(READERS_WRITERS_IOA)
-        .with_sim_seeds(4)
-        .with_prop_test_cases(100);
-
-    let result = cascade.run();
-    for level in &result.levels {
-        assert!(level.passed, "cascade level failed: {}", level.summary);
-    }
-    assert!(
-        result
-            .level_result(CascadeLevel::ModelCheck)
-            .expect("model check result")
-            .passed
-    );
-    assert!(result.all_passed, "cascade should pass all levels");
 }

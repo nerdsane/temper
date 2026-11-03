@@ -4,6 +4,7 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use temper_runtime::ActorSystem;
 use temper_runtime::tenant::TenantId;
@@ -147,9 +148,7 @@ async fn state_with(test: &str, mock: &MockServer, link: bool) -> ServerState {
         ("blob_secret_key", "temporary-secret".to_string()),
         ("blob_session_token", "dGVtcG9yYXJ5".to_string()),
     ] {
-        vault
-            .cache_secret("default", key, value)
-            .expect("cache secret");
+        vault.cache_secret("default", key, value);
     }
     if link {
         for (key, value) in [
@@ -157,9 +156,7 @@ async fn state_with(test: &str, mock: &MockServer, link: bool) -> ServerState {
             ("blob_link_secret_key", "link-secret"),
             ("blob_link_session_token", "bGluaw=="),
         ] {
-            vault
-                .cache_secret("default", key, value.to_string())
-                .expect("cache secret");
+            vault.cache_secret("default", key, value.to_string());
         }
     }
     state.secrets_vault = Some(std::sync::Arc::new(vault));
@@ -482,4 +479,153 @@ async fn without_read_only_link_credentials_no_link_carries_the_temporary_ones()
     // A link would carry the session token, and temporary credentials are rebuilt from it: the bytes come instead.
     assert_eq!(read.status(), StatusCode::OK);
     assert!(read.headers().get("location").is_none());
+}
+
+fn json_request(method: &str, uri: &str, body: serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/json")
+        .header("x-test-principal", "member")
+        .body(Body::from(body.to_string()))
+        .expect("request")
+}
+
+/// A File names only bytes sent to it: its `$value` PUT writes `content_hash`, and no caller does, even one whose
+/// Cedar lets it dispatch every action on Files. A caller's StreamUpdated is refused whichever hash it names, the
+/// hash of another File's stored bytes included, so a File's `$value` is never another File's bytes.
+#[tokio::test]
+async fn a_files_content_hash_is_only_ever_the_hash_of_bytes_sent_to_it() {
+    let mock = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path_regex("^/bucket/.*"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&mock)
+        .await;
+    let stored = b"bytes this server stored".to_vec();
+    let stored_hash = content_hash(&stored);
+    Mock::given(method("GET"))
+        .and(path_regex(format!(
+            "^/bucket/{PREFIX}/temper-fs/sha256(:|%3A){}$",
+            &stored_hash[7..]
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(stored.clone()))
+        .mount(&mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex("^/bucket/.*"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&mock)
+        .await;
+    let state = state_with_object_store("content-hash-is-stored", &mock).await;
+    state
+        .authz
+        .reload_tenant_policies(
+            "default",
+            r#"permit(principal, action, resource is File) when { principal.id == "member" };"#,
+        )
+        .expect("policy");
+    let app = router(&state);
+    let put = app
+        .clone()
+        .oneshot(put_file("fl-stored", stored.clone(), "member"))
+        .await
+        .expect("respond");
+    assert_eq!(put.status(), StatusCode::NO_CONTENT);
+    for id in ["fl-pointed", "fl-copy"] {
+        let made = app
+            .clone()
+            .oneshot(json_request("POST", "/tdata/Files", json!({ "Id": id })))
+            .await
+            .expect("respond");
+        assert!(made.status().is_success(), "{id}: {}", made.status());
+    }
+
+    // A caller's StreamUpdated is refused whatever it names: bytes this server never stored, another File's stored
+    // bytes, no hash at all. The File stays as it was, and its `$value` serves none of another File's bytes.
+    let elsewhere = content_hash(b"bytes kept somewhere else");
+    let size = stored.len();
+    let ready = |hash: &str| json!({ "content_hash": hash, "size_bytes": size, "mime_type": "image/png", "version_number": 1, "previous_version_id": "", "created_by": "member" });
+    let mut no_hash = ready("");
+    no_hash
+        .as_object_mut()
+        .expect("object")
+        .remove("content_hash");
+    for (id, body) in [
+        ("fl-pointed", ready(&elsewhere)),
+        ("fl-copy", ready(&stored_hash)),
+        ("fl-pointed", no_hash),
+    ] {
+        let refused = app
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/tdata/Files('{id}')/Temper.StreamUpdated"),
+                body.clone(),
+            ))
+            .await
+            .expect("respond");
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST, "{id} {body}");
+        let file = state
+            .get_tenant_entity_state(&TenantId::default(), "File", id)
+            .await
+            .expect("file");
+        let hash = file
+            .state
+            .fields
+            .get("content_hash")
+            .and_then(|h| h.as_str())
+            .unwrap_or_default();
+        assert_eq!(
+            (file.state.status.as_str(), hash),
+            ("Created", ""),
+            "{id} never made Ready by a hash"
+        );
+    }
+    let copy_read = app
+        .clone()
+        .oneshot(
+            Request::get("/tdata/Files('fl-copy')/$value")
+                .header("x-test-principal", "member")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("respond");
+    assert_ne!(
+        copy_read.status(),
+        StatusCode::OK,
+        "no bytes were sent to fl-copy"
+    );
+
+    // Neither a create nor a PATCH nor a PUT writes what the bytes decide.
+    for (verb, uri, body) in [
+        (
+            "POST",
+            "/tdata/Files",
+            json!({ "Id": "fl-made", "content_hash": stored_hash }),
+        ),
+        (
+            "PATCH",
+            "/tdata/Files('fl-stored')",
+            json!({ "content_hash": elsewhere }),
+        ),
+        (
+            "PUT",
+            "/tdata/Files('fl-stored')",
+            json!({ "has_content": true, "mime_type": "image/png" }),
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(json_request(verb, uri, body))
+            .await
+            .expect("respond");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{verb} {uri}");
+    }
+    let file = state
+        .get_tenant_entity_state(&TenantId::default(), "File", "fl-stored")
+        .await
+        .expect("file");
+    assert_eq!(file.state.fields["content_hash"], stored_hash);
 }

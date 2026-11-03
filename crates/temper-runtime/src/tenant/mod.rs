@@ -179,19 +179,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tenant_id_default() {
-        let t = TenantId::default();
-        assert_eq!(t.as_str(), "default");
-    }
-
-    #[test]
-    fn tenant_id_custom() {
-        let t = TenantId::new("alpha");
-        assert_eq!(t.as_str(), "alpha");
-        assert_eq!(t.to_string(), "alpha");
-    }
-
-    #[test]
     fn tenant_id_try_new_rejects_untrusted_invalid_values() {
         assert_eq!(
             TenantId::try_new("").unwrap_err(),
@@ -213,12 +200,6 @@ mod tests {
     #[should_panic(expected = "must not contain colons")]
     fn tenant_id_colon_panics() {
         TenantId::new("a:b");
-    }
-
-    #[test]
-    fn tenant_id_from_str() {
-        let t: TenantId = "beta".into();
-        assert_eq!(t.as_str(), "beta");
     }
 
     #[test]

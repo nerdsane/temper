@@ -15,7 +15,7 @@ use temper_jit::table::TransitionTable;
 use temper_runtime::ActorSystem;
 use temper_runtime::scheduler::install_deterministic_context;
 use temper_server::storage::{BackendLabel, BoxedEventStore};
-use temper_server::{EntityActor, EntityMsg, EntityResponse};
+use temper_server::{EntityActor, EntityMsg, EntityResponse, EntityState};
 use temper_store_sim::SimEventStore;
 
 const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
@@ -37,6 +37,7 @@ async fn dispatch_action(
     actor_ref
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: action.to_string(),
                 params,
                 related: BTreeMap::new(),
@@ -119,6 +120,185 @@ async fn dst_replay_fidelity() {
             post.state.events.len(),
             pre_crash_event_count,
             "seed {seed}: event count mismatch after replay"
+        );
+    }
+}
+
+// =========================================================================
+// Test: Replay keeps each event's stored state after a spec change
+// =========================================================================
+
+/// v1 of a small pipeline: Draft -> Open -> Approved -> Shipped, with a
+/// counter effect on each later step so a skipped rule is visible.
+const PIPELINE_V1_IOA: &str = r#"
+[automaton]
+name = "Pipeline"
+states = ["Draft", "Open", "Held", "Approved", "Shipped"]
+initial = "Draft"
+
+[[state]]
+name = "approvals"
+type = "counter"
+initial = 0
+
+[[state]]
+name = "shipments"
+type = "counter"
+initial = 0
+
+[[action]]
+name = "Start"
+kind = "input"
+from = ["Draft"]
+to = "Open"
+
+[[action]]
+name = "Approve"
+kind = "input"
+from = ["Open"]
+to = "Approved"
+effect = ["approvals += 1"]
+
+[[action]]
+name = "Ship"
+kind = "input"
+from = ["Approved"]
+to = "Shipped"
+effect = ["shipments += 1"]
+"#;
+
+/// Build a v2 table from `v1` by replacing one exact snippet, failing the test
+/// if the snippet is absent (a silent no-op would make the v2 run prove nothing).
+fn retargeted_table(v1: &str, from: &str, to: &str) -> Arc<RwLock<TransitionTable>> {
+    assert!(v1.contains(from), "v2 snippet not found in v1 spec: {from}");
+    let v2 = v1.replacen(from, to, 1);
+    Arc::new(RwLock::new(TransitionTable::from_ioa_source(&v2)))
+}
+
+/// Run `actions` on a fresh actor under `table`, then drop it (a restart).
+/// Returns the state the live actor reported before the drop.
+async fn run_then_stop(
+    entity_type: &str,
+    entity_id: &str,
+    table: Arc<RwLock<TransitionTable>>,
+    store: BoxedEventStore,
+    actions: &[&str],
+    seed: u64,
+) -> EntityState {
+    let system = ActorSystem::new("dst-respec-1");
+    let actor = EntityActor::with_persistence(
+        entity_type,
+        entity_id,
+        table,
+        serde_json::json!({}),
+        store,
+        BackendLabel::Sim,
+    )
+    .with_tenant("default");
+    let actor_ref = system.spawn(actor, entity_id);
+    for action in actions {
+        let r = dispatch_action(&actor_ref, action, serde_json::json!({})).await;
+        assert!(r.success, "seed {seed}: {action} failed: {:?}", r.error);
+    }
+    get_state(&actor_ref).await.state
+}
+
+/// Respawn the entity from `store` under `table` and return its replayed state.
+async fn respawn(
+    entity_type: &str,
+    entity_id: &str,
+    table: Arc<RwLock<TransitionTable>>,
+    store: BoxedEventStore,
+) -> EntityState {
+    let system = ActorSystem::new("dst-respec-2");
+    let actor = EntityActor::with_persistence(
+        entity_type,
+        entity_id,
+        table,
+        serde_json::json!({}),
+        store,
+        BackendLabel::Sim,
+    )
+    .with_tenant("default");
+    let actor_ref = system.spawn(actor, format!("{entity_id}-replay"));
+    get_state(&actor_ref).await.state
+}
+
+/// A committed transition's stored `to_status` is a fact. Installing a spec
+/// whose action now targets a different state must not move records that
+/// already took that action.
+#[tokio::test]
+async fn dst_replay_keeps_stored_status_after_target_change() {
+    for seed in 0..NUM_SEEDS {
+        let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
+        let store = sim_store(seed);
+        let entity_id = format!("ord-respec-{seed}");
+
+        let pre = run_then_stop(
+            "Order",
+            &entity_id,
+            order_table(),
+            store.clone(),
+            &["AddItem", "SubmitOrder", "ConfirmOrder"],
+            seed,
+        )
+        .await;
+        assert_eq!(pre.status, "Confirmed", "seed {seed}: v1 run");
+
+        // v2: ConfirmOrder now goes to Processing.
+        let v2 = retargeted_table(
+            ORDER_IOA,
+            "from = [\"Submitted\"]\nto = \"Confirmed\"",
+            "from = [\"Submitted\"]\nto = \"Processing\"",
+        );
+        let (_guard2, _clock2, _id_gen2) = install_deterministic_context(seed + 3000);
+        let post = respawn("Order", &entity_id, v2, store.clone()).await;
+        assert_eq!(
+            post.status, pre.status,
+            "seed {seed}: replay under v2 moved the record off its stored status"
+        );
+    }
+}
+
+/// After one event drifts, later events must still match their rules: replay
+/// picks each rule by the event's stored `from_status`, so later statuses and
+/// effects come back as they were committed.
+#[tokio::test]
+async fn dst_replay_after_drifted_event_keeps_later_events() {
+    for seed in 0..NUM_SEEDS {
+        let (_guard, _clock, _id_gen) = install_deterministic_context(seed);
+        let store = sim_store(seed);
+        let entity_id = format!("pipe-respec-{seed}");
+        let v1 = Arc::new(RwLock::new(TransitionTable::from_ioa_source(
+            PIPELINE_V1_IOA,
+        )));
+
+        let pre = run_then_stop(
+            "Pipeline",
+            &entity_id,
+            v1,
+            store.clone(),
+            &["Start", "Approve", "Ship"],
+            seed,
+        )
+        .await;
+        assert_eq!(pre.status, "Shipped", "seed {seed}: v1 run");
+
+        // v2: Start now goes to Held, so the first event drifts under v2.
+        let v2 = retargeted_table(
+            PIPELINE_V1_IOA,
+            "from = [\"Draft\"]\nto = \"Open\"",
+            "from = [\"Draft\"]\nto = \"Held\"",
+        );
+        let (_guard2, _clock2, _id_gen2) = install_deterministic_context(seed + 4000);
+        let post = respawn("Pipeline", &entity_id, v2, store.clone()).await;
+        assert_eq!(
+            post.status, pre.status,
+            "seed {seed}: replay under v2 lost the events after the drifted one"
+        );
+        assert_eq!(
+            post.counters, pre.counters,
+            "seed {seed}: replay under v2 skipped the effects of later events"
         );
     }
 }

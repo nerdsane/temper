@@ -151,6 +151,7 @@
         <Property Name="algorithms" Type="Edm.String"/>
         <Property Name="description" Type="Edm.String"/>
         <Property Name="created_by" Type="Edm.String"/>
+        <Property Name="keys_rotated" Type="Edm.Boolean"/>
       </EntityType>
 
       <EntityType Name="PrincipalGeneration">

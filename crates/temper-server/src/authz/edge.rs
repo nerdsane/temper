@@ -67,8 +67,9 @@ pub fn is_public_kernel_request(method: &Method, path: &str) -> bool {
     {
         return true;
     }
-    (matches!(*method, Method::GET | Method::POST) && path.starts_with("/webhooks/"))
-        || (method == Method::GET && path.starts_with("/genesis/"))
+    // Webhook ingress takes any method: its Class B verifier (the sender's
+    // signature, then Cedar) admits each request (ADR-0182).
+    path.starts_with("/webhooks/") || (method == Method::GET && path.starts_with("/genesis/"))
 }
 
 /// A browser's CORS preflight: `OPTIONS` with an `Origin` and the method it asks to send. It carries no credential by
@@ -303,9 +304,16 @@ mod tests {
             assert!(!is_public_kernel_request(&Method::GET, path), "{path}");
         }
         assert!(!is_public_kernel_request(&Method::POST, "/tdata"));
+        // Any method reaches the webhook receiver, which admits by signature.
+        for method in [Method::POST, Method::PUT, Method::PATCH, Method::DELETE] {
+            assert!(is_public_kernel_request(
+                &method,
+                "/webhooks/tenant/provider"
+            ));
+        }
         assert!(!is_public_kernel_request(
-            &Method::DELETE,
-            "/webhooks/tenant/provider"
+            &Method::POST,
+            "/webhooks-evil/path"
         ));
     }
 

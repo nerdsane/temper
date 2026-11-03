@@ -20,11 +20,12 @@ use toml::{Table, Value};
 pub(super) const MIGRATE_HINT: &str = "convert the spec with `temper migrate-predicates`";
 
 /// The sections a spec may contain.
-const SECTIONS: [&str; 12] = [
+pub(super) const SECTIONS: [&str; 15] = [
     "automaton",
     "state",
     "action",
     "invariant",
+    "entry_rule",
     "liveness",
     "webhook",
     "context_entity",
@@ -33,6 +34,8 @@ const SECTIONS: [&str; 12] = [
     "key",
     "vector",
     "admission",
+    "group",
+    "carry",
 ];
 
 /// Parse TOML into an Automaton struct.
@@ -84,6 +87,7 @@ fn read(doc: &Table) -> Result<Automaton, AutomatonParseError> {
         state: entries(doc, "state", "name", typed_entry)?,
         actions: entries(doc, "action", "name", parse_action)?,
         invariants: predicates::invariants(doc)?,
+        entry_rules: entries(doc, "entry_rule", "name", typed_entry)?,
         liveness: entries(doc, "liveness", "name", typed_entry)?,
         integrations: Vec::new(),
         webhooks: entries(doc, "webhook", "name", |scope, table| {
@@ -98,10 +102,12 @@ fn read(doc: &Table) -> Result<Automaton, AutomatonParseError> {
         })?,
         keys: entries(doc, "key", "name", typed_entry)?,
         vectors: entries(doc, "vector", "name", typed_entry)?,
+        carries: entries(doc, "carry", "from", typed_entry)?,
         admission: doc
             .get("admission")
             .map(|value| typed(value.clone(), "admission"))
             .transpose()?,
+        groups: entries(doc, "group", "name", typed_entry)?,
     };
 
     debug_assert!(automaton.actions.iter().all(|a| !a.name.is_empty()));

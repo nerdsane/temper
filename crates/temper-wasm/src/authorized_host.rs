@@ -53,21 +53,62 @@ pub trait WasmAuthzGate: Send + Sync {
     ) -> WasmAuthzDecision;
 }
 
-/// Extract domain from a URL using simple string parsing.
+/// The host an outbound request connects to, for the `http_call` gate.
 ///
-/// Finds `://`, strips any `user:pass@` userinfo, then takes everything
-/// up to the next `/`, `?`, or `:` (port). Returns the domain or the
-/// full URL if parsing fails.
-pub fn extract_domain(url: &str) -> &str {
-    let after_scheme = url.find("://").map(|i| &url[i + 3..]).unwrap_or(url);
-    // Strip userinfo if present (user:pass@host) to prevent SSRF bypass
-    let after_auth = after_scheme
-        .find('@')
-        .map(|i| &after_scheme[i + 1..])
-        .unwrap_or(after_scheme);
-    // Take up to the first '/', '?', or ':' (port separator)
-    let end = after_auth.find(['/', '?', ':']).unwrap_or(after_auth.len());
-    &after_auth[..end]
+/// Parses with `reqwest::Url`, the WHATWG parser the HTTP client uses, so the
+/// gate decides on the host the request is sent to. Returns `None` for a URL
+/// that does not parse, has no host, or carries userinfo: such a URL is
+/// refused, never sent.
+pub fn extract_domain(url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return None;
+    }
+    parsed.host_str().map(str::to_owned)
+}
+
+/// Ask `gate` whether `operation` may send `method` to the host `url` connects
+/// to. Guest calls come through here from [`AuthorizedWasmHost`]; so does every
+/// redirect hop the production host follows (`host_trait/redirects.rs`).
+pub(crate) fn authorize_outbound(
+    gate: &dyn WasmAuthzGate,
+    ctx: &WasmAuthzContext,
+    operation: &str,
+    method: &str,
+    url: &str,
+) -> Result<(), String> {
+    let Some(domain) = extract_domain(url) else {
+        tracing::warn!(
+            tenant = %ctx.tenant,
+            module = %ctx.module_name,
+            entity_type = %ctx.entity_type,
+            trigger_action = %ctx.trigger_action,
+            operation,
+            "WASM host refused an outbound URL with no host or with userinfo"
+        );
+        return Err(format!(
+            "{operation} refused: the URL must name a host and carry no userinfo"
+        ));
+    };
+    match gate.authorize_http_call(&domain, method, url, ctx) {
+        WasmAuthzDecision::Allow => Ok(()),
+        WasmAuthzDecision::Deny(reason) => {
+            tracing::warn!(
+                tenant = %ctx.tenant,
+                module = %ctx.module_name,
+                entity_type = %ctx.entity_type,
+                trigger_action = %ctx.trigger_action,
+                domain = %domain,
+                http_method = %method,
+                operation,
+                reason = %reason,
+                "WASM host authorization denied outbound HTTP call"
+            );
+            Err(format!(
+                "authorization denied for {operation} to {domain}: {reason}"
+            ))
+        }
+    }
 }
 
 /// Decorator that wraps a `WasmHost` and checks authorization before
@@ -93,6 +134,10 @@ impl AuthorizedWasmHost {
     ) -> Self {
         Self { inner, gate, ctx }
     }
+
+    fn authorize_http(&self, operation: &str, method: &str, url: &str) -> Result<(), String> {
+        authorize_outbound(self.gate.as_ref(), &self.ctx, operation, method, url)
+    }
 }
 
 #[async_trait]
@@ -112,28 +157,8 @@ impl WasmHost for AuthorizedWasmHost {
         headers: &[(String, String)],
         body: &str,
     ) -> Result<(u16, String), String> {
-        let domain = extract_domain(url);
-        match self
-            .gate
-            .authorize_http_call(domain, method, url, &self.ctx)
-        {
-            WasmAuthzDecision::Allow => self.inner.http_call(method, url, headers, body).await,
-            WasmAuthzDecision::Deny(reason) => {
-                tracing::warn!(
-                    tenant = %self.ctx.tenant,
-                    module = %self.ctx.module_name,
-                    entity_type = %self.ctx.entity_type,
-                    trigger_action = %self.ctx.trigger_action,
-                    domain = %domain,
-                    http_method = %method,
-                    reason = %reason,
-                    "WASM host authorization denied outbound HTTP call"
-                );
-                Err(format!(
-                    "authorization denied for http_call to {domain}: {reason}"
-                ))
-            }
-        }
+        self.authorize_http("http_call", method, url)?;
+        self.inner.http_call(method, url, headers, body).await
     }
 
     async fn http_call_binary(
@@ -143,32 +168,10 @@ impl WasmHost for AuthorizedWasmHost {
         headers: &[(String, String)],
         body: &[u8],
     ) -> Result<(u16, Vec<u8>), String> {
-        let domain = extract_domain(url);
-        match self
-            .gate
-            .authorize_http_call(domain, method, url, &self.ctx)
-        {
-            WasmAuthzDecision::Allow => {
-                self.inner
-                    .http_call_binary(method, url, headers, body)
-                    .await
-            }
-            WasmAuthzDecision::Deny(reason) => {
-                tracing::warn!(
-                    tenant = %self.ctx.tenant,
-                    module = %self.ctx.module_name,
-                    entity_type = %self.ctx.entity_type,
-                    trigger_action = %self.ctx.trigger_action,
-                    domain = %domain,
-                    http_method = %method,
-                    reason = %reason,
-                    "WASM host authorization denied outbound binary HTTP call"
-                );
-                Err(format!(
-                    "authorization denied for http_call_binary to {domain}: {reason}"
-                ))
-            }
-        }
+        self.authorize_http("http_call_binary", method, url)?;
+        self.inner
+            .http_call_binary(method, url, headers, body)
+            .await
     }
 
     async fn connect_call(
@@ -177,55 +180,16 @@ impl WasmHost for AuthorizedWasmHost {
         headers: &[(String, String)],
         body: &str,
     ) -> Result<Vec<String>, String> {
-        let domain = extract_domain(url);
-        match self
-            .gate
-            .authorize_http_call(domain, "POST", url, &self.ctx)
-        {
-            WasmAuthzDecision::Allow => self.inner.connect_call(url, headers, body).await,
-            WasmAuthzDecision::Deny(reason) => {
-                tracing::warn!(
-                    tenant = %self.ctx.tenant,
-                    module = %self.ctx.module_name,
-                    entity_type = %self.ctx.entity_type,
-                    trigger_action = %self.ctx.trigger_action,
-                    domain = %domain,
-                    reason = %reason,
-                    "WASM host authorization denied Connect call"
-                );
-                Err(format!(
-                    "authorization denied for connect_call to {domain}: {reason}"
-                ))
-            }
-        }
+        self.authorize_http("connect_call", "POST", url)?;
+        self.inner.connect_call(url, headers, body).await
     }
 
     async fn http_stream_begin_outbound(
         &self,
         request: crate::http_stream::HttpRequestHead,
     ) -> Result<crate::http_stream::HttpStreamHandles, String> {
-        let domain = extract_domain(&request.url);
-        match self
-            .gate
-            .authorize_http_call(domain, &request.method, &request.url, &self.ctx)
-        {
-            WasmAuthzDecision::Allow => self.inner.http_stream_begin_outbound(request).await,
-            WasmAuthzDecision::Deny(reason) => {
-                tracing::warn!(
-                    tenant = %self.ctx.tenant,
-                    module = %self.ctx.module_name,
-                    entity_type = %self.ctx.entity_type,
-                    trigger_action = %self.ctx.trigger_action,
-                    domain = %domain,
-                    http_method = %request.method,
-                    reason = %reason,
-                    "WASM host authorization denied outbound streaming HTTP call"
-                );
-                Err(format!(
-                    "authorization denied for http_stream_begin_outbound to {domain}: {reason}"
-                ))
-            }
-        }
+        self.authorize_http("http_stream_begin_outbound", &request.method, &request.url)?;
+        self.inner.http_stream_begin_outbound(request).await
     }
 
     async fn http_stream_read(

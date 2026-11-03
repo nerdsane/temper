@@ -44,6 +44,15 @@ pub struct SpecVerificationUpdate<'a> {
     pub verification_result_json: Option<&'a str>,
 }
 
+/// What the newest review of an app's modules said.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleReviewRow {
+    /// What was reviewed: the commit the app's files say, else its bundle's digest.
+    pub version: String,
+    /// JSON: `{"warnings": [...], "modules_reviewed": [...]}`.
+    pub result: String,
+}
+
 /// WASM module row returned by [`PlatformStore`] WASM queries.
 #[derive(Debug, Clone)]
 pub struct WasmModuleRow {
@@ -236,6 +245,25 @@ pub trait PlatformStore: Send + Sync {
     /// Load all WASM modules across all tenants (for startup recovery).
     async fn load_wasm_modules_all_tenants(&self) -> Result<Vec<WasmModuleRow>, String>;
 
+    // ── Module reviews ───────────────────────────────────────────────
+
+    /// Keep what the newest review of `app_name`'s modules said, in place of the
+    /// last: `result` is JSON, `version` what was reviewed.
+    async fn save_module_review(
+        &self,
+        tenant: &str,
+        app_name: &str,
+        version: &str,
+        result: &str,
+    ) -> Result<(), String>;
+
+    /// What the newest review of `app_name`'s modules said, if one is kept.
+    async fn load_module_review(
+        &self,
+        tenant: &str,
+        app_name: &str,
+    ) -> Result<Option<ModuleReviewRow>, String>;
+
     /// Upsert a WASM module binary for a tenant.
     ///
     /// `source` distinguishes the os-apps install pipeline (`"bundled"`) from
@@ -263,6 +291,30 @@ use temper_store_turso::{TursoEventStore, TursoInstalledAppRow, TursoSpecVerific
 
 #[async_trait::async_trait]
 impl PlatformStore for TursoEventStore {
+    async fn save_module_review(
+        &self,
+        tenant: &str,
+        app_name: &str,
+        version: &str,
+        result: &str,
+    ) -> Result<(), String> {
+        self.save_module_review(tenant, app_name, version, result)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn load_module_review(
+        &self,
+        tenant: &str,
+        app_name: &str,
+    ) -> Result<Option<ModuleReviewRow>, String> {
+        let row = self
+            .load_module_review(tenant, app_name)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(row.map(|(version, result)| ModuleReviewRow { version, result }))
+    }
+
     async fn upsert_spec(
         &self,
         tenant: &str,
@@ -540,6 +592,30 @@ impl PlatformStore for TursoEventStore {
 
 #[async_trait::async_trait]
 impl PlatformStore for PostgresEventStore {
+    async fn save_module_review(
+        &self,
+        tenant: &str,
+        app_name: &str,
+        version: &str,
+        result: &str,
+    ) -> Result<(), String> {
+        self.save_module_review(tenant, app_name, version, result)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn load_module_review(
+        &self,
+        tenant: &str,
+        app_name: &str,
+    ) -> Result<Option<ModuleReviewRow>, String> {
+        let row = self
+            .load_module_review(tenant, app_name)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(row.map(|(version, result)| ModuleReviewRow { version, result }))
+    }
+
     async fn upsert_spec(
         &self,
         tenant: &str,
@@ -930,6 +1006,8 @@ mod sim_platform_store {
         policy_entries: BTreeMap<(String, String), PolicyEntryRow>,
         /// Cross-invariant definitions keyed by tenant.
         constraints: BTreeMap<String, String>,
+        /// The newest module review, keyed by (tenant, app_name).
+        module_reviews: BTreeMap<(String, String), ModuleReviewRow>,
         /// Installed apps: (tenant, app_name).
         installed_apps: BTreeSet<(String, String)>,
         /// Installed app digest metadata keyed by (tenant, app_name).
@@ -953,6 +1031,7 @@ mod sim_platform_store {
                     policies: BTreeMap::new(),
                     policy_entries: BTreeMap::new(),
                     constraints: BTreeMap::new(),
+                    module_reviews: BTreeMap::new(),
                     installed_apps: BTreeSet::new(),
                     installed_app_records: BTreeMap::new(),
                     pending_decisions: BTreeMap::new(),
@@ -1019,6 +1098,36 @@ mod sim_platform_store {
 
     #[async_trait::async_trait]
     impl PlatformStore for SimPlatformStore {
+        async fn save_module_review(
+            &self,
+            tenant: &str,
+            app_name: &str,
+            version: &str,
+            result: &str,
+        ) -> Result<(), String> {
+            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
+            inner.module_reviews.insert(
+                (tenant.to_string(), app_name.to_string()),
+                ModuleReviewRow {
+                    version: version.to_string(),
+                    result: result.to_string(),
+                },
+            );
+            Ok(())
+        }
+
+        async fn load_module_review(
+            &self,
+            tenant: &str,
+            app_name: &str,
+        ) -> Result<Option<ModuleReviewRow>, String> {
+            let inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
+            Ok(inner
+                .module_reviews
+                .get(&(tenant.to_string(), app_name.to_string()))
+                .cloned())
+        }
+
         async fn upsert_spec(
             &self,
             tenant: &str,

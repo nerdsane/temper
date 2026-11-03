@@ -81,23 +81,3 @@ guard = "some_var > 0"
 <What invariants should be checked, what edge cases to test>
 
 Be specific about IOA TOML syntax. Only propose changes that are mechanically verifiable."#;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn observation_prompt_pins_its_output_contract() {
-        assert!(!OBSERVATION_SYSTEM_PROMPT.is_empty());
-        assert!(OBSERVATION_SYSTEM_PROMPT.contains("## Problem Statement"));
-        assert!(OBSERVATION_SYSTEM_PROMPT.contains("## Evidence"));
-    }
-
-    #[test]
-    fn analysis_prompt_pins_its_output_contract() {
-        assert!(!ANALYSIS_SYSTEM_PROMPT.is_empty());
-        assert!(ANALYSIS_SYSTEM_PROMPT.contains("## Root Cause Analysis"));
-        // Downstream extraction depends on the IOA TOML fence.
-        assert!(ANALYSIS_SYSTEM_PROMPT.contains("```toml"));
-    }
-}

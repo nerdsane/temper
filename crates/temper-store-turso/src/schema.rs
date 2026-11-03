@@ -7,6 +7,7 @@ pub use crate::schema_event_history::{
     CREATE_SNAPSHOT_HISTORY_ENTITY_INDEX, CREATE_SNAPSHOT_HISTORY_TABLE,
 };
 pub use query_plane::{
+    CREATE_ENTITY_CATALOG_CHECKPOINT_INDEX, CREATE_ENTITY_CATALOG_COUNTERS_TABLE,
     CREATE_ENTITY_CATALOG_STATUS_INDEX, CREATE_ENTITY_CATALOG_TABLE,
     CREATE_ENTITY_CATALOG_TYPE_INDEX, CREATE_ENTITY_FIELD_INDEX_LOOKUP,
     CREATE_ENTITY_FIELD_INDEX_STATUS, CREATE_ENTITY_FIELD_INDEX_TABLE,
@@ -34,9 +35,10 @@ pub const CREATE_EVENTS_ENTITY_INDEX: &str = "\
 CREATE INDEX IF NOT EXISTS idx_events_entity
     ON events(tenant, entity_type, entity_id, sequence_nr);";
 
-/// Tombstones only. Entity listings keep an entity unless it has a `Deleted`
-/// event; without this index that check reads the entity's whole journal once
-/// per journal row, so a 30,000-event entity took 15 minutes to list.
+/// Events of the tombstone's type only. Entity listings keep an entity unless
+/// its journal has the kernel's tombstone (`store::tombstone_sql`); without
+/// this index that check reads the entity's whole journal once per journal
+/// row, so a 30,000-event entity took 15 minutes to list.
 pub const CREATE_EVENTS_DELETED_INDEX: &str = "\
 CREATE INDEX IF NOT EXISTS idx_events_deleted
     ON events(tenant, entity_type, entity_id) WHERE event_type = 'Deleted';";
@@ -51,6 +53,14 @@ CREATE TABLE IF NOT EXISTS snapshots (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY(tenant, entity_type, entity_id)
 );";
+
+/// Each snapshot's key and sequence, for journal heads
+/// (`store/projection_repair.rs`): without it the engine reads every
+/// snapshot whole to give its sequence (see
+/// `CREATE_ENTITY_CATALOG_CHECKPOINT_INDEX`).
+pub const CREATE_SNAPSHOTS_CHECKPOINT_INDEX: &str = "\
+CREATE INDEX IF NOT EXISTS idx_snapshots_checkpoint
+    ON snapshots(tenant, entity_type, entity_id, sequence_nr);";
 
 /// Specs per (tenant, entity_type). A primary key rather than a UNIQUE
 /// constraint: Turso Sync replays every change on its remote by primary key.
@@ -307,6 +317,20 @@ CREATE TABLE IF NOT EXISTS spec_committed_versions (
     PRIMARY KEY(tenant, entity_type)
 );";
 
+/// What the newest review of each app's modules said, one row per app of a
+/// tenant: `result` is JSON, `{"warnings": [...], "modules_reviewed": [...]}`.
+/// `version` names what was reviewed: the commit the app's files say, else the
+/// digest of its bundle.
+pub const CREATE_MODULE_REVIEWS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS module_reviews (
+    tenant TEXT NOT NULL,
+    app_name TEXT NOT NULL,
+    version TEXT NOT NULL,
+    result TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(tenant, app_name)
+);";
+
 /// ALTER TABLE migrations for the `trajectories` table.
 ///
 /// These add columns that were previously only tracked in-memory
@@ -470,10 +494,22 @@ CREATE TABLE IF NOT EXISTS tenant_secrets (
     key_name TEXT NOT NULL,
     ciphertext BLOB NOT NULL,
     nonce BLOB NOT NULL,
+    version_id TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY(tenant, key_name)
 );";
+
+/// Adds the opaque version id of each secret's latest write (its HTTP etag).
+/// Nullable, so an older release's inserts, which do not name it, still work.
+pub const ALTER_TENANT_SECRETS_ADD_VERSION_ID: &str =
+    "ALTER TABLE tenant_secrets ADD COLUMN version_id TEXT";
+
+/// Gives every row without a version id a random one: rows written before the
+/// column existed, or by an older release since. Random, never derived from
+/// the value, so a version id tells nothing about the secret.
+pub const BACKFILL_TENANT_SECRETS_VERSION_ID: &str = "\
+UPDATE tenant_secrets SET version_id = lower(hex(randomblob(16))) WHERE version_id IS NULL";
 
 /// Armed state timers (ADR-0056): one row per entity while its timer waits,
 /// read once at boot to arm each timer again with the identity that armed it.
@@ -489,6 +525,20 @@ CREATE TABLE IF NOT EXISTS state_timers (
     params TEXT NOT NULL,
     armed_by TEXT NOT NULL,
     PRIMARY KEY(tenant, entity_type, entity_id)
+);";
+
+/// Pending `schedule(...)` and `schedule_at(...)` actions: one row per
+/// scheduled action until it fires, read once at boot to arm each again.
+pub const CREATE_SCHEDULED_ACTIONS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS scheduled_actions (
+    tenant TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    arm_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    due_at TEXT NOT NULL,
+    armed_by TEXT NOT NULL,
+    PRIMARY KEY(tenant, entity_type, entity_id, arm_id)
 );";
 
 // ---------------------------------------------------------------------------

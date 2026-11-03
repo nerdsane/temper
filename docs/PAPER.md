@@ -553,9 +553,10 @@ L3 Property Tests PASSED: 1000 cases, 30 max steps
 - No composition calculus or simulation relations.
 
 **Stateright limitations:**
-- `Property::eventually` only checks acyclic paths (no cycles).
 - No fairness assumptions: liveness cannot express "if action A is enabled
-  infinitely often, it eventually fires."
+  infinitely often, it eventually fires." A `reaches` rule is checked rule
+  by rule on the whole walk, so any loop that avoids its targets breaks it;
+  `can_reach` states the weaker "can always still get there".
 
 **SMT verification limitations:**
 - Invariant induction proves per-step preservation, not reachability from
@@ -1442,8 +1443,8 @@ Several additional directions remain open:
 - **Cloud deployment.**  Packaging the platform as a managed service with
   popular hosting platforms (vercel, railway, fly.io, cloudflare, cloud providers, etc).
 
-- **Fairness-aware liveness.**  The current liveness checking uses
-  Stateright's `Property::eventually` which only covers acyclic paths.
+- **Fairness-aware liveness.**  `reaches` rules are checked without
+  fairness, so every loop that avoids a rule's targets breaks it.
   Full fairness assumptions ("if enabled infinitely often, eventually fires")
   would require a custom checker or integration with a temporal logic tool.
 

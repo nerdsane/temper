@@ -19,10 +19,25 @@ export interface TemperClientConfig {
 export interface AuthzResponse {
   /** Whether the action was allowed by Cedar policy. */
   allowed: boolean;
-  /** Decision ID for pending/escalated decisions. */
-  decision_id?: string;
   /** Human-readable reason for the decision. */
-  reason?: string;
+  reason?: string | null;
+}
+
+/** One record snapshot shared by all requested move checks. */
+export interface AuthzRecord {
+  resource_type: string;
+  resource_id: string;
+  actions: string[];
+  context?: Record<string, unknown>;
+}
+
+/** Record and move answers preserve request order. Checks never file decisions. */
+export interface AuthzBatchResponse {
+  records: {
+    resource_type: string;
+    resource_id: string;
+    actions: (AuthzResponse & { action: string })[];
+  }[];
 }
 
 /** A server-sent event representing an entity state change. */
@@ -247,6 +262,17 @@ export class TemperClient {
       }),
     });
     return resp.json() as Promise<AuthzResponse>;
+  }
+
+  /** Check every requested move in one request, without filing decisions. */
+  async authorizeBatch(agentId: string, records: AuthzRecord[]): Promise<AuthzBatchResponse> {
+    const resp = await fetch(`${this.baseUrl}/api/authorize`, {
+      method: "POST",
+      headers: { ...this.defaultHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ agent_id: agentId, records }),
+    });
+    this.checkStatus(resp, "authorize", "batch");
+    return resp.json() as Promise<AuthzBatchResponse>;
   }
 
   // ── SSE ──────────────────────────────────────────────────────────

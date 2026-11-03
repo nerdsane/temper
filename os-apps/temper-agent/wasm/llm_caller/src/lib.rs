@@ -1339,7 +1339,8 @@ fn mock_plan_requests_hang(messages: &[Value]) -> bool {
 }
 
 fn simulate_mock_hang(ctx: &Context) -> Result<(), String> {
-    let base_url = temper_api_url(ctx);
+    let fields = ctx.entity_state.get("fields").cloned().unwrap_or(json!({}));
+    let base_url = resolve_temper_api_url(ctx, &fields);
     let url = format!(
         "{base_url}/observe/entities/{}/{}/wait?statuses=__never__&timeout_ms=10000&poll_ms=250",
         ctx.entity_type, ctx.entity_id

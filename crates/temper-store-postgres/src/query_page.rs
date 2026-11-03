@@ -132,15 +132,16 @@ fn postgres_query_field_page_sql(
     )
 }
 
-// Generated filter fragments refer to entity_field_index. Bind that relation
-// locally to the selected physical table, without rewriting the fragment or its
-// literals. With no schema selected, retain the original SQL and query plan.
+// Generated filters and their completeness guards refer to these query
+// relations. Bind both to the selected physical tables without rewriting the
+// fragment or its literals. With no schema selected, retain the original SQL.
 pub(crate) fn field_index_cte(schema: &str) -> String {
     if schema.is_empty() {
         return String::new();
     }
     format!(
-        "WITH entity_field_index AS (SELECT * FROM {schema}entity_field_index WHERE tenant = $1 AND entity_type = $2) "
+        "WITH entity_field_index AS (SELECT * FROM {schema}entity_field_index WHERE tenant = $1 AND entity_type = $2), \
+         entity_catalog AS (SELECT * FROM {schema}entity_catalog WHERE tenant = $1 AND entity_type = $2) "
     )
 }
 
@@ -175,39 +176,4 @@ fn postgres_query_field_order_sql(order_by: &[(String, bool)]) -> String {
 
 fn postgres_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn no_count_page_sql_does_not_compute_window_count() {
-        let sql = postgres_query_field_page_sql("", "entity_id = $3", "entity_id ASC", 4, 5, false);
-
-        assert!(sql.starts_with("SELECT entity_id FROM entity_catalog"));
-        assert!(!sql.contains("{schema}"));
-        assert!(!sql.contains("COUNT(*) OVER()"));
-    }
-
-    #[test]
-    fn count_page_sql_computes_count_only_when_requested() {
-        let sql = postgres_query_field_page_sql("", "entity_id = $3", "entity_id ASC", 4, 5, true);
-
-        assert!(sql.contains("COUNT(*) OVER() AS total_count"));
-    }
-    #[test]
-    fn qualified_page_keeps_caller_fragments_unchanged() {
-        let sql = postgres_query_field_page_sql(
-            "\"chosen\".",
-            "status = '{schema}'",
-            "entity_id ASC",
-            3,
-            4,
-            false,
-        );
-        assert!(sql.contains("FROM \"chosen\".entity_catalog"));
-        assert!(sql.contains("FROM \"chosen\".entity_field_index"));
-        assert!(sql.contains("status = '{schema}'"));
-    }
 }

@@ -8,7 +8,8 @@ use super::TursoEventStore;
 
 /// Live ids of one entity type from the catalog, the field index and the
 /// journal. Each `NOT EXISTS` probe is served by `idx_events_deleted`.
-pub(super) const LIST_ENTITY_IDS_BY_TYPE_SQL: &str = "\
+pub(super) const LIST_ENTITY_IDS_BY_TYPE_SQL: &str = concat!(
+    "\
 SELECT entity_id
     FROM (
       SELECT c.entity_id
@@ -21,7 +22,10 @@ SELECT entity_id
           WHERE d.tenant = c.tenant
             AND d.entity_type = c.entity_type
             AND d.entity_id = c.entity_id
-            AND d.event_type = 'Deleted'
+            ",
+    "AND ",
+    tombstone_sql!(),
+    "
         )
       UNION
       SELECT f.entity_id
@@ -34,7 +38,10 @@ SELECT entity_id
           WHERE d.tenant = f.tenant
             AND d.entity_type = f.entity_type
             AND d.entity_id = f.entity_id
-            AND d.event_type = 'Deleted'
+            ",
+    "AND ",
+    tombstone_sql!(),
+    "
         )
       UNION
       SELECT DISTINCT e.entity_id
@@ -47,10 +54,14 @@ SELECT entity_id
           WHERE d.tenant = e.tenant
             AND d.entity_type = e.entity_type
             AND d.entity_id = e.entity_id
-            AND d.event_type = 'Deleted'
+            ",
+    "AND ",
+    tombstone_sql!(),
+    "
         )
     )
-    ORDER BY entity_id";
+    ORDER BY entity_id"
+);
 
 impl TursoEventStore {
     #[instrument(skip_all, fields(

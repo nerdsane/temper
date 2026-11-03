@@ -1,4 +1,4 @@
-//! Tests for required cross-entity ref resolution (ARN-92 #2).
+//! Tests for cross-entity guard resolution: required refs (ARN-92 #2) and lists.
 
 use crate::registry::SpecRegistry;
 use crate::state::ServerState;
@@ -171,7 +171,7 @@ to = "Locked"
 /// resolve the related entities, build the evaluation context, evaluate.
 async fn submit_guard_passes(state: &ServerState, tenant: &TenantId) -> bool {
     let related = state
-        .resolve_cross_entity_guards(tenant, "Doc", "doc-1", "Submit")
+        .resolve_related_statuses(tenant, "Doc", "doc-1", "Submit")
         .await;
     let current = state
         .get_tenant_entity_state(tenant, "Doc", "doc-1")
@@ -380,4 +380,110 @@ async fn forbidden_status_required_missing_target_rejects() {
         !submit_guard_passes(&state, &tenant).await,
         "a REQUIRED denylist scalar ref to an unresolvable target must fail (mandatory relation)"
     );
+}
+
+#[tokio::test]
+async fn list_ref_resolves_every_id_past_sixteen() {
+    // A guard over a list reads every entity in it. Until this change a list
+    // past 16 ids became unresolved and failed every guard that read it, so
+    // "all 17 files are Ready" could never be true.
+    let (state, tenant) = state_with_doc_and_file(DOC_REQUIRED_LIST, "list-ref-17").await;
+    let ids: Vec<String> = (1..=17).map(|n| format!("file-{n}")).collect();
+    for id in &ids {
+        state
+            .get_or_create_tenant_entity(&tenant, "File", id, serde_json::json!({}))
+            .await
+            .expect("create File (Ready)");
+    }
+    state
+        .get_or_create_tenant_entity(
+            &tenant,
+            "Doc",
+            "doc-1",
+            serde_json::json!({ "child_ids": ids }),
+        )
+        .await
+        .expect("create Doc");
+    assert!(
+        submit_guard_passes(&state, &tenant).await,
+        "17 Ready files must pass a guard that every file is Ready"
+    );
+
+    // The last id is read too: one Locked file fails the guard.
+    state
+        .dispatch_tenant_action(
+            &tenant,
+            "File",
+            "file-17",
+            "Lock",
+            serde_json::json!({}),
+            &crate::request_context::AgentContext::for_service("test"),
+        )
+        .await
+        .expect("lock File");
+    assert!(
+        !submit_guard_passes(&state, &tenant).await,
+        "the 17th file's status must be read"
+    );
+}
+
+#[tokio::test]
+async fn every_spawn_in_a_transition_runs() {
+    // Nine spawn effects in one action: every child is created and initialized.
+    // Until this change the ninth was dropped with only a log line.
+    let spawns: Vec<String> = (1..=9)
+        .map(|n| format!("\"spawn('File', 'Lock', file_{n}_id, params.f{n})\""))
+        .collect();
+    let params: Vec<String> = (1..=9).map(|n| format!("\"f{n}\"")).collect();
+    let doc = format!(
+        r#"
+[automaton]
+name = "Doc"
+states = ["Draft", "Submitted"]
+initial = "Draft"
+
+[[action]]
+name = "Fan"
+from = ["Draft"]
+to = "Submitted"
+params = [{}]
+effect = [{}]
+"#,
+        params.join(", "),
+        spawns.join(", ")
+    );
+    let (state, tenant) = state_with_doc_and_file(&doc, "spawn-nine").await;
+    let args: serde_json::Map<String, serde_json::Value> = (1..=9)
+        .map(|n| (format!("f{n}"), serde_json::json!(format!("child-{n}"))))
+        .collect();
+    let response = state
+        .dispatch_tenant_action(
+            &tenant,
+            "Doc",
+            "doc-1",
+            "Fan",
+            serde_json::Value::Object(args),
+            &crate::request_context::AgentContext::for_service("test"),
+        )
+        .await
+        .expect("Fan");
+    assert!(response.success, "Fan: {:?}", response.error);
+
+    for n in 1..=9 {
+        let id = format!("child-{n}");
+        let mut status = String::new();
+        for _ in 0..100 {
+            status = state
+                .get_tenant_entity_state(&tenant, "File", &id)
+                .await
+                .expect("File state")
+                .state
+                .status;
+            if status == "Locked" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(status, "Locked", "{id} was not spawned and initialized");
+    }
 }

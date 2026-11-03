@@ -65,12 +65,16 @@ kind = "input"
 from = ["Refreshing"]
 to = "Expired"
 
+# The provider's redirect cannot be signed, so a relay that holds the shared
+# secret forwards it signed with the kernel scheme (ADR-0182).
 [[webhook]]
 name = "oauth_callback"
 path = "oauth/callback"
 method = "GET"
 action = "OAuthCallback"
 entity_id = "query.state"
+hmac_secret = "{secret:GMAIL_CALLBACK_HMAC}"
+hmac_header = "x-webhook-signature"
 
 [webhook.extract]
 code = "query.code"

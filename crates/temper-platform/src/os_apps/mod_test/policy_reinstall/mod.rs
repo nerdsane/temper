@@ -246,6 +246,36 @@ async fn approvals_and_primary_survive_reinstall_and_restart() {
 }
 
 #[tokio::test]
+async fn an_upgrade_after_a_whole_set_replacement_loads_at_restart() {
+    let fx = Fixture::new("after-put").await;
+    let app = format!("reinstall-after-put-{}", uuid::Uuid::new_v4().simple());
+    fx.write_app(&app, &[("thing.cedar", &thing_policies(FORBID_WITHDRAW))]);
+    fx.install(&app).await;
+    // PUT stores the live text as the only enabled row, the app's rows disabled.
+    let store = fx.state.server.policy_store().expect("policy store");
+    store
+        .replace_tenant_policies(&fx.tenant, "primary", &fx.live_text(), "rita")
+        .await
+        .expect("replace the whole set");
+
+    fx.write_app(&app, &[("thing.cedar", &thing_policies(FORBID_DELETE))]);
+    fx.install(&app).await;
+
+    for state in [&fx.state, &fx.restart().await] {
+        assert!(
+            fx.allowed(state, "Withdraw", "Thing"),
+            "old forbid survived"
+        );
+        assert!(
+            !fx.allowed(state, "Delete", "Thing"),
+            "new forbid not loaded"
+        );
+    }
+    let rows = fx.rows().await;
+    assert!(rows.iter().all(|row| row.enabled), "{rows:?}");
+}
+
+#[tokio::test]
 async fn unchanged_reinstall_is_a_noop() {
     let fx = Fixture::new("unchanged").await;
     let app = format!("reinstall-same-{}", uuid::Uuid::new_v4().simple());

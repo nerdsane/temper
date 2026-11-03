@@ -117,25 +117,6 @@ fn extract_agent_context_empty_session() {
 }
 
 #[test]
-fn remote_parent_context_builds_remote_span_context() {
-    let agent_ctx = AgentContext {
-        trace_id: Some("4bf92f3577b34da6a3ce929d0e0e4736".to_string()),
-        parent_span_id: Some("00f067aa0ba902b7".to_string()),
-        ..AgentContext::default()
-    };
-
-    let remote = remote_parent_context(&agent_ctx).expect("valid remote trace context");
-    let span_context = remote.span().span_context().clone();
-
-    assert!(span_context.is_remote());
-    assert_eq!(
-        span_context.trace_id().to_string(),
-        "4bf92f3577b34da6a3ce929d0e0e4736"
-    );
-    assert_eq!(span_context.span_id().to_string(), "00f067aa0ba902b7");
-}
-
-#[test]
 fn service_context_inherits_workflow_trace_context() {
     let parent = AgentContext {
         session_id: Some("ss-1".to_string()),
@@ -145,7 +126,9 @@ fn service_context_inherits_workflow_trace_context() {
         workflow_root_entity_type: Some("CurationJob".to_string()),
         workflow_root_entity_id: Some("job-1".to_string()),
         workflow_run_id: Some("wf-job-1".to_string()),
-        idempotency_key: Some("parent-key".to_string()),
+        idempotency_key: Some(crate::idempotency::IdempotencyKey::Request(
+            "parent-key".to_string(),
+        )),
         ..AgentContext::default()
     };
 
@@ -296,4 +279,72 @@ fn the_callers_sampling_and_tracestate_reach_the_server_span() {
         headers.insert("traceparent", invalid.parse().unwrap());
         assert!(remote_parent_from_headers(&headers).is_none(), "{invalid}");
     }
+}
+
+/// Tensorlake's sandbox ingress keeps the trace id but puts its own span, which
+/// never reaches us, into `traceparent`. The caller's copy still names the
+/// caller's span, so that is the server span's parent; an unusable copy is
+/// ignored.
+#[test]
+fn a_proxy_that_rewrites_traceparent_does_not_take_the_callers_place() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "traceparent",
+        "00-4bf92f3577b34da6a3ce929d0e0e4736-717c1ab7e810efc1-01"
+            .parse()
+            .unwrap(),
+    );
+    headers.insert(
+        temper_observe::otel::TRACEPARENT_COPY,
+        "00-4bf92f3577b34da6a3ce929d0e0e4736-25fa1b2dffb9af95-01"
+            .parse()
+            .unwrap(),
+    );
+    let remote = remote_parent_from_headers(&headers).expect("a valid copy");
+    assert_eq!(
+        remote.span().span_context().span_id().to_string(),
+        "25fa1b2dffb9af95",
+        "the caller's span, not the proxy's"
+    );
+
+    headers.insert(
+        temper_observe::otel::TRACEPARENT_COPY,
+        "not-a-traceparent".parse().unwrap(),
+    );
+    let remote = remote_parent_from_headers(&headers).expect("traceparent still serves");
+    assert_eq!(
+        remote.span().span_context().span_id().to_string(),
+        "717c1ab7e810efc1"
+    );
+}
+
+/// Behind a proxy that always rewrites `traceparent`, only the caller's copy
+/// names a parent: a request without one (a page's poll, a background call)
+/// starts its own trace instead of hanging from the proxy's span.
+#[test]
+fn a_temper_that_trusts_only_the_copy_ignores_a_bare_traceparent() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "traceparent",
+        "00-4bf92f3577b34da6a3ce929d0e0e4736-717c1ab7e810efc1-01"
+            .parse()
+            .unwrap(),
+    );
+    assert!(
+        remote_parent_from_trusted_headers(&headers, false).is_none(),
+        "the proxy's span is no parent"
+    );
+    assert!(remote_parent_from_trusted_headers(&headers, true).is_some());
+
+    headers.insert(
+        temper_observe::otel::TRACEPARENT_COPY,
+        "00-4bf92f3577b34da6a3ce929d0e0e4736-25fa1b2dffb9af95-01"
+            .parse()
+            .unwrap(),
+    );
+    let remote = remote_parent_from_trusted_headers(&headers, false).expect("the copy");
+    assert_eq!(
+        remote.span().span_context().span_id().to_string(),
+        "25fa1b2dffb9af95"
+    );
 }

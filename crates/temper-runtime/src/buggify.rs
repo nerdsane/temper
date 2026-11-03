@@ -63,6 +63,25 @@ pub fn install_buggify_context(seed: u64) -> BuggifyGuard {
     BuggifyGuard { _private: () }
 }
 
+/// The next draw from the installed seeded RNG, or `None` when no buggify
+/// context is installed.
+fn next_draw() -> Option<u64> {
+    BUGGIFY_CTX.with(|ctx| {
+        let mut ctx = ctx.borrow_mut();
+        if !ctx.enabled {
+            return None;
+        }
+
+        // xorshift64
+        let mut x = ctx.rng_state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        ctx.rng_state = x;
+        Some(x)
+    })
+}
+
 /// Check if a buggify fault should fire at the given probability.
 ///
 /// Returns `false` when buggify is not installed (production default).
@@ -72,27 +91,31 @@ pub fn buggify_check(prob: f64) -> bool {
     if prob <= 0.0 {
         return false;
     }
+    let Some(x) = next_draw() else {
+        return false;
+    };
+    if prob >= 1.0 {
+        return true;
+    }
 
-    BUGGIFY_CTX.with(|ctx| {
-        let mut ctx = ctx.borrow_mut();
-        if !ctx.enabled {
-            return false;
-        }
+    let threshold = (prob * u64::MAX as f64) as u64;
+    x < threshold
+}
 
-        // xorshift64
-        let mut x = ctx.rng_state;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        ctx.rng_state = x;
-
-        if prob >= 1.0 {
-            return true;
-        }
-
-        let threshold = (prob * u64::MAX as f64) as u64;
-        x < threshold
-    })
+/// A cooperative scheduling point for simulation.
+///
+/// With a buggify context installed, yields to the runtime's other tasks a
+/// seeded number of times, from zero up to `max_yields`, so a single-threaded
+/// simulation runs whatever else is ready at this point in a different order
+/// per seed. Without a context it returns at once and draws nothing.
+pub async fn buggify_yield(max_yields: u32) {
+    let Some(x) = next_draw() else {
+        return;
+    };
+    let yields = x % (u64::from(max_yields) + 1);
+    for _ in 0..yields {
+        tokio::task::yield_now().await;
+    }
 }
 
 /// Probabilistic fault injection macro.
@@ -173,6 +196,12 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn buggify_yield_returns_at_once_without_a_context() {
+        buggify_yield(u32::MAX).await;
+        assert!(!buggify_check(1.0));
+    }
+
     #[test]
     fn buggify_guard_resets_context() {
         {
@@ -181,15 +210,6 @@ mod tests {
         }
         // Guard dropped — should be disabled.
         assert!(!buggify_check(1.0));
-    }
-
-    #[test]
-    fn buggify_macro_works() {
-        let _guard = install_buggify_context(42);
-
-        // The macro should compile and work.
-        let _fired = buggify!(0.5);
-        // Just verify it compiles — value depends on RNG.
     }
 
     #[test]

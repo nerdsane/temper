@@ -4,9 +4,7 @@ use super::*;
 fn name_the_server_already_set_keeps_its_value() {
     let vault = test_vault();
     // What start-up does for ANTHROPIC_API_KEY before the prefixed variables.
-    vault
-        .cache_platform_secret("anthropic_api_key", "from-fixed-variable".to_string())
-        .expect("platform secret cached");
+    vault.cache_platform_secret("anthropic_api_key", "from-fixed-variable".to_string());
 
     let (report, log) = seed_with_log(
         &vault,
@@ -57,14 +55,10 @@ fn stored_tenant_secret_wins_over_a_seeded_one_for_that_tenant_only() {
     let vault = test_vault();
     // tenant-a stored its own build_token before the server started;
     // tenant-b stores one after.
-    vault
-        .cache_secret("tenant-a", "build_token", "stored-by-a".to_string())
-        .expect("tenant secret cached");
+    vault.cache_secret("tenant-a", "build_token", "stored-by-a".to_string());
 
     seed_platform_secrets_from_environment(&vault, vars(&[("TEMPER_SECRET_BUILD_TOKEN", "abc")]));
-    vault
-        .cache_secret("tenant-b", "build_token", "stored-by-b".to_string())
-        .expect("tenant secret cached");
+    vault.cache_secret("tenant-b", "build_token", "stored-by-b".to_string());
 
     assert_eq!(
         vault.get_secret("tenant-a", "build_token"),
@@ -93,32 +87,22 @@ fn stored_tenant_secret_wins_over_a_seeded_one_for_that_tenant_only() {
 }
 
 #[test]
-fn variables_over_the_platform_budget_are_skipped_in_name_order() {
+fn every_variable_is_seeded_in_name_order() {
     let vault = test_vault();
-    let budget = crate::secrets::vault::MAX_SECRETS_PER_TENANT;
-    // Listed in reverse, to show the outcome follows the names and not the
-    // order the environment lists them in.
-    let variables: Vec<(OsString, OsString)> = (0..budget + 2)
+    // Past the 100 the platform layer used to hold, so the 101st and 102nd
+    // used to be skipped. Listed in reverse, to show the outcome follows the
+    // names and not the order the environment lists them in.
+    let count = 102;
+    let variables: Vec<(OsString, OsString)> = (0..count)
         .rev()
         .flat_map(|i| vars(&[(format!("TEMPER_SECRET_KEY_{i:03}").as_str(), "abc")]))
         .collect();
 
     let report = seed_platform_secrets_from_environment(&vault, variables);
 
-    assert_eq!(report.seeded.len(), budget);
+    assert_eq!(report.seeded.len(), count);
     assert_eq!(report.seeded.first().map(String::as_str), Some("key_000"));
-    assert_eq!(
-        report.skipped,
-        vec![
-            (
-                format!("TEMPER_SECRET_KEY_{budget:03}"),
-                EnvironmentSecretSkip::BudgetExhausted
-            ),
-            (
-                format!("TEMPER_SECRET_KEY_{:03}", budget + 1),
-                EnvironmentSecretSkip::BudgetExhausted
-            ),
-        ]
-    );
-    assert_eq!(vault.get_platform_secrets().len(), budget);
+    assert_eq!(report.seeded.last().map(String::as_str), Some("key_101"));
+    assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+    assert_eq!(vault.get_platform_secrets().len(), count);
 }

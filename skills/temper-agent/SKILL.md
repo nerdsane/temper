@@ -563,7 +563,7 @@ hint = "Description."   # optional
 # Name an explicit service to elevate (must match a registered AgentType).
 [[action.triggers]]
 name = "trigger_name"
-kind = "entity"               # "entity" | "wasm" | "adapter" | "webhook" | "hook"
+kind = "entity"               # "entity" | "wasm" | "adapter" | "hook"
 principal = "my-service"      # optional elevation
 guard = "status == 'State2'"  # optional; reads the entity after the action
 target_entity = "OtherEntity"
@@ -632,9 +632,9 @@ config = { url = "https://wttr.in/{city}?format=j1", method = "GET" }
 
 Callback actions receive `{"status_code": "200", "body": "..."}` as params.
 
-#### `kind = "webhook"` — outbound HTTP (parse-only today)
+#### `kind = "webhook"`: refused at load
 
-Currently parsed and expanded but **no runtime dispatcher matches it**. Until the webhook dispatcher lands, use `kind = "wasm"` with the `http_fetch` module instead.
+No dispatcher sends it, so a spec that declares one fails to load with a message saying so (ADR-0182). Make outbound HTTP calls with `kind = "wasm"` and the `http_fetch` module.
 
 #### `kind = "adapter"` — native platform adapter
 

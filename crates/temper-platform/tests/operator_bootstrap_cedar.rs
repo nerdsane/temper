@@ -2,7 +2,8 @@
 //!
 //! Proves a virgin store's verified operator can manage Cedar, that
 //! unverified / non-operator principals stay denied, that re-bootstrap is
-//! idempotent, and that OS-app Cedar still loads.
+//! idempotent, that OS-app Cedar still loads, and that the sole holder of a
+//! new operator key retires the credential an earlier boot issued.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -10,14 +11,16 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use serde_json::json;
 use temper_authz::{AuthzDecision, SecurityContext};
-use temper_platform::bootstrap::{bootstrap_agent_specs, bootstrap_operator_credential};
+use temper_platform::bootstrap::{
+    bootstrap_agent_specs, bootstrap_operator_credential, retire_other_operator_credentials,
+};
 use temper_platform::install_os_app;
 use temper_platform::recovery::recover_cedar_policies;
 use temper_platform::router::build_platform_router;
 use temper_platform::state::PlatformState;
 use temper_runtime::tenant::TenantId;
 use temper_server::StorageStack;
-use temper_server::identity::hash_token;
+use temper_server::identity::{IdentityResolver, hash_token};
 use temper_server::request_context::AgentContext;
 use temper_server::state::PendingDecision;
 use temper_store_turso::TursoEventStore;
@@ -351,6 +354,38 @@ async fn recovered_granular_row_still_allows_verified_operator() {
     );
 }
 
+/// The operator key reads its tenant's installs (`read_app_installs`), which
+/// is how Katagami finds the folder an app is served from; a developer key
+/// does not.
+#[tokio::test]
+async fn http_app_installs_read_allows_operator_and_denies_developer() {
+    let tenant = "acme";
+    let (state, _temp) = virgin_state_with_store(tenant).await;
+    bootstrap_operator_credential(&state, OPERATOR_KEY, tenant)
+        .await
+        .expect("operator credential bootstrap should succeed");
+    issue_developer_credential(&state, tenant, DEVELOPER_KEY).await;
+    let app = build_platform_router(state);
+
+    for (key, expected) in [
+        (OPERATOR_KEY, StatusCode::OK),
+        (DEVELOPER_KEY, StatusCode::FORBIDDEN),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/api/genesis/apps/installs")
+                    .header("Authorization", format!("Bearer {key}"))
+                    .header("X-Tenant-Id", tenant)
+                    .body(Body::empty())
+                    .expect("GET installs"),
+            )
+            .await
+            .expect("GET installs should run");
+        assert_eq!(response.status(), expected, "{key}");
+    }
+}
+
 #[tokio::test]
 async fn http_policy_api_allows_operator_and_denies_developer() {
     let tenant = "acme";
@@ -541,6 +576,118 @@ async fn denied_developer_cannot_self_approve_operator_can() {
             .unwrap_or_default()
             .contains(r#"Action::"Assign""#),
         "{approved}"
+    );
+}
+
+/// A boot with a new operator key (a new key over restored data, or a
+/// rotation) leaves the old key's credential live, as it always has: another
+/// holder may still use it. A deployment that is the sole holder of its key
+/// retires it (`retire_other_operator_credentials`, behind
+/// `TEMPER_RETIRE_OLD_OPERATOR_KEYS`), so the old key loses its authority.
+/// Credentials issued through the API stay, and the current key keeps working.
+#[tokio::test]
+async fn the_sole_holder_of_a_new_operator_key_retires_the_old_keys_credential() {
+    const OLD_KEY: &str = "tmpr_operator-before-the-volume-was-lost";
+    const NEW_KEY: &str = "tmpr_operator-made-at-the-next-start";
+    let tenant = "default";
+    let tenant_id = TenantId::new(tenant);
+    let state = virgin_state(tenant);
+    let resolver = IdentityResolver::new();
+    let resolves = |key: &'static str| {
+        let (resolver, state, tenant_id) = (&resolver, &state, &tenant_id);
+        async move {
+            resolver
+                .resolve(&state.server, tenant_id, key)
+                .await
+                .is_ok()
+        }
+    };
+
+    bootstrap_operator_credential(&state, OLD_KEY, tenant)
+        .await
+        .expect("first boot");
+    issue_developer_credential(&state, tenant, DEVELOPER_KEY).await;
+    bootstrap_operator_credential(&state, NEW_KEY, tenant)
+        .await
+        .expect("boot with a new key");
+    assert!(
+        resolves(OLD_KEY).await && resolves(NEW_KEY).await,
+        "a boot alone keeps both: another holder may use the old key"
+    );
+
+    assert_eq!(
+        retire_other_operator_credentials(&state, NEW_KEY, tenant).await,
+        1
+    );
+    assert!(resolves(NEW_KEY).await, "the current key is the operator");
+    assert!(!resolves(OLD_KEY).await, "the old key no longer works");
+    let old = state
+        .server
+        .get_tenant_entity_state(&tenant_id, "AgentCredential", &hash_token(OLD_KEY))
+        .await
+        .expect("old credential");
+    assert_eq!(old.state.status, "Revoked");
+    assert!(
+        resolves(DEVELOPER_KEY).await,
+        "a credential issued through the API is not a boot's to retire"
+    );
+    assert_eq!(
+        retire_other_operator_credentials(&state, NEW_KEY, tenant).await,
+        0,
+        "nothing more the next time"
+    );
+}
+
+/// The same over a restart: a new server over the store an earlier one wrote
+/// (an app's Temper restored from Turso with a new key) finds the old key's
+/// credential in the store and retires it.
+#[tokio::test]
+async fn a_restart_with_a_new_operator_key_retires_the_old_keys_credential_from_the_store() {
+    const OLD_KEY: &str = "tmpr_operator-written-to-the-store";
+    const NEW_KEY: &str = "tmpr_operator-after-the-restart";
+    let tenant = "default";
+    let tenant_id = TenantId::new(tenant);
+    let temp = tempfile::tempdir().expect("temp db");
+    let db_url = format!("file:{}", temp.path().join("operator.db").display());
+    let boot = |key: &'static str| {
+        let db_url = db_url.clone();
+        async move {
+            let store = TursoEventStore::new(&db_url, None).await.expect("store");
+            let mut state = virgin_state(tenant);
+            state
+                .server
+                .set_storage_stack(StorageStack::from_turso(store));
+            bootstrap_operator_credential(&state, key, tenant)
+                .await
+                .expect("boot");
+            state
+        }
+    };
+    drop(boot(OLD_KEY).await);
+    let state = boot(NEW_KEY).await;
+    let resolver = IdentityResolver::new();
+    assert!(
+        resolver
+            .resolve(&state.server, &tenant_id, OLD_KEY)
+            .await
+            .is_ok(),
+        "without retiring, the old key still works after the restart"
+    );
+    assert_eq!(
+        retire_other_operator_credentials(&state, NEW_KEY, tenant).await,
+        1
+    );
+    assert!(
+        resolver
+            .resolve(&state.server, &tenant_id, OLD_KEY)
+            .await
+            .is_err()
+    );
+    assert!(
+        resolver
+            .resolve(&state.server, &tenant_id, NEW_KEY)
+            .await
+            .is_ok()
     );
 }
 

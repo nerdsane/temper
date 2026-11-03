@@ -183,12 +183,18 @@ async fn exchange(state: &ServerState, request: NativeRequest, config: NativeEnd
             .into_response();
         }
     };
-    let admitted =
-        match super::admission::admit(state, &authenticated, &matched.params, config.actions).await
-        {
-            Ok(admitted) => admitted,
-            Err(response) => return response,
-        };
+    let admitted = match super::admission::admit(
+        state,
+        &authenticated,
+        &matched.route.id,
+        &matched.params,
+        config.actions,
+    )
+    .await
+    {
+        Ok(admitted) => admitted,
+        Err(response) => return response,
+    };
     // Prefix matching consumes one concrete segment per template segment.
     let segments = matched
         .route

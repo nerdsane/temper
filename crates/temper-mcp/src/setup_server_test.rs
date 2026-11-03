@@ -27,6 +27,7 @@ async fn human_setup_provisions_distinct_identity_on_real_temper() {
     bootstrap_operator_credential(&platform, "fixture-operator-key", "default")
         .await
         .unwrap();
+    register_order_spec(&platform);
     let router = temper_platform::router::build_platform_router(platform);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -109,6 +110,40 @@ async fn human_setup_provisions_distinct_identity_on_real_temper() {
     let _ = std::fs::remove_dir_all(directory);
 }
 
+/// The test-fixture Order type in tenant "default", verified, beside the
+/// identity specs: an ordinary app entity for the governance probe.
+fn register_order_spec(platform: &PlatformState) {
+    use temper_server::registry::{EntityLevelSummary, EntityVerificationResult};
+    const ORDER_CSDL: &str = include_str!("../../../test-fixtures/specs/model.csdl.xml");
+    const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
+    let tenant = temper_runtime::tenant::TenantId::new("default");
+    let mut registry = platform.registry.write().unwrap();
+    registry
+        .try_register_tenant_with_constraints(
+            tenant.clone(),
+            temper_spec::csdl::parse_csdl(ORDER_CSDL).unwrap(),
+            ORDER_CSDL.to_string(),
+            &[("Order", ORDER_IOA)],
+            None,
+            true,
+        )
+        .unwrap();
+    registry.set_verification_status(
+        &tenant,
+        "Order",
+        temper_server::registry::VerificationStatus::Completed(EntityVerificationResult {
+            all_passed: true,
+            levels: vec![EntityLevelSummary {
+                level: "MCP fixture".to_string(),
+                passed: true,
+                summary: "Pre-verified for the setup flow test".to_string(),
+                details: None,
+            }],
+            verified_at: "2026-10-23T00:00:00Z".to_string(),
+        }),
+    );
+}
+
 async fn prove_governance_flow(
     ctx: &mut RuntimeContext,
     rx: &mut tokio::sync::mpsc::Receiver<Value>,
@@ -116,7 +151,9 @@ async fn prove_governance_flow(
 ) {
     // Exercise the ordinary denial -> native response -> operator resolution
     // flow after setup. Responses below are isolated test-client fixtures.
-    let code = "return await temper.create('default', 'AgentTypes', {'id':'setup-flow-probe'})";
+    // The probe is an app entity: agent identity records are the platform's to
+    // write, so no tenant grant, approved or not, opens them to the requester.
+    let code = "return await temper.create('default', 'Orders', {'id':'setup-flow-probe'})";
     let (denied_result, denials) = ctx.run_execute(code).await;
     assert_eq!(denials.len(), 1);
     let approve_path = format!(

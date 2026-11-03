@@ -369,6 +369,7 @@ impl ServerState {
             workflow_root_entity_id: agent_ctx.workflow_root_entity_id.clone(),
             workflow_run_id: agent_ctx.workflow_run_id.clone(),
             http_request: None,
+            trigger_principal: None,
         };
 
         let security_ctx = agent_ctx.security_ctx.as_ref().ok_or_else(|| {
@@ -400,11 +401,36 @@ impl ServerState {
                 });
         }
 
+        // The adapter says what it stored; the File records the hash and size of the bytes this server was sent,
+        // and an adapter that names other bytes is refused.
+        let mut params = wasm_result.callback_params;
+        let (content_hash, _) = content_hash_and_native_blob_key(body);
+        if let Some(fields) = params.as_object_mut()
+            && wasm_result.callback_action.rsplit('.').next() == Some("StreamUpdated")
+        {
+            match fields.get("content_hash").and_then(|hash| hash.as_str()) {
+                Some(said) if !said.is_empty() && said != content_hash => {
+                    return Err(FileStreamContentError::Wasm(format!(
+                        "blob_adapter said content_hash '{said}' for bytes whose hash is '{content_hash}'"
+                    )));
+                }
+                _ => {
+                    fields.insert(
+                        "content_hash".to_string(),
+                        serde_json::Value::String(content_hash),
+                    );
+                }
+            }
+            fields.insert(
+                "size_bytes".to_string(),
+                serde_json::json!(body.len() as u64),
+            );
+        }
         self.dispatch_file_stream_action(FileStreamAction {
             tenant,
             file_id,
             action: &wasm_result.callback_action,
-            params: wasm_result.callback_params,
+            params,
             agent_ctx,
             await_reactions: true,
             expected_authorization_precondition,
@@ -435,6 +461,8 @@ impl ServerState {
                         await_integration: options.await_integration,
                         await_reactions: options.await_reactions,
                     },
+                    // The file module's callback action, a kernel follow-on.
+                    crate::state::write_record::WriteCaller::Kernel,
                     expected,
                 )
                 .await

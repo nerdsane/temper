@@ -16,30 +16,8 @@ use temper_server::registry::VerificationStatus;
 use crate::os_apps;
 use crate::state::PlatformState;
 
-/// Runtime-only outcome for installed-app warm restart recovery.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InstalledAppRuntimeRecoveryOutcome {
-    /// Specs were already registered and marked usable.
-    Ready,
-    /// Specs were registered and the durable bundle digest matched; runtime
-    /// verification readiness was repaired without reinstalling app content.
-    Healed,
-    /// The app should be reconciled by the digest-aware app reconcile path.
-    NeedsReconcile,
-    /// The durable installed-app row points at an app that is not in the catalog.
-    MissingBundle,
-    /// Durable metadata could not be read, so the caller should reconcile.
-    StoreError,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct InstalledAppsRuntimeRecoverySummary {
-    pub ready: usize,
-    pub healed: usize,
-    pub needs_reconcile: usize,
-    pub missing_bundle: usize,
-    pub store_error: usize,
-}
+mod summary;
+pub use summary::{InstalledAppRuntimeRecoveryOutcome, InstalledAppsRuntimeRecoverySummary};
 
 /// Recover Cedar policies from the platform store into memory.
 ///
@@ -176,10 +154,10 @@ fn push_unique_cedar_text(
 ///
 /// Reads the durable `tenant_installed_apps` table and reinstalls any
 /// apps whose specs are not already present in the SpecRegistry.
-/// Uses the production [`os_apps::install_os_app`] code path — no shortcuts.
+/// Uses the production installer through [`os_apps::restore_os_app`], which
+/// keeps each stored record's origin. It takes no shortcuts.
 ///
-/// This is the **production code path** — identical logic runs at CLI boot
-/// (Phase 8b) and during DST restart simulation.
+/// The DST restart harness runs this; `temper serve` replays each app itself.
 pub async fn restore_installed_apps(state: &PlatformState, ps: &dyn PlatformStore) {
     let installed = match ps.list_all_installed_apps().await {
         Ok(apps) => apps,
@@ -188,7 +166,7 @@ pub async fn restore_installed_apps(state: &PlatformState, ps: &dyn PlatformStor
             return;
         }
     };
-
+    os_apps::converge_installed_schemas(state, &installed).await;
     for (tenant, app_name) in installed {
         match recover_installed_app_runtime_state(state, ps, &tenant, &app_name).await {
             InstalledAppRuntimeRecoveryOutcome::Ready => {
@@ -216,7 +194,7 @@ pub async fn restore_installed_apps(state: &PlatformState, ps: &dyn PlatformStor
             continue;
         }
 
-        match os_apps::install_os_app(state, &tenant, &app_name).await {
+        match os_apps::restore_os_app(state, &tenant, &app_name).await {
             Ok(result) => {
                 let all: Vec<String> = result
                     .added
@@ -231,7 +209,7 @@ pub async fn restore_installed_apps(state: &PlatformState, ps: &dyn PlatformStor
                 );
             }
             Err(e) => {
-                tracing::warn!("Failed to restore app '{app_name}' for '{tenant}': {e}");
+                tracing::error!("Stored app '{app_name}' for '{tenant}' was not restored: {e}");
             }
         }
     }
@@ -250,7 +228,7 @@ pub async fn recover_installed_app_runtime_state(
     tenant: &str,
     app_name: &str,
 ) -> InstalledAppRuntimeRecoveryOutcome {
-    let Some(bundle) = os_apps::get_os_app(app_name) else {
+    let Some(bundle) = os_apps::tenant_os_app(tenant, app_name) else {
         tracing::warn!(
             tenant,
             app = %app_name,
@@ -267,7 +245,7 @@ pub async fn recover_installed_app_runtime_state(
         return InstalledAppRuntimeRecoveryOutcome::Ready;
     }
 
-    let Some(digest) = os_apps::os_app_bundle_digest(app_name) else {
+    let Some(digest) = os_apps::tenant_os_app_bundle_digest(tenant, app_name) else {
         return InstalledAppRuntimeRecoveryOutcome::MissingBundle;
     };
 
@@ -313,7 +291,7 @@ pub async fn recover_installed_apps_runtime_state(
             };
         }
     };
-
+    os_apps::converge_installed_schemas(state, &installed).await;
     let mut summary = InstalledAppsRuntimeRecoverySummary::default();
     for (tenant, app_name) in installed {
         match recover_installed_app_runtime_state(state, ps, &tenant, &app_name).await {
@@ -324,12 +302,13 @@ pub async fn recover_installed_apps_runtime_state(
             InstalledAppRuntimeRecoveryOutcome::StoreError => summary.store_error += 1,
         }
     }
+    summary.report();
     summary
 }
 
 /// Check if all entity types for an app are already registered.
 fn tenant_has_ready_app_specs(state: &PlatformState, tenant: &str, app_name: &str) -> bool {
-    let Some(bundle) = os_apps::get_os_app(app_name) else {
+    let Some(bundle) = os_apps::tenant_os_app(tenant, app_name) else {
         return false;
     };
     let tenant_id = TenantId::new(tenant);
@@ -391,14 +370,17 @@ permit(
             "id".to_string(),
             serde_json::json!("__trigger__:Submit:build_session_message"),
         );
-        resource_attrs.insert(
-            "module".to_string(),
+        // The WASM gate sets the calling module on the context.
+        let mut module_ctx =
+            SecurityContext::from_resolved_identity("wasm-module", "wasm_module", None);
+        module_ctx.context_attrs.insert(
+            temper_authz::platform_keys::MODULE.to_string(),
             serde_json::json!("build_session_message"),
         );
 
         let decision = state.server.authz.authorize_for_tenant(
             "default",
-            &SecurityContext::from_resolved_identity("wasm-module", "wasm_module", None),
+            &module_ctx,
             "http_call",
             "HttpEndpoint",
             &resource_attrs,

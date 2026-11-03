@@ -173,54 +173,55 @@ fn allow_gate_delegates_evaluate_spec() {
 }
 
 #[test]
-fn logging_always_allowed() {
-    let inner = Arc::new(SimWasmHost::new());
-    let gate = Arc::new(DenyAllGate);
-    let host = AuthorizedWasmHost::new(inner, gate, test_ctx());
-    // Should not panic
-    host.log("info", "test message");
-}
-
-#[test]
 fn extract_domain_https() {
     assert_eq!(
-        extract_domain("https://api.stripe.com/v1/charges"),
-        "api.stripe.com"
+        extract_domain("https://api.stripe.com/v1/charges").as_deref(),
+        Some("api.stripe.com")
     );
 }
 
 #[test]
 fn extract_domain_http() {
-    assert_eq!(extract_domain("http://localhost:8080/api"), "localhost");
+    assert_eq!(
+        extract_domain("http://localhost:8080/api").as_deref(),
+        Some("localhost")
+    );
 }
 
 #[test]
 fn extract_domain_with_port() {
     assert_eq!(
-        extract_domain("https://example.com:443/path"),
-        "example.com"
+        extract_domain("https://example.com:443/path").as_deref(),
+        Some("example.com")
     );
 }
 
 #[test]
-fn extract_domain_no_scheme() {
-    assert_eq!(extract_domain("api.stripe.com/path"), "api.stripe.com");
+fn extract_domain_refuses_a_url_without_a_scheme() {
+    assert_eq!(extract_domain("api.stripe.com/path"), None);
 }
 
 #[test]
 fn extract_domain_bare() {
-    assert_eq!(extract_domain("https://example.com"), "example.com");
+    assert_eq!(
+        extract_domain("https://example.com").as_deref(),
+        Some("example.com")
+    );
 }
 
 #[test]
 fn extract_domain_ip() {
-    assert_eq!(extract_domain("http://127.0.0.1:3000/api"), "127.0.0.1");
+    assert_eq!(
+        extract_domain("http://127.0.0.1:3000/api").as_deref(),
+        Some("127.0.0.1")
+    );
 }
 
 #[test]
-fn extract_domain_strips_userinfo() {
+fn extract_domain_refuses_userinfo() {
     assert_eq!(
         extract_domain("https://attacker:pass@localhost/exploit"),
-        "localhost"
+        None
     );
+    assert_eq!(extract_domain("https://localhost@api.stripe.com/"), None);
 }

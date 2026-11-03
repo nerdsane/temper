@@ -80,6 +80,8 @@ assert = "status in ['Active'] => issue_count > 0"
 # --- Liveness ---
 
 [[liveness]]
-name = "CycleEventuallyCompletes"
+# A planning cycle can always still complete. Not `reaches`: nothing makes
+# a cycle start, and SetProject can be sent forever while it plans.
+name = "CycleCanComplete"
 from = ["Planning"]
-reaches = ["Completed"]
+can_reach = ["Completed"]

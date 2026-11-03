@@ -39,6 +39,32 @@ pub fn odata_error(status: StatusCode, code: &str, message: &str) -> ODataRespon
     }
 }
 
+/// An action refusal: `message` as callers read it, and the typed reason
+/// beside it in the error object. A typed refusal names its own code (such as
+/// `GuardFailed`); without one the refusal answers with `code`.
+pub fn odata_refusal(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+    refusal: Option<&temper_jit::table::Refusal>,
+) -> ODataResponse {
+    let mut response = odata_error(status, code, message);
+    if let Some(refusal) = refusal {
+        merge_refusal(&mut response.body["error"], refusal);
+    }
+    response
+}
+
+/// Write `refusal`'s code and fields into a JSON object, beside its message.
+pub fn merge_refusal(target: &mut serde_json::Value, refusal: &temper_jit::table::Refusal) {
+    let (Some(target), Ok(serde_json::Value::Object(fields))) =
+        (target.as_object_mut(), serde_json::to_value(refusal))
+    else {
+        return;
+    };
+    target.extend(fields);
+}
+
 /// A resumable authorization denial with an authoritative decision identifier.
 pub fn odata_denial(message: &str, decision_id: &str) -> ODataResponse {
     let mut response = odata_error(StatusCode::FORBIDDEN, "AuthorizationDenied", message);

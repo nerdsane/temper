@@ -6,6 +6,11 @@ use temper_runtime::ActorSystem;
 
 const ORDER_IOA: &str = include_str!("../../../../test-fixtures/specs/order.ioa.toml");
 
+/// Whether `answer` refuses a write decided on a state its record has left.
+fn record_changed(answer: &EntityResponse) -> bool {
+    answer.refused && answer.refusal.as_ref().map(|refusal| refusal.code()) == Some("RecordChanged")
+}
+
 fn order_table() -> Arc<RwLock<TransitionTable>> {
     Arc::new(RwLock::new(TransitionTable::from_ioa_source(ORDER_IOA)))
 }
@@ -54,7 +59,9 @@ fn event_budget_workspace_id_uses_workspace_entity_id_or_field() {
         last_snapshot_sequence_nr: 0,
         sequence_nr: 0,
         processed_idempotency_keys: BTreeMap::new(),
+        last_event: Default::default(),
         status_clock: Default::default(),
+        spawn_reservations: Default::default(),
     };
     assert_eq!(event_budget_workspace_id(&workspace_state), "ws-1");
 
@@ -73,7 +80,9 @@ fn event_budget_workspace_id_uses_workspace_entity_id_or_field() {
         last_snapshot_sequence_nr: 0,
         sequence_nr: 0,
         processed_idempotency_keys: BTreeMap::new(),
+        last_event: Default::default(),
         status_clock: Default::default(),
+        spawn_reservations: Default::default(),
     };
     assert_eq!(event_budget_workspace_id(&file_state), "ws-2");
 }
@@ -105,7 +114,9 @@ async fn queued_snapshot_only_advances_replay_boundary_after_write_applies() {
         last_snapshot_sequence_nr: 0,
         sequence_nr: 100,
         processed_idempotency_keys: BTreeMap::new(),
+        last_event: Default::default(),
         status_clock: Default::default(),
+        spawn_reservations: Default::default(),
     };
 
     EntityActor::maybe_save_snapshot(
@@ -190,6 +201,7 @@ async fn dst_update_fields_preserves_runtime_owned_field_authority() {
         let response: EntityResponse = actor_ref
             .ask(
                 EntityMsg::UpdateFields {
+                    caller: None,
                     fields: serde_json::json!({
                         "Id": "forged-update",
                         "id": "forged-update",
@@ -244,6 +256,7 @@ async fn dst_update_fields_rejects_stale_authorization_without_a_journal() {
     let concurrent: EntityResponse = actor_ref
         .ask(
             EntityMsg::UpdateFields {
+                caller: None,
                 fields: serde_json::json!({"Owner": "mallory"}),
                 replace: false,
                 expected_precondition: None,
@@ -258,6 +271,7 @@ async fn dst_update_fields_rejects_stale_authorization_without_a_journal() {
     let stale: EntityResponse = actor_ref
         .ask(
             EntityMsg::UpdateFields {
+                caller: None,
                 fields: serde_json::json!({"Secret": "forged"}),
                 replace: false,
                 expected_precondition: Some(expected),
@@ -275,6 +289,7 @@ async fn dst_update_fields_rejects_stale_authorization_without_a_journal() {
     let fresh: EntityResponse = actor_ref
         .ask(
             EntityMsg::UpdateFields {
+                caller: None,
                 fields: serde_json::json!({"Label": "authorized"}),
                 replace: false,
                 expected_precondition: Some(fresh_precondition),
@@ -291,6 +306,7 @@ async fn dst_update_fields_rejects_stale_authorization_without_a_journal() {
     let cancelled: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: "CancelOrder".to_string(),
                 params: serde_json::json!({"Reason": "test"}),
                 related: BTreeMap::new(),
@@ -308,6 +324,7 @@ async fn dst_update_fields_rejects_stale_authorization_without_a_journal() {
     let stale_status: EntityResponse = actor_ref
         .ask(
             EntityMsg::UpdateFields {
+                caller: None,
                 fields: serde_json::json!({"Secret": "still-forged"}),
                 replace: false,
                 expected_precondition: Some(before_status_change),
@@ -322,6 +339,7 @@ async fn dst_update_fields_rejects_stale_authorization_without_a_journal() {
     let deleted: EntityResponse = actor_ref
         .ask(
             EntityMsg::Delete {
+                caller: None,
                 expected_authorization_precondition: None,
             },
             Duration::from_secs(1),
@@ -332,6 +350,7 @@ async fn dst_update_fields_rejects_stale_authorization_without_a_journal() {
     let after_delete: EntityResponse = actor_ref
         .ask(
             EntityMsg::UpdateFields {
+                caller: None,
                 fields: serde_json::json!({"Secret": "post-delete"}),
                 replace: false,
                 expected_precondition: None,
@@ -365,6 +384,7 @@ async fn dst_action_rejects_stale_authorization_but_allows_idempotent_reply() {
     let concurrent: EntityResponse = actor_ref
         .ask(
             EntityMsg::UpdateFields {
+                caller: None,
                 fields: serde_json::json!({"Owner": "mallory"}),
                 replace: false,
                 expected_precondition: None,
@@ -376,6 +396,7 @@ async fn dst_action_rejects_stale_authorization_but_allows_idempotent_reply() {
     let stale_delete: EntityResponse = actor_ref
         .ask(
             EntityMsg::Delete {
+                caller: None,
                 expected_authorization_precondition: Some(stale_precondition.clone()),
             },
             Duration::from_secs(1),
@@ -383,15 +404,19 @@ async fn dst_action_rejects_stale_authorization_but_allows_idempotent_reply() {
         .await
         .expect("stale delete response");
     assert!(!stale_delete.success);
+    assert!(record_changed(&stale_delete), "{stale_delete:?}");
     assert_eq!(stale_delete.state.status, "Draft");
 
     let stale: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: "CancelOrder".to_string(),
                 params: serde_json::json!({"Reason": "stale"}),
                 related: BTreeMap::new(),
-                idempotency_key: Some("cancel-request".to_string()),
+                idempotency_key: Some(crate::idempotency::IdempotencyKey::Request(
+                    "cancel-request".to_string(),
+                )),
                 expected_authorization_precondition: Some(stale_precondition),
             },
             Duration::from_secs(1),
@@ -399,6 +424,7 @@ async fn dst_action_rejects_stale_authorization_but_allows_idempotent_reply() {
         .await
         .expect("stale action response");
     assert!(!stale.success);
+    assert!(record_changed(&stale), "{stale:?}");
     assert_eq!(stale.state.status, "Draft");
 
     let fresh_precondition =
@@ -406,10 +432,13 @@ async fn dst_action_rejects_stale_authorization_but_allows_idempotent_reply() {
     let applied: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: "CancelOrder".to_string(),
                 params: serde_json::json!({"Reason": "fresh"}),
                 related: BTreeMap::new(),
-                idempotency_key: Some("cancel-request".to_string()),
+                idempotency_key: Some(crate::idempotency::IdempotencyKey::Request(
+                    "cancel-request".to_string(),
+                )),
                 expected_authorization_precondition: Some(fresh_precondition.clone()),
             },
             Duration::from_secs(1),
@@ -422,10 +451,13 @@ async fn dst_action_rejects_stale_authorization_but_allows_idempotent_reply() {
     let retry: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: "CancelOrder".to_string(),
                 params: serde_json::json!({"Reason": "fresh"}),
                 related: BTreeMap::new(),
-                idempotency_key: Some("cancel-request".to_string()),
+                idempotency_key: Some(crate::idempotency::IdempotencyKey::Request(
+                    "cancel-request".to_string(),
+                )),
                 expected_authorization_precondition: Some(fresh_precondition),
             },
             Duration::from_secs(1),
@@ -490,6 +522,9 @@ fn snapshot_keeps_the_status_clock() {
         timestamp: at(s),
         params: serde_json::json!({}),
         idempotency_key: None,
+        origin: Default::default(),
+        kind: temper_runtime::persistence::EventKind::Transition,
+        outcome: None,
     };
     state.push_event_bounded(event("Submit", "Draft", "Submitted", 10));
     state.push_event_bounded(event("Note", "Submitted", "Submitted", 20));
@@ -529,6 +564,7 @@ async fn dst_add_item_then_submit() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: "AddItem".into(),
                 params: serde_json::json!({"ProductId": "prod-1"}),
                 related: std::collections::BTreeMap::new(),
@@ -547,6 +583,7 @@ async fn dst_add_item_then_submit() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: "SubmitOrder".into(),
                 params: serde_json::json!({"ShippingAddressId": "addr-1"}),
                 related: std::collections::BTreeMap::new(),
@@ -572,6 +609,20 @@ async fn duplicate_composite_idempotency_reemits_spec_trigger() {
         serde_json::json!({}),
     );
     let actor_ref = system.spawn(actor, "rp-acme-app");
+    // A person's request, so the move is recorded although its params are
+    // transient and it changes nothing (`entity_actor::unrecorded`).
+    let caller = Some(std::sync::Arc::new(crate::request_context::AgentContext {
+        security_ctx: Some(temper_authz::SecurityContext::from_verified_jwt(
+            "ann",
+            temper_authz::PrincipalKind::Customer,
+            None,
+            None,
+            None,
+            None,
+        )),
+        agent_id: Some("ann".to_string()),
+        ..Default::default()
+    }));
     let params = serde_json::json!({
         "PackBytes": "pack",
         "RefUpdates": [{"Name": "refs/heads/main"}],
@@ -581,10 +632,13 @@ async fn duplicate_composite_idempotency_reemits_spec_trigger() {
     let first: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                caller: caller.clone(),
                 name: "IngestPack".into(),
                 params: params.clone(),
                 related: std::collections::BTreeMap::new(),
-                idempotency_key: Some("same-pack".into()),
+                idempotency_key: Some(crate::idempotency::IdempotencyKey::Request(
+                    "same-pack".into(),
+                )),
                 expected_authorization_precondition: None,
             },
             Duration::from_secs(1),
@@ -599,10 +653,13 @@ async fn duplicate_composite_idempotency_reemits_spec_trigger() {
     let duplicate: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                caller,
                 name: "IngestPack".into(),
                 params,
                 related: std::collections::BTreeMap::new(),
-                idempotency_key: Some("same-pack".into()),
+                idempotency_key: Some(crate::idempotency::IdempotencyKey::Request(
+                    "same-pack".into(),
+                )),
                 expected_authorization_precondition: None,
             },
             Duration::from_secs(1),
@@ -635,6 +692,7 @@ async fn dst_cannot_submit_without_items() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: "SubmitOrder".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -679,6 +737,7 @@ async fn dst_full_order_lifecycle() {
         let r: EntityResponse = actor_ref
             .ask(
                 EntityMsg::Action {
+                    caller: None,
                     name: action.into(),
                     params,
                     related: std::collections::BTreeMap::new(),
@@ -715,6 +774,7 @@ async fn dst_cancel_from_draft() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: "CancelOrder".into(),
                 params: serde_json::json!({"Reason": "changed mind"}),
                 related: std::collections::BTreeMap::new(),
@@ -747,6 +807,7 @@ async fn dst_cannot_cancel_shipped_order() {
         let _: EntityResponse = actor_ref
             .ask(
                 EntityMsg::Action {
+                    caller: None,
                     name: action.to_string(),
                     params: serde_json::json!({}),
                     related: std::collections::BTreeMap::new(),
@@ -763,6 +824,7 @@ async fn dst_cannot_cancel_shipped_order() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: "CancelOrder".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -796,6 +858,7 @@ async fn dst_multiple_actors_independent() {
     let _: EntityResponse = a1
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: "CancelOrder".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -811,6 +874,7 @@ async fn dst_multiple_actors_independent() {
     let _: EntityResponse = a2
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: "AddItem".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -945,6 +1009,7 @@ async fn patched_fields_survive_actor_restart() {
     let response: EntityResponse = actor_ref
         .ask(
             EntityMsg::UpdateFields {
+                caller: None,
                 fields: serde_json::json!({"Title": "durable title", "Priority": 3}),
                 replace: false,
                 expected_precondition: None,
@@ -1021,6 +1086,7 @@ async fn replaced_fields_survive_actor_restart_with_replace_semantics() {
     let merged: EntityResponse = actor_ref
         .ask(
             EntityMsg::UpdateFields {
+                caller: None,
                 fields: serde_json::json!({"Title": "before", "Legacy": "drop me"}),
                 replace: false,
                 expected_precondition: None,
@@ -1035,6 +1101,7 @@ async fn replaced_fields_survive_actor_restart_with_replace_semantics() {
     let replaced: EntityResponse = actor_ref
         .ask(
             EntityMsg::UpdateFields {
+                caller: None,
                 fields: serde_json::json!({"Title": "after"}),
                 replace: true,
                 expected_precondition: None,
@@ -1131,27 +1198,18 @@ impl temper_runtime::persistence::EventStore for AppendFuseStore {
             .await
     }
 
-    async fn append_with_index_rows(
+    async fn append_with_rows(
         &self,
         persistence_id: &str,
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
-        key_rows: &[temper_runtime::persistence::EntityKeyRow],
-        vector_rows: &[temper_runtime::persistence::EntityVectorRow],
-        reconcile_vectors: bool,
+        rows: temper_runtime::persistence::CommitRows<'_>,
     ) -> Result<u64, temper_runtime::persistence::PersistenceError> {
         if let Some(e) = self.fuse_err() {
             return Err(e);
         }
         self.inner
-            .append_with_index_rows(
-                persistence_id,
-                expected_sequence,
-                events,
-                key_rows,
-                vector_rows,
-                reconcile_vectors,
-            )
+            .append_with_rows(persistence_id, expected_sequence, events, rows)
             .await
     }
 
@@ -1174,6 +1232,17 @@ impl temper_runtime::persistence::EventStore for AppendFuseStore {
         from_sequence: u64,
     ) -> Result<Vec<PersistenceEnvelope>, temper_runtime::persistence::PersistenceError> {
         self.inner.read_events(persistence_id, from_sequence).await
+    }
+
+    async fn read_events_page(
+        &self,
+        persistence_id: &str,
+        before_sequence: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, temper_runtime::persistence::PersistenceError> {
+        self.inner
+            .read_events_page(persistence_id, before_sequence, limit)
+            .await
     }
 
     async fn save_snapshot(
@@ -1252,6 +1321,7 @@ async fn field_update_with_failed_journal_append_does_not_report_success() {
     let response: EntityResponse = actor_ref
         .ask(
             EntityMsg::UpdateFields {
+                caller: None,
                 fields: serde_json::json!({"Title": "never durable"}),
                 replace: false,
                 expected_precondition: None,
@@ -1312,6 +1382,7 @@ async fn field_updates_reject_when_event_budget_exhausted() {
         let response: EntityResponse = actor_ref
             .ask(
                 EntityMsg::UpdateFields {
+                    caller: None,
                     fields: serde_json::json!({"counter": i}),
                     replace: false,
                     expected_precondition: None,
@@ -1503,6 +1574,7 @@ async fn field_update_rejects_non_object_payload_before_journaling() {
             let response: EntityResponse = actor_ref
                 .ask(
                     EntityMsg::UpdateFields {
+                        caller: None,
                         fields: body.clone(),
                         replace,
                         expected_precondition: None,
@@ -1564,6 +1636,7 @@ async fn field_update_sanitization_is_reproduced_by_replay() {
     let response: EntityResponse = actor_ref
         .ask(
             EntityMsg::UpdateFields {
+                caller: None,
                 fields: serde_json::json!({
                     "Customer": "Bob",
                     "Id": "forged-id",
@@ -1678,10 +1751,12 @@ async fn reserved_field_update_event_names_are_refused_as_actions() {
     for reserved in [
         crate::entity_actor::effects::FIELDS_UPDATED_EVENT,
         crate::entity_actor::effects::FIELDS_REPLACED_EVENT,
+        crate::entity_actor::spawn_refusal::SPAWN_REFUSED_EVENT,
     ] {
         let response: EntityResponse = actor_ref
             .ask(
                 EntityMsg::Action {
+                    caller: None,
                     name: reserved.to_string(),
                     params: serde_json::json!({"Customer": "Mallory"}),
                     related: BTreeMap::new(),
@@ -1745,6 +1820,7 @@ async fn field_update_recovers_from_a_concurrency_violation() {
     let warmup: EntityResponse = actor_ref
         .ask(
             EntityMsg::UpdateFields {
+                caller: None,
                 fields: serde_json::json!({"Customer": "Warmup"}),
                 replace: false,
                 expected_precondition: None,
@@ -1763,6 +1839,7 @@ async fn field_update_recovers_from_a_concurrency_violation() {
     let response: EntityResponse = actor_ref
         .ask(
             EntityMsg::UpdateFields {
+                caller: None,
                 fields: serde_json::json!({"Customer": "Bob"}),
                 replace: false,
                 expected_precondition: None,
@@ -1783,6 +1860,7 @@ async fn field_update_recovers_from_a_concurrency_violation() {
     let next: EntityResponse = actor_ref
         .ask(
             EntityMsg::UpdateFields {
+                caller: None,
                 fields: serde_json::json!({"Customer": "Carol"}),
                 replace: false,
                 expected_precondition: None,
@@ -1841,6 +1919,7 @@ async fn field_update_fails_closed_when_conflicts_exceed_the_retry_budget() {
     let warmup: EntityResponse = actor_ref
         .ask(
             EntityMsg::UpdateFields {
+                caller: None,
                 fields: serde_json::json!({"Customer": "Warmup"}),
                 replace: false,
                 expected_precondition: None,
@@ -1864,6 +1943,7 @@ async fn field_update_fails_closed_when_conflicts_exceed_the_retry_budget() {
     let response: EntityResponse = actor_ref
         .ask(
             EntityMsg::UpdateFields {
+                caller: None,
                 fields: serde_json::json!({"Customer": "Bob"}),
                 replace: false,
                 expected_precondition: None,
@@ -1913,7 +1993,9 @@ fn apply_field_update_merge_replace_and_runtime_owned_fields() {
             last_snapshot_sequence_nr: 0,
             sequence_nr: 0,
             processed_idempotency_keys: BTreeMap::new(),
+            last_event: Default::default(),
             status_clock: Default::default(),
+            spawn_reservations: Default::default(),
         }
     }
 
@@ -2009,6 +2091,7 @@ async fn field_update_retry_does_not_double_apply_the_journal() {
         let response: EntityResponse = actor_ref
             .ask(
                 EntityMsg::UpdateFields {
+                    caller: None,
                     fields: serde_json::json!({"Customer": customer}),
                     replace: false,
                     expected_precondition: None,
@@ -2033,6 +2116,7 @@ async fn field_update_retry_does_not_double_apply_the_journal() {
     let recovered: EntityResponse = actor_ref
         .ask(
             EntityMsg::UpdateFields {
+                caller: None,
                 fields: serde_json::json!({"Customer": "Fourth"}),
                 replace: false,
                 expected_precondition: None,
@@ -2111,6 +2195,7 @@ async fn preconditioned_field_update_refuses_rather_than_retrying_a_conflict() {
     let seeded: EntityResponse = holder
         .ask(
             EntityMsg::UpdateFields {
+                caller: None,
                 fields: serde_json::json!({"Customer": "Seed"}),
                 replace: false,
                 expected_precondition: None,
@@ -2144,6 +2229,7 @@ async fn preconditioned_field_update_refuses_rather_than_retrying_a_conflict() {
     let concurrent: EntityResponse = other
         .ask(
             EntityMsg::UpdateFields {
+                caller: None,
                 fields: serde_json::json!({"Region": "eu"}),
                 replace: false,
                 expected_precondition: None,
@@ -2157,6 +2243,7 @@ async fn preconditioned_field_update_refuses_rather_than_retrying_a_conflict() {
     let response: EntityResponse = holder
         .ask(
             EntityMsg::UpdateFields {
+                caller: None,
                 fields: serde_json::json!({"Customer": "Bob"}),
                 replace: false,
                 expected_precondition: Some(precondition),
@@ -2219,6 +2306,7 @@ async fn field_update_retry_refuses_when_the_race_deleted_the_entity() {
     let seeded: EntityResponse = writer
         .ask(
             EntityMsg::UpdateFields {
+                caller: None,
                 fields: serde_json::json!({"Customer": "Seed"}),
                 replace: false,
                 expected_precondition: None,
@@ -2245,6 +2333,7 @@ async fn field_update_retry_refuses_when_the_race_deleted_the_entity() {
     let deleted: EntityResponse = deleter
         .ask(
             EntityMsg::Delete {
+                caller: None,
                 expected_authorization_precondition: None,
             },
             Duration::from_secs(5),
@@ -2262,6 +2351,7 @@ async fn field_update_retry_refuses_when_the_race_deleted_the_entity() {
     let response: EntityResponse = writer
         .ask(
             EntityMsg::UpdateFields {
+                caller: None,
                 fields: serde_json::json!({"Customer": "TooLate"}),
                 replace: false,
                 expected_precondition: None,
@@ -2313,6 +2403,7 @@ async fn field_update_recovers_at_the_full_retry_budget() {
     let warmup: EntityResponse = actor_ref
         .ask(
             EntityMsg::UpdateFields {
+                caller: None,
                 fields: serde_json::json!({"Customer": "Warmup"}),
                 replace: false,
                 expected_precondition: None,
@@ -2331,6 +2422,7 @@ async fn field_update_recovers_at_the_full_retry_budget() {
     let response: EntityResponse = actor_ref
         .ask(
             EntityMsg::UpdateFields {
+                caller: None,
                 fields: serde_json::json!({"Customer": "Bob"}),
                 replace: false,
                 expected_precondition: None,
@@ -2369,7 +2461,9 @@ fn replaying_a_non_object_field_event_leaves_state_untouched() {
         last_snapshot_sequence_nr: 0,
         sequence_nr: 0,
         processed_idempotency_keys: BTreeMap::new(),
+        last_event: Default::default(),
         status_clock: Default::default(),
+        spawn_reservations: Default::default(),
     };
     let before = state.fields.clone();
 
@@ -2420,6 +2514,7 @@ async fn exhausted_field_update_rolls_back_to_the_caught_up_state() {
     let seeded: EntityResponse = writer
         .ask(
             EntityMsg::UpdateFields {
+                caller: None,
                 fields: serde_json::json!({"Customer": "Seed"}),
                 replace: false,
                 expected_precondition: None,
@@ -2445,6 +2540,7 @@ async fn exhausted_field_update_rolls_back_to_the_caught_up_state() {
     let concurrent: EntityResponse = other
         .ask(
             EntityMsg::UpdateFields {
+                caller: None,
                 fields: serde_json::json!({"Customer": "Concurrent"}),
                 replace: false,
                 expected_precondition: None,
@@ -2464,6 +2560,7 @@ async fn exhausted_field_update_rolls_back_to_the_caught_up_state() {
     let response: EntityResponse = writer
         .ask(
             EntityMsg::UpdateFields {
+                caller: None,
                 fields: serde_json::json!({"Customer": "Loser"}),
                 replace: false,
                 expected_precondition: None,
@@ -2515,6 +2612,7 @@ async fn field_update_retry_refuses_when_the_race_spent_the_event_budget() {
     let seeded: EntityResponse = stale
         .ask(
             EntityMsg::UpdateFields {
+                caller: None,
                 fields: serde_json::json!({"Customer": "Seed"}),
                 replace: false,
                 expected_precondition: None,
@@ -2541,6 +2639,7 @@ async fn field_update_retry_refuses_when_the_race_spent_the_event_budget() {
         let response: EntityResponse = hog
             .ask(
                 EntityMsg::UpdateFields {
+                    caller: None,
                     fields: serde_json::json!({"filler": i}),
                     replace: false,
                     expected_precondition: None,
@@ -2559,6 +2658,7 @@ async fn field_update_retry_refuses_when_the_race_spent_the_event_budget() {
     let response: EntityResponse = stale
         .ask(
             EntityMsg::UpdateFields {
+                caller: None,
                 fields: serde_json::json!({"Customer": "TooLate"}),
                 replace: false,
                 expected_precondition: None,
@@ -2612,6 +2712,9 @@ async fn replay_skip_of_a_field_update_event_is_counted() {
         timestamp: sim_now(),
         params: serde_json::json!({"Customer": "Alice"}),
         idempotency_key: None,
+        origin: Default::default(),
+        kind: temper_runtime::persistence::EventKind::Transition,
+        outcome: None,
     };
     let created_env = PersistenceEnvelope {
         sequence_nr: 1,
@@ -2683,4 +2786,185 @@ async fn replay_skip_of_a_field_update_event_is_counted() {
         counted,
         "a skipped field-update event must be counted, not only logged"
     );
+}
+
+/// A refusal must recheck the replay budget after a real stale-writer conflict.
+#[cfg(feature = "sim")]
+#[tokio::test]
+async fn spawn_refusal_retry_refuses_when_the_race_spent_the_event_budget() {
+    let store = Arc::new(AppendFuseStore::no_faults(103));
+    // Snapshots never succeed: models the stalled snapshot path that lets the
+    // tail grow in the first place.
+    store
+        .fail_snapshots
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let entity_id = "spawn-refusal-budget-race";
+    let boxed = || crate::storage::BoxedEventStore::from_arc(store.clone());
+
+    let system = ActorSystem::new("sim-spawn-refusal-budget-race");
+    let stale = system.spawn(
+        EntityActor::with_persistence(
+            "Order",
+            entity_id,
+            order_table(),
+            serde_json::json!({"Customer": "Alice", "child": "refused-child"}),
+            boxed(),
+            crate::storage::BackendLabel::Sim,
+        ),
+        entity_id,
+    );
+    // The stale writer sees one durable event and nothing after it.
+    let seeded: EntityResponse = stale
+        .ask(
+            EntityMsg::UpdateFields {
+                caller: None,
+                fields: serde_json::json!({"Customer": "Seed"}),
+                replace: false,
+                expected_precondition: None,
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("seed");
+    assert!(seeded.success);
+
+    // A second actor on the same journal spends the whole budget.
+    let hog = system.spawn(
+        EntityActor::with_persistence(
+            "Order",
+            entity_id,
+            order_table(),
+            serde_json::json!({"Customer": "Alice", "child": "refused-child"}),
+            boxed(),
+            crate::storage::BackendLabel::Sim,
+        ),
+        format!("{entity_id}-hog"),
+    );
+    for i in 0..MAX_EVENTS_SINCE_SNAPSHOT {
+        let response: EntityResponse = hog
+            .ask(
+                EntityMsg::UpdateFields {
+                    caller: None,
+                    fields: serde_json::json!({"filler": i}),
+                    replace: false,
+                    expected_precondition: None,
+                },
+                Duration::from_secs(5),
+            )
+            .await
+            .expect("filler update");
+        if !response.success {
+            break;
+        }
+    }
+
+    // The stale parent's refusal conflicts with the writer that filled its tail.
+    let response: EntityResponse = stale
+        .ask(
+            EntityMsg::RecordSpawnRefusal {
+                refusal: crate::entity_actor::spawn_refusal::SpawnRefusal {
+                    reservation_id: String::new(),
+                    child_type: "Order".to_owned(),
+                    child_id: "refused-child".to_owned(),
+                    field: Some("child".to_owned()),
+                    child: crate::entity_actor::spawn_refusal::ChildLookup::Absent,
+                    error: "child creation refused".to_owned(),
+                },
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("post-race refusal response");
+    assert!(
+        !response.success,
+        "refusal must not append beyond the replay budget"
+    );
+    assert!(
+        response
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Event budget exhausted"),
+        "unexpected error: {:?}",
+        response.error
+    );
+    assert_eq!(
+        response.state.events_since_snapshot,
+        MAX_EVENTS_SINCE_SNAPSHOT
+    );
+    assert_eq!(
+        response.state.fields["child"], "refused-child",
+        "a refusal that cannot be journaled must not clear the reservation"
+    );
+
+    use temper_runtime::persistence::EventStore as _;
+    let journal = store
+        .inner
+        .read_events(&format!("default:Order:{entity_id}"), 0)
+        .await
+        .expect("parent journal");
+    assert_eq!(journal.len(), MAX_EVENTS_SINCE_SNAPSHOT);
+    assert!(
+        journal.iter().all(
+            |event| event.event_type != crate::entity_actor::spawn_refusal::SPAWN_REFUSED_EVENT
+        )
+    );
+
+    let restarted = system.spawn(
+        EntityActor::with_persistence(
+            "Order",
+            entity_id,
+            order_table(),
+            serde_json::json!({"Customer": "Alice", "child": "refused-child"}),
+            boxed(),
+            crate::storage::BackendLabel::Sim,
+        ),
+        format!("{entity_id}-restarted"),
+    );
+    let recovered: EntityResponse = restarted
+        .ask(EntityMsg::GetState, Duration::from_secs(5))
+        .await
+        .expect("parent must remain recoverable after restart");
+    assert_eq!(recovered.state.fields, response.state.fields);
+    assert_eq!(recovered.state.sequence_nr, response.state.sequence_nr);
+}
+
+#[tokio::test]
+async fn reconciliation_preserves_unknown_until_the_event_lands() {
+    use temper_runtime::persistence::{EventMetadata, EventStore};
+    let store = Arc::new(temper_store_sim::SimEventStore::no_faults(120));
+    let boxed = crate::storage::BoxedEventStore::from_arc(store.clone());
+    let id = "default:Order:delayed-commit";
+    let event = PersistenceEnvelope {
+        sequence_nr: 0,
+        event_type: "Created".into(),
+        payload: serde_json::json!({}),
+        metadata: EventMetadata {
+            event_id: sim_uuid(),
+            causation_id: sim_uuid(),
+            correlation_id: sim_uuid(),
+            timestamp: sim_now(),
+            actor_id: "test".into(),
+        },
+    };
+    let error = PersistenceError::OutcomeUnknown("COMMIT transport failed".into());
+    let outcome =
+        EntityActor::learn_write_outcome(&boxed, id, 0, event.metadata.event_id, &error).await;
+    assert!(matches!(outcome, WriteOutcome::Unknown(_)));
+    // Definitive errors retain the existing absent-event behavior.
+    let refused = PersistenceError::ConcurrencyViolation {
+        expected: 0,
+        actual: 1,
+    };
+    let outcome =
+        EntityActor::learn_write_outcome(&boxed, id, 0, event.metadata.event_id, &refused).await;
+    assert!(matches!(outcome, WriteOutcome::NotWritten));
+    // The same remote transaction can finish after both recovery reads.
+    store
+        .append(id, 0, std::slice::from_ref(&event))
+        .await
+        .unwrap();
+    let outcome =
+        EntityActor::learn_write_outcome(&boxed, id, 0, event.metadata.event_id, &error).await;
+    assert!(matches!(outcome, WriteOutcome::Landed { sequence_nr: 1 }));
 }

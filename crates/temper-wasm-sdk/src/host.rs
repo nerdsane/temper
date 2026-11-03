@@ -3,11 +3,11 @@
 //! These match the host functions linked by `temper-wasm::engine::link_host_functions`.
 //! SDK users should use the typed wrappers in `context.rs` instead.
 
-/// Buffer size for reading invocation context (512 KB).
+/// Buffer size for the first read of the invocation context (512 KB).
 ///
-/// Agent conversation state can grow large (10K+ per turn), so this
-/// needs to accommodate multi-turn entities. Increased from 256 KB
-/// to handle entities with accumulated adapter/WASM callback fields.
+/// Not a limit: a longer context is read again into a buffer of its own
+/// length (`Context::from_host`). This size only saves that second read for
+/// most invocations.
 pub const CTX_BUF_LEN: usize = 524288;
 
 /// Buffer size for HTTP response data (4 MB).
@@ -16,7 +16,10 @@ pub const CTX_BUF_LEN: usize = 524288;
 /// especially when the response includes tool calls with substantial output.
 pub const HTTP_BUF_LEN: usize = 4 * 1024 * 1024;
 
-/// Buffer size for secret values (4 KB).
+/// Buffer size for the first read of a secret value (4 KB).
+///
+/// Not a limit: a longer secret (a PEM key, a service-account JSON) is read
+/// again into a buffer of its own length (`Context::get_secret`).
 pub const SECRET_BUF_LEN: usize = 4096;
 
 /// Buffer size for spec evaluation results (64 KB).

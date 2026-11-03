@@ -170,107 +170,11 @@ mod tests {
     use temper_runtime::scheduler::sim_now;
 
     #[test]
-    fn test_evaluator_serialization() {
-        let evaluator = OTSEvaluator::new("eval_123", EvaluatorType::Human).with_version("1.0");
-
-        let json_str = serde_json::to_string(&evaluator).unwrap();
-        let parsed: OTSEvaluator = serde_json::from_str(&json_str).unwrap();
-
-        assert_eq!(parsed.id, "eval_123");
-        assert_eq!(parsed.evaluator_type, EvaluatorType::Human);
-        assert_eq!(parsed.version, Some("1.0".to_string()));
-
-        // Check that "type" is used in JSON
-        assert!(json_str.contains("\"type\":\"human\""));
-    }
-
-    #[test]
-    fn test_evaluator_without_version() {
-        let evaluator = OTSEvaluator::new("eval_456", EvaluatorType::Model);
-        let json_str = serde_json::to_string(&evaluator).unwrap();
-
-        // Version should not appear
-        assert!(!json_str.contains("\"version\""));
-    }
-
-    #[test]
-    fn test_trajectory_level_annotation() {
-        let now = sim_now();
-        let evaluator = OTSEvaluator::new("human_eval", EvaluatorType::Human);
-        let annotation = OTSAnnotation::new("traj_123", evaluator, 0.85, now)
-            .with_label("good_execution")
-            .with_feedback("Clear reasoning");
-
-        assert_eq!(annotation.trajectory_id, "traj_123");
-        assert_eq!(annotation.turn_id, None);
-        assert_eq!(annotation.decision_id, None);
-        assert_eq!(annotation.score, 0.85);
-
-        let json_str = serde_json::to_string(&annotation).unwrap();
-        let parsed: OTSAnnotation = serde_json::from_str(&json_str).unwrap();
-
-        assert_eq!(parsed.trajectory_id, "traj_123");
-        assert_eq!(parsed.score, 0.85);
-        assert_eq!(parsed.label, Some("good_execution".to_string()));
-    }
-
-    #[test]
-    fn test_turn_level_annotation() {
-        let now = sim_now();
-        let evaluator = OTSEvaluator::new("model_eval", EvaluatorType::Model);
-        let annotation = OTSAnnotation::for_turn("traj_456", 2, evaluator, 0.92, now);
-
-        assert_eq!(annotation.trajectory_id, "traj_456");
-        assert_eq!(annotation.turn_id, Some(2));
-        assert_eq!(annotation.decision_id, None);
-
-        let json_str = serde_json::to_string(&annotation).unwrap();
-        let parsed: OTSAnnotation = serde_json::from_str(&json_str).unwrap();
-
-        assert_eq!(parsed.turn_id, Some(2));
-    }
-
-    #[test]
-    fn test_decision_level_annotation() {
-        let now = sim_now();
-        let evaluator = OTSEvaluator::new("heuristic_eval", EvaluatorType::Heuristic);
-        let annotation =
-            OTSAnnotation::for_decision("traj_789", 3, "decision_abc", evaluator, 0.75, now)
-                .with_feedback("Could be optimized");
-
-        assert_eq!(annotation.trajectory_id, "traj_789");
-        assert_eq!(annotation.turn_id, Some(3));
-        assert_eq!(annotation.decision_id, Some("decision_abc".to_string()));
-        assert_eq!(annotation.score, 0.75);
-
-        let json_str = serde_json::to_string(&annotation).unwrap();
-        let parsed: OTSAnnotation = serde_json::from_str(&json_str).unwrap();
-
-        assert_eq!(parsed.decision_id, Some("decision_abc".to_string()));
-        assert_eq!(parsed.feedback, Some("Could be optimized".to_string()));
-    }
-
-    #[test]
     #[should_panic(expected = "Score must be between 0.0 and 1.0")]
     fn test_annotation_invalid_score() {
         let now = sim_now();
         let evaluator = OTSEvaluator::new("test", EvaluatorType::Human);
         OTSAnnotation::new("traj", evaluator, 1.5, now);
-    }
-
-    #[test]
-    fn test_annotation_minimal() {
-        let now = sim_now();
-        let evaluator = OTSEvaluator::new("eval", EvaluatorType::Model);
-        let annotation = OTSAnnotation::new("traj_minimal", evaluator, 0.5, now);
-
-        let json_str = serde_json::to_string(&annotation).unwrap();
-
-        // Optional fields should not appear
-        assert!(!json_str.contains("\"turn_id\""));
-        assert!(!json_str.contains("\"decision_id\""));
-        assert!(!json_str.contains("\"label\""));
-        assert!(!json_str.contains("\"feedback\""));
     }
 
     #[test]

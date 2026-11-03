@@ -47,6 +47,17 @@ enum AuthzMode {
 }
 
 async fn build_app(authz: AuthzMode) -> (Router, TursoEventStore) {
+    let (state, turso) = build_state(authz).await;
+    (api_router(state), turso)
+}
+
+fn api_router(state: ServerState) -> Router {
+    Router::new()
+        .nest("/api", crate::api::build_api_router())
+        .with_state(state)
+}
+
+async fn build_state(authz: AuthzMode) -> (ServerState, TursoEventStore) {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let dir =
@@ -87,10 +98,7 @@ async fn build_app(authz: AuthzMode) -> (Router, TursoEventStore) {
     state.data_dir = dir;
     state.set_storage_stack(StorageStack::from_turso(turso.clone()));
 
-    let app = Router::new()
-        .nest("/api", crate::api::build_api_router())
-        .with_state(state);
-    (app, turso)
+    (state, turso)
 }
 
 async fn seed_row(
@@ -1711,14 +1719,38 @@ async fn a_trajectory_with_no_steps_is_not_exported_as_stepless_atif() {
     );
 }
 
-/// A denied `POST /api/authorize` pre-flight must never poison another run's
-/// conformance verdict. The probe's action, resource type, and session are all
-/// caller-chosen, so its denial row is written `spec_governed = false` and the
-/// walk skips it — otherwise any agent could flip a victim session's verdict
-/// by probing garbage actions under that session id.
+/// A denied `POST /api/authorize` pre-flight is a question and writes no
+/// trajectory row, so it cannot poison another run's conformance verdict. The
+/// probe's action, resource type, and session are all caller-chosen: if it
+/// wrote a row, any agent could add rows to a victim session by probing
+/// garbage actions under that session id.
 #[tokio::test]
-async fn a_denied_preflight_probe_cannot_poison_a_sessions_verdict() {
-    let (app, store) = policy_permitted_app().await;
+async fn a_denied_preflight_probe_writes_no_row_into_a_sessions_verdict() {
+    // Each queued write owns a sink clone. Once the last router is dropped,
+    // this channel closes only after every queued write has finished. A later
+    // audit row is not a barrier: outbox writes can persist in any order.
+    struct ObservedSink {
+        inner: std::sync::Arc<dyn crate::storage::TrajectorySink>,
+        attempted: tokio::sync::mpsc::UnboundedSender<String>,
+    }
+    #[async_trait::async_trait]
+    impl crate::storage::TrajectorySink for ObservedSink {
+        async fn persist_trajectory_entry(
+            &self,
+            entry: &crate::state::TrajectoryEntry,
+        ) -> Result<(), String> {
+            self.attempted.send(entry.action.clone()).unwrap();
+            self.inner.persist_trajectory_entry(entry).await
+        }
+    }
+    let (mut state, store) = build_state(AuthzMode::PermitTrajectoryReads).await;
+    let (attempted, mut attempts) = tokio::sync::mpsc::unbounded_channel();
+    let stack = std::sync::Arc::make_mut(state.storage_stack.as_mut().unwrap());
+    stack.trajectory = Some(std::sync::Arc::new(ObservedSink {
+        inner: stack.trajectory.take().unwrap(),
+        attempted,
+    }));
+    let app = api_router(state);
 
     // A genuine governed dispatch in the victim session: verdict passes.
     seed_row(
@@ -1734,6 +1766,13 @@ async fn a_denied_preflight_probe_cannot_poison_a_sessions_verdict() {
     // session (in production the session rides the correlation header), probing
     // an undeclared action against the victim's entity type. The engine only
     // permits read_trajectories, so Cedar denies the probe.
+    let in_session = || {
+        temper_authz::AuthenticatedRequestContext::new(
+            temper_runtime::tenant::TenantId::default(),
+            agent_context(),
+        )
+        .with_session_id(Some("session-1".to_string()))
+    };
     let mut probe = Request::post("/api/authorize")
         .header("Content-Type", "application/json")
         .body(Body::from(
@@ -1746,13 +1785,7 @@ async fn a_denied_preflight_probe_cannot_poison_a_sessions_verdict() {
             .to_string(),
         ))
         .unwrap();
-    probe.extensions_mut().insert(
-        temper_authz::AuthenticatedRequestContext::new(
-            temper_runtime::tenant::TenantId::default(),
-            agent_context(),
-        )
-        .with_session_id(Some("session-1".to_string())),
-    );
+    probe.extensions_mut().insert(in_session());
     // The oracle answers 200 with the decision; denial is in the body.
     let denied = app.clone().oneshot(probe).await.unwrap();
     assert_eq!(denied.status(), StatusCode::OK);
@@ -1761,27 +1794,6 @@ async fn a_denied_preflight_probe_cannot_poison_a_sessions_verdict() {
         decision["allowed"],
         serde_json::json!(false),
         "the probe must be denied: {decision}"
-    );
-
-    // Wait for the denial row to drain into the store, then pin the call site:
-    // it must arrive marked ungoverned.
-    let mut denial_row = None;
-    for _ in 0..200 {
-        let rows = store
-            .query_trajectories_by_session("session-1", Some("default"), None, 50)
-            .await
-            .expect("query session rows");
-        if let Some(row) = rows.iter().find(|r| r.action == "GarbageAction") {
-            denial_row = Some(row.clone());
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
-    let denial_row = denial_row.expect("the denied probe's trajectory row must be persisted");
-    assert_eq!(
-        denial_row.spec_governed,
-        Some(false),
-        "a pre-flight denial row must be explicitly ungoverned"
     );
 
     // And end to end: the victim session's verdict is untouched by the probe.
@@ -1805,9 +1817,24 @@ async fn a_denied_preflight_probe_cannot_poison_a_sessions_verdict() {
         "a denied pre-flight probe must not add violations: {body}"
     );
     assert_eq!(body["report"]["violations"], serde_json::json!([]));
-    assert_eq!(
-        body["report"]["stats"]["non_governed_rows_skipped"],
-        serde_json::json!(1),
-        "the probe's row must be present and skipped, not absent: {body}"
+
+    let writes = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut writes = Vec::new();
+        while let Some(action) = attempts.recv().await {
+            writes.push(action);
+        }
+        writes
+    })
+    .await
+    .expect("all queued writes must finish after the router is dropped");
+    assert!(
+        writes.is_empty(),
+        "a denied pre-flight wrote rows: {writes:?}"
     );
+    let rows = store
+        .query_trajectories_by_session("session-1", Some("default"), None, 50)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "only the genuine governed dispatch remains");
+    assert_eq!(rows[0].action, "AddItem");
 }

@@ -102,6 +102,52 @@ from = ["Draft"]
     );
 }
 
+const TIMED_JOB: &str = r#"
+[automaton]
+name = "Job"
+states = ["Waiting", "Failed"]
+initial = "Waiting"
+
+[[action]]
+name = "TimeoutFail"
+from = ["Waiting"]
+to = "Failed"
+
+[[state_timeout]]
+state = "Waiting"
+after_seconds = 60
+on_timeout = "TimeoutFail"
+"#;
+
+#[test]
+fn max_occurrences_loads_and_is_reported_as_having_no_effect() {
+    let src = format!("{TIMED_JOB}max_occurrences = 3\n");
+    let findings = lint_automaton(&parse(&src));
+    let finding = findings
+        .iter()
+        .find(|finding| finding.code == "state_timeout_max_occurrences_ignored")
+        .expect("a set max_occurrences is reported");
+    assert_eq!(finding.severity, LintSeverity::Warning);
+    assert!(finding.message.contains("'Waiting'"), "{}", finding.message);
+}
+
+#[test]
+fn a_timeout_without_max_occurrences_is_not_reported() {
+    let findings = lint_automaton(&parse(TIMED_JOB));
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.code == "state_timeout_max_occurrences_ignored")
+    );
+}
+
+#[test]
+fn max_occurrences_zero_still_loads() {
+    // It used to be rejected as an invalid budget; it is now a key with no
+    // effect, so no value of it can make a spec fail to load.
+    parse(&format!("{TIMED_JOB}max_occurrences = 0\n"));
+}
+
 fn parse(src: &str) -> Automaton {
     parse_automaton(src).expect("parse")
 }
@@ -241,6 +287,65 @@ params = ["title", "description", "plan_id"]
             && finding.entity == "Plan"
             && finding.message.contains("description")
     }));
+}
+
+/// A param the spawn leaves unset that names a declared variable reads as the
+/// variable's initial value, so the spawn may leave it out; a param with no
+/// declaration is still missing.
+#[test]
+fn bundle_lint_lets_a_declared_variable_cover_an_unmapped_spawn_param() {
+    let parent = parse(
+        r#"
+[automaton]
+name = "Plan"
+states = ["Draft"]
+initial = "Draft"
+
+[[action]]
+name = "AddTask"
+from = ["Draft"]
+params = ["title"]
+effect = ["spawn('Task', 'Create')"]
+"#,
+    );
+    let child = |declared: &str| {
+        parse(&format!(
+            r#"
+[automaton]
+name = "Task"
+states = ["Open"]
+initial = "Open"
+{declared}
+[[action]]
+name = "Create"
+from = ["Open"]
+params = ["title", "description", "plan_id"]
+"#
+        ))
+    };
+    let unmapped = |task| {
+        let bundle = BTreeMap::from([
+            ("Plan".to_string(), parent.clone()),
+            ("Task".to_string(), task),
+        ]);
+        lint_automata_bundle(&bundle)
+            .into_iter()
+            .filter(|finding| finding.code == "spawn_initial_action_params_unmapped")
+            .collect::<Vec<_>>()
+    };
+
+    let declared = child(
+        r#"
+[[state]]
+name = "description"
+type = "string"
+initial = ""
+"#,
+    );
+    assert!(unmapped(declared).is_empty());
+    let findings = unmapped(child(""));
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(findings[0].message.contains("description"), "{findings:?}");
 }
 
 #[test]

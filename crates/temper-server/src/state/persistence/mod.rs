@@ -19,7 +19,10 @@ pub(crate) enum TenantMetadataBackend {
 }
 
 mod logs_and_secrets;
+mod secrets;
 mod spec_metadata;
+
+pub use secrets::SecretWriteOutcome;
 
 const BUNDLED_REPLACE_UPLOAD_SOURCE: &str = "bundled-replace-upload";
 
@@ -103,7 +106,7 @@ impl ServerState {
         };
         let tenant_id = TenantId::new(tenant);
         let artifact_key = crate::blob_store::wasm_artifact_key(&effective_hash);
-        self.put_blob_object(&tenant_id, &artifact_key, wasm_bytes, None)
+        self.put_kernel_blob_object(&tenant_id, &artifact_key, wasm_bytes)
             .await
             .map_err(|e| {
                 format!(
@@ -419,23 +422,31 @@ impl ServerState {
         sha256_hash: &str,
         inline_bytes: Vec<u8>,
     ) -> Result<Vec<u8>, String> {
-        if !inline_bytes.is_empty() {
-            return Ok(inline_bytes);
-        }
-        if sha256_hash.is_empty() {
+        let bytes = if !inline_bytes.is_empty() {
+            inline_bytes
+        } else if sha256_hash.is_empty() {
             return Err(format!(
                 "WASM module '{module_name}' for tenant '{tenant}' has no inline bytes and no artifact hash"
             ));
+        } else {
+            let artifact_key = crate::blob_store::wasm_artifact_key(sha256_hash);
+            self.get_blob_with_legacy_fallback(tenant, &artifact_key)
+                .await?
+                .ok_or_else(|| {
+                    format!(
+                        "WASM artifact missing for tenant '{tenant}' module '{module_name}' at '{artifact_key}'"
+                    )
+                })?
+        };
+        // A module runs only as the bytes its hash names.
+        let found = temper_wasm::WasmEngine::hash_module(&bytes);
+        if !sha256_hash.is_empty() && found != sha256_hash {
+            return Err(format!(
+                "WASM module '{module_name}' for tenant '{tenant}' does not match its hash: \
+                 expected {sha256_hash}, its bytes hash to {found}"
+            ));
         }
-
-        let artifact_key = crate::blob_store::wasm_artifact_key(sha256_hash);
-        self.get_blob_with_legacy_fallback(tenant, &artifact_key)
-            .await?
-            .ok_or_else(|| {
-                format!(
-                    "WASM artifact missing for tenant '{tenant}' module '{module_name}' at '{artifact_key}'"
-                )
-            })
+        Ok(bytes)
     }
 
     /// Persist a WASM invocation log entry (Postgres or Turso).

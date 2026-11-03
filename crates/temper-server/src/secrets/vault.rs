@@ -10,9 +10,6 @@ use std::sync::{Arc, RwLock};
 use aes_gcm::aead::{Aead, OsRng}; // determinism-ok: cryptographic nonce generation, not simulation-visible
 use aes_gcm::{AeadCore, Aes256Gcm, Key, KeyInit, Nonce};
 
-/// Maximum number of secrets per tenant (TigerStyle budget).
-pub const MAX_SECRETS_PER_TENANT: usize = 100;
-
 /// Maximum secret value size in bytes (TigerStyle budget).
 pub const MAX_SECRET_VALUE_BYTES: usize = 8192;
 
@@ -73,44 +70,25 @@ impl SecretsVault {
             .map_err(|e| format!("decryption failed: {e}"))
     }
 
-    /// Cache a decrypted secret in memory.
+    /// Cache a decrypted secret in memory, adding it or replacing its value.
     ///
-    /// Enforces `MAX_SECRETS_PER_TENANT` budget. Returns `Err` if the
-    /// tenant already has the maximum number of secrets and this is a
-    /// new key (not an update).
-    pub fn cache_secret(&self, tenant: &str, key: &str, value: String) -> Result<(), String> {
+    /// A tenant may hold any number of secrets; nothing forces a count.
+    pub fn cache_secret(&self, tenant: &str, key: &str, value: String) {
         let mut cache = self.cache.write().unwrap(); // ci-ok: infallible lock
         let tenant_secrets = cache.entry(tenant.to_string()).or_default();
-        Self::insert_secret_with_budget(tenant_secrets, key, value, tenant)
+        tenant_secrets.insert(key.to_string(), value);
     }
 
     /// Cache a shared platform secret in memory.
     ///
     /// Platform secrets act as a baseline for all tenants but are not
     /// associated with any specific tenant ID.
-    pub fn cache_platform_secret(&self, key: &str, value: String) -> Result<(), String> {
+    pub fn cache_platform_secret(&self, key: &str, value: String) {
         let mut platform = self
             .platform
             .write()
             .expect("platform secrets lock poisoned");
-        Self::insert_secret_with_budget(&mut platform, key, value, "platform")
-    }
-
-    fn insert_secret_with_budget(
-        secrets: &mut BTreeMap<String, String>,
-        key: &str,
-        value: String,
-        scope: &str,
-    ) -> Result<(), String> {
-        // Budget check: only enforce on new keys, not updates.
-        if !secrets.contains_key(key) && secrets.len() >= MAX_SECRETS_PER_TENANT {
-            return Err(format!(
-                "{scope} has reached the maximum of {MAX_SECRETS_PER_TENANT} secrets"
-            ));
-        }
-
-        secrets.insert(key.to_string(), value);
-        Ok(())
+        platform.insert(key.to_string(), value);
     }
 
     /// Get a platform secret value.
@@ -212,9 +190,7 @@ mod tests {
     #[test]
     fn cache_and_retrieve() {
         let vault = SecretsVault::new(&test_key());
-        vault
-            .cache_secret("tenant-a", "API_KEY", "sk-123".into())
-            .unwrap();
+        vault.cache_secret("tenant-a", "API_KEY", "sk-123".into());
         assert_eq!(
             vault.get_secret("tenant-a", "API_KEY"),
             Some("sk-123".into())
@@ -226,9 +202,7 @@ mod tests {
     #[test]
     fn platform_secret_fallback() {
         let vault = SecretsVault::new(&test_key());
-        vault
-            .cache_platform_secret("API_KEY", "sk-platform".into())
-            .unwrap();
+        vault.cache_platform_secret("API_KEY", "sk-platform".into());
 
         assert_eq!(
             vault.get_secret("tenant-b", "API_KEY"),
@@ -239,12 +213,8 @@ mod tests {
     #[test]
     fn tenant_overrides_platform() {
         let vault = SecretsVault::new(&test_key());
-        vault
-            .cache_platform_secret("API_KEY", "sk-platform".into())
-            .unwrap();
-        vault
-            .cache_secret("tenant-a", "API_KEY", "sk-tenant".into())
-            .unwrap();
+        vault.cache_platform_secret("API_KEY", "sk-platform".into());
+        vault.cache_secret("tenant-a", "API_KEY", "sk-tenant".into());
 
         assert_eq!(
             vault.get_secret("tenant-a", "API_KEY"),
@@ -253,26 +223,28 @@ mod tests {
     }
 
     #[test]
-    fn budget_enforcement() {
+    fn a_tenant_keeps_every_secret_it_sets() {
+        // The cache refused a tenant's 101st secret until this was removed.
         let vault = SecretsVault::new(&test_key());
-        for i in 0..MAX_SECRETS_PER_TENANT {
-            vault
-                .cache_secret("t", &format!("key-{i}"), "v".into())
-                .unwrap();
+        for i in 0..150 {
+            vault.cache_secret("t", &format!("key-{i}"), format!("v{i}"));
+            vault.cache_platform_secret(&format!("platform-{i}"), format!("p{i}"));
         }
-        // 101st key should fail
-        let result = vault.cache_secret("t", "key-overflow", "v".into());
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("maximum"));
+        assert_eq!(vault.get_secret("t", "key-149"), Some("v149".into()));
+        assert_eq!(
+            vault.get_platform_secret("platform-149"),
+            Some("p149".into())
+        );
+        assert_eq!(vault.get_platform_secrets().len(), 150);
 
-        // Updating an existing key should still work
-        vault.cache_secret("t", "key-0", "updated".into()).unwrap();
+        vault.cache_secret("t", "key-0", "updated".into());
+        assert_eq!(vault.get_secret("t", "key-0"), Some("updated".into()));
     }
 
     #[test]
     fn remove_secret_works() {
         let vault = SecretsVault::new(&test_key());
-        vault.cache_secret("t", "k", "v".into()).unwrap();
+        vault.cache_secret("t", "k", "v".into());
         assert!(vault.remove_secret("t", "k"));
         assert!(!vault.remove_secret("t", "k")); // already removed
         assert_eq!(vault.get_secret("t", "k"), None);
@@ -281,11 +253,9 @@ mod tests {
     #[test]
     fn list_keys_returns_names_only() {
         let vault = SecretsVault::new(&test_key());
-        vault
-            .cache_platform_secret("GLOBAL", "platform".into())
-            .unwrap();
-        vault.cache_secret("t", "B_KEY", "val-b".into()).unwrap();
-        vault.cache_secret("t", "A_KEY", "val-a".into()).unwrap();
+        vault.cache_platform_secret("GLOBAL", "platform".into());
+        vault.cache_secret("t", "B_KEY", "val-b".into());
+        vault.cache_secret("t", "A_KEY", "val-a".into());
         let keys = vault.list_keys("t");
         assert_eq!(keys, vec!["A_KEY", "B_KEY", "GLOBAL"]); // BTree order
     }
@@ -293,14 +263,10 @@ mod tests {
     #[test]
     fn platform_secrets_merged() {
         let vault = SecretsVault::new(&test_key());
-        vault
-            .cache_platform_secret("GLOBAL", "base".into())
-            .unwrap();
-        vault.cache_secret("t", "K1", "V1".into()).unwrap();
-        vault.cache_secret("t", "K2", "V2".into()).unwrap();
-        vault
-            .cache_secret("t", "GLOBAL", "override".into())
-            .unwrap();
+        vault.cache_platform_secret("GLOBAL", "base".into());
+        vault.cache_secret("t", "K1", "V1".into());
+        vault.cache_secret("t", "K2", "V2".into());
+        vault.cache_secret("t", "GLOBAL", "override".into());
         let secrets = vault.get_tenant_secrets("t");
         assert_eq!(secrets.len(), 3);
         assert_eq!(secrets["GLOBAL"], "override");
@@ -311,15 +277,9 @@ mod tests {
     #[test]
     fn no_default_special_casing() {
         let vault = SecretsVault::new(&test_key());
-        vault
-            .cache_platform_secret("API_KEY", "sk-platform".into())
-            .unwrap();
-        vault
-            .cache_secret("default", "API_KEY", "sk-default".into())
-            .unwrap();
-        vault
-            .cache_secret("tenant-a", "OTHER", "value".into())
-            .unwrap();
+        vault.cache_platform_secret("API_KEY", "sk-platform".into());
+        vault.cache_secret("default", "API_KEY", "sk-default".into());
+        vault.cache_secret("tenant-a", "OTHER", "value".into());
 
         assert_eq!(
             vault.get_secret("default", "API_KEY"),

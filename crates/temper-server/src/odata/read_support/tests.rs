@@ -289,3 +289,42 @@ fn safety_cap_rejects_incomplete_row_authorized_reads() {
     assert_eq!(error.candidate_count, 15_000);
     assert_eq!(error.candidate_budget, 10_000);
 }
+
+#[test]
+fn legacy_catalog_metadata_is_null_and_never_taken_from_app_fields() {
+    let properties: Vec<String> = [
+        "first_event_at",
+        "last_event_at",
+        "last_event_via",
+        "last_event_by",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    let options = QueryOptions {
+        select: Some(properties.clone()),
+        ..QueryOptions::default()
+    };
+    assert!(
+        catalog_select_projection_fields(&options).is_none(),
+        "metadata selects need the authoritative state, not a sparse app-field projection"
+    );
+    for state in [
+        None,
+        Some(serde_json::json!({"fields": {"last_event_by":"forged"}})),
+    ] {
+        let row = EntityCatalogRow {
+            entity_id: "legacy".into(),
+            status: "Ready".into(),
+            sequence_nr: 3,
+            fields: serde_json::json!({"last_event_at":"1900-01-01T00:00:00Z", "last_event_via":"request", "last_event_by":"forged"}),
+            state,
+        };
+        let body = catalog_row_to_entity_body("Job", "Jobs", row.clone());
+        let selected = catalog_row_to_selected_entity_body("Job", "Jobs", row, &properties);
+        for property in &properties {
+            assert_eq!(body.get(property), Some(&serde_json::Value::Null));
+            assert_eq!(selected.get(property), Some(&serde_json::Value::Null));
+        }
+    }
+}

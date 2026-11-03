@@ -104,7 +104,10 @@ pub fn unmodelable<'e>(expr: &'e Expr, vars: &BTreeMap<String, VarKind>) -> Opti
         }
         Operand::Var(name) => matches!(kind(name), Some(VarKind::Counter | VarKind::Bool)),
         Operand::Len(name) => kind(name) == Some(VarKind::List),
-        Operand::CrossStatus { .. } | Operand::Lit(Literal::Null) => false,
+        Operand::CrossStatus { .. }
+        | Operand::CrossField { .. }
+        | Operand::Param(_)
+        | Operand::Lit(Literal::Null) => false,
     };
     match expr {
         Expr::Const(_) => None,
@@ -125,6 +128,78 @@ pub fn unmodelable<'e>(expr: &'e Expr, vars: &BTreeMap<String, VarKind>) -> Opti
                 }
             };
             (!modeled).then_some(expr)
+        }
+    }
+}
+
+/// The first sub-expression of an `[[invariant]]` the verifier cannot check,
+/// if any. Beyond what [`unmodelable`] allows, a string state variable is
+/// compared as a symbol (equality only: the verifier tracks which strings are
+/// equal, not what they say), and a related entity's status or field is read
+/// in the joint check of the entity types the invariant names. Numbers that
+/// are not counters, and `null`, stay out.
+pub fn unverifiable<'e>(expr: &'e Expr, vars: &BTreeMap<String, VarKind>) -> Option<&'e Expr> {
+    unverifiable_assertion(expr, vars, false)
+}
+
+/// The first entry assertion read the verifier cannot check. Entry checks
+/// additionally model nullable related statuses and local list membership.
+pub(crate) fn unverifiable_entry<'e>(
+    expr: &'e Expr,
+    vars: &BTreeMap<String, VarKind>,
+) -> Option<&'e Expr> {
+    unverifiable_assertion(expr, vars, true)
+}
+
+fn unverifiable_assertion<'e>(
+    expr: &'e Expr,
+    vars: &BTreeMap<String, VarKind>,
+    entry: bool,
+) -> Option<&'e Expr> {
+    let kind = |name: &str| vars.get(name).copied();
+    let checked_operand = |operand: &Operand| match operand {
+        Operand::Status
+        | Operand::Lit(Literal::Int(_) | Literal::Str(_) | Literal::Bool(_))
+        | Operand::CrossStatus { .. }
+        | Operand::CrossField { .. } => true,
+        Operand::Var(name) => {
+            matches!(
+                kind(name),
+                Some(VarKind::Counter | VarKind::Bool | VarKind::Str)
+            ) || (entry && kind(name) == Some(VarKind::List))
+        }
+        Operand::Len(name) => kind(name) == Some(VarKind::List),
+        Operand::Lit(Literal::Null) => entry,
+        Operand::Param(_) => false,
+    };
+    match expr {
+        Expr::Const(_) => None,
+        Expr::Not(inner) => unverifiable_assertion(inner, vars, entry),
+        Expr::And(parts) | Expr::Or(parts) => parts
+            .iter()
+            .find_map(|p| unverifiable_assertion(p, vars, entry)),
+        Expr::Implies(a, b) => unverifiable_assertion(a, vars, entry)
+            .or_else(|| unverifiable_assertion(b, vars, entry)),
+        Expr::Var(name) => (kind(name) != Some(VarKind::Bool)).then_some(expr),
+        Expr::Empty(name) => {
+            (!matches!(kind(name), Some(VarKind::List | VarKind::Str))).then_some(expr)
+        }
+        Expr::Compare { lhs, rhs, .. } => {
+            (!checked_operand(lhs) || !checked_operand(rhs)).then_some(expr)
+        }
+        Expr::In { value, set, .. } => {
+            let checked = match set {
+                Set::List(_) => checked_operand(value),
+                Set::Var(name) => {
+                    kind(name) == Some(VarKind::List)
+                        && if entry {
+                            checked_operand(value)
+                        } else {
+                            matches!(value, Operand::Lit(Literal::Str(_)))
+                        }
+                }
+            };
+            (!checked).then_some(expr)
         }
     }
 }
@@ -161,6 +236,15 @@ fn operand_ty(operand: &Operand, scope: Scope<'_>) -> Result<Ty, String> {
             Ty::Str | Ty::List | Ty::Any => Ok(Ty::Str),
             _ => Err(format!("'{id_field}' cannot hold an entity id")),
         },
+        // The related entity's field is of a type this entity's spec does not
+        // declare; the joint check reads it as it is.
+        Operand::CrossField { id_field, .. } => match field_ty(id_field, scope) {
+            Ty::Str | Ty::List | Ty::Any => Ok(Ty::Any),
+            _ => Err(format!("'{id_field}' cannot hold an entity id")),
+        },
+        // A parameter's type is the action's to declare; the validator
+        // checks that the action declares it.
+        Operand::Param(_) => Ok(Ty::Any),
         Operand::Lit(lit) => Ok(lit_ty(lit)),
     }
 }

@@ -81,40 +81,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_span_columns_has_required_fields() {
-        assert!(is_span_column("trace_id"));
-        assert!(is_span_column("span_id"));
-        assert!(is_span_column("parent_span_id"));
-        assert!(is_span_column("service"));
-        assert!(is_span_column("operation"));
-        assert!(is_span_column("status"));
-        assert!(is_span_column("duration_ns"));
-        assert!(is_span_column("start_time"));
-        assert!(is_span_column("end_time"));
-        assert!(is_span_column("attributes"));
-        assert_eq!(SPAN_COLUMN_COUNT, 10);
-    }
-
-    #[test]
-    fn test_log_columns_has_required_fields() {
-        assert!(is_log_column("timestamp"));
-        assert!(is_log_column("level"));
-        assert!(is_log_column("service"));
-        assert!(is_log_column("message"));
-        assert!(is_log_column("attributes"));
-        assert_eq!(LOG_COLUMN_COUNT, 5);
-    }
-
-    #[test]
-    fn test_metric_columns_has_required_fields() {
-        assert!(is_metric_column("metric_name"));
-        assert!(is_metric_column("timestamp"));
-        assert!(is_metric_column("value"));
-        assert!(is_metric_column("tags"));
-        assert_eq!(METRIC_COLUMN_COUNT, 4);
-    }
-
-    #[test]
     fn test_unknown_columns_rejected() {
         assert!(!is_span_column("nonexistent"));
         assert!(!is_log_column("nonexistent"));

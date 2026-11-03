@@ -20,7 +20,6 @@ async fn legacy_bootstrap_after_skipped_history_remains_lenient() {
         BackendLabel::Turso,
         &serde_json::json!({}),
         None,
-        false,
     )
     .await
     .unwrap();
@@ -92,7 +91,7 @@ async fn skipped_history_does_not_append_a_fresh_bootstrap_on_restart() {
 }
 
 #[tokio::test]
-async fn round_four_recovery_does_not_invent_new_declared_fields() {
+async fn round_four_recovery_stores_no_declared_value_and_reads_its_initial() {
     let table = TransitionTable::from_ioa_source(
         r#"
 [automaton]
@@ -133,14 +132,26 @@ constraints = [{ kind="param_equals_field", param="expected", field="revision" }
         !recovered.counters.contains_key("revision"),
         "replay invented a declaration default"
     );
+    // The constraint reads the missing counter as its declared initial value.
     let mut recovered = recovered;
-    let refused = crate::entity_actor::effects::process_action(
+    let stale = crate::entity_actor::effects::process_action(
+        &mut recovered,
+        &table,
+        "Advance",
+        &serde_json::json!({"expected":0}),
+    );
+    assert!(!stale.success, "a missing counter read as its type's zero");
+    let advanced = crate::entity_actor::effects::process_action(
         &mut recovered,
         &table,
         "Advance",
         &serde_json::json!({"expected":7}),
     );
-    assert!(!refused.success, "new default became stored authority");
+    assert!(advanced.success, "{:?}", advanced.error);
+    assert!(
+        !recovered.counters.contains_key("revision"),
+        "a read wrote the declared value into the record"
+    );
 }
 
 #[tokio::test]
@@ -255,7 +266,6 @@ constraints = [{kind="param_equals_field",param="expected",field="revision"}]
         BackendLabel::Turso,
         &serde_json::json!({}),
         None,
-        true,
     )
     .await
     .unwrap();
@@ -263,13 +273,11 @@ constraints = [{kind="param_equals_field",param="expected",field="revision"}]
     assert_eq!(snapshot_recovery.fields, recovered.fields);
 }
 
+/// Every table, with or without input contracts, refuses to recover from a
+/// journal it could not read.
 #[tokio::test]
-async fn round_four_lenient_recovery_refuses_unreadable_contracted_prestate() {
-    for (strict, constrained, should_fail) in [
-        (true, false, true),
-        (false, true, true),
-        (false, false, false),
-    ] {
+async fn recovery_refuses_an_unreadable_journal_for_every_table() {
+    for (strict, constrained) in [(true, false), (false, true), (false, false)] {
         let mut table = order_table();
         table.strict_action_params = strict;
         if constrained {
@@ -282,7 +290,7 @@ async fn round_four_lenient_recovery_refuses_unreadable_contracted_prestate() {
             read_error: Some("injected unavailable journal".into()),
             ..Default::default()
         });
-        let recovered = recover_entity_state_from_store(
+        let error = recover_entity_state_from_store(
             "default",
             "Order",
             "unreadable",
@@ -291,17 +299,10 @@ async fn round_four_lenient_recovery_refuses_unreadable_contracted_prestate() {
             BackendLabel::Turso,
             &serde_json::json!({}),
             None,
-            false,
         )
-        .await;
-        assert_eq!(
-            recovered.is_err(),
-            should_fail,
-            "strict={strict}, constrained={constrained}"
-        );
-        if let Err(error) = recovered {
-            assert!(error.to_string().contains("injected unavailable journal"));
-        }
+        .await
+        .expect_err(&format!("strict={strict}, constrained={constrained}"));
+        assert!(error.to_string().contains("injected unavailable journal"));
     }
 }
 
@@ -329,8 +330,6 @@ async fn closed_cached_actor_recovers_once_after_journal_outage() {
         StorageStack::new(
             BackendLabel::Turso,
             store,
-            None,
-            None,
             None,
             None,
             None,

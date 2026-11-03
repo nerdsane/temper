@@ -7,9 +7,7 @@ fn artifact_vault(endpoint: &str) -> SecretsVault {
         ("published_blob_endpoint", endpoint),
         ("published_blob_bucket", "published-bucket"),
     ] {
-        vault
-            .cache_secret(TENANT, key, value.to_string())
-            .expect("cache artifact secret");
+        vault.cache_secret(TENANT, key, value.to_string());
     }
     vault
 }

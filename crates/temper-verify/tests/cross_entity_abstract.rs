@@ -46,6 +46,17 @@ assert = "status != 'Ready'"
     );
     assert!(
         result.all_passed,
-        "abstract cross-entity edge should not fail a local never-state proof"
+        "an invariant L0 cannot prove does not fail L0: {:?}",
+        result.not_proved
+    );
+    // The cross-entity guard may hold, so the edge to Ready may fire (L1
+    // takes it): L0 must not call the never-Ready invariant inductive.
+    assert!(
+        result
+            .inductive_invariants
+            .iter()
+            .any(|(name, proved)| name == "NeverLocallyReady" && !proved),
+        "{:?}",
+        result.inductive_invariants
     );
 }

@@ -6,6 +6,7 @@
 mod agents;
 mod entities;
 pub(crate) mod evolution;
+mod history;
 mod metrics;
 mod projections;
 mod refresh;
@@ -15,6 +16,10 @@ pub mod subprocess_verify;
 mod verification;
 pub(crate) mod wasm;
 use axum::Router;
+pub use specs::{
+    DEFAULT_BUDGET_MS, DEFAULT_PROP_TEST_CASES, DEFAULT_SIM_SEEDS, MAX_BUDGET_MS, budget_states,
+    check_ioa,
+};
 
 use axum::routing::{get, patch, post};
 use serde::{Deserialize, Serialize};
@@ -75,6 +80,10 @@ pub struct SpecDetail {
     pub invariants: Vec<InvariantDetail>,
     /// State variable declarations.
     pub state_variables: Vec<StateVarDetail>,
+    /// The spec's `[[group]]` boxes, flat and in source order, for drawing a
+    /// statechart; nesting is by name. Empty when the spec has none.
+    #[serde(default)]
+    pub groups: Vec<temper_spec::automaton::Group>,
 }
 
 /// Detail of a single action.
@@ -98,6 +107,10 @@ pub struct ActionDetail {
     /// Agent-facing hint from the spec (empty when the spec has none).
     #[serde(default)]
     pub hint: String,
+    /// The action's plain-words label for a statechart arrow; `null` when
+    /// the spec gives none.
+    #[serde(default)]
+    pub says: Option<String>,
 }
 
 /// A single action parameter: name plus its declared type ("string" default).
@@ -193,7 +206,7 @@ pub fn build_observe_router() -> Router<ServerState> {
         .route("/paths/{entity}", get(verification::handle_get_paths))
         .route(
             "/entities/{entity_type}/{entity_id}/history",
-            get(entities::handle_get_entity_history),
+            get(history::handle_get_entity_history),
         )
         .route(
             "/entities/{entity_type}/{entity_id}/events",

@@ -3,14 +3,43 @@
 //! The engine pushes only changes numbered above the remote's record for this
 //! file (`turso_sync_last_change_id`), and never says what that record was.
 //! Temper reads it itself to tell whether the file is behind the remote, and
-//! whether a push the remote refused still moved it.
+//! whether a push the remote refused still moved it. The same request, made
+//! on a new connection and timed step by step, shows where a hung push waits.
 
-use std::time::Duration;
+use std::fmt::Display;
+use std::time::{Duration, Instant};
 
 use super::DriverError;
 
 /// One request for the record.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long each step of a timed fresh request may take. Past the 1 s
+/// temper-cli lets a lost DNS answer cost (`RES_OPTIONS`), so one lost answer
+/// shows as a slow lookup rather than a failed one; far past a fresh
+/// request's normal 70 ms (lookup 9, connect 15, TLS 30, first byte 15 ms at
+/// the median on 28 Oct 2026).
+const STEP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A fresh request to the remote, timed step by step. A step that failed
+/// has no time, and neither does any step after it.
+#[derive(Debug, Default)]
+pub(super) struct FreshRequest {
+    /// The remote's host name.
+    pub host: String,
+    /// Looking the host name up, through the system resolver the engine's
+    /// client uses too.
+    pub lookup_ms: Option<u64>,
+    /// A TCP connection to the first address found.
+    pub connect_ms: Option<u64>,
+    /// A new HTTP connection to that address and a request for the remote's
+    /// record, until its answer's status line.
+    pub answer_ms: Option<u64>,
+    /// The answer's HTTP status.
+    pub status: Option<u16>,
+    /// The step that failed, and how.
+    pub failed: Option<String>,
+}
 
 /// Where the remote is and who this file is to it.
 pub(super) struct Remote {
@@ -35,10 +64,9 @@ impl Remote {
         }
     }
 
-    /// The number of the last change of this file the remote has applied; 0
-    /// when it has none.
-    pub(super) async fn last_change(&self) -> Result<i64, DriverError> {
-        let body = serde_json::json!({
+    /// The request for the remote's record of this file's pushes.
+    fn record_request(&self) -> serde_json::Value {
+        serde_json::json!({
             "requests": [{
                 "type": "execute",
                 "stmt": {
@@ -46,7 +74,59 @@ impl Remote {
                     "args": [{ "type": "text", "value": self.client_id }],
                 },
             }],
-        });
+        })
+    }
+
+    /// Ask the remote for its record on a new connection, timing the name
+    /// lookup, the connection and the answer apart. It shares nothing with
+    /// the engine's client, so it shows whether the remote can be found,
+    /// reached and answers now, not what the engine's own request is
+    /// waiting on.
+    pub(super) async fn time_fresh_request(&self) -> FreshRequest {
+        let mut fresh = FreshRequest::default();
+        if let Err(failed) = self.time_steps(&mut fresh).await {
+            fresh.failed = Some(failed);
+        }
+        fresh
+    }
+
+    async fn time_steps(&self, fresh: &mut FreshRequest) -> Result<(), String> {
+        let url =
+            reqwest::Url::parse(&self.pipeline_url).map_err(|error| format!("url: {error}"))?;
+        let host = url.host_str().unwrap_or_default().to_string();
+        fresh.host.clone_from(&host);
+        let port = url.port_or_known_default().unwrap_or(443);
+        let addr = step("lookup", &mut fresh.lookup_ms, async {
+            tokio::net::lookup_host((host.as_str(), port))
+                .await?
+                .next()
+                .ok_or_else(|| std::io::Error::other("no address"))
+        })
+        .await?;
+        step(
+            "connect",
+            &mut fresh.connect_ms,
+            tokio::net::TcpStream::connect(addr),
+        )
+        .await?;
+        let client = reqwest::Client::builder()
+            .resolve(&host, addr)
+            .build()
+            .map_err(|error| format!("client: {error}"))?;
+        let request = client
+            .post(url)
+            .bearer_auth(&self.auth_token)
+            .json(&self.record_request())
+            .send();
+        let answer = step("answer", &mut fresh.answer_ms, request).await?;
+        fresh.status = Some(answer.status().as_u16());
+        Ok(())
+    }
+
+    /// The number of the last change of this file the remote has applied; 0
+    /// when it has none.
+    pub(super) async fn last_change(&self) -> Result<i64, DriverError> {
+        let body = self.record_request();
         let failed = |what: String| {
             DriverError::SyncSetup(format!("read the remote copy's progress: {what}"))
         };
@@ -92,6 +172,30 @@ impl Remote {
             _ if value["type"] == "null" => Ok(0),
             _ => Err(unexpected()),
         }
+    }
+}
+
+/// Run one step of a timed request within [`STEP_TIMEOUT`], keeping its time
+/// when it succeeds.
+async fn step<T, E: Display>(
+    name: &str,
+    took: &mut Option<u64>,
+    work: impl Future<Output = Result<T, E>>,
+) -> Result<T, String> {
+    let started = Instant::now();
+    match tokio::time::timeout(STEP_TIMEOUT, work).await {
+        Ok(Ok(value)) => {
+            *took = Some(started.elapsed().as_millis() as u64);
+            Ok(value)
+        }
+        Ok(Err(error)) => Err(format!(
+            "{name}: {error} after {} ms",
+            started.elapsed().as_millis()
+        )),
+        Err(_) => Err(format!(
+            "{name}: nothing within {} s",
+            STEP_TIMEOUT.as_secs()
+        )),
     }
 }
 

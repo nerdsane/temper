@@ -268,10 +268,16 @@ from = ["Draft", "Submitted"]
 to = "Cancelled"
 params = ["Reason"]
 hint = "Cancel an order. Only from Draft or Submitted."
+says = "call it off"
 
 [[invariant]]
 name = "SubmitRequiresItems"
 assert = "status in ['Submitted'] => items > 0"
+
+[[group]]
+name = "Open"
+says = "still being put together"
+states = ["Draft", "Submitted"]
 ```
 
 **Rules for I/O Automaton specs:**
@@ -279,11 +285,64 @@ assert = "status in ['Submitted'] => items > 0"
 1. `[automaton]`: Define `name`, `states` (all valid status values), `initial` state, and optional `terminal` states (no action may leave them).
 2. `[[state]]`: Declare state variables with `name`, `type` (`counter`, `bool`, `string`, `set`), and `initial` value.
 3. `[[action]]`: Define actions with `name`, `kind` (`input`/`output`/`internal`), `from` states, `to` state, optional `guard`, `params`, `effect`, and `hint`.
-4. `[[invariant]]`: Define safety invariants with `name` and one `assert` expression, proven over every reachable state.
+4. `[[invariant]]`: Define safety invariants with `name` and one `assert` expression, proven over every reachable state and checked on every move: a move that would make one false is refused with its name ([predicates.md](predicates.md#invariants-on-every-move)).
 5. Every `guard` and `assert` is one expression in the predicate grammar (`&&`, `||`, `!`, `=>`, comparisons, `in`, `empty()`, `len()`, `Type[ref].status`); see [predicates.md](predicates.md).
-6. `effect` is a list of statements in the same grammar: `items += 1`, `retries -= 1`, `quota = params.quota`, `ready = true`, `append(tags, params.tag)`, `remove_at(tags, params.i)`, `schedule('Expire', 3600)`, `schedule_at('Expire', expires_at)`, `spawn('Task', 'Create', last_task_id)`. Statements are type-checked at load, and effects reading `params.p` are verified with `p` unknown. An action's name implies nothing: `AddItem` without an `effect` changes only `status`. See [predicates.md#effects](predicates.md#effects).
-7. `[[action.triggers]]`: the only way an action causes work elsewhere — `kind = "entity"` (another entity's action), `"wasm"`, `"adapter"`, `"webhook"`, or `"hook"` (a platform hook registered by the host). See [Section 9](#9-integration-engine).
+6. `effect` is a list of statements in the same grammar: `items += 1`, `retries -= 1`, `quota = params.quota`, `ready = true`, `append(tags, params.tag)`, `remove(tags, params.tag)`, `remove_at(tags, params.i)`, `schedule('Expire', 3600)`, `schedule_at('Expire', expires_at)`, `spawn('Task', 'Create', last_task_id)`. Statements are type-checked at load, and effects reading `params.p` are verified with `p` unknown. An action's name implies nothing: `AddItem` without an `effect` changes only `status`. See [predicates.md#effects](predicates.md#effects).
+7. `[[action.triggers]]`: the only way an action causes work elsewhere — `kind = "entity"` (another entity's action), `"wasm"`, `"adapter"`, or `"hook"` (a platform hook registered by the host). `kind = "webhook"` is refused at load: make the call with `kind = "wasm"`, `module = "http_fetch"` (ADR-0182). See [Section 9](#9-integration-engine).
 8. Action kinds: `input` = from environment (HTTP), always enabled in from-states; `output` = emitted events; `internal` = private state transitions.
+9. Statechart labels, which change nothing the spec does: an action's optional `says` is its arrow's label, non-empty when present; each `[[action]]` block of the same name keeps its own. A `[[group]]` has a `name`, an optional `says` (a reader shows the name without one) and a non-empty `states`, listing declared states and other groups' names, so groups nest. Group names differ from each other and from every state; every state and group sits in at most one group; groups never contain themselves. A group name is not a state: `from` and `to` cannot name one. `GET /observe/specs/{entity}` returns each action's `says` (`null` when absent) and the spec's `groups`, flat and in source order.
+10. `[[carry]]`: where a new version of a spec moves stored records it would otherwise leave with no way forward. See [Changing a spec with stored records](#changing-a-spec-with-stored-records).
+
+#### Changing a spec with stored records
+
+A new version of a spec may change anything, as long as no stored record is left with no way forward. A record has no way forward when its state is one the new version drops, or when moves start from its state and none is possible for its values, though one was possible under the installed version. A declared value a record lacks reads as its initial value, so adding a state variable strands nothing.
+
+Before an install writes anything, it reads the stored records in the states the change can affect. If some would be left with no way forward, the install is refused. The refusal starts with the `[[carry]]` sections that would fix it, ready to paste, and then lists the records by type and state with why. When a dropped state has an obvious target (the one state the version adds in its place, or the one state all its moves led to), the section names it.
+
+```toml
+# Placed is renamed Settled: move the stored Placed records there.
+[[carry]]
+from = "Placed"
+to = "Settled"
+
+# Bring now needs ready: set it on the stored Placed records that lack it.
+[[carry]]
+from = "Placed"
+guard = "!ready"          # optional: which of them
+set = { ready = true }    # optional: counters, flags, strings, numbers
+```
+
+`from` may be a state the new version drops. `to` defaults to `from`. A carry applies only to records that would otherwise have no way forward; the others are not moved. The install first tries each carry on each record it applies to, with the same move code every move runs: the carried record must satisfy the new version's invariants and have a way forward, or nothing is installed. Then the install answers and the new version serves. The platform makes the carries after that, in the background, each as an ordinary journaled move named `carry:<from>:<n>`; until its carry is made, a record waits in its old state, where no caller move is possible for it. The install's warnings say how many records each carry moves. Callers cannot make these moves, and they are not listed among a record's actions.
+
+A carry stays in effect while the version holds it: every install into the tenant and every start makes it on the records it applies to then. So a start finishes the carries a stopped process left unmade, and a record carried once is not moved again. Remove the carry in a later version once its records have moved.
+
+When the records' next step is what an action does, name it with `then`. The platform makes that action on each record right after its carry, with no parameters, as an ordinary move with its effects, triggers and reactions. It must start from the state the carry ends in. The install's dry run makes it too, so its guard must pass and the record must keep the invariants after it, or nothing is installed.
+
+```toml
+# Runs left waiting for a login end through EndLeftover, whose trigger reports the failure.
+[[carry]]
+from = "WaitingForLogin"
+to = "Running"
+set = { carried_from = "WaitingForLogin" }
+then = "EndLeftover"
+```
+
+The `then` move goes through the version's Cedar like any move. Its principal is `Agent::"service:carry"` (role `service`, agent type `carry`), and `context.carryMove` names the carry's move, such as `"carry:WaitingForLogin:1"`. Only the platform sets `carryMove`: a record field of that name does not reach the context. To keep an action to the platform: `forbid(principal, action == Action::"EndLeftover", resource) unless { context has carryMove };`. The moves its triggers make run as the same principal unless a trigger declares its own, and the modules they call get the capability any move's modules get.
+
+When the move must be made for the user a record belongs to, name the string field that holds them with `as`. The carry service then acts for that user: Cedar sees `context.actingFor` set to the field's value and no role, and a parameter with `source = "authenticated_subject"` is bound to that user, as it is when an agent acts for them. A record whose field is empty is left where the carry puts it, and the install says how many. Since the platform acts for whoever the field names, `as` needs a field only a caller's own identity writes: the spec must set `strict_action_params = true` (otherwise a create body or a field update could write it), each action parameter of that name must have `source = "authenticated_subject"`, and no carry may `set` it. A version that breaks one of these is refused.
+
+```toml
+# Runs left waiting for a login end for the user who asked for them.
+[[carry]]
+from = "WaitingForLogin"
+to = "Running"
+then = "EndLeftover"
+as = "asked_by"
+```
+
+The install's dry run asks Cedar too, with the policies the tenant will have once the install serves, for the user each record names. A `then` move Cedar refuses refuses the install, naming its records. The dry run asks for one record of each group of records that hold the same values of what the check reads, the `as` field among them; a policy that reads another field is asked again for each record when its move is made. A move refused then is logged, and its record stays where the carry left it. So does a record whose process stopped between its carry and its `then` move: a later pass does not make the `then` move.
+
+Reported, not refused: records already without a way forward under the installed version, and moves that are no longer possible for records that keep another one. Not checked: moves whose guard reads a related record, and an install that removes a whole type.
 
 ### 3.3 Cedar (Access Control)
 
@@ -600,11 +659,11 @@ Work outside the entity is declared as `[[action.triggers]]` on the action that 
 | `entity` | Dispatches an action on another Temper entity (a *reaction*) | `target_entity`, `target_action`, `resolve_target` |
 | `wasm` | Runs a sandboxed WASM module, then optionally `on_success` / `on_failure` on this entity | `module` (`config = { ... }` is passed to it) |
 | `adapter` | Runs a native platform adapter, then `on_success` / `on_failure` | `adapter`, `config` |
-| `webhook` | Outbound HTTP call (parses and installs, but no runtime dispatcher delivers it yet — ADR-0046 known gap; use `webhooks.toml` below) | `url`, `method` (optional `headers`, `body_template`) |
+| `webhook` | Refused at load: no dispatcher sends it (ADR-0182). Make the call with `kind = "wasm"`, `module = "http_fetch"` | |
 | `hook` | A platform hook registered by the host | `hook` (e.g. `"DispatchCallback"`) |
 
 - **Reactions** (`kind = "entity"`) — in-system choreography. Fire-and-forget, bounded cascade, deterministic under `SimReactionSystem`. Use them when both source and target are Temper entities. See [`docs/reactions.md`](reactions.md) for the full reference and [ADR-0045](adrs/0045-reactions-first-class-app-primitive.md) for the design.
-- **WASM, adapter and webhook triggers** — out-of-system work (external HTTP, LLM calls, third-party APIs). Use them when you need computation, I/O beyond the Temper cluster, or explicit retry / timeout semantics.
+- **WASM and adapter triggers** — out-of-system work (external HTTP, LLM calls, third-party APIs). Use them when you need computation, I/O beyond the Temper cluster, or explicit retry / timeout semantics.
 
 Every trigger is authorized by Cedar under the invoking principal, or under the service identity named by its optional `principal`.
 
@@ -625,7 +684,24 @@ on_failure = "RefreshFailed"
 config = { method = "POST", url = "https://oauth2.googleapis.com/token" }
 ```
 
-`on_success` / `on_failure` are ordinary actions on the same entity, so the callback path is a verified transition.
+`on_success` / `on_failure` are ordinary actions on the same entity, so the callback path is a verified transition. A module computes values; the spec decides the move. Where the values choose between moves, list them, and let each one's guard read the values as `params.<name>`:
+
+```toml
+[[action.triggers]]
+name = "forecast"
+kind = "wasm"
+module = "forecast"
+on_success = ["TakeUmbrella", "LeaveUmbrella"]
+
+[[action]]
+name = "TakeUmbrella"
+from = ["Asked"]
+to = "Wet"
+params = [{ name = "rain", type = "int" }]
+guard = "params.rain >= 50"
+```
+
+The kernel sends the first listed action the record takes with the module's values (its `from`, constraints and guard), or else the last, whose refusal is recorded. A guard reads only the parameters its action declares, and only an action's guard reads `params`. The record decides again when the answer commits. A module with nothing to report answers empty (`{"empty": true}`, `set_empty_result()` in the SDK), and nothing moves; `"action": ""` is not empty and still sends `on_success`. When `on_success` is named, an action the module's result names is ignored. Without `on_success`, the module's result may name any action of the entity, and the kernel dispatches it with no Cedar check: a module picking the move is being retired, so name `on_success`.
 
 ### Deployment-level webhooks
 
@@ -928,7 +1004,7 @@ any of these causes silent failures that are hard to diagnose after the fact.
 - [ ] `model.csdl.xml` entity types match IOA spec names and states
 - [ ] Cedar policies exist for each entity type in `specs/policies/`
 - [ ] No warnings from L0 SMT (dead guards, unreachable states)
-- [ ] Every WASM / adapter / webhook `[[action.triggers]]` entry names a module, adapter or `url` that exists in the deployment, and its `on_success` / `on_failure` actions are declared
+- [ ] Every WASM / adapter `[[action.triggers]]` entry names a module or adapter that exists in the deployment, and its `on_success` / `on_failure` actions are declared
 
 **Persistence (events survive restart):**
 - [ ] `DATABASE_URL` is set and points to a running Postgres instance
@@ -1301,7 +1377,7 @@ temper serve [--port PORT] [--specs-dir DIR] [--tenant NAME]
   2. What the server sets itself at start: `anthropic_api_key` when `ANTHROPIC_API_KEY` is set, `exa_api_key` when `EXA_API_KEY` is set, and the addresses the server gives its own modules (such as `temper_api_url`). The prefixed variable of the same name is skipped and logged by name.
   3. The prefixed variable.
 - **What is logged.** One line with the number of secrets seeded, and one warning for each skipped variable with its name. Values are never logged. With no `TEMPER_SECRET_` variable set, startup logs nothing about them.
-- **Budgets.** A value larger than 8192 bytes, the limit of the secrets API, is skipped and logged by name. The platform layer holds at most 100 secrets, the server's own included. Variables are taken in name order, and any beyond that are skipped and logged by name.
+- **Budgets.** A value larger than 8192 bytes, the limit of the secrets API, is skipped and logged by name. There is no limit on how many secrets the platform layer holds. Variables are taken in name order.
 
 ### Telemetry export settings
 

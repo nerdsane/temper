@@ -7,7 +7,6 @@ pub const TENANT_IOA: &str = include_str!("../../src/specs/Tenant.ioa.toml");
 pub const CATALOG_ENTRY_IOA: &str = include_str!("../../src/specs/CatalogEntry.ioa.toml");
 pub const COLLABORATOR_IOA: &str = include_str!("../../src/specs/Collaborator.ioa.toml");
 pub const VERSION_IOA: &str = include_str!("../../src/specs/Version.ioa.toml");
-pub const SYSTEM_MODEL_CSDL_XML: &str = include_str!("../../src/specs/model.csdl.xml");
 
 pub fn project_table_arc() -> Arc<TransitionTable> {
     Arc::new(TransitionTable::from_ioa_source(PROJECT_IOA))

@@ -33,6 +33,8 @@ impl ClientConfig {
 pub(super) struct HttpClients {
     pub(super) client: reqwest::Client,
     pub(super) internal_client: reqwest::Client,
+    /// The clients' request timeout. A followed redirect chain shares it.
+    pub(super) timeout: Duration,
 }
 
 impl HttpClients {
@@ -44,6 +46,7 @@ impl HttpClients {
         Self {
             client: build_client(config, false),
             internal_client: build_client(config, true),
+            timeout: config.timeout,
         }
     }
 }
@@ -132,14 +135,16 @@ impl HttpClientCache {
     }
 }
 
-fn build_client(config: &ClientConfig, disable_redirects: bool) -> reqwest::Client {
+fn build_client(config: &ClientConfig, internal: bool) -> reqwest::Client {
+    // The `http_call` gate checks only the URL the guest names, so neither
+    // client follows redirects on its own. The host follows them in
+    // `redirects.rs` and asks the gate about every hop first.
     let mut builder = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
-        .timeout(config.timeout);
-    if disable_redirects {
-        builder = builder
-            .redirect(reqwest::redirect::Policy::none())
-            .no_proxy();
+        .timeout(config.timeout)
+        .redirect(reqwest::redirect::Policy::none());
+    if internal {
+        builder = builder.no_proxy();
     }
     for (key, pem) in &config.ca_certs {
         match reqwest::Certificate::from_pem(pem.as_bytes()) {

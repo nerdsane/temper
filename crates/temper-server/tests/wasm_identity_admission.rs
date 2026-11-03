@@ -168,12 +168,8 @@ async fn fixture() -> (ServerState, tempfile::TempDir) {
         .reload_tenant_policies("probe", POLICIES)
         .unwrap();
     let vault = temper_server::secrets::vault::SecretsVault::new(&[42; 32]);
-    vault
-        .cache_secret("probe", "webhook_token", "fixture-token".into())
-        .unwrap();
-    vault
-        .cache_secret("probe", "unrelated_token", "must-not-read".into())
-        .unwrap();
+    vault.cache_secret("probe", "webhook_token", "fixture-token".into());
+    vault.cache_secret("probe", "unrelated_token", "must-not-read".into());
     state.secrets_vault = Some(std::sync::Arc::new(vault));
     let wasm = include_bytes!("fixtures/wasm-identity/identity.wasm");
     let hash = state.wasm_engine.compile_and_cache(wasm).unwrap();

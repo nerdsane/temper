@@ -1,0 +1,7 @@
+{"problemMatcher":[
+ {"owner":"rust-test-panic","pattern":[
+  {"regexp":"^\\s*(?:\\x1b\\[[0-9;]*m)*thread '(.+?)'(?: \\(\\d+\\))? panicked at (.+):(\\d+):(\\d+):(?:\\x1b\\[[0-9;]*m)*$","code":1,"file":2,"line":3,"column":4},
+  {"regexp":"^\\s*(?:\\x1b\\[[0-9;]*m)*(.+?)(?:\\x1b\\[[0-9;]*m)*$","message":1}]},
+ {"owner":"rust-test-sides","pattern":[
+  {"regexp":"^\\s*((?:left|right): .*)$","message":1}]}
+]}

@@ -38,6 +38,7 @@ async fn dispatch(
     actor_ref
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: action.to_string(),
                 params,
                 related: BTreeMap::new(),
