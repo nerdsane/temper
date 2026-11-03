@@ -384,6 +384,7 @@ impl crate::state::ServerState {
         } = dispatch;
         let span = crate::trace_context::runtime_work_span!(
             crate::trace_context::cause(),
+            kind = "reaction",
             "reaction.dispatch.background",
             tenant = %tenant,
             entity_type = %entity_type,

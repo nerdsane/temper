@@ -8,6 +8,8 @@
   - ADR-0098: Background WASM Trace Retention (the `dispatch.scheduled_actions` reduction is removed)
   - `crates/temper-server/src/trace_context.rs`
   - `crates/temper-server/src/state/dispatch/actions.rs`
+  - `crates/temper-server/src/api/decisions.rs`
+  - `crates/temper-platform/src/hooks/governance_callback.rs`
 
 ## Context
 
@@ -36,9 +38,19 @@ its own. Its first span is opened with `trace_context::runtime_work_span!`: the
 span has no parent and one span link to the span of the move that handed the
 work off (`trace_context::cause()`). It applies to every kind: state timers,
 scheduled actions, spawned records, background reactions, background WASM and
-adapter integrations (with the callbacks they dispatch) and integration failure
-compensation. A delayed piece of work opens its span when the wait ends, so the
-span's duration is the work's.
+adapter integrations (with the callbacks they dispatch), integration failure
+compensation, the GovernanceDecision move that an approve or deny request hands
+off without waiting for it (linked to that request), and the platform's
+governance callback that resumes or fails the waiting record (linked to the
+decision's move). The macro is exported (`temper_server::runtime_work_span!`)
+so work handed off outside `temper-server` uses the same rule. Every root it
+opens carries `runtime_work = "<kind>"` (a required argument: `state_timeout`,
+`scheduled_action`, `background_spawn`, `reaction`, `wasm_integration`,
+`adapter_integration`, `integration_compensation`, `decision_resolution`,
+`governance_callback`), so a trace pipeline keeps runtime work with
+`parent_id:0 @runtime_work:*` and a new kind needs no rule change. A delayed piece
+of work opens its span when the wait ends, so the span's duration is the
+work's.
 
 No span is kept open across moves. `WorkflowSpanRegistry`, its hardcoded
 agent-cycle entity names and terminal status names, and the drain grace are

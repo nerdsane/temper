@@ -36,6 +36,14 @@ pub(crate) fn capture() -> CapturedSpans {
     }
 }
 
+/// The value of `span`'s attribute `key`, as text.
+pub(crate) fn attribute(span: &SpanData, key: &str) -> Option<String> {
+    span.attributes
+        .iter()
+        .find(|kv| kv.key.as_str() == key)
+        .map(|kv| kv.value.to_string())
+}
+
 /// Whether `span` carries the attribute `key`.
 pub(crate) fn has_attribute(span: &SpanData, key: &str) -> bool {
     span.attributes.iter().any(|kv| kv.key.as_str() == key)

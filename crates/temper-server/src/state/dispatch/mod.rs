@@ -278,6 +278,7 @@ impl crate::state::ServerState {
         let workflow_run_id = workflow_run_id(&agent_ctx, &entity_type, &entity_id);
         let span = crate::trace_context::runtime_work_span!(
             crate::trace_context::cause(),
+            kind = "wasm_integration",
             "dispatch.background_wasm_integrations",
             workflow.root_entity_type = %workflow_root_entity_type,
             workflow.root_entity_id = %workflow_root_entity_id,

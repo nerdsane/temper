@@ -243,6 +243,7 @@ impl ServerState {
             "owed write did not land; keeping it to try again");
         let span = crate::trace_context::runtime_work_span!(
             crate::trace_context::cause(),
+            kind = "owed_write",
             "dispatch.owed_write",
             tenant = %owed.tenant,
             entity_type = %owed.entity_type,

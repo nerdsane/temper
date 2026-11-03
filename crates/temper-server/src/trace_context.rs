@@ -9,41 +9,57 @@
 //!
 //! Work the runtime starts on its own, after the move that caused it (a state
 //! timer, a scheduled action, a spawned record, a background reaction, an
-//! integration and the callback it dispatches), is a trace of its own: its first
-//! span has no parent and links to the move that caused it
+//! integration and the callback it dispatches, a decision's resolution that an
+//! approve or deny request hands off, the governance callback), is a trace of
+//! its own: its first span has no parent and links to the move that caused it
 //! ([`runtime_work_span!`]). The trace ends, and its root is exported, when that
 //! piece of work ends, so a record that keeps moving makes many short traces,
-//! each linked to the move before it, instead of one trace that grows with every
-//! later move.
+//! each linked to the move before it, instead of one trace that grows with
+//! every later move.
 
 use opentelemetry::trace::{SpanContext, TraceContextExt};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// Open the root span of work the runtime starts on its own:
-/// `runtime_work_span!(cause, "span.name", fields...)`.
+/// `runtime_work_span!(cause, kind = "state_timeout", "span.name", fields...)`.
 ///
 /// The span has no parent, so the work is its own trace, exported when the work
 /// ends. It links to `cause`, a [`SpanContext`] taken with [`cause`] where the
 /// work was handed off: the span of the move that started it. Create the span
 /// when the work starts (after a timer's wait, not before), so its duration is
 /// the work's.
+///
+/// Every such root carries the attribute `runtime_work = kind`, the work's own
+/// name. It is what marks a trace as runtime work (a trace pipeline keeps
+/// `parent_id:0 @runtime_work:*`), so a new kind needs no rule anywhere else.
+///
+/// Exported (`temper_server::runtime_work_span!`) so work handed off outside
+/// this crate, such as the platform's governance callback, follows the same
+/// rule.
+#[macro_export]
 macro_rules! runtime_work_span {
-    ($cause:expr, $name:literal $(, $($field:tt)*)?) => {{
-        let span = ::tracing::info_span!(parent: None, $name $(, $($field)*)?);
+    ($cause:expr, kind = $kind:literal, $name:literal $(, $($field:tt)*)?) => {{
+        let span = ::tracing::info_span!(
+            parent: None,
+            $name,
+            runtime_work = $kind
+            $(, $($field)*)?
+        );
         $crate::trace_context::link_cause(&span, &$cause);
         span
     }};
 }
-pub(crate) use runtime_work_span;
+pub use runtime_work_span;
 
 /// The span of the move that is handing off work, for the work's own trace to
 /// link back to. Invalid when no span is active (a timer armed at boot).
-pub(crate) fn cause() -> SpanContext {
+pub fn cause() -> SpanContext {
     span_context(&tracing::Span::current())
 }
 
 /// Link the root span of runtime-started work to the move that caused it.
-pub(crate) fn link_cause(span: &tracing::Span, cause: &SpanContext) {
+/// [`runtime_work_span!`] calls this; other code opens the span with the macro.
+pub fn link_cause(span: &tracing::Span, cause: &SpanContext) {
     if cause.is_valid() {
         span.add_link(cause.clone());
     }
