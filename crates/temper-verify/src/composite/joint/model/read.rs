@@ -37,6 +37,8 @@ pub(super) struct Reaction {
     /// creates its target (always ready for it), or `drop_ok` says a drop is
     /// meant.
     pub(super) may_drop: bool,
+    /// What it does as a spawn, when it stands for one.
+    pub(super) spawn: Option<super::spawn::Spawn>,
 }
 
 /// The models of the types in `scope` and the reactions between them,
@@ -237,6 +239,17 @@ pub(super) fn reactions_into(
 ) -> BTreeMap<(String, String), BTreeSet<String>> {
     let mut into: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
     for (from, automaton) in by_name.iter().filter(|(name, _)| !scope.contains(**name)) {
+        for (to, action) in automaton
+            .actions
+            .iter()
+            .flat_map(super::spawn::spawns_of)
+            .map(|(to, action, ..)| (to, action))
+            .filter(|(to, _)| scope.contains(*to))
+        {
+            into.entry((to.clone(), action.clone()))
+                .or_default()
+                .insert(from.to_string());
+        }
         for trigger in automaton.actions.iter().flat_map(|a| &a.triggers) {
             if let (TriggerKind::Entity, Some(to), Some(action)) = (
                 &trigger.kind,
@@ -258,6 +271,9 @@ fn reactions_in(by_name: &BTreeMap<&str, &Automaton>, scope: &BTreeSet<String>) 
     let mut reactions = Vec::new();
     for from in scope {
         for action in &by_name[from.as_str()].actions {
+            // Before its triggers: a commit stores a child's id before any
+            // of its trigger guards is read.
+            reactions.extend(super::spawn::spawn_reactions(by_name, scope, from, action));
             for trigger in &action.triggers {
                 if trigger.kind != TriggerKind::Entity {
                     continue;
@@ -282,6 +298,7 @@ fn reactions_in(by_name: &BTreeMap<&str, &Automaton>, scope: &BTreeSet<String>) 
                     trigger: trigger.name.clone(),
                     may_drop: trigger.drop_ok
                         || matches!(trigger.resolve_target, Some(TargetResolver::Create)),
+                    spawn: None,
                 });
             }
         }

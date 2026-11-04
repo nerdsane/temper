@@ -108,9 +108,14 @@ impl JointModel {
             return false;
         };
         let reaction = &self.reactions[index];
+        // Spawns run beside a commit's reactions, not in their order.
+        if reaction.spawn.is_some() {
+            return false;
+        }
         let earlier = |entity: &str, action: &str| {
             self.reactions[..index].iter().any(|r| {
-                r.from == reaction.from
+                r.spawn.is_none()
+                    && r.from == reaction.from
                     && r.source_action == reaction.source_action
                     && r.to == entity
                     && r.target_action == action
@@ -119,6 +124,7 @@ impl JointModel {
         let sibling = |other: &Dispatch| {
             other.via.is_some_and(|at| {
                 at < index
+                    && self.reactions[at].spawn.is_none()
                     && self.reactions[at].from == reaction.from
                     && self.reactions[at].source_action == reaction.source_action
             })

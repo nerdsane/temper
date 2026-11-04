@@ -79,7 +79,10 @@ impl JointModel {
     ) -> Vec<(JointState, String, Certainty)> {
         let refused = format!("{text} refused by its record");
         let (moved, action, certainty) = match self.arrive(&state, dispatch) {
-            Arrival::Refused => return vec![(state, refused, Certainty::Sure)],
+            Arrival::Refused => {
+                self.spawn_refused(&mut state, dispatch);
+                return vec![(state, refused, Certainty::Sure)];
+            }
             Arrival::BeyondBounds => {
                 // The runtime can take this move, but its result is outside
                 // the bounded walk. Do not count it as a definite refusal
@@ -99,11 +102,20 @@ impl JointModel {
         // A take the model cannot decide may be a refusal instead.
         let mut outcomes = Vec::new();
         if certainty != Certainty::Sure {
-            outcomes.push((state.clone(), refused, certainty));
+            let mut stays = state.clone();
+            self.spawn_refused(&mut stays, dispatch);
+            outcomes.push((stays, refused, certainty));
         }
         let text = format!("{text} arrives -> {}", moved.status);
         self.place(&mut state, &dispatch.to, moved, &action, dispatch.by);
-        let after = self.after_commit(state, &dispatch.to, &action, &dispatch.chain, dispatch.by);
+        let after = self.after_commit(
+            state,
+            &dispatch.to,
+            &action,
+            &dispatch.chain,
+            dispatch.by,
+            &dispatch.params,
+        );
         outcomes.extend(
             after
                 .into_iter()
@@ -129,7 +141,7 @@ impl JointModel {
         let moved = step(t, record, &action.params);
         let mut next = state;
         self.place(&mut next, entity, moved, &action.name, by);
-        self.after_commit(next, entity, &action.name, chain, by)
+        self.after_commit(next, entity, &action.name, chain, by, &action.params)
     }
 
     /// Put `entity`'s record, after it took `action` from `by`, into
@@ -147,13 +159,7 @@ impl JointModel {
         let timeout = self.timeout(entity, &moved.status);
         match timeout {
             Some(timeout) if entered || timeout.reset_on.iter().any(|a| a == action) => {
-                // Its fire starts a timer's chain, whichever chain armed it.
-                let sender = if self.sender_matters.contains(entity) {
-                    super::super::senders::Senders::armer(by)
-                } else {
-                    super::super::senders::OUTSIDE
-                };
-                state.armed.insert(entity.into(), sender);
+                state.armed.insert(entity.into(), self.armer(entity, by));
             }
             Some(_) => {}
             None => {
@@ -162,6 +168,16 @@ impl JointModel {
         }
         if let Some(record) = state.records.get_mut(entity) {
             *record = std::sync::Arc::new(moved);
+        }
+    }
+
+    /// Who `entity`'s timer fires as when `by` arms it. Its fire starts a
+    /// timer's chain, whichever chain armed it.
+    pub(super) fn armer(&self, entity: &str, by: u32) -> u32 {
+        if self.sender_matters.contains(entity) {
+            super::super::senders::Senders::armer(by)
+        } else {
+            super::super::senders::OUTSIDE
         }
     }
 

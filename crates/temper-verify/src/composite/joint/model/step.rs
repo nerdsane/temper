@@ -312,9 +312,11 @@ impl JointModel {
                 if allows != Truth::True {
                     let refused = format!("{dispatch} refused when read");
                     let certainty = Certainty::unless(allows == Truth::False, OneOf);
+                    let mut stays = next.clone();
+                    self.spawn_refused(&mut stays, dispatch);
                     if !self
                         .expansion
-                        .push(&mut outcomes, (next.clone(), refused, certainty))
+                        .push(&mut outcomes, (stays, refused, certainty))
                     {
                         return (Vec::new(), false);
                     };
@@ -336,9 +338,10 @@ impl JointModel {
                 let mut next = state.clone();
                 remove(&mut next, dispatch);
                 // Cedar decides a reaction as its sender; every other
-                // dispatch was decided at its entry point, or is the kernel's.
-                let may = if let Some(index) = dispatch.via {
-                    let reaction = &self.reactions[index];
+                // dispatch was decided at its entry point, or is the kernel's,
+                // as a spawned record's first action is.
+                let via = dispatch.via.map(|index| &self.reactions[index]);
+                let may = if let Some(reaction) = via.filter(|r| r.spawn.is_none()) {
                     let rule = Rule {
                         from: &reaction.from,
                         action: &reaction.source_action,

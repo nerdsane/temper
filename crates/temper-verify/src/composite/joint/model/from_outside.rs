@@ -9,6 +9,7 @@ use super::super::JointState;
 use super::super::state::ReactionStep;
 use super::JointModel;
 use super::commit::add;
+use super::spawn::spawns_of;
 use super::step::{Certainty, Move, sent};
 use crate::model::semantics::successors_budgeted;
 use crate::model::{ModelString, ResolvedTransition, TemperModelAction};
@@ -189,6 +190,10 @@ impl JointModel {
     }
 }
 
+/// How a spawn reaches its child: it makes it.
+static CREATE: Option<temper_spec::automaton::TargetResolver> =
+    Some(temper_spec::automaton::TargetResolver::Create);
+
 /// The reactions from types outside `scope` into actions of types in it
 /// ([`Outside`]), by their target (entity, action).
 pub(super) fn outside_reactions(
@@ -201,6 +206,12 @@ pub(super) fn outside_reactions(
     let mut set_off_by: BTreeMap<(String, String), BTreeSet<(String, String)>> = BTreeMap::new();
     for (entity, automaton) in by_name {
         for action in &automaton.actions {
+            for (to, target, ..) in spawns_of(action) {
+                set_off_by
+                    .entry((to.clone(), target.clone()))
+                    .or_default()
+                    .insert((entity.to_string(), action.name.clone()));
+            }
             for trigger in &action.triggers {
                 if let (TriggerKind::Entity, Some(to), Some(target)) = (
                     &trigger.kind,
@@ -219,14 +230,18 @@ pub(super) fn outside_reactions(
     let mut makes: BTreeMap<(String, String), BTreeSet<Option<bool>>> = BTreeMap::new();
     for (from, automaton) in by_name.iter().filter(|(name, _)| !scope.contains(**name)) {
         for action in &automaton.actions {
-            for trigger in &action.triggers {
+            let spawned = spawns_of(action).map(|(to, target, ..)| (to, target, &CREATE));
+            let triggered = action.triggers.iter().filter_map(|trigger| {
                 let (TriggerKind::Entity, Some(to), Some(target)) = (
                     &trigger.kind,
                     &trigger.target_entity,
                     &trigger.target_action,
                 ) else {
-                    continue;
+                    return None;
                 };
+                Some((to, target, &trigger.resolve_target))
+            });
+            for (to, target, resolve) in spawned.chain(triggered) {
                 if !scope.contains(to) {
                     continue;
                 }
@@ -253,16 +268,11 @@ pub(super) fn outside_reactions(
                 }
                 // As `react` records its step: made when it creates its
                 // target; a same-id step inherits what its chain made.
-                makes
-                    .entry(key)
-                    .or_default()
-                    .insert(match &trigger.resolve_target {
-                        Some(TargetResolver::Create) => Some(true),
-                        Some(TargetResolver::SameId | TargetResolver::CreateIfMissing { .. }) => {
-                            None
-                        }
-                        _ => Some(false),
-                    });
+                makes.entry(key).or_default().insert(match resolve {
+                    Some(TargetResolver::Create) => Some(true),
+                    Some(TargetResolver::SameId | TargetResolver::CreateIfMissing { .. }) => None,
+                    _ => Some(false),
+                });
             }
         }
     }

@@ -29,7 +29,10 @@ impl JointModel {
         action: &str,
         chain: &[ReactionStep],
         by: u32,
+        params: &BTreeMap<String, ParamValue>,
     ) -> Vec<(JointState, Certainty)> {
+        let mut state = state;
+        self.store_outside_spawns(&mut state, source, action);
         // Outside actions and detached work start a fresh chain.
         let root = [ReactionStep {
             entity_type: source.to_string(),
@@ -37,7 +40,7 @@ impl JointModel {
             generated_for: None,
         }];
         let chain = if chain.is_empty() { &root } else { chain };
-        let mut outcomes = self.react(state, source, action, chain, by);
+        let mut outcomes = self.react(state, source, action, chain, by, params);
         let key = (source.to_string(), action.to_string());
         let Some(specs) = self.kernel.calls_on.get(&key).filter(|_| self.kernel_moves) else {
             return outcomes;
@@ -116,6 +119,7 @@ impl JointModel {
         action: &str,
         chain: &[ReactionStep],
         by: u32,
+        params: &BTreeMap<String, ParamValue>,
     ) -> Vec<(JointState, Certainty)> {
         let mut outcomes = Vec::new();
         if !self.keep(&mut outcomes, state, Certainty::Sure) {
@@ -134,6 +138,15 @@ impl JointModel {
             for (state, known) in outcomes {
                 if !self.expansion.take() {
                     return Vec::new();
+                }
+                if let Some(spawn) = &reaction.spawn {
+                    let made = (index, reaction, spawn);
+                    for (next, then) in self.spawn(state, source, made, chain, by, params) {
+                        if !self.keep(&mut after, next, known.then(then)) {
+                            return Vec::new();
+                        }
+                    }
+                    continue;
                 }
                 let fires = match &reaction.guard {
                     Some(guard) => eval(guard, &self.env_blind(source, &state, Blind::Related)),
@@ -352,7 +365,7 @@ impl JointModel {
     /// counts its target reads (in an effect, or compared with a counter)
     /// from a counter `source` holds as a value, read from `source` as it
     /// holds them.
-    fn args(
+    pub(super) fn args(
         &self,
         state: &JointState,
         source: &str,

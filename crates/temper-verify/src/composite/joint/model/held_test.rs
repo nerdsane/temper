@@ -97,7 +97,7 @@ fn module_calls_count_before_inflight_pruning_and_stay_charged() {
 
     let room = 1 << 20;
     model.expansion.allow(room);
-    let outcomes = model.after_commit(state, "Ask", "Go", &[], OUTSIDE);
+    let outcomes = model.after_commit(state, "Ask", "Go", &[], OUTSIDE, &Default::default());
     assert!(!model.expansion.short());
     assert_eq!(outcomes.len(), 1);
     assert_eq!(outcomes[0].0.calls.len(), 100);

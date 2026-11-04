@@ -13,7 +13,7 @@ pub(super) const ID: &str = "Id";
 
 /// What a reference's id field holds when there is one record of a type: the
 /// id of that record, which every reference finds.
-const ONE_ID: &str = "#1";
+pub(super) const ONE_ID: &str = "#1";
 
 /// What an evaluation may not see. The runtime reads related records on the
 /// dispatch path and the record's own state in its actor, at different

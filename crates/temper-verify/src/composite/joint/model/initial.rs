@@ -3,6 +3,67 @@
 use super::*;
 
 impl JointModel {
+    /// The records as they start, without their ids.
+    pub(super) fn blank(&self) -> BTreeMap<std::sync::Arc<str>, std::sync::Arc<TemperModelState>> {
+        self.models
+            .iter()
+            .map(|(entity, model)| {
+                let init = stateright::Model::init_states(model)
+                    .into_iter()
+                    .next()
+                    .expect("a model has one initial state");
+                (entity.as_str().into(), std::sync::Arc::new(init))
+            })
+            .collect()
+    }
+
+    /// The starting state whose ids are `ids` (entity type to a trace name;
+    /// equal names, equal ids; a type left out gets an id of its own), and
+    /// each trace name's value in it.
+    pub(in crate::composite::joint) fn init_with_ids(
+        &self,
+        ids: &BTreeMap<String, String>,
+    ) -> (JointState, BTreeMap<String, ModelString>) {
+        let mut names: BTreeMap<String, ModelString> = BTreeMap::new();
+        let mut records = self.blank();
+        for (entity, record) in &mut records {
+            let name = ids
+                .get(&**entity)
+                .cloned()
+                .unwrap_or_else(|| format!("{entity}#id"));
+            let next = ModelString::Symbol(names.len() + 1);
+            let value = names.entry(name).or_insert(next).clone();
+            std::sync::Arc::make_mut(record)
+                .strings
+                .insert(ID.to_string(), value);
+        }
+        let mut state = JointState {
+            records,
+            inflight: Vec::new(),
+            calls: Vec::new(),
+            armed: BTreeMap::new(),
+        };
+        self.arm_at_start(&mut state);
+        self.order.normalize(&mut state);
+        let renamed = canonical(&mut state);
+        for value in names.values_mut() {
+            if let Some(new) = renamed.get(value) {
+                *value = new.clone();
+            }
+        }
+        (state, names)
+    }
+
+    /// A record that starts in a state with a timer was made by someone
+    /// outside, who armed it.
+    pub(super) fn arm_at_start(&self, state: &mut JointState) {
+        for (entity, record) in &state.records {
+            if self.timeout(entity, &record.status).is_some() {
+                state.armed.insert(entity.clone(), OUTSIDE);
+            }
+        }
+    }
+
     /// The starting states: one per way the records' ids can be equal or
     /// differ from one another and from the literals each can meet
     /// ([`super::classes`]).

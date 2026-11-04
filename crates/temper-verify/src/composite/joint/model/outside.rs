@@ -87,7 +87,10 @@ impl JointModel {
                 .filter(|r| r.principal.is_none() && r.from == entity && r.source_action == action)
             {
                 let next = (reaction.to.as_str(), reaction.target_action.as_str());
-                asked.insert(next);
+                // Cedar is not asked about a spawned record's first action.
+                if reaction.spawn.is_none() {
+                    asked.insert(next);
+                }
                 follows(next);
             }
             let key = (entity.to_string(), action.to_string());

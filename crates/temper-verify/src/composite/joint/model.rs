@@ -15,6 +15,7 @@ mod outside;
 mod react;
 mod read;
 mod silent;
+mod spawn;
 mod step;
 mod walk;
 
@@ -148,6 +149,14 @@ pub(super) struct JointModel {
     /// The actions (entity, action) of types in scope that a reaction from
     /// a type outside it sends ([`Outside`]).
     outside: BTreeMap<(String, String), Outside>,
+    /// The fields a move (entity, action) stores a child's id in, when the
+    /// child's type is outside the scope.
+    outside_spawns: BTreeMap<(String, String), Vec<String>>,
+    /// Each type's record as it first stands, made on first use.
+    first: std::cell::OnceCell<BTreeMap<String, TemperModelState>>,
+    /// Each type's statuses from which its record can send nothing more,
+    /// made on first use.
+    settled: std::cell::OnceCell<BTreeMap<String, BTreeSet<String>>>,
 }
 
 impl JointModel {
@@ -315,6 +324,9 @@ impl JointModel {
             sender_matters,
             unsent,
             outside,
+            outside_spawns: spawn::outside_spawns(by_name, scope),
+            first: std::cell::OnceCell::new(),
+            settled: std::cell::OnceCell::new(),
         }
     }
 
@@ -326,67 +338,6 @@ impl JointModel {
         }
         memory.set(self.senders.construction_bytes())?;
         Ok(self)
-    }
-
-    /// The records as they start, without their ids.
-    fn blank(&self) -> BTreeMap<std::sync::Arc<str>, std::sync::Arc<TemperModelState>> {
-        self.models
-            .iter()
-            .map(|(entity, model)| {
-                let init = stateright::Model::init_states(model)
-                    .into_iter()
-                    .next()
-                    .expect("a model has one initial state");
-                (entity.as_str().into(), std::sync::Arc::new(init))
-            })
-            .collect()
-    }
-
-    /// The starting state whose ids are `ids` (entity type to a trace name;
-    /// equal names, equal ids; a type left out gets an id of its own), and
-    /// each trace name's value in it.
-    pub(super) fn init_with_ids(
-        &self,
-        ids: &BTreeMap<String, String>,
-    ) -> (JointState, BTreeMap<String, ModelString>) {
-        let mut names: BTreeMap<String, ModelString> = BTreeMap::new();
-        let mut records = self.blank();
-        for (entity, record) in &mut records {
-            let name = ids
-                .get(&**entity)
-                .cloned()
-                .unwrap_or_else(|| format!("{entity}#id"));
-            let next = ModelString::Symbol(names.len() + 1);
-            let value = names.entry(name).or_insert(next).clone();
-            std::sync::Arc::make_mut(record)
-                .strings
-                .insert(ID.to_string(), value);
-        }
-        let mut state = JointState {
-            records,
-            inflight: Vec::new(),
-            calls: Vec::new(),
-            armed: BTreeMap::new(),
-        };
-        self.arm_at_start(&mut state);
-        self.order.normalize(&mut state);
-        let renamed = canonical(&mut state);
-        for value in names.values_mut() {
-            if let Some(new) = renamed.get(value) {
-                *value = new.clone();
-            }
-        }
-        (state, names)
-    }
-
-    /// A record that starts in a state with a timer was made by someone
-    /// outside, who armed it.
-    fn arm_at_start(&self, state: &mut JointState) {
-        for (entity, record) in &state.records {
-            if self.timeout(entity, &record.status).is_some() {
-                state.armed.insert(entity.clone(), OUTSIDE);
-            }
-        }
     }
 
     /// `entity`'s timer in `status`, when the model makes timers fire.

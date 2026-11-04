@@ -20,7 +20,7 @@ pub fn string_values<'a>(
 }
 
 /// A value equal to none of `values`, preserving whether it is blank.
-fn fresh_string(values: &BTreeSet<ModelString>, blank: bool) -> ModelString {
+pub(crate) fn fresh_string(values: &BTreeSet<ModelString>, blank: bool) -> ModelString {
     let largest = values
         .iter()
         .filter_map(ModelString::symbol_id)
