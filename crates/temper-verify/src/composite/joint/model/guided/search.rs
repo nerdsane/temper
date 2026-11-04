@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use temper_spec::automaton::Automaton;
-use temper_spec::predicate::{Expr, Truth, eval};
+use temper_spec::predicate::{Expr, Truth};
 
 use super::super::super::JointOutcome;
 use super::super::super::room::{Bound, Bytes, Progress};
@@ -94,11 +94,13 @@ pub fn guided_search(
         let invariants: Vec<Expr> = invariants.iter().map(|inv| (*inv).clone()).collect();
         model.walk_with(bound, Keep::Sure, move |model, _, state, sure| {
             expanded.fetch_add(1, Ordering::Relaxed);
-            if sure && state.settled() {
-                let env = model.env(&owner, state);
-                if invariants.iter().any(|inv| eval(inv, &env) == Truth::False) {
-                    met.store(true, Ordering::Relaxed);
-                }
+            if sure
+                && state.settled()
+                && invariants
+                    .iter()
+                    .any(|inv| model.rule_truth(&owner, inv, state) == Truth::False)
+            {
+                met.store(true, Ordering::Relaxed);
             }
             met.load(Ordering::Relaxed)
         })

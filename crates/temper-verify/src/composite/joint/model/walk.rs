@@ -1,12 +1,12 @@
 //! What the walk over joint states finds (`walk/run.rs` walks them).
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use super::super::pack::{Packed, Packer};
 use super::super::room::{Held, MB};
 use super::super::state::render;
-use super::super::{JointState, JointStep};
+use super::super::{JointOutcome, JointState, JointStep};
 use super::JointModel;
 
 mod checked;
@@ -15,6 +15,19 @@ mod invariants;
 mod levels;
 mod run;
 mod shared;
+
+/// What a walk found.
+pub(in crate::composite::joint) struct Walk {
+    /// Distinct joint states walked.
+    pub(in crate::composite::joint) states: usize,
+    /// One per invariant.
+    pub(in crate::composite::joint) outcomes: Vec<JointOutcome>,
+    /// Whether a move was held back for [`super::MAX_IN_FLIGHT`].
+    pub(in crate::composite::joint) held_back: bool,
+    /// One per invariant: when it is false only where the walk went by a
+    /// reaction from types outside the scope, those types, else none.
+    pub(in crate::composite::joint) outside: Vec<BTreeSet<String>>,
+}
 
 /// One move made from a walked state.
 #[derive(Debug, Clone, Copy)]

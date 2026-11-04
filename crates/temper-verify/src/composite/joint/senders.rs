@@ -42,6 +42,7 @@
 //! (`resolve_target` `field`) needs this, since only the state says whether
 //! that record is one its source may act on.
 
+use super::model::copies::base;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::sync::Arc;
@@ -60,6 +61,7 @@ use crate::model::ModelString;
 use table::reread;
 
 mod build;
+pub(super) use build::declared;
 mod kinds;
 mod table;
 #[path = "senders_unknown.rs"]
@@ -198,6 +200,7 @@ impl Senders {
     /// Whether Cedar lets the outside sender `by` request `action` on an
     /// `entity` record.
     pub(super) fn request_as(&self, by: u32, entity: &str, action: &str) -> May {
+        let entity = base(entity);
         let Some(requests) = &self.requests else {
             return May::Yes;
         };
@@ -212,6 +215,7 @@ impl Senders {
     /// The senders `entity`'s `action` is sent as from outside, once worked
     /// out ([`Self::note_alike`]).
     pub(super) fn alike(&self, entity: &str, action: &str) -> Option<Arc<[u32]>> {
+        let entity = base(entity);
         self.alike
             .read()
             .expect("a walk thread panicked")
@@ -222,6 +226,7 @@ impl Senders {
 
     /// Note the senders `entity`'s `action` is sent as from outside.
     pub(super) fn note_alike(&self, entity: &str, action: &str, senders: Arc<[u32]>) {
+        let entity = base(entity);
         self.alike
             .write()
             .expect("a walk thread panicked")
@@ -238,6 +243,7 @@ impl Senders {
     /// Whether Cedar lets sender `by` send `action` to an `entity` record as
     /// a reaction, whatever its rule.
     pub(super) fn may(&self, by: u32, entity: &str, action: &str) -> May {
+        let entity = base(entity);
         let Some(may) = &self.may else {
             return May::Yes;
         };
@@ -270,6 +276,8 @@ impl Senders {
         ) else {
             return may;
         };
+        // Cedar knows the type: which copy holds the record means nothing.
+        let entity = base(entity);
         // The current cause names the record whose move set this reaction off.
         // The service keeps the source recorded when it was declared.
         let source_id = state
@@ -283,8 +291,16 @@ impl Senders {
             },
             Asker::Outside | Asker::OutsideAs(_) => None,
         };
+        // A service's source is the record that set this off, when of its type.
         let service_source_id = service_source
-            .and_then(|source| state.records.get(source))
+            .and_then(|source| {
+                let held = if base(rule.from) == source {
+                    rule.from
+                } else {
+                    source
+                };
+                state.records.get(held)
+            })
             .and_then(|record| record.strings.get(ID));
         let name = rule.to_string();
         let question = (
@@ -318,7 +334,7 @@ impl Senders {
             .collect();
         let none = BTreeSet::new();
         let symbol = |value: &ModelString, entity: &str, field: &str| {
-            let key = (entity.to_string(), field.to_string());
+            let key = (base(entity).to_string(), field.to_string());
             let meets = self.meets.get(&key).unwrap_or(&none);
             symbol(value, &literals.intersection(meets).cloned().collect())
         };
@@ -332,7 +348,7 @@ impl Senders {
         let hop = Hop {
             rule: text(&name),
             action: text(rule.action),
-            entity_type: text(rule.from),
+            entity_type: text(base(rule.from)),
             entity_id: source_id.map_or(Attr::Unknown, |id| symbol(id, rule.from, ID)),
         };
         let cause = Cause::reaction(by % 2 == 1, hop);
@@ -423,35 +439,6 @@ fn asker_name(asker: &Asker) -> String {
         Asker::OutsideAs(kind) => format!("an outside caller {kind}"),
         Asker::Service { name, .. } => format!("service:{name}"),
     }
-}
-
-/// The sender a reaction declares, as the trigger dispatcher builds it.
-pub(super) fn declared(
-    trigger: &temper_spec::automaton::ActionTrigger,
-    source_entity: &str,
-    source_action: &str,
-) -> Option<Asker> {
-    if trigger.kind != TriggerKind::Entity {
-        return None;
-    }
-    let name = trigger.principal.as_deref().filter(|p| !p.is_empty())?;
-    let text = |value: &str| Attr::Value(Value::String(value.to_string()));
-    // A same-id reaction acts on the record with its source's id.
-    let source_id = match trigger.resolve_target {
-        Some(TargetResolver::SameId) => Attr::ResourceId,
-        _ => Attr::Unknown,
-    };
-    let context = BTreeMap::from([
-        ("triggerRule".to_string(), text(&trigger.name)),
-        ("triggerSourceEntityType".to_string(), text(source_entity)),
-        ("triggerSourceEntityId".to_string(), source_id),
-        ("triggerSourceAction".to_string(), text(source_action)),
-        (
-            "triggerDeclaredPrincipal".to_string(),
-            Attr::Value(Value::Bool(true)),
-        ),
-    ]);
-    Some(service(name, context))
 }
 
 /// A tracked string as Cedar may read it: a value the model made up is

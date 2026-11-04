@@ -25,6 +25,7 @@ pub(super) struct Wider<'room> {
     policies: Option<SendAnalysis>,
     reads: String,
     room: &'room dyn Room,
+    records: usize,
 }
 
 impl fmt::Debug for Wider<'_> {
@@ -32,6 +33,7 @@ impl fmt::Debug for Wider<'_> {
         f.debug_struct("Wider")
             .field("scope", &self.scope)
             .field("reads", &self.reads)
+            .field("records", &self.records)
             .finish_non_exhaustive()
     }
 }
@@ -75,6 +77,7 @@ impl<'room> Wider<'room> {
         outside: BTreeSet<String>,
         policies: Option<&SendAnalysis>,
         room: &'room dyn Room,
+        records: usize,
     ) -> Option<Self> {
         if outside.is_empty() {
             return None;
@@ -87,6 +90,7 @@ impl<'room> Wider<'room> {
             policies: policies.cloned(),
             reads,
             room,
+            records,
         })
     }
 
@@ -96,8 +100,8 @@ impl<'room> Wider<'room> {
     /// reaction with any parameters as any sender, so it could not be sure
     /// of it. Here it comes from its own source: a break sure moves alone
     /// reach is one the runtime can reach, so it is broken. Anything else
-    /// stays not checked, naming the types: this walk holds one record of
-    /// each type, and a reaction from beyond it is again unsure. When the
+    /// stays not checked, naming the types: a reaction from beyond this
+    /// wider model is again unsure. When the
     /// model does not fit in the room, no break walks again.
     pub(super) fn walk(
         &self,
@@ -115,6 +119,7 @@ impl<'room> Wider<'room> {
             &proof.invariants,
             self.policies.as_ref(),
             &memory,
+            self.records,
         ) else {
             return;
         };

@@ -1,0 +1,31 @@
+# Planted: nothing stops a second Take, so the count passes what the rule allows.
+[automaton]
+name = "Tally"
+states = ["Open"]
+initial = "Open"
+
+[[state]]
+name = "taken"
+type = "counter"
+initial = 0
+
+[[state]]
+name = "who"
+type = "string"
+initial = ""
+
+[[action]]
+name = "Take"
+kind = "input"
+from = ["Open"]
+effect = ["taken += 1"]
+params = [{ name = "who", type = "string" }]
+
+[[action.triggers]]
+name = "counted"
+kind = "entity"
+target_entity = "Taker"
+target_action = "Counted"
+[action.triggers.resolve_target]
+kind = "field"
+id_field = "who"

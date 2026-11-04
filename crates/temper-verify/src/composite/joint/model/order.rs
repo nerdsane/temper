@@ -26,6 +26,8 @@ use super::super::{Dispatch, JointState};
 use super::Reaction;
 use crate::model::{ModelEffect, ParamValue, TemperModel, TemperModelState};
 
+mod fan;
+
 /// How many steps behind its family's newest the model tells a count apart;
 /// a count further behind is one value.
 const BEHIND: usize = 1;

@@ -274,7 +274,7 @@ fn a_break_needing_cedar_to_answer_one_way_is_broken_if_it_does() {
         "{text}"
     );
     assert!(text.contains("BROKEN if the runtime can make"), "{text}");
-    assert!(text.contains("Child.Note"), "{text}");
+    assert!(text.contains(".Note"), "{text}");
 }
 
 #[test]

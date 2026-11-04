@@ -22,7 +22,7 @@ use crate::model::{ModelString, ResolvedTransition, TemperModelAction};
 /// answer either way for ([`super::senders::Senders::unknown`]). That only
 /// adds behaviour, so an invariant that holds here holds in the runtime.
 /// Liveness never counts on one (`liveness.rs`).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct Outside {
     /// The types it comes from.
     from: BTreeSet<String>,

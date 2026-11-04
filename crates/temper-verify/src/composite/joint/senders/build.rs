@@ -16,7 +16,7 @@ impl Senders {
         else {
             return false;
         };
-        policies.turns_on_who_asks(asker, action, entity)
+        policies.turns_on_who_asks(asker, action, base(entity))
     }
 
     /// The senders of the moves among `entities`, and what `policies` lets
@@ -220,4 +220,33 @@ impl std::fmt::Debug for Senders {
             .field("meets", &self.meets)
             .finish()
     }
+}
+
+/// The sender a reaction declares, as the trigger dispatcher builds it.
+pub(in crate::composite::joint) fn declared(
+    trigger: &temper_spec::automaton::ActionTrigger,
+    source_entity: &str,
+    source_action: &str,
+) -> Option<Asker> {
+    if trigger.kind != TriggerKind::Entity {
+        return None;
+    }
+    let name = trigger.principal.as_deref().filter(|p| !p.is_empty())?;
+    let text = |value: &str| Attr::Value(Value::String(value.to_string()));
+    // A same-id reaction acts on the record with its source's id.
+    let source_id = match trigger.resolve_target {
+        Some(TargetResolver::SameId) => Attr::ResourceId,
+        _ => Attr::Unknown,
+    };
+    let context = BTreeMap::from([
+        ("triggerRule".to_string(), text(&trigger.name)),
+        ("triggerSourceEntityType".to_string(), text(source_entity)),
+        ("triggerSourceEntityId".to_string(), source_id),
+        ("triggerSourceAction".to_string(), text(source_action)),
+        (
+            "triggerDeclaredPrincipal".to_string(),
+            Attr::Value(Value::Bool(true)),
+        ),
+    ]);
+    Some(service(name, context))
 }

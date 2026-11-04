@@ -21,6 +21,7 @@ use temper_authz::May;
 
 use super::super::super::state::render;
 use super::super::super::{JointState, JointStep};
+use super::super::copies::base;
 use super::super::{Certainty, JointModel, Move};
 use super::Explored;
 use crate::model::TemperModelAction;
@@ -154,5 +155,6 @@ impl JointModel {
 
 /// One sender's one request.
 fn asking(entity: &str, action: &str, by: u32) -> (String, String, u32) {
-    (entity.to_string(), action.to_string(), by)
+    // Cedar can't tell a type's records apart, so one sender gets one answer for all of them.
+    (base(entity).to_string(), action.to_string(), by)
 }

@@ -12,6 +12,7 @@ use super::super::senders::Senders;
 use super::super::state::ReactionStep;
 use super::super::{Call, Committed, Dispatch, JointState};
 use super::commit::add;
+use super::copies::base;
 use super::read::Reaction;
 use super::step::Certainty;
 use super::{Delivery, JointModel};
@@ -45,7 +46,7 @@ impl JointModel {
         self.store_outside_spawns(&mut state, source, action);
         // Outside actions and detached work start a fresh chain.
         let root = [ReactionStep {
-            entity_type: source.to_string(),
+            entity_type: base(source).to_string(),
             action: action.to_string(),
             generated_for: None,
         }];
@@ -150,6 +151,27 @@ impl JointModel {
                 if !self.expansion.take() {
                     return Vec::new();
                 }
+                // Making a record takes one record of its type, once.
+                let making = match (&reaction.spawn, &reaction.resolve) {
+                    (Some(spawn), _) => Some(self.named_id(spawn, params)),
+                    (_, Some(TargetResolver::Create)) => Some(None),
+                    (_, Some(TargetResolver::CreateIfMissing { id_field })) => {
+                        Some(state.records[source].strings.get(id_field).cloned())
+                    }
+                    _ => None,
+                };
+                let (index, reaction) = match making {
+                    None => (index, reaction),
+                    Some(named) => match self.making_takes(&state, source, index, named.as_ref()) {
+                        Some(at) => (at, &self.reactions[at]),
+                        None => {
+                            if !self.keep(&mut after, state, known) {
+                                return Vec::new();
+                            }
+                            continue;
+                        }
+                    },
+                };
                 if let Some(spawn) = &reaction.spawn {
                     let made = (index, reaction, spawn);
                     for (next, then) in self.spawn(state, source, made, chain, by, params) {
@@ -210,7 +232,7 @@ impl JointModel {
                     return Vec::new();
                 }
                 let generated_for = match &reaction.resolve {
-                    Some(TargetResolver::Create) => Some(reaction.to.clone()),
+                    Some(TargetResolver::Create) => Some(base(&reaction.to).to_string()),
                     Some(TargetResolver::CreateIfMissing { id_field }) => {
                         if state.records[source]
                             .strings
@@ -219,7 +241,7 @@ impl JointModel {
                         {
                             None
                         } else {
-                            Some(reaction.to.clone())
+                            Some(base(&reaction.to).to_string())
                         }
                     }
                     Some(TargetResolver::SameId) => {
@@ -228,7 +250,7 @@ impl JointModel {
                     _ => None,
                 };
                 let step = ReactionStep {
-                    entity_type: reaction.to.clone(),
+                    entity_type: base(&reaction.to).to_string(),
                     action: reaction.target_action.clone(),
                     generated_for,
                 };

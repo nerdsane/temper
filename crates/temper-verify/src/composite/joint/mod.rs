@@ -66,6 +66,7 @@ mod liveness;
 mod model;
 mod pack;
 mod proof;
+mod replay;
 mod room;
 mod senders;
 mod slice;
@@ -74,25 +75,27 @@ mod state;
 pub use fair::{FairOutcome, FairVerdict, Lasso};
 pub use liveness::{JointLivenessResult, LivenessOutcome, StuckCase, verify_joint_liveness};
 pub use proof::{
-    InvariantProof, JointProof, LivenessProof, invariant_proofs, joint_proofs, liveness_proofs,
+    InvariantProof, JointProof, LivenessProof, invariant_proofs, invariant_proofs_holding,
+    joint_proofs, liveness_proofs,
 };
+pub use replay::{JointReplay, TraceMove, replay_joint_invariants};
 pub use room::{Bound, Bytes, Progress, Room};
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use temper_authz::SendAnalysis;
 use temper_spec::automaton::Automaton;
-use temper_spec::predicate::{Expr, Truth, eval};
-
-use crate::model::{ModelString, ParamValue};
+use temper_spec::predicate::Expr;
 
 pub use model::DroppedReaction;
 pub(crate) use model::dropped_reactions;
 pub use model::{Candidate, GUIDED_STEPS, Guide, GuidedSearch, guided_search, plain};
-use model::{JointModel, Move, Sending};
-use state::render;
 pub use state::{Call, Committed, Dispatch, JointState, ReactionStep};
+
+#[cfg(test)]
+use model::{JointModel, Sending};
+#[cfg(test)]
+use std::collections::{BTreeMap, BTreeSet};
 
 /// What the joint check found for one invariant.
 #[derive(Debug, Clone)]
@@ -107,6 +110,9 @@ pub struct JointInvariantResult {
     pub scope: Vec<String>,
     /// Distinct joint states walked.
     pub states: usize,
+    /// How many records of each type the walk held: what it found holds for
+    /// up to that many.
+    pub records: usize,
     /// When the walk held a move back because it would have put more than
     /// this many dispatches in flight: what it found holds only up to that.
     /// A commit whose reactions wait for their guards to be read counts as
@@ -191,9 +197,13 @@ impl fmt::Display for JointInvariantResult {
         let scope = self.scope.join(" + ");
         match &self.outcome {
             JointOutcome::Holds => {
+                let upto = match self.records {
+                    1 => String::new(),
+                    records => format!(" for up to {records} records of each type,"),
+                };
                 write!(
                     f,
-                    "{}.{} HOLDS over {} joint states ({scope}",
+                    "{}.{} HOLDS{upto} over {} joint states ({scope}",
                     self.entity, self.invariant, self.states
                 )?;
                 match self.in_flight_bound {
@@ -212,6 +222,13 @@ impl fmt::Display for JointInvariantResult {
                     self.states,
                     self.assert
                 )?;
+                if self.records > 1 {
+                    writeln!(
+                        f,
+                        "  with {} records of each type. The walk keeps them in one order, so `Type#2` can be another record from one step to the next",
+                        self.records
+                    )?;
+                }
                 for step in path {
                     match &step.action {
                         Some(action) => writeln!(f, "  {action}\n      {}", step.state)?,
@@ -248,187 +265,6 @@ pub fn verify_joint_invariants(
         .collect()
 }
 
-/// One move of a trace: an entity's action with the string parameters it
-/// was sent. Values are names for this trace only: equal names are equal
-/// values, `''` is the empty string, and a name not seen before is a value
-/// nothing holds yet. A parameter the model does not track is not checked.
-#[derive(Debug, Clone)]
-pub struct TraceMove {
-    /// The entity type.
-    pub entity: String,
-    /// The action.
-    pub action: String,
-    /// String parameters by name; parameters left out may take any value.
-    pub params: BTreeMap<String, String>,
-}
-
-/// A trace walked through the joint model of `entity`'s cross-entity
-/// invariants.
-#[derive(Debug, Clone)]
-pub struct JointReplay {
-    /// The start and the state after each step.
-    pub steps: Vec<JointStep>,
-    /// The invariants false in the last state.
-    pub broken: Vec<String>,
-}
-
-/// Walk `trace` through the joint model of `entity`'s invariants that read
-/// related entities, as the check does: whether the spec allows each move,
-/// and which invariants the last state breaks. `ids` names each record's id
-/// in the trace's names (equal names, equal ids); a type left out gets an
-/// id of its own. A move the trace names takes a dispatch in flight to that
-/// action when there is one, and is otherwise sent from outside; when it is
-/// not allowed yet, dispatches in flight land first, oldest first. A
-/// reaction whose guard the model cannot decide is taken as not firing. Use
-/// it to ask whether what happened in production is a path of the spec.
-pub fn replay_joint_invariants(
-    automatons: &[&Automaton],
-    entity: &str,
-    ids: &BTreeMap<String, String>,
-    trace: &[TraceMove],
-) -> Result<JointReplay, String> {
-    let by_name: BTreeMap<&str, &Automaton> = automatons
-        .iter()
-        .map(|a| (a.automaton.name.as_str(), *a))
-        .collect();
-    let automaton = by_name
-        .get(entity)
-        .ok_or_else(|| format!("no entity type {entity}"))?;
-    let joint: Vec<&temper_spec::automaton::Invariant> = automaton
-        .invariants
-        .iter()
-        .filter(|inv| !inv.assert.related_types().is_empty())
-        .collect();
-    let mut scope = BTreeSet::from([entity.to_string()]);
-    for inv in &joint {
-        for (entity_type, _) in inv.assert.related_types() {
-            if !by_name.contains_key(entity_type.as_str()) {
-                return Err(format!(
-                    "{entity} reads {entity_type}, which is not declared"
-                ));
-            }
-            scope.insert(entity_type);
-        }
-    }
-    let exprs: Vec<&Expr> = joint.iter().map(|inv| &inv.assert).collect();
-    let model = JointModel::new(&by_name, &scope, entity, &exprs, Sending::anyone(), true);
-    let (mut state, mut names) = model.init_with_ids(ids);
-    let mut steps = vec![JointStep {
-        action: None,
-        state: render(&state),
-        unsure: false,
-    }];
-    for (i, wanted) in trace.iter().enumerate() {
-        loop {
-            let fits = |params: &BTreeMap<String, ParamValue>| {
-                let mut bindings = names.clone();
-                let mut used = model.values(&state);
-                wanted.params.iter().all(|(param, name)| {
-                    // A parameter the model does not track takes any value.
-                    let Some(ParamValue::Str(value)) = params.get(param) else {
-                        return true;
-                    };
-                    match bindings.get(name) {
-                        Some(bound) => value == bound,
-                        None if name.is_empty() => value.is_empty(),
-                        None if value.symbol_id().is_some() && !used.contains(value) => {
-                            bindings.insert(name.clone(), value.clone());
-                            used.insert(value.clone());
-                            true
-                        }
-                        None => false,
-                    }
-                })
-            };
-            let wanted_dispatch = |d: &Dispatch| {
-                d.to == wanted.entity && d.action == wanted.action && fits(&d.params)
-            };
-            let moves = model.moves(&state);
-            let named = moves
-                .iter()
-                .find(|mv| match mv {
-                    Move::Read(d) | Move::Arrive(d) => wanted_dispatch(d),
-                    _ => false,
-                })
-                .or_else(|| {
-                    moves.iter().find(|mv| match mv {
-                        Move::Take(e, action, _) | Move::Send(e, action, _) => {
-                            e == &wanted.entity
-                                && action.name == wanted.action
-                                && fits(&action.params)
-                        }
-                        _ => false,
-                    })
-                });
-            let (mv, done) = match named {
-                Some(mv @ (Move::Take(..) | Move::Arrive(_))) => (mv.clone(), true),
-                Some(mv) => (mv.clone(), false),
-                None => match moves
-                    .iter()
-                    .find(|mv| matches!(mv, Move::Read(_) | Move::Arrive(_)))
-                {
-                    Some(mv) => (mv.clone(), false),
-                    None => {
-                        return Err(format!(
-                            "move {} ({}.{}) is not allowed in {}",
-                            i + 1,
-                            wanted.entity,
-                            wanted.action,
-                            render(&state)
-                        ));
-                    }
-                },
-            };
-            if let Move::Take(_, action, _) | Move::Send(_, action, _) = &mv {
-                for (param, name) in &wanted.params {
-                    if let Some(ParamValue::Str(value)) = action.params.get(param)
-                        && !name.is_empty()
-                    {
-                        names.entry(name.clone()).or_insert_with(|| value.clone());
-                    }
-                }
-            }
-            let next = model
-                .next(&state, &mv)
-                .0
-                .into_iter()
-                .next()
-                .ok_or_else(|| {
-                    format!(
-                        "move {} ({}.{}) cannot be taken",
-                        i + 1,
-                        wanted.entity,
-                        wanted.action
-                    )
-                })?;
-            names = names
-                .into_iter()
-                .filter_map(|(name, value)| match next.renamed.get(&value) {
-                    Some(new) => Some((name, new.clone())),
-                    None if matches!(value, ModelString::Literal(_)) => Some((name, value)),
-                    None => None,
-                })
-                .collect();
-            steps.push(JointStep {
-                action: Some(next.label),
-                state: render(&next.state),
-                unsure: false,
-            });
-            state = next.state;
-            if done {
-                break;
-            }
-        }
-    }
-    let env = model.env(entity, &state);
-    let broken = joint
-        .iter()
-        .filter(|inv| eval(&inv.assert, &env) == Truth::False)
-        .map(|inv| inv.name.clone())
-        .collect();
-    Ok(JointReplay { steps, broken })
-}
-
 #[cfg(test)]
 #[path = "joint_test.rs"]
 mod tests;
@@ -443,6 +279,8 @@ mod both_ways_tests;
 
 #[cfg(test)]
 mod chain_test;
+#[cfg(test)]
+mod copies_test;
 
 #[cfg(test)]
 #[path = "literals_test.rs"]

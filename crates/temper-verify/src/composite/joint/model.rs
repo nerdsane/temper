@@ -4,6 +4,7 @@
 mod chosen;
 mod classes;
 mod commit;
+pub(in crate::composite::joint) mod copies;
 mod drops;
 mod fair_key;
 mod from_outside;
@@ -27,11 +28,11 @@ use temper_authz::{May, SendAnalysis};
 use temper_spec::automaton::Automaton;
 use temper_spec::predicate::{Expr, Name, eval};
 
+use super::JointState;
 use super::env::{Blind, ID, JointEnv, Records};
 use super::senders::{OUTSIDE, Senders};
 use super::slice::slice;
 use super::state::canonical;
-use super::{JointOutcome, JointState};
 use crate::model::semantics::{Expansion, rule_for, string_values};
 use crate::model::{ModelString, ParamValue, ResolvedTransition, TemperModel, TemperModelState};
 
@@ -46,8 +47,8 @@ use order::{Order, Specs};
 pub(super) use read::Timeout;
 use read::{Kernel, Reaction, Unchecked, named_literals, tracked, unchecked_constraints};
 pub(super) use step::{Certainty, Move};
-pub(super) use walk::Keep;
 pub(super) use walk::{Edge, Explored, Made};
+pub(super) use walk::{Keep, Walk};
 
 /// Counter ceiling for the joint models, as for the composite plans.
 const JOINT_MAX_COUNTER: usize = 3;
@@ -103,19 +104,6 @@ impl Sending<'_> {
     }
 }
 
-/// What a walk found.
-pub(super) struct Walk {
-    /// Distinct joint states walked.
-    pub(super) states: usize,
-    /// One per invariant.
-    pub(super) outcomes: Vec<JointOutcome>,
-    /// Whether a move was held back for [`MAX_IN_FLIGHT`].
-    pub(super) held_back: bool,
-    /// One per invariant: when it is false only where the walk went by a
-    /// reaction from types outside the scope, those types, else none.
-    pub(super) outside: Vec<BTreeSet<String>>,
-}
-
 /// The joint model of one entity's properties that read related entities.
 #[derive(Debug)]
 pub(super) struct JointModel {
@@ -124,6 +112,12 @@ pub(super) struct JointModel {
     id_literals: BTreeMap<String, BTreeSet<String>>,
     models: BTreeMap<String, TemperModel>,
     reactions: Vec<Reaction>,
+    /// The names of each type's records ([`copies`]).
+    copies: BTreeMap<String, Vec<String>>,
+    /// Each reaction's place among the reactions as the specs say them.
+    first_reaction: Vec<usize>,
+    /// The reaction from its place in the specs, its source and its target.
+    reaction_at: BTreeMap<(usize, String, String), usize>,
     records: Records,
     /// With one record of a type, each entity's id fields that references
     /// use: each holds that record's id.
@@ -227,6 +221,10 @@ impl JointModel {
         sending: Sending<'_>,
         cut: bool,
     ) -> Self {
+        let copies = models
+            .keys()
+            .map(|entity| (entity.clone(), vec![entity.clone()]))
+            .collect();
         let classes = Classes::read(by_name, scope);
         let id_literals = scope
             .iter()
@@ -319,6 +317,9 @@ impl JointModel {
             models,
             chosen_guards: chosen::chosen_guards(by_name, &reactions),
             reactions,
+            copies,
+            first_reaction: Vec::new(),
+            reaction_at: BTreeMap::new(),
             records: Records::ById,
             refs: BTreeMap::new(),
             delivery: Delivery::Any,
@@ -398,11 +399,27 @@ impl JointModel {
         state: &JointState,
         blind: Blind,
     ) -> bool {
+        self.enabled_carrying(entity, t, state, blind, None)
+    }
+
+    /// [`Self::enabled`] for a dispatch carrying `params`.
+    fn enabled_carrying(
+        &self,
+        entity: &str,
+        t: &ResolvedTransition,
+        state: &JointState,
+        blind: Blind,
+        params: Option<&BTreeMap<String, ParamValue>>,
+    ) -> bool {
         // The rule the runtime takes for this action in the record's status
         // (`rule_for`); another with the same name never fires from there.
         let taken = rule_for(&self.models[entity], &t.name, &state.records[entity].status)
             .is_some_and(|rule| std::ptr::eq(rule, t));
-        taken && eval(&t.guard, &self.env_blind(entity, state, blind)).may_hold()
+        let env = JointEnv {
+            params,
+            ..self.env_blind(entity, state, blind)
+        };
+        taken && eval(&t.guard, &env).may_hold()
     }
 
     pub(super) fn env<'a>(&'a self, owner: &'a str, state: &'a JointState) -> JointEnv<'a> {
@@ -419,11 +436,13 @@ impl JointModel {
             models: &self.models,
             records: self.records,
             refs: &self.refs,
+            copies: &self.copies,
             state,
             owner,
             blind,
             own: None,
             unheld_unknown: false,
+            params: None,
         }
     }
 }

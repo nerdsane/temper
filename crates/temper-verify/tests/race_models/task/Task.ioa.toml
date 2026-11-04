@@ -1,0 +1,32 @@
+# Planted: Assign is taken while the task is assigned, so a second Worker overwrites the first.
+[automaton]
+name = "Task"
+states = ["Open", "Assigned", "Done"]
+initial = "Open"
+
+[[state]]
+name = "worker"
+type = "string"
+initial = ""
+
+[[action]]
+name = "Assign"
+kind = "input"
+from = ["Open", "Assigned"]
+to = "Assigned"
+params = [{ name = "worker", type = "string" }]
+
+[[action.triggers]]
+name = "got"
+kind = "entity"
+target_entity = "Worker"
+target_action = "Got"
+[action.triggers.resolve_target]
+kind = "field"
+id_field = "worker"
+
+[[action]]
+name = "Complete"
+kind = "input"
+from = ["Assigned"]
+to = "Done"

@@ -1,0 +1,27 @@
+# Planted: RunEnded doesn't ask which run ended, so an old run ending fails the pass on a new one.
+[automaton]
+name = "Pass"
+states = ["Idle", "Staging", "Failed"]
+initial = "Idle"
+
+[[state]]
+name = "run"
+type = "string"
+initial = ""
+
+[[action]]
+name = "Stage"
+kind = "input"
+from = ["Idle", "Staging", "Failed"]
+to = "Staging"
+effect = ["spawn('Run', 'Begin', run)"]
+
+[[action]]
+name = "RunEnded"
+kind = "input"
+from = ["Staging"]
+to = "Failed"
+
+[[invariant]]
+name = "FailedRunEnded"
+assert = "status == 'Failed' => Run[run].status == 'Ended'"

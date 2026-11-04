@@ -1,0 +1,37 @@
+[automaton]
+name = "Taker"
+states = ["New", "Asking", "Counted"]
+initial = "New"
+
+[[state]]
+name = "tally"
+type = "string"
+initial = ""
+
+[[action]]
+name = "Ask"
+kind = "input"
+from = ["New"]
+to = "Asking"
+params = [{ name = "tally", type = "string" }]
+
+[[action.triggers]]
+name = "take"
+kind = "entity"
+target_entity = "Tally"
+target_action = "Take"
+[action.triggers.args]
+who = "Id"
+[action.triggers.resolve_target]
+kind = "field"
+id_field = "tally"
+
+[[action]]
+name = "Counted"
+kind = "input"
+from = ["Asking"]
+to = "Counted"
+
+[[invariant]]
+name = "OneTakes"
+assert = "status == 'Counted' => Tally[tally].taken <= 1"

@@ -54,7 +54,7 @@ pub use search::{GuidedSearch, guided_search};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-use temper_spec::predicate::{Expr, Name, Truth, eval};
+use temper_spec::predicate::{Expr, Name, Truth};
 
 use super::super::pack::{Packed, Packer};
 use super::super::room::{Bound, Held, block, grow_map};
@@ -724,13 +724,14 @@ impl JointModel {
                 return Look::Go;
             }
             let sure = trace.last().is_some_and(|step| step.2);
-            let found: Vec<usize> = {
-                let env = engine.model.env(owner, state);
-                open.iter()
-                    .copied()
-                    .filter(|&i| broken[i].is_none() && eval(invariants[i], &env) == Truth::False)
-                    .collect()
-            };
+            let found: Vec<usize> = open
+                .iter()
+                .copied()
+                .filter(|&i| {
+                    broken[i].is_none()
+                        && engine.model.rule_truth(owner, invariants[i], state) == Truth::False
+                })
+                .collect();
             if !sure {
                 maybe |= !found.is_empty();
                 return Look::Go;

@@ -88,9 +88,8 @@ impl JointModel {
                 premises.iter().map(|premise| premise.cloned()).collect();
             self.walk_with(bound, Keep::Sure, move |model, index, state, sure| {
                 if state.settled() {
-                    let env = model.env(&owner, state);
                     for (i, inv) in invariants.iter().enumerate() {
-                        match eval(inv, &env) {
+                        match model.rule_truth(&owner, inv, state) {
                             Truth::False if sure => found.broken(i, index),
                             Truth::False => found.maybe(i, index),
                             Truth::Unknown => found.unknown[i].store(true, Ordering::Relaxed),
@@ -98,7 +97,10 @@ impl JointModel {
                         }
                         if let Some(premise) = &premises[i]
                             && !found.met[i].load(Ordering::Relaxed)
-                            && eval(premise, &env) != Truth::False
+                            && model
+                                .records_of(&owner)
+                                .iter()
+                                .any(|name| eval(premise, &model.env(name, state)) != Truth::False)
                         {
                             found.met[i].store(true, Ordering::Relaxed);
                         }

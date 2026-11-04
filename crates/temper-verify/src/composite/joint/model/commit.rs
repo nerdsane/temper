@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use temper_spec::predicate::{Expr, Name, Truth, eval};
 
-use super::super::env::Blind;
+use super::super::env::{Blind, JointEnv};
 use super::super::state::ReactionStep;
 use super::super::{Call, Dispatch, JointState};
 use super::JointModel;
@@ -218,7 +218,15 @@ impl JointModel {
         let target = &state.records[dispatch.to.as_str()];
         let enabled: Vec<&ResolvedTransition> = self
             .transitions_for(dispatch)
-            .filter(|t| self.enabled(&dispatch.to, t, state, Blind::Related))
+            .filter(|t| {
+                self.enabled_carrying(
+                    &dispatch.to,
+                    t,
+                    state,
+                    Blind::Related,
+                    Some(&dispatch.params),
+                )
+            })
             .collect();
         let Some(&t) = enabled.first() else {
             return Arrival::Refused;
@@ -281,9 +289,13 @@ impl JointModel {
         // the dispatch path let those parts of its guard through. A guard
         // reading only types outside scope skips Read, so it stays unknown.
         let guard = if self.reads_related(t) && self.transitions_for(dispatch).nth(1).is_none() {
-            self.actor_holds(&dispatch.to, t, state)
+            self.actor_holds(&dispatch.to, t, state, &dispatch.params)
         } else {
-            eval(&t.guard, &self.env(&dispatch.to, state)) == Truth::True
+            let env = JointEnv {
+                params: Some(&dispatch.params),
+                ..self.env(&dispatch.to, state)
+            };
+            eval(&t.guard, &env) == Truth::True
         };
         let decided = guard
             && self.unchecked.decides(&dispatch.to, &t.name)
@@ -306,8 +318,17 @@ impl JointModel {
     /// `state`: each conjunct that reads the record itself. A conjunct that
     /// reads only related records was read on the dispatch path; on a way
     /// sure moves alone take, that read let the dispatch through.
-    fn actor_holds(&self, entity: &str, t: &ResolvedTransition, state: &JointState) -> bool {
-        let env = self.env(entity, state);
+    fn actor_holds(
+        &self,
+        entity: &str,
+        t: &ResolvedTransition,
+        state: &JointState,
+        params: &BTreeMap<String, ParamValue>,
+    ) -> bool {
+        let env = JointEnv {
+            params: Some(params),
+            ..self.env(entity, state)
+        };
         let mut parts = Vec::new();
         conjuncts(&t.guard, &mut parts);
         parts

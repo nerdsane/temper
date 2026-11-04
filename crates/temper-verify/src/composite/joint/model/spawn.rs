@@ -183,10 +183,11 @@ impl JointModel {
             }
             return vec![(next, Certainty::Unsure)];
         }
+        let child_type = super::copies::base(child);
         let step = ReactionStep {
-            entity_type: child.to_string(),
+            entity_type: child_type.to_string(),
             action: reaction.target_action.clone(),
-            generated_for: Some(child.to_string()),
+            generated_for: Some(child_type.to_string()),
         };
         // A first action its chain already holds is a loop: no child, and
         // the field goes back.
@@ -257,6 +258,11 @@ impl JointModel {
             ways.push((send(next), decided));
             return ways;
         }
+        // With several records of a type, one more than the bound is past
+        // what the walk answers for, as a verdict for up to that many says.
+        if self.copies[child_type].len() > 1 {
+            return ways;
+        }
         ways.push((send(next), Certainty::Unsure));
         let mut carries_on = state;
         self.store_child_id(&mut carries_on, source, child, spawn);
@@ -301,7 +307,7 @@ impl JointModel {
 
     /// Whether `record` of `entity` is as the type's first state holds it:
     /// no record the runtime has made yet, whatever its id.
-    fn unstarted(&self, entity: &str, record: &TemperModelState) -> bool {
+    pub(super) fn unstarted(&self, entity: &str, record: &TemperModelState) -> bool {
         let mut plain = record.clone();
         plain.strings.remove(ID);
         plain == self.first_records()[entity]
@@ -310,7 +316,7 @@ impl JointModel {
     /// Whether a new record can take the place of the one `state` holds of
     /// `child` with nothing lost: it has not started, or it can send nothing
     /// more, with nothing on its way to it.
-    fn replaces_cleanly(&self, state: &JointState, child: &str) -> bool {
+    pub(super) fn replaces_cleanly(&self, state: &JointState, child: &str) -> bool {
         let working = state.inflight.iter().any(|d| d.to == child)
             || state.calls.iter().any(|c| c.to == child);
         if working {
@@ -353,7 +359,7 @@ impl JointModel {
     }
 
     /// The id `spawn` names, when it names one the model holds.
-    fn named_id(
+    pub(super) fn named_id(
         &self,
         spawn: &Spawn,
         params: &BTreeMap<String, ParamValue>,

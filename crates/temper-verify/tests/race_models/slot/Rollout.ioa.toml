@@ -1,0 +1,52 @@
+[automaton]
+name = "Rollout"
+states = ["New", "Asking", "Holding", "Done"]
+initial = "New"
+
+[[state]]
+name = "slot"
+type = "string"
+initial = ""
+
+[[action]]
+name = "Take"
+kind = "input"
+from = ["New"]
+to = "Asking"
+params = [{ name = "slot", type = "string" }]
+
+[[action.triggers]]
+name = "claim"
+kind = "entity"
+target_entity = "Slot"
+target_action = "Claim"
+[action.triggers.args]
+holder = "Id"
+[action.triggers.resolve_target]
+kind = "field"
+id_field = "slot"
+
+[[action]]
+name = "Granted"
+kind = "input"
+from = ["Asking"]
+to = "Holding"
+
+[[action]]
+name = "Release"
+kind = "input"
+from = ["Holding"]
+to = "Done"
+
+[[action.triggers]]
+name = "free"
+kind = "entity"
+target_entity = "Slot"
+target_action = "Free"
+[action.triggers.resolve_target]
+kind = "field"
+id_field = "slot"
+
+[[invariant]]
+name = "HoldingMeansHeld"
+assert = "status == 'Holding' => Slot[slot].status == 'Held'"

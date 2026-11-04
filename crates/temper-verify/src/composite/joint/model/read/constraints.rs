@@ -176,3 +176,19 @@ pub(in crate::composite::joint::model) fn unchecked_constraints(
     }
     out
 }
+
+impl Unchecked {
+    /// These tables for every record's name.
+    pub(in crate::composite::joint::model) fn fan(
+        &mut self,
+        copies: &BTreeMap<String, Vec<String>>,
+    ) {
+        use super::super::copies::{fan_moves, fan_set};
+        fan_set(&mut self.taken, copies);
+        fan_set(&mut self.chosen, copies);
+        fan_moves(&mut self.equals, copies);
+        fan_moves(&mut self.counts, copies);
+        fan_moves(&mut self.nonempty, copies);
+        fan_moves(&mut self.greater, copies);
+    }
+}

@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use temper_spec::predicate::{Env, Val, VarKind};
 
 use super::JointState;
-use crate::model::{TemperModel, TemperModelState};
+use crate::model::{ParamValue, TemperModel, TemperModelState};
 
 /// The key under which each record keeps its own id among its strings.
 pub(super) const ID: &str = "Id";
@@ -123,6 +123,10 @@ pub(super) struct JointEnv<'a> {
     /// A reference whose id field names another record than the one the
     /// model holds of its type reads as unknown, not as no record.
     pub(super) unheld_unknown: bool,
+    /// The values the dispatch being decided carries, read by `params.x`.
+    pub(super) params: Option<&'a BTreeMap<String, ParamValue>>,
+    /// The names of each type's records.
+    pub(super) copies: &'a BTreeMap<String, Vec<String>>,
 }
 
 fn var_of<'a>(model: &TemperModel, state: &'a TemperModelState, name: &str) -> Val<'a> {
@@ -157,24 +161,35 @@ impl JointEnv<'_> {
         if self.blind == Blind::Related {
             return None;
         }
-        match resolve_from(
-            self.models,
-            self.records,
-            self.state,
-            self.own_record(),
-            self.owner,
-            id_field,
-            entity_type,
-        ) {
-            Found::Yes => Some(self.state.records.get(entity_type).map(|record| &**record)),
-            Found::Missing if self.unheld_unknown => None,
-            Found::Missing => Some(None),
-            Found::Unknown => None,
+        for name in self.copies.get(entity_type)? {
+            match resolve_from(
+                self.models,
+                self.records,
+                self.state,
+                self.own_record(),
+                self.owner,
+                id_field,
+                name,
+            ) {
+                Found::Yes => return Some(self.state.records.get(name.as_str()).map(|r| &**r)),
+                Found::Missing => {}
+                Found::Unknown => return None,
+            }
         }
+        (!self.unheld_unknown).then_some(None)
     }
 }
 
 impl Env for JointEnv<'_> {
+    fn param(&self, name: &str) -> Val<'_> {
+        match self.params.and_then(|params| params.get(name)) {
+            Some(ParamValue::Count(n)) => Val::Num(*n as f64),
+            Some(ParamValue::Bool(value)) => Val::Bool(*value),
+            Some(ParamValue::Str(value)) => value.val(),
+            Some(ParamValue::Fresh) | None => Val::Unknown,
+        }
+    }
+
     fn status(&self) -> Val<'_> {
         if self.blind == Blind::Own {
             return Val::Unknown;

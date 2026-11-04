@@ -351,6 +351,7 @@ impl JointModel {
                 continue;
             }
             self.order.normalize(&mut outcome);
+            self.in_one_order(&mut outcome);
             let renamed = canonical(&mut outcome);
             let next = Next {
                 label: rename_label(&text, mv, &renamed),

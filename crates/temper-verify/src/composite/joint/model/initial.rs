@@ -95,8 +95,20 @@ impl JointModel {
             .into_iter()
             .map(|l| ModelString::from(l.as_str()))
             .collect();
+        // Two records of a type never share an id.
+        let types: Vec<String> = blank
+            .keys()
+            .map(|entity| copies::base(entity).to_string())
+            .collect();
         Box::new(
             partitions(allowed, literals.len())
+                .filter(move |blocks| {
+                    let mut seen = BTreeSet::new();
+                    blocks
+                        .iter()
+                        .zip(&types)
+                        .all(|(block, entity)| seen.insert((*block, entity)))
+                })
                 .flat_map(move |blocks| id_values(blocks, literals.clone()))
                 .map(move |ids| {
                     let mut records = blank.clone();
@@ -113,6 +125,7 @@ impl JointModel {
                     };
                     self.arm_at_start(&mut state);
                     self.order.normalize(&mut state);
+                    self.in_one_order(&mut state);
                     canonical(&mut state);
                     state
                 }),

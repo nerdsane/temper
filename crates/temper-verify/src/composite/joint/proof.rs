@@ -61,7 +61,7 @@ pub fn joint_proofs<'room>(
     policies: Option<&SendAnalysis>,
     room: &'room dyn Room,
 ) -> Vec<JointProof<'room>> {
-    invariant_proofs(automatons, policies, room)
+    invariant_proofs_holding(automatons, policies, room, RECORDS_HELD)
         .into_iter()
         .map(JointProof::Invariants)
         .chain(
@@ -94,12 +94,14 @@ pub struct InvariantProof<'room> {
 impl InvariantProof<'_> {
     /// Walk the model, one result per invariant.
     pub fn check(&self, bound: Bound<'_>) -> Vec<JointInvariantResult> {
+        let records = self.model.as_ref().map_or(1, |model| model.records_held());
         let result = |inv: &Invariant, states, outcome| JointInvariantResult {
             entity: self.entity.clone(),
             invariant: inv.name.clone(),
             assert: inv.assert.to_string(),
             scope: self.scope.iter().cloned().collect(),
             states,
+            records,
             in_flight_bound: None,
             outcome,
         };
@@ -153,6 +155,7 @@ fn invariant_model(
     invariants: &[Invariant],
     policies: Option<&SendAnalysis>,
     memory: &Construction<'_>,
+    records: usize,
 ) -> Result<Arc<JointModel>, String> {
     let reserve = |bytes| memory.set(bytes);
     let exprs: Vec<&Expr> = invariants.iter().map(|inv| &inv.assert).collect();
@@ -180,19 +183,37 @@ fn invariant_model(
     };
     JointModel::new(by_name, scope, name, &exprs, sending, true)
         .without_silent(by_name)
+        .with_copies(records)
         .built(memory)
         .map(Arc::new)
 }
+
+/// How many records of each type an invariant's walk holds. Two is the fewest
+/// that can race for one thing: two holders of one slot, two takers of one
+/// task, two moves on one counter. What a walk finds holds for up to this many.
+pub const RECORDS_HELD: usize = 2;
 
 /// The walks that check every `[[invariant]]` in `automatons` that reads a
 /// related entity: one per entity, on the joint model of it and the types
 /// its invariants name. `policies` decide each move as its sender, as for
 /// liveness; without them every sender may send everything. `room` bounds
 /// sender construction and retains its charge until each proof is dropped.
+/// Each model holds one record of each type; an install holds
+/// [`RECORDS_HELD`] ([`joint_proofs`]).
 pub fn invariant_proofs<'room>(
     automatons: &[&Automaton],
     policies: Option<&SendAnalysis>,
     room: &'room dyn Room,
+) -> Vec<InvariantProof<'room>> {
+    invariant_proofs_holding(automatons, policies, room, 1)
+}
+
+/// [`invariant_proofs`] on models holding `records` records of each type.
+pub fn invariant_proofs_holding<'room>(
+    automatons: &[&Automaton],
+    policies: Option<&SendAnalysis>,
+    room: &'room dyn Room,
+    records: usize,
 ) -> Vec<InvariantProof<'room>> {
     let by_name: BTreeMap<&str, &Automaton> = automatons
         .iter()
@@ -228,7 +249,15 @@ pub fn invariant_proofs<'room>(
         }
         let memory = Construction::new(room);
         let model = if missing.is_empty() {
-            invariant_model(&by_name, &scope, name, &invariants, policies, &memory)
+            invariant_model(
+                &by_name,
+                &scope,
+                name,
+                &invariants,
+                policies,
+                &memory,
+                records,
+            )
         } else {
             Err(format!(
                 "it reads {}, which this app does not declare",
@@ -236,9 +265,8 @@ pub fn invariant_proofs<'room>(
             ))
         };
         let wider = match &model {
-            Ok(model) => {
-                Wider::new(&app, &scope, model.outside_types(), policies, room).map(Box::new)
-            }
+            Ok(model) => Wider::new(&app, &scope, model.outside_types(), policies, room, records)
+                .map(Box::new),
             Err(_) => None,
         };
         proofs.push(InvariantProof {
