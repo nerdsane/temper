@@ -283,4 +283,13 @@ impl SendAnalysis {
             .iter()
             .any(|(_, policy)| cause::tells_timer_chains(&policy["conditions"]))
     }
+
+    /// Whether a policy on `action` of a `resource_type` record can tell which
+    /// move set a reaction off ([`Hop`]): when none can, a model need not keep
+    /// reactions from different moves apart for this one.
+    pub fn reads_source_move(&self, action: &str, resource_type: &str) -> bool {
+        self.scoped(action, resource_type)
+            .iter()
+            .any(|&at| cause::reads_source_move(&self.policies[at].1["conditions"]))
+    }
 }

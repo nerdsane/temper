@@ -245,6 +245,63 @@ fn a_status_a_late_guard_never_reads_splits_no_state() {
     assert!(result.states <= 1_900, "{result}");
 }
 
+/// Four moves send one reaction, and Cedar lets only `Drop`'s through.
+fn source_move() -> Model {
+    model!("sourcemove", "Ticket", "Board")
+}
+
+/// The same moves, under policies that can't tell them apart.
+fn source_move_unread(rule: &str) -> Model {
+    let mut model = fixed(
+        &source_move(),
+        0,
+        "status == 'Dropped' => Board[board].status != 'Pinged'",
+        rule,
+    );
+    model.1 = r#"permit(principal, action in [Action::"Start", Action::"Keep", Action::"Drop", Action::"Poke", Action::"Prod"], resource);
+permit(principal, action == Action::"Ping", resource) when { context has via && context.via != "request" };"#;
+    model
+}
+
+#[test]
+fn a_policy_that_reads_the_source_move_keeps_its_moves_apart() {
+    for records in [1, 2] {
+        let result = check(&source_move(), records);
+        assert!(
+            matches!(result.outcome, JointOutcome::Broken { .. }),
+            "{result}"
+        );
+        let moves = moves(&result);
+        assert!(moves.iter().any(|m| m.contains(".Drop")), "{moves:#?}");
+        assert!(moves.iter().any(|m| m.contains(".Ping")), "{moves:#?}");
+    }
+}
+
+#[test]
+fn a_reaction_walked_as_another_move_still_lands_and_names_its_own_move() {
+    let result = check(
+        &source_move_unread("status == 'Dropped' => Board[board].status != 'Pinged'"),
+        1,
+    );
+    assert!(
+        matches!(result.outcome, JointOutcome::Broken { .. }),
+        "{result}"
+    );
+    let moves = moves(&result);
+    assert!(moves.iter().any(|m| m.contains(".Drop")), "{moves:#?}");
+}
+
+#[test]
+fn moves_nothing_can_tell_apart_are_walked_as_one() {
+    let model = source_move_unread("status == 'New' => Board[board].status != 'Pinged'");
+    let one = check(&model, 1);
+    assert!(one.holds(), "{one}");
+    assert!(one.states <= 204, "{one}");
+    let two = check(&model, 2);
+    assert!(two.holds(), "{two}");
+    assert!(two.states <= 43_936, "{two}");
+}
+
 #[test]
 fn a_spawn_makes_one_child() {
     let result = check(&pass(), 2);

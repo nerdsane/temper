@@ -1,6 +1,7 @@
 //! The joint model: the records in scope, their reactions, the dispatches
 //! and module calls on their way, who may send what, and the walk.
 
+mod alike;
 mod chosen;
 mod classes;
 mod commit;
@@ -116,6 +117,8 @@ pub(super) struct JointModel {
     copies: BTreeMap<String, Vec<String>>,
     /// Each reaction's place among the reactions as the specs say them.
     first_reaction: Vec<usize>,
+    /// The reaction each goes out as ([`alike`]); itself, when this is empty.
+    alike: Vec<usize>,
     /// The reaction from its place in the specs, its source and its target.
     reaction_at: BTreeMap<(usize, String, String), usize>,
     records: Records,
@@ -319,6 +322,7 @@ impl JointModel {
             reactions,
             copies,
             first_reaction: Vec::new(),
+            alike: Vec::new(),
             reaction_at: BTreeMap::new(),
             records: Records::ById,
             refs: BTreeMap::new(),

@@ -117,6 +117,26 @@ pub(super) fn tells_timer_chains(policy: &Json) -> bool {
     }
 }
 
+/// Whether `policy` reads the rule or the move that set a reaction off, or
+/// the whole context, which holds them.
+pub(super) fn reads_source_move(policy: &Json) -> bool {
+    let Some((op, arg)) = single(policy) else {
+        return match policy {
+            Json::Object(object) => object.values().any(reads_source_move),
+            Json::Array(items) => items.iter().any(reads_source_move),
+            _ => false,
+        };
+    };
+    match op {
+        "." | "has" if is_context(&arg["left"]) => matches!(
+            arg["attr"].as_str(),
+            Some(platform_keys::RULE | platform_keys::CAUSE_ACTION)
+        ),
+        "Var" => is_context(policy),
+        _ => reads_source_move(arg),
+    }
+}
+
 /// Whether `expr` is `context.<key>`.
 fn reads_context(expr: &Json, key: &str) -> bool {
     single(expr).is_some_and(|(op, arg)| {

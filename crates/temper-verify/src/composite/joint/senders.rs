@@ -379,6 +379,14 @@ impl Senders {
         may
     }
 
+    /// Whether a policy on `entity`'s `action` can read which move set a
+    /// reaction off.
+    pub(super) fn reads_source_move(&self, entity: &str, action: &str) -> bool {
+        self.policies
+            .as_ref()
+            .is_some_and(|policies| policies.reads_source_move(action, base(entity)))
+    }
+
     /// The bytes the answers decided again so far hold.
     pub(super) fn held(&self) -> usize {
         self.decided_bytes.load(Ordering::Relaxed)

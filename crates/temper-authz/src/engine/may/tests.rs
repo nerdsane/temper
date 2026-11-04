@@ -416,3 +416,22 @@ fn the_same_questions_are_answered_once() {
         "only what it holds is reserved"
     );
 }
+
+#[test]
+fn a_policy_reads_the_source_move_through_the_rule_the_move_or_the_whole_context() {
+    for (when, reads) in [
+        (r#"context.causeAction == "Drop""#, true),
+        (r#"context.rule == "Ticket:Drop:ping""#, true),
+        ("context has causeAction", true),
+        (r#"context == {"via": "reaction"}"#, true),
+        (r#"context.via != "request""#, false),
+        (r#"context.causeEntityType == "Ticket""#, false),
+        ("true", false),
+    ] {
+        let policies =
+            format!(r#"permit(principal, action == Action::"Ping", resource) when {{ {when} }};"#);
+        let analysis = SendAnalysis::new(&policies).expect("policies parse");
+        assert_eq!(analysis.reads_source_move("Ping", "Board"), reads, "{when}");
+        assert!(!analysis.reads_source_move("Other", "Board"), "{when}");
+    }
+}

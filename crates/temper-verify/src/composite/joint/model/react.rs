@@ -269,16 +269,15 @@ impl JointModel {
                 if repeats == Truth::Unknown && !self.keep(&mut after, state.clone(), known) {
                     return Vec::new();
                 }
-                let mut next_chain = chain.to_vec();
-                next_chain.push(step);
+                let (via, chain) = self.sent_as(index, chain, step);
                 let dispatch = Dispatch {
                     to: reaction.to.clone(),
                     action: reaction.target_action.clone(),
                     target_state: None,
                     params: self.args(&state, source, reaction),
                     read: !self.action_reads_related(&reaction.to, &reaction.target_action),
-                    chain: next_chain,
-                    via: Some(index),
+                    chain,
+                    via: Some(via),
                     unread_guard,
                     by: self.senders.reaction(
                         reaction.principal.as_ref(),

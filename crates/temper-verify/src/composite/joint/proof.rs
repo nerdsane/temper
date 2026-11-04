@@ -184,6 +184,7 @@ fn invariant_model(
     JointModel::new(by_name, scope, name, &exprs, sending, true)
         .without_silent(by_name)
         .with_copies(records)
+        .with_alike_as_one()
         .built(memory)
         .map(Arc::new)
 }
