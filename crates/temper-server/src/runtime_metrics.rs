@@ -47,6 +47,9 @@ struct RuntimeMetrics {
     events_written_total: Counter<u64>,
     // A scheduled action that came due when its record could not take it.
     scheduled_fires_lapsed_total: Counter<u64>,
+    // A scheduled action armed while an earlier arm of it, due at another time,
+    // still waits on the same record.
+    schedule_arms_beside_waiting_total: Counter<u64>,
     scheduler_overdue_on_replay_total: Counter<u64>,
     scheduler_pending_timers: Gauge<u64>,
     // ADR-0056: re-arm on actor hydration.
@@ -230,6 +233,14 @@ fn metrics() -> &'static RuntimeMetrics {
                 .with_description(
                     "Scheduled actions that came due when their action had no transition from \
                      the record's status, so nothing fired and nothing was recorded.",
+                )
+                .build(),
+            schedule_arms_beside_waiting_total: meter
+                .u64_counter("temper_schedule_arms_beside_waiting_total")
+                .with_description(
+                    "Scheduled actions armed while an earlier commit's arm of the same action, \
+                     due at another time, still waits on the record: a spec that wants both, or \
+                     a retry whose two chains never merge.",
                 )
                 .build(),
             scheduler_overdue_on_replay_total: meter
@@ -785,6 +796,20 @@ pub fn record_events_written(tenant: &str, entity_type: &str, count: u64) {
 /// from its record's status, so it did not fire (`scheduled_fire_lapsed`).
 pub fn record_scheduled_fire_lapsed(tenant: &str, entity_type: &str, action: &str) {
     metrics().scheduled_fires_lapsed_total.add(
+        1,
+        &[
+            KeyValue::new("tenant", tenant.to_string()),
+            KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("action", action.to_string()),
+        ],
+    );
+}
+
+/// Record a scheduled action armed while an earlier commit's arm of it, due at
+/// another time, still waits on the same record. Counted when the move is
+/// applied, so a commit that then fails is counted too.
+pub fn record_schedule_arm_beside_waiting(tenant: &str, entity_type: &str, action: &str) {
+    metrics().schedule_arms_beside_waiting_total.add(
         1,
         &[
             KeyValue::new("tenant", tenant.to_string()),

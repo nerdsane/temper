@@ -15,6 +15,12 @@
 //! all firing together at the deadline (on 2 Nov 2026 one run fired 20 at
 //! once, every one refused).
 //!
+//! An arm of an action due at a different time stays beside the one waiting,
+//! and is counted (`temper_schedule_arms_beside_waiting_total`). That is either
+//! a spec that wants both, or a retry that re-arms itself with a second way in,
+//! whose two chains then never merge. Arms in one commit are not beside each
+//! other: one move may arm the same action twice on purpose.
+//!
 //! The same event writes the deadline row of each background module call it
 //! starts that names an `on_failure` (`request_context::calls`), with the id
 //! `<seq>.call:<integration>`; the call's answer removes it in its commit.
@@ -91,7 +97,17 @@ impl EntityActor {
             .map(|fire| fire.arm_id.clone());
         if journaled && !scheduled.is_empty() {
             let waiting = self.waiting_schedules(state, fired.as_deref()).await;
-            drop_identical_schedules(scheduled, waiting);
+            drop_identical_schedules(scheduled, &waiting);
+            for action in scheduled
+                .iter()
+                .filter(|action| waiting.iter().any(|(name, _)| *name == action.action))
+            {
+                crate::runtime_metrics::record_schedule_arm_beside_waiting(
+                    &self.tenant.to_string(),
+                    &state.entity_type,
+                    &action.action,
+                );
+            }
         }
         for (index, action) in scheduled.iter_mut().enumerate() {
             action.arm_id = format!("{sequence}.{index}");
@@ -230,15 +246,16 @@ impl EntityActor {
 /// times stay separate.
 fn drop_identical_schedules(
     scheduled: &mut Vec<ScheduledAction>,
-    mut waiting: Vec<(String, DateTime<Utc>)>,
+    waiting: &[(String, DateTime<Utc>)],
 ) {
+    let mut seen = waiting.to_vec();
     scheduled.retain(|action| {
         let due = action.due_at.unwrap_or(DateTime::<Utc>::MAX_UTC);
-        let identical = waiting
+        let identical = seen
             .iter()
             .any(|(name, at)| *name == action.action && *at == due);
         if !identical {
-            waiting.push((action.action.clone(), due));
+            seen.push((action.action.clone(), due));
         }
         !identical
     });
