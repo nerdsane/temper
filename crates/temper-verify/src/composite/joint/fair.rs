@@ -115,6 +115,9 @@ pub enum FairOutcome {
         /// A fair cycle that never reaches it, when one needs someone outside
         /// to keep acting forever.
         kept_away: Option<Lasso>,
+        /// With none sure, why one may still be there: moves the model cannot
+        /// decide (what Cedar says, a guard) may make such a cycle.
+        may_be_kept_away: Option<String>,
     },
     /// A fair behaviour never reaches it.
     Broken {
@@ -178,9 +181,20 @@ impl fmt::Display for FairVerdict {
             under += &format!(", with at most {bound} dispatches and calls in flight");
         }
         match &self.outcome {
-            FairOutcome::Holds { kept_away: None } => write!(f, "HOLDS under {under}"),
+            FairOutcome::Holds {
+                kept_away: None,
+                may_be_kept_away: None,
+            } => write!(f, "HOLDS under {under}"),
+            FairOutcome::Holds {
+                kept_away: None,
+                may_be_kept_away: Some(why),
+            } => write!(
+                f,
+                "HOLDS under {under} when left alone. With moves nothing owes (requests, restarts) going on forever, {why}"
+            ),
             FairOutcome::Holds {
                 kept_away: Some(lasso),
+                ..
             } => write!(
                 f,
                 "HOLDS under {under} when left alone, though moves nothing owes (requests, restarts) can keep it away if they go on forever:\n{lasso}"
@@ -264,10 +278,20 @@ pub(super) fn fair_check(
         };
     }
     let people = view(Side::Must, true, &must_open);
-    FairOutcome::Holds {
-        kept_away: people
+    let kept_away = people
+        .fair_cycle()
+        .map(|cycle| lasso(model, explored, &people, &parents, &cycle));
+    let may_be_kept_away = if kept_away.is_some() {
+        None
+    } else {
+        let people = view(Side::May, true, &may_open);
+        people
             .fair_cycle()
-            .map(|cycle| lasso(model, explored, &people, &parents, &cycle)),
+            .map(|cycle| unsure_reason(explored, &people, &cycle))
+    };
+    FairOutcome::Holds {
+        kept_away,
+        may_be_kept_away,
     }
 }
 

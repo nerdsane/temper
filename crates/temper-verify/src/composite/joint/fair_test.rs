@@ -1,6 +1,7 @@
 //! The fairness check, on small apps whose answer tla-ts gave for the same
 //! system written in TLA+ (`tests/fair_models`, `scripts/fair-cross-check.mjs`).
 
+use temper_authz::SendAnalysis;
 use temper_spec::automaton::{Automaton, parse_automaton};
 
 use super::super::room::{Bytes, Progress};
@@ -44,7 +45,13 @@ fn fair(result: &JointLivenessResult) -> &FairOutcome {
 
 fn assert_holds(result: &JointLivenessResult) {
     assert!(
-        matches!(fair(result), FairOutcome::Holds { kept_away: None }),
+        matches!(
+            fair(result),
+            FairOutcome::Holds {
+                kept_away: None,
+                may_be_kept_away: None,
+            }
+        ),
         "{result}"
     );
 }
@@ -158,6 +165,7 @@ fn someone_who_keeps_acting_is_reported_beside_a_rule_that_holds_when_left_alone
     let result = check(model!("kept_away"));
     let FairOutcome::Holds {
         kept_away: Some(lasso),
+        ..
     } = fair(&result)
     else {
         panic!("expected a lasso beside HOLDS, got {result}");
@@ -169,6 +177,37 @@ fn someone_who_keeps_acting_is_reported_beside_a_rule_that_holds_when_left_alone
             .any(|step| step.action.as_deref().is_some_and(|a| a.contains("Flip"))),
         "{result}"
     );
+}
+
+/// Cedar may let someone keep it from the condition, or may not: that depends
+/// on the request, so HOLDS says so without claiming the cycle is there.
+#[test]
+fn someone_who_may_keep_acting_is_reported_as_not_sure_beside_a_rule_that_holds() {
+    let automaton = parse_automaton(model!("kept_away")).expect("model parses");
+    let analysis = SendAnalysis::new(
+        r#"
+permit(principal, action in [Action::"Begin", Action::"Exit"], resource);
+permit(principal, action == Action::"Flip", resource) when { context.urgent == true };
+"#,
+    )
+    .expect("its Cedar parses");
+    let (room, progress) = (Bytes::new(1 << 30), Progress::default());
+    let bound = Bound {
+        room: &room,
+        progress: &progress,
+    };
+    let mut results = verify_joint_liveness(&[&automaton], Some(&analysis), bound);
+    assert_eq!(results.len(), 1);
+    let result = results.remove(0);
+    let FairOutcome::Holds {
+        kept_away: None,
+        may_be_kept_away: Some(why),
+    } = fair(&result)
+    else {
+        panic!("expected a note beside HOLDS, got {result}");
+    };
+    assert!(why.contains("Flip"), "{result}");
+    assert!(result.to_string().contains("HOLDS"), "{result}");
 }
 
 #[test]

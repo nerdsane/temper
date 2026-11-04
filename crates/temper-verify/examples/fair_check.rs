@@ -132,8 +132,17 @@ fn check_app(
         };
         let (left_alone, with_people) = match result.fair.as_ref().map(|fair| &fair.outcome) {
             None => ("not-asked", "not-asked"),
-            Some(FairOutcome::Holds { kept_away: None }) => ("holds", "holds"),
-            Some(FairOutcome::Holds { kept_away: Some(_) }) => ("holds", "broken"),
+            Some(FairOutcome::Holds {
+                kept_away: None,
+                may_be_kept_away: None,
+            }) => ("holds", "holds"),
+            Some(FairOutcome::Holds {
+                kept_away: None,
+                may_be_kept_away: Some(_),
+            }) => ("holds", "not-checked"),
+            Some(FairOutcome::Holds {
+                kept_away: Some(_), ..
+            }) => ("holds", "broken"),
             Some(FairOutcome::Broken { .. }) => ("broken", "broken"),
             Some(FairOutcome::Vacuous { .. }) => ("vacuous", "vacuous"),
             Some(FairOutcome::Incomplete { .. }) => ("not-checked", "not-checked"),
