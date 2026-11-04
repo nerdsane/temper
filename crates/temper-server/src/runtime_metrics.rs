@@ -224,8 +224,10 @@ fn metrics() -> &'static RuntimeMetrics {
             events_written_total: meter
                 .u64_counter("temper_events_written_total")
                 .with_description(
-                    "Events written to a record's journal, by tenant and entity type: what grows \
-                     the journal. Beside temper_unrecorded_moves_total, the moves left out of it.",
+                    "Events written to a record's journal, by tenant, entity type, action and how \
+                     the move came about (request, timer, reaction): what grows the journal, and \
+                     where it comes from. Beside temper_unrecorded_moves_total, the moves left \
+                     out of it.",
                 )
                 .build(),
             scheduled_fires_lapsed_total: meter
@@ -781,13 +783,17 @@ pub fn record_unrecorded_move(tenant: &str, entity_type: &str, action: &str) {
     );
 }
 
-/// Record `count` events written to a journal of `entity_type` in `tenant`.
-pub fn record_events_written(tenant: &str, entity_type: &str, count: u64) {
+/// Record an event of `action` written to a journal of `entity_type` in
+/// `tenant`. `via` is how the move came about: `request`, `timer`, `reaction`,
+/// or `unknown` for an event that does not say.
+pub fn record_event_written(tenant: &str, entity_type: &str, action: &str, via: &str) {
     metrics().events_written_total.add(
-        count,
+        1,
         &[
             KeyValue::new("tenant", tenant.to_string()),
             KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("action", action.to_string()),
+            KeyValue::new("via", via.to_string()),
         ],
     );
 }

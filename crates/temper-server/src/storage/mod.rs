@@ -120,7 +120,7 @@ impl BoxedEventStore {
             .await;
         let result = self.record_append(result);
         if result.is_ok() {
-            count_written(persistence_id, events.len());
+            count_written(persistence_id, events);
         }
         result
     }
@@ -140,7 +140,7 @@ impl BoxedEventStore {
         let result = self.record_append(result);
         if result.is_ok() {
             for append in appends {
-                count_written(&append.persistence_id, append.events.len());
+                count_written(&append.persistence_id, &append.events);
             }
         }
         result
@@ -190,7 +190,7 @@ impl BoxedEventStore {
             .await;
         let result = self.record_append(result);
         if result.is_ok() {
-            count_written(persistence_id, events.len());
+            count_written(persistence_id, events);
         }
         result
     }
@@ -210,7 +210,7 @@ impl BoxedEventStore {
             .await;
         let result = self.record_append(result);
         if result.is_ok() {
-            count_written(persistence_id, events.len());
+            count_written(persistence_id, events);
         }
         result
     }
@@ -2331,12 +2331,16 @@ impl TrajectorySink for TenantStoreRouter {
 }
 
 /// Count the events an append wrote, by the tenant and entity type its
-/// journal belongs to (`temper_events_written_total`).
-fn count_written(persistence_id: &str, events: usize) {
+/// journal belongs to, each by its action and by how it came about, as the
+/// event itself says (`temper_events_written_total`).
+fn count_written(persistence_id: &str, events: &[PersistenceEnvelope]) {
     let (tenant, entity_type) =
         match temper_runtime::tenant::parse_persistence_id_parts(persistence_id) {
             Ok((tenant, entity_type, _)) => (tenant, entity_type),
             Err(_) => ("unknown", "unknown"),
         };
-    crate::runtime_metrics::record_events_written(tenant, entity_type, events as u64);
+    for event in events {
+        let via = event.payload["via"].as_str().unwrap_or("unknown");
+        crate::runtime_metrics::record_event_written(tenant, entity_type, &event.event_type, via);
+    }
 }
