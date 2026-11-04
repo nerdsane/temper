@@ -291,6 +291,7 @@ impl LivenessProof<'_> {
             self.fairness.as_ref().map(|fairness| FairVerdict {
                 weak: fairness.weak.clone(),
                 strong: fairness.strong.clone(),
+                relies_on: self.relies_on.clone(),
                 in_flight_bound: None,
                 outcome,
             })

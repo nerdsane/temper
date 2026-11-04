@@ -42,6 +42,11 @@ on_success = ["Answer"]
 on_failure = "Failed"
 
 [[state_timeout]]
+state = "Calling"
+after_seconds = 60
+on_timeout = "Failed"
+
+[[state_timeout]]
 state = "Waiting"
 after_seconds = 60
 on_timeout = "Retry"

@@ -41,6 +41,12 @@ kind = "internal"
 from = ["Polling"]
 to = "Out"
 
+[[state_timeout]]
+state = "Polling"
+after_seconds = 60
+on_timeout = "Failed"
+reset_on = ["Still"]
+
 [[liveness]]
 name = "G"
 eventually = "status == 'Idle' || status == 'Out'"

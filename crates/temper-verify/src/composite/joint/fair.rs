@@ -101,6 +101,9 @@ pub struct FairVerdict {
     pub weak: Vec<String>,
     /// Actions the rule assumes strongly fair.
     pub strong: Vec<String>,
+    /// Actions the rule assumes come while its condition is false. The walk
+    /// takes the rule's word for them, so the verdict names them.
+    pub relies_on: Vec<String>,
     /// When the walk held a move back, the bound on what was in flight.
     pub in_flight_bound: Option<usize>,
     /// Holds, broken, proves nothing, or not fully checked.
@@ -176,6 +179,12 @@ impl fmt::Display for FairVerdict {
         }
         if !self.strong.is_empty() {
             under += &format!(", strong on {}", self.strong.join(", "));
+        }
+        if !self.relies_on.is_empty() {
+            under += &format!(
+                ", relying on {} while it is false",
+                self.relies_on.join(", ")
+            );
         }
         if let Some(bound) = self.in_flight_bound {
             under += &format!(", with at most {bound} dispatches and calls in flight");

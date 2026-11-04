@@ -246,7 +246,8 @@ fn broken_moves(result: &JointLivenessResult) -> Vec<String> {
 }
 
 /// A call answered by a move that stays where it is ended all the same: the
-/// joint state has no call number to show it. Polling forever is fair.
+/// joint state has no call number to show it. Polling forever is fair, and
+/// each such answer puts back the timer that is its way out.
 #[test]
 fn a_call_answered_by_staying_can_go_on_forever() {
     let result = check(model!("poll_self"));
@@ -279,10 +280,22 @@ fn timers_of_two_states_are_owed_apart_when_they_share_an_action() {
 }
 
 /// Two calls to one module are two endings owed: the second's answers do not
-/// let the first wait forever.
+/// let the first wait forever. Each round of the second leaves a gap, and the
+/// rule, which counts every status, is met there once the first has ended. Its
+/// Cedar lets nobody move it by hand and leave the second's call open.
 #[test]
 fn two_calls_to_one_module_are_owed_apart() {
-    assert_holds(&check(model!("merged_calls")));
+    let automaton = parse_automaton(model!("merged_calls")).expect("model parses");
+    let cedar = include_str!("../../../tests/fair_models/merged_calls.cedar");
+    let analysis = SendAnalysis::new(cedar).expect("its Cedar parses");
+    let (room, progress) = (Bytes::new(1 << 30), Progress::default());
+    let bound = Bound {
+        room: &room,
+        progress: &progress,
+    };
+    let mut results = verify_joint_liveness(&[&automaton], Some(&analysis), bound);
+    assert_eq!(results.len(), 1);
+    assert_holds(&results.remove(0));
 }
 
 /// A walk on many threads numbers states in another order and leaves its moves
@@ -412,6 +425,20 @@ fn a_reaction_from_outside_the_scope_makes_neither_verdict() {
     not_checked_naming(
         &check(NOTE_FINISHED_FROM_OUTSIDE),
         "Note.Finish (a reaction from outside the rule's scope)",
+    );
+}
+
+/// The walk takes the rule's word for what it relies on, so the verdict says so.
+#[test]
+fn a_verdict_names_what_its_rule_relies_on() {
+    let result = check(model!("loop_strong"));
+    assert_holds(&result);
+    let verdict = result.fair.as_ref().expect("the rule asks for fairness");
+    assert!(
+        verdict
+            .to_string()
+            .contains("relying on Exit while it is false"),
+        "{verdict}"
     );
 }
 

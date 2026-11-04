@@ -89,8 +89,29 @@ fn a_timer_is_a_way_out_when_the_call_answers_nothing() {
 }
 
 #[test]
-fn a_trigger_that_names_its_answers_ends_with_one() {
+fn a_trigger_that_names_its_answers_can_still_answer_nothing() {
     let result = check_job("on_success = \"Finish\"", "");
+    let LivenessOutcome::Stuck { cases, .. } = &result.outcome else {
+        panic!("naming an answer does not promise one comes: {result}");
+    };
+    assert!(
+        cases.iter().any(|case| {
+            case.path.iter().any(|step| {
+                step.action
+                    .as_deref()
+                    .is_some_and(|action| action.ends_with("ends with no answer"))
+            })
+        }),
+        "{result}"
+    );
+}
+
+#[test]
+fn a_timer_is_a_way_out_of_a_trigger_that_names_its_answers() {
+    let result = check_job(
+        "on_success = \"Finish\"",
+        "[[state_timeout]]\nstate = \"Busy\"\nafter_seconds = 60\non_timeout = \"Give\"",
+    );
     assert!(result.holds(), "{result}");
 }
 

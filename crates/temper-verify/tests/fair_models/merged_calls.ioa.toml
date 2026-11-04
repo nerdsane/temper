@@ -28,14 +28,8 @@ kind = "internal"
 from = ["P"]
 to = "Q"
 
-[[action.triggers]]
-name = "b"
-kind = "wasm"
-module = "work"
-on_success = ["ToP"]
-
 [[action]]
-name = "ToP"
+name = "Back"
 kind = "internal"
 from = ["Q"]
 to = "P"
@@ -52,7 +46,12 @@ kind = "internal"
 from = ["P", "Q"]
 to = "Out"
 
+[[state_timeout]]
+state = "Q"
+after_seconds = 60
+on_timeout = "Back"
+
 [[liveness]]
 name = "G"
-eventually = "status == 'Idle' || status == 'Out'"
+eventually = "status == 'Idle' || status == 'P' || status == 'Q' || status == 'Out'"
 fairness = {}

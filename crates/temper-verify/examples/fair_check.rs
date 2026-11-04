@@ -7,7 +7,8 @@
 //! ```
 //!
 //! `--specs` holds `*.ioa.toml`, all one app. With `--models`, each name before
-//! its first `.` is an app of its own (`tests/fair_models`). `--all-fair` runs
+//! its first `.` is an app of its own (`tests/fair_models`), with `<app>.cedar`
+//! beside it as its Cedar if there is one. `--all-fair` runs
 //! the fairness check on rules that do not ask for it, assuming only what the
 //! runtime owes.
 //! `--json` prints one line per rule: what `scripts/fair-cross-check.mjs` reads.
@@ -190,7 +191,20 @@ fn main() -> Result<(), String> {
             .push(parse(&path, options.all_fair)?);
     }
     for (app, automatons) in &apps {
-        check_app(app, automatons, policies.as_ref(), &options);
+        let own = options.specs.join(format!("{app}.cedar"));
+        let own = match options.models && own.exists() {
+            true => {
+                let text = fs::read_to_string(&own).map_err(|e| e.to_string())?;
+                Some(SendAnalysis::new(&text).map_err(|e| e.to_string())?)
+            }
+            false => None,
+        };
+        check_app(
+            app,
+            automatons,
+            own.as_ref().or(policies.as_ref()),
+            &options,
+        );
     }
     Ok(())
 }

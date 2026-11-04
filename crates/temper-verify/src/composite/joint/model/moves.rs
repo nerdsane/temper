@@ -37,7 +37,7 @@ pub(in crate::composite::joint) enum Move {
     /// A module's call ends with no answer: it succeeded and no move follows
     /// (the kernel's `integration answered no move`, an empty answer, or no
     /// named answer fits), and its `on_failure` is not for that. The record
-    /// stays where it is.
+    /// stays where it is. Any call may end this way, whatever it names.
     Silent(Arc<Call>),
     /// The dispatch path reads the related records a reaction needs.
     Read(Arc<Dispatch>),
@@ -130,22 +130,14 @@ impl JointModel {
             if !calls.insert(call) {
                 continue;
             }
-            let before = out.len();
+            // Naming its answers narrows what a trigger may answer; any module
+            // may still answer nothing (`"empty": true`), and then the kernel
+            // makes no move. So a call may always end with none, and each
+            // state it can leave a record in needs a way out of its own.
             if !(self.answers(state, call, &values, &mut out)
                 && self.keep_move(&mut out, Move::Fail(call.clone()))
-                && self.keep_move(&mut out, Move::Lost(call.clone())))
-            {
-                return out;
-            }
-            // A trigger that names its answers says what the module answers,
-            // so it ends with none only when none of them fits the record
-            // (the kernel's `choose_answer`). One that names none may end
-            // with none at any time.
-            let answered = out[before..]
-                .iter()
-                .any(|mv| matches!(mv, Move::Answer(..)));
-            if (call.on_success.is_empty() || !answered)
-                && !self.keep_move(&mut out, Move::Silent(call.clone()))
+                && self.keep_move(&mut out, Move::Lost(call.clone()))
+                && self.keep_move(&mut out, Move::Silent(call.clone())))
             {
                 return out;
             }

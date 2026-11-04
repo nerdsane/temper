@@ -1,5 +1,6 @@
 //! A module call lost to a restart: answered by its `on_failure` when it
-//! names one, as a failed call is; otherwise the record is left stuck.
+//! names one, as a failed call is; otherwise the record is left stuck. An
+//! `on_failure` answers no call that ends with no answer.
 
 use super::*;
 
@@ -36,8 +37,8 @@ fn a_lost_call_with_no_on_failure_after_a_one_shot_timer_leaves_the_record_stuck
 fn a_lost_call_with_an_on_failure_is_answered_by_it() {
     // Every call names `on_failure = "Again"`. A call lost to a restart is
     // answered by it as a failed call is, so `Again` asks the module again
-    // and the one-shot timer is not needed to settle. Each names its answer,
-    // so neither ends with no answer.
+    // and neither leaves the record at rest. Only a call that ends with no
+    // answer does, once the one-shot timer has fired.
     let place = counting_place(true)
         .replace(
             "on_success = \"Placed\"",
@@ -53,5 +54,18 @@ fn a_lost_call_with_an_on_failure_is_answered_by_it() {
         "{place}"
     );
     let result = check_specs(COUNTING_APP, &place, SAME_RECORD);
-    assert!(result.holds(), "{result}");
+    let LivenessOutcome::Stuck { cases, .. } = &result.outcome else {
+        panic!("a call can still end with no answer: {result}");
+    };
+    for case in cases {
+        let last = case
+            .path
+            .iter()
+            .rev()
+            .find_map(|step| step.action.as_deref());
+        assert!(
+            last.is_some_and(|action| action.ends_with("ends with no answer")),
+            "{result}"
+        );
+    }
 }
