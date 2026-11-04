@@ -1,0 +1,10 @@
+[automaton]
+name = "Home"
+states = ["Unmade", "Open"]
+initial = "Unmade"
+
+[[action]]
+name = "Add"
+kind = "input"
+from = ["Unmade"]
+to = "Open"

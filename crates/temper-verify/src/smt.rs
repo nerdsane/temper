@@ -17,6 +17,8 @@
 //! 3. **Unreachable state detection** — BFS from initial state through
 //!    transition targets to find states that can never be reached.
 
+pub mod cross;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use z3::ast::{Bool, Int};

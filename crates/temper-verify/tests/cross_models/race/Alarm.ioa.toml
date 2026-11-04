@@ -1,0 +1,44 @@
+# Taking an alarm opens a case with a reaction. Clearing the alarm closes the
+# case, but the reaction may still be on its way: the close is refused, then the
+# case opens under an alarm that is already cleared.
+[automaton]
+name = "Alarm"
+states = ["Unmade", "Firing", "Taken", "Cleared"]
+initial = "Unmade"
+
+[[state]]
+name = "case"
+type = "string"
+initial = ""
+
+[[invariant]]
+name = "ClearedEndsCase"
+assert = "status == 'Cleared' && !empty(case) => !(Case[case].status in ['Opened'])"
+
+[[action]]
+name = "Add"
+kind = "input"
+from = ["Unmade"]
+to = "Firing"
+
+[[action]]
+name = "Take"
+kind = "input"
+from = ["Firing"]
+to = "Taken"
+effect = ["spawn('Case', 'Open', case)"]
+
+[[action]]
+name = "Clear"
+kind = "input"
+from = ["Taken"]
+to = "Cleared"
+
+[[action.triggers]]
+name = "close_case"
+kind = "entity"
+target_entity = "Case"
+target_action = "Close"
+[action.triggers.resolve_target]
+kind = "field"
+id_field = "case"
