@@ -3,7 +3,7 @@
 //! check counts on from it finishes and [`settle`] finds a state there that
 //! cannot reach the condition.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use temper_spec::predicate::{Expr, Truth, eval};
 
@@ -39,7 +39,6 @@ impl Engine<'_, '_> {
             edges: Vec::new(),
             stopped: None,
             held_back: false,
-            unwalked: BTreeSet::new(),
             outside: BTreeMap::new(),
             held: Held::new(self.bound),
         };
@@ -67,7 +66,6 @@ impl Engine<'_, '_> {
                 self.left -= 1;
                 self.stats.steps += 1;
                 let state = sub.state(index);
-                model.note_unwalked(&state, &mut sub.unwalked);
                 tables.make_room(&mut sub, &mut seen, &mut queue, true)?;
                 let before = [sub.nodes.len(), sub.made.len(), sub.edges.len()];
                 let failing = eval(goal, &model.env(owner, &state)) != Truth::True;
@@ -136,11 +134,6 @@ impl Engine<'_, '_> {
         match walked {
             Ok(true) => {}
             Ok(false) | Err(_) => return Confirm::Open,
-        }
-        // A module may answer with an action the walk never takes, and that
-        // answer may be the way out: not a stuck verdict to stand on.
-        if !sub.unwalked.is_empty() {
-            return Confirm::Open;
         }
         match settle(model, owner, goal, &sub) {
             (LivenessOutcome::Holds, _) => {

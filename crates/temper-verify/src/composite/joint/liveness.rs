@@ -44,9 +44,7 @@
 //! sure moves alone lead to the state, and no move, sure or not, may lead on
 //! to the condition. Anything less is not checked, naming why.
 //!
-//! A pass that checked nothing is not one. Where a module may answer with an
-//! action the walk never takes, the property is not checked, since one may
-//! be the way out. And a condition written
+//! A pass that checked nothing is not one: a condition written
 //! `premise => conclusion` whose premise no walked state meets proves nothing.
 
 use std::collections::{BTreeSet, VecDeque};
@@ -86,9 +84,6 @@ pub struct JointLivenessResult {
     /// Settles, stuck (with a shortest path to a state it cannot leave),
     /// proves nothing, or not fully checked.
     pub outcome: LivenessOutcome,
-    /// The answers a module may give that the walk never takes, each as
-    /// `Entity.Action (from Status, ...)`.
-    pub unwalked: Vec<String>,
 }
 
 impl JointLivenessResult {

@@ -370,14 +370,15 @@ impl JointModel {
                 }
             }
         }
-        let early = match mv {
+        let unsure = match mv {
             Move::Read(dispatch) | Move::Arrive(dispatch) => self.overtakes(state, dispatch),
+            Move::Answer(call, action) => self.only_a_module_may(&call.to, &action.name),
             _ => false,
         };
         let mut held_back = false;
         let mut nexts = Vec::new();
         for (mut outcome, text, certainty) in outcomes {
-            let certainty = if early { Unsure } else { certainty };
+            let certainty = if unsure { Unsure } else { certainty };
             let fits = self.delivery == Delivery::BeforeNextRequest || self.fits(&outcome);
             held_back |= !fits;
             if !fits {

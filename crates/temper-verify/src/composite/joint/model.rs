@@ -42,7 +42,7 @@ pub(super) use read::Timeout;
 use read::{Kernel, Reaction, Unchecked, named_literals, tracked, unchecked_constraints};
 pub(super) use step::{Certainty, Move};
 pub(super) use walk::Keep;
-pub(super) use walk::{Explored, Made, unwalked_reason};
+pub(super) use walk::{Explored, Made};
 
 /// Counter ceiling for the joint models, as for the composite plans.
 const JOINT_MAX_COUNTER: usize = 3;
@@ -246,12 +246,29 @@ impl JointModel {
                 || senders.request(entity, action) != May::No
                 || kernel.chooses(entity, action)
         };
+        let open: BTreeSet<&String> = kernel
+            .calls_on
+            .iter()
+            .filter(|(_, specs)| specs.iter().any(|spec| spec.on_success.is_empty()))
+            .map(|((entity, _), _)| entity)
+            .collect();
+        // A module whose trigger names no `on_success` may answer with an
+        // action of its record nothing else sends, choosing its parameters.
+        let only_a_module = |entity: &str, action: &str| {
+            open.contains(&entity.to_string())
+                && !chosen(entity, action)
+                && !reactions
+                    .iter()
+                    .any(|r| r.to == entity && r.target_action == action)
+        };
+        let answered =
+            |entity: &str, action: &str| chosen(entity, action) || only_a_module(entity, action);
         let order = Order::read(&Specs {
             by_name,
             models: &models,
             reactions: &reactions,
             read,
-            chosen: &chosen,
+            chosen: &answered,
         });
         let models: BTreeMap<String, TemperModel> = models
             .into_iter()
@@ -265,12 +282,6 @@ impl JointModel {
             })
             .collect();
         let unchecked = unchecked_constraints(by_name, &models, &order);
-        let open: BTreeSet<&String> = kernel
-            .calls_on
-            .iter()
-            .filter(|(_, specs)| specs.iter().any(|spec| spec.on_success.is_empty()))
-            .map(|((entity, _), _)| entity)
-            .collect();
         let unsent = models
             .iter()
             .filter(|(entity, _)| open.contains(entity))
@@ -279,12 +290,7 @@ impl JointModel {
                     .transitions
                     .iter()
                     .enumerate()
-                    .filter(|(_, t)| {
-                        !chosen(entity, &t.name)
-                            && !reactions
-                                .iter()
-                                .any(|r| &r.to == entity && r.target_action == t.name)
-                    })
+                    .filter(|(_, t)| only_a_module(entity, &t.name))
                     .map(|(i, _)| i)
                     .collect();
                 (!ways.is_empty()).then(|| (entity.clone(), ways))

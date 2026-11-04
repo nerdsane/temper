@@ -32,13 +32,11 @@
 //!   ([`settle`]). Every state that walk reaches is reachable, and what
 //!   decides whether it reaches the condition lies inside the walk, so a
 //!   stuck state there is stuck in the model. A walk that does not finish
-//!   within its share of steps or the room confirms nothing, and nor does
-//!   one where a module may answer with an action the model never takes
-//!   (the walk cannot tell that answer is no way out).
+//!   within its share of steps or the room confirms nothing.
 //!
-//! Nothing here takes a move the model does not take, so the rules that
-//! make a pass that checked nothing NOT CHECKED (an answer the walk never
-//! takes, a premise nothing meets) can never turn into a break here.
+//! Nothing here takes a move the model does not take, so the rule that makes
+//! a pass that checked nothing NOT CHECKED (a premise nothing meets) can
+//! never turn into a break here.
 //!
 //! Bounds, each for a reason outside this code:
 //!

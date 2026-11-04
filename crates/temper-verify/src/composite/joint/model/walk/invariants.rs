@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 
 use super::super::super::{JointOutcome, premise};
 use super::super::{JointModel, Walk};
-use super::{Keep, unwalked_reason};
+use super::Keep;
 use crate::composite::joint::room::Bound;
 use temper_spec::predicate::{Expr, Name, Truth, eval};
 
@@ -99,7 +99,6 @@ impl JointModel {
             }
             broken.iter().all(Option::is_some)
         });
-        let unwalked = explored.unwalked();
         // The first move each invariant's first maybe-break rests on, and
         // the types outside the scope it comes from when it is a reaction
         // from them.
@@ -136,9 +135,6 @@ impl JointModel {
                 (None, None) => match &explored.stopped {
                     Some(reason) => JointOutcome::Incomplete {
                         reason: reason.clone(),
-                    },
-                    None if !unwalked.is_empty() => JointOutcome::Incomplete {
-                        reason: unwalked_reason(&unwalked),
                     },
                     None => match premises[i] {
                         Some(premise) if !met[i] => JointOutcome::Vacuous {

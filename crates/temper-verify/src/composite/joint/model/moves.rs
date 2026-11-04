@@ -88,11 +88,23 @@ impl JointModel {
         out
     }
 
+    /// Whether `action` of `entity` is one nothing else can send, on a record
+    /// a module whose trigger names no `on_success` may answer: no request,
+    /// reaction or timer. It may be how that module answers, or never happen.
+    pub(super) fn only_a_module_may(&self, entity: &str, action: &str) -> bool {
+        self.unsent.get(entity).is_some_and(|ways| {
+            ways.iter()
+                .any(|&way| self.models[entity].transitions[way].name == action)
+        })
+    }
+
     /// The answers a module may give the call `call`: its trigger's
-    /// `on_success`, or else any internal action of its record. The module
-    /// itself is not modelled: it may give each of these answers, and gives
-    /// each it keeps being able to give at some point. False when the
-    /// expansion's room is used up.
+    /// `on_success`, or else any internal action of its record, and any
+    /// action of its record nothing else can send
+    /// ([`Self::only_a_module_may`]). The module itself is not modelled: it
+    /// may give each of these answers, and gives each internal or named one
+    /// it keeps being able to give at some point. False when the expansion's
+    /// room is used up.
     fn answers(
         &self,
         state: &JointState,
@@ -108,6 +120,7 @@ impl JointModel {
                     .internal
                     .get(&call.to)
                     .is_some_and(|names| names.contains(&t.name))
+                    || self.only_a_module_may(&call.to, &t.name)
             } else {
                 call.on_success.contains(&t.name)
             };

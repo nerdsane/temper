@@ -1,5 +1,7 @@
-//! A pass that checked nothing is not a pass: a rule whose premise no walked
-//! state meets, and a walk that never takes an answer a module may give.
+//! A pass that checked nothing is not a pass, and a module's answer nothing
+//! names is walked as a move it may make: a rule whose premise no walked
+//! state meets checks nothing, and a verdict resting on such an answer is
+//! not a verdict.
 
 use temper_authz::SendAnalysis;
 use temper_spec::automaton::{Automaton, parse_automaton};
@@ -100,15 +102,14 @@ fn invariant(done_kind: &str, assert: &str) -> JointInvariantResult {
 }
 
 #[test]
-fn a_liveness_pass_that_never_takes_a_module_answer_is_not_checked() {
-    // The module may answer Done, and nothing then leads to Gone: the
-    // runtime gets stuck. The walk never takes Done, so it never meets the
-    // premise.
+fn a_stuck_state_only_an_unnamed_module_answer_reaches_is_not_checked() {
+    // The module may answer Done, and nothing then leads to Gone. Whether it
+    // ever does is not known, so this is not a broken rule.
     let result = liveness("input", false, "status == 'Done' => status == 'Gone'");
     let text = result.to_string();
     assert!(!result.holds(), "{text}");
     assert!(text.contains("NOT CHECKED"), "{text}");
-    assert!(text.contains("Ask.Done (from Asked)"), "{text}");
+    assert!(text.contains("answer from asker"), "{text}");
 }
 
 #[test]
@@ -121,14 +122,14 @@ fn a_liveness_premise_no_walked_state_meets_proves_nothing() {
 }
 
 #[test]
-fn an_invariant_that_holds_without_a_module_answer_is_not_checked() {
-    // Once the module answers Done, the box is still Empty: the runtime
-    // breaks the rule. The walk never takes Done.
+fn a_break_only_an_unnamed_module_answer_reaches_is_not_checked() {
+    // If the module answers Done, the box is still Empty, which breaks the
+    // rule. Whether it ever does is not known.
     let result = invariant("input", "status == 'Done' => Box[Id].status == 'Full'");
     let text = result.to_string();
     assert!(!result.holds(), "{text}");
     assert!(text.contains("NOT CHECKED"), "{text}");
-    assert!(text.contains("Ask.Done (from Asked)"), "{text}");
+    assert!(text.contains("answer from asker"), "{text}");
 }
 
 #[test]
@@ -140,15 +141,63 @@ fn an_invariant_premise_no_settled_state_meets_proves_nothing() {
 }
 
 #[test]
-fn an_answer_the_walk_never_takes_leaves_a_stuck_rule_not_checked() {
-    // The answer may be the way out, so the rule is not said to be broken.
+fn a_failed_call_nothing_retries_is_stuck_whatever_the_module_may_answer() {
+    // The module's call can fail, and then nothing leads on: the answer it
+    // might have given does not change that.
     let result = liveness("input", false, "status == 'Asked' => status == 'Done'");
     let text = result.to_string();
     assert!(
-        matches!(result.outcome, LivenessOutcome::Incomplete { .. }),
+        matches!(result.outcome, LivenessOutcome::Stuck { .. }),
         "{text}"
     );
-    assert!(text.contains("Ask.Done (from Asked)"), "{text}");
+}
+
+#[test]
+fn an_unnamed_answer_that_is_the_only_way_out_leaves_a_rule_not_checked() {
+    // A failed call asks again, so the record never comes to rest. Only the
+    // module's answer leads on, and it may never give it, so this is neither
+    // a pass nor a broken rule.
+    let spec = ask(
+        "input",
+        false,
+        r#"
+[[action]]
+name = "Again"
+kind = "internal"
+from = ["Asked"]
+to = "Asked"
+
+[[action.triggers]]
+name = "ask_again"
+kind = "wasm"
+module = "asker"
+on_failure = "Again"
+
+[[liveness]]
+name = "rule"
+eventually = "status == 'Asked' => status == 'Done'"
+"#,
+    )
+    .replace(
+        "module = \"asker\"\n\n[[action]]\nname = \"Done\"",
+        "module = \"asker\"\non_failure = \"Again\"\n\n[[action]]\nname = \"Done\"",
+    );
+    let automatons = parsed(&[&spec]);
+    let refs: Vec<&Automaton> = automatons.iter().collect();
+    let analysis = SendAnalysis::new(POLICIES).expect("fixture policies parse");
+    let mut results = bounded(|bound| verify_joint_liveness(&refs, Some(&analysis), bound));
+    let result = results.remove(0);
+    assert!(
+        matches!(result.outcome, LivenessOutcome::Incomplete { .. }),
+        "{result}"
+    );
+}
+
+#[test]
+fn a_rule_that_holds_through_an_unnamed_answer_holds() {
+    // The walk goes where the answer leads, and the rule holds there.
+    let result = liveness("input", false, "status == 'Done' => status == 'Done'");
+    assert!(result.holds(), "{result}");
 }
 
 #[test]

@@ -281,7 +281,6 @@ impl LivenessProof<'_> {
             states: 0,
             in_flight_bound: None,
             outcome: LivenessOutcome::Holds,
-            unwalked: Vec::new(),
         };
         let model = match &self.model {
             Ok(model) => model,
@@ -295,7 +294,6 @@ impl LivenessProof<'_> {
         let mut explored = model.walk_with(bound, model::Keep::Edges, |_, _, _| false);
         result.states = explored.len();
         result.in_flight_bound = explored.held_back.then_some(model::MAX_IN_FLIGHT);
-        result.unwalked = explored.unwalked();
         let settling = settle_bytes(&explored);
         // Past where the walk stops, phase two (`model/guided.rs`).
         if let Some(reason) = explored.stopped.clone() {
@@ -305,13 +303,6 @@ impl LivenessProof<'_> {
         }
         result.outcome = match explored.held.add(settling) {
             Ok(()) => match settle(model, &self.entity, &self.goal, &explored) {
-                (LivenessOutcome::Holds | LivenessOutcome::Stuck { .. }, _)
-                    if !result.unwalked.is_empty() =>
-                {
-                    LivenessOutcome::Incomplete {
-                        reason: model::unwalked_reason(&result.unwalked),
-                    }
-                }
                 (LivenessOutcome::Holds, false) => LivenessOutcome::Vacuous {
                     premise: super::premise(&self.goal)
                         .map(ToString::to_string)
