@@ -328,14 +328,11 @@ fn a_delivery_fires_a_repeating_timer_once_then_it_waits_its_budget() {
             .await
             .unwrap();
         assert_eq!(current.state.status, "Watching");
-        let next = events.state_timer("default:Change:c1").unwrap();
         assert_eq!(
-            chrono::DateTime::parse_from_rfc3339(&next.started_at).unwrap(),
-            chrono::DateTime::parse_from_rfc3339(&row.started_at).unwrap()
-                + chrono::Duration::seconds(86400),
-            "the next fire waits the full budget"
+            events.state_timer("default:Change:c1").unwrap().arm_id,
+            row.arm_id,
+            "a fire that changes nothing keeps the timer's row"
         );
-        assert_ne!(next.arm_id, row.arm_id);
     });
 }
 

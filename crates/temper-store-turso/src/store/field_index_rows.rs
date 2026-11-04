@@ -7,9 +7,9 @@
 //! one per changed field.
 //!
 //! A row holds one field's value and nothing else about the entity. Its
-//! `status` column is left NULL: a filter reads the status from the entity's
-//! catalog row (see `query_field_index`), so a status change writes only the
-//! `Status` row instead of every row.
+//! `status` column is left NULL and the status has no row of its own: a filter
+//! reads it from the entity's catalog row (see `query_field_index`), so a
+//! change of status writes no row here.
 
 use std::collections::BTreeMap;
 

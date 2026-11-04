@@ -36,10 +36,10 @@ pub(crate) fn timer_arm_id(state: &str, sequence_nr: u64) -> String {
     format!("{state}-{sequence_nr}")
 }
 
-/// The id of the timer a move that wrote no event reset at `at`, on a record
-/// at `sequence_nr` (`entity_actor::unrecorded`). It differs from the id the
-/// event at `sequence_nr` armed and from every earlier reset's, so the timer
-/// it replaces, whose task ends after it, does not remove its row.
+/// The id of the timer someone else's move that wrote no event reset at `at`,
+/// on a record at `sequence_nr` (`entity_actor::unrecorded`). It differs from
+/// the id the event at `sequence_nr` armed and from every earlier reset's, so
+/// the timer it replaces, whose task ends after it, does not remove its row.
 pub(crate) fn unrecorded_timer_arm_id(
     state: &str,
     sequence_nr: u64,

@@ -290,7 +290,7 @@ impl TursoEventStore {
             changed_indexes.push((
                 projection.entity_type.clone(),
                 projection.entity_id.clone(),
-                indexed_projection_fields(&projection.status, &projection.indexed_fields),
+                indexed_projection_fields(&projection.indexed_fields),
                 projection.known_new,
             ));
             catalog_upserts.push(PreparedProjection {
@@ -619,15 +619,22 @@ impl TursoEventStore {
                     .entry(entity_id.clone())
                     .or_insert_with(|| ProjectedEntityFieldsRow {
                         entity_id: entity_id.clone(),
-                        status,
                         fields: requested_fields
                             .iter()
-                            .map(|field| ((*field).to_string(), None))
+                            .map(|field| {
+                                let value = is_status_field(field).then(|| status.clone());
+                                ((*field).to_string(), value)
+                            })
                             .collect(),
+                        status,
                     });
 
+            // A status row older than `indexed_projection_fields` may remain
+            // until its record next changes an indexed field: the catalog row
+            // above is the status.
             if let Some(field_name) = field_name
                 && requested_fields.contains(field_name.as_str())
+                && !is_status_field(&field_name)
             {
                 entry.fields.insert(field_name, field_value);
             }
@@ -811,15 +818,22 @@ fn scalar_to_text(value: &serde_json::Value) -> Option<String> {
     }
 }
 
+/// Whether `field_name` is the record's status, which its catalog row holds.
+fn is_status_field(field_name: &str) -> bool {
+    field_name == "Status" || field_name == "status"
+}
+
 pub(super) fn indexed_projection_fields(
-    status: &str,
     fields: &serde_json::Value,
 ) -> Vec<(String, Option<String>)> {
     let mut indexed_fields = Vec::new();
 
     if let Some(obj) = fields.as_object() {
         for (field_name, value) in obj {
-            if field_name == "Status" {
+            // Filters, ordering and projections read the status from the
+            // catalog row (`filter_sql`, `query_page`), so a status row here
+            // would be two more writes on every change of place, read by nothing.
+            if is_status_field(field_name) {
                 continue;
             }
 
@@ -838,8 +852,6 @@ pub(super) fn indexed_projection_fields(
         }
     }
 
-    // Also index the status as a pseudo-field so `$filter=Status eq 'Active'` works.
-    indexed_fields.push(("Status".to_string(), Some(status.to_string())));
     indexed_fields
 }
 
@@ -891,7 +903,7 @@ mod tests {
             "Payload": long,
         });
 
-        let indexed = indexed_projection_fields("Active", &fields);
+        let indexed = indexed_projection_fields(&fields);
 
         assert!(
             indexed
@@ -902,7 +914,8 @@ mod tests {
         assert!(
             indexed
                 .iter()
-                .any(|(name, value)| name == "Status" && value.as_deref() == Some("Active"))
+                .all(|(name, _)| name != "Status" && name != "status"),
+            "the catalog row holds the status"
         );
     }
 }

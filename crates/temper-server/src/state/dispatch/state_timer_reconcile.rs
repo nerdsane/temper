@@ -341,6 +341,11 @@ impl ServerState {
                 started_at,
             )
         });
+        // A live arm of this row may have gone on past the row's clock: a
+        // repeating fire that wrote no event keeps the row as it is.
+        if let Some(live) = armed.as_ref().filter(|live| live.arm_id == timer.arm_id) {
+            timer.started_at = timer.started_at.max(live.started_at);
+        }
         // The journal may have named a setter in place of a service identity.
         timer.agent_ctx = super::state_timeouts::timer_agent(&identity);
         timer.sequence_nr = current.sequence_nr;

@@ -293,11 +293,8 @@ pub(crate) fn denial_can_be_answered(
 
 /// [`record_authz_denial`] for a refusal someone can answer
 /// ([`denial_can_be_answered`]). Any other refusal files no decision and no
-/// denial pattern, and gets `None`, but still writes its trajectory row: a
-/// direct request is recorded even when it changes nothing
-/// (`entity_actor::unrecorded`), and a refusal is the same kind of act, made
-/// at human speed. Those rows are how refused moves and the key that made
-/// them are found.
+/// denial pattern, and gets `None`, but still writes its trajectory row. Those
+/// rows are how refused moves and the key that made them are found.
 pub(crate) async fn record_answerable_denial(
     state: &crate::state::ServerState,
     input: DenialInput<'_>,

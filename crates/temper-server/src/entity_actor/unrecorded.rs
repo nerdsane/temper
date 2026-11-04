@@ -1,34 +1,43 @@
-//! A move a machine made that leaves its record exactly as it found it
-//! writes nothing.
+//! A move that leaves its record exactly as it found it writes nothing.
 //!
 //! A timer's poll with no effects, the reaction hop it sets off only to run a
-//! module, a module's answer whose facts the record already holds: each wrote
-//! an event, a trajectory row and the record's rows, and moved the snapshot
-//! cadence on, so a record polled every few seconds grew its journal without
-//! ever changing. One app's database reached 3.35 GB that way, too big to
-//! restore within the upgrade limit; 61% of its last 100,000 events were such
-//! moves. Such a move now writes no event, row, trajectory entry or snapshot
-//! step, and is not pushed into the record's journal. Its triggers still run,
-//! from the answer's state, and a timer its action resets re-arms from the
-//! move's own time ([`EntityResponse::unrecorded_at`]), writing its own row in
-//! place of the one the event would have carried.
+//! module, a module's answer whose facts the record already holds, an agent's
+//! look: each wrote an event, a trajectory row and the record's rows, and moved
+//! the snapshot cadence on, so a record polled every few seconds grew its
+//! journal without ever changing. One app's database reached 3.35 GB that way,
+//! too big to restore within the upgrade limit; 61% of its last 100,000 events
+//! were such moves. Such a move now writes no event, row, trajectory entry or
+//! snapshot step, and is not pushed into the record's journal. Its triggers
+//! still run, from the answer's state, and a timer its action resets re-arms
+//! from the move's own time ([`EntityResponse::unrecorded_at`]).
+//!
+//! A timer's own fire goes on under the row it fired from, so it writes no row
+//! either; a reset by anyone else writes one, so a restart keeps it
+//! (`arm_state_timeouts_if_needed`).
 
+use super::EventVia;
 use super::actor::EntityActor;
 use super::effects::ProcessResult;
 use super::scheduled_rows::ScheduledRows;
 use super::types::{EntityEvent, EntityResponse, EntityState};
-use super::{EventOrigin, EventVia};
 
-/// Whether a machine made the move: a state timer or scheduled action
-/// (`Timer`), or a reaction, an integration's or module's callback, or
-/// another kernel-owned move (`Reaction`).
+/// Whether the record already holds everything the move's event would say.
 ///
-/// A move a person or an agent asked for directly (an HTTP or MCP request,
-/// `Request`) is recorded even when it changes nothing: it is an intentional
-/// act, bounded by human speed, and who-did-what history is for it. A move
-/// whose origin is unknown is recorded too.
-pub(super) fn made_by_machine(origin: &EventOrigin) -> bool {
-    matches!(origin.via, Some(EventVia::Timer | EventVia::Reaction))
+/// A machine's move (`Timer`, `Reaction`) carries nothing of its own. A move
+/// someone asked for (`Request`, an HTTP or MCP call by a person or an agent)
+/// can carry params the record does not keep, such as a transient field, and
+/// then its event is the only place they exist, so it is written. A move whose
+/// origin is unknown is written too.
+pub(super) fn record_holds_what_it_says(event: &EntityEvent, after: &EntityState) -> bool {
+    match event.origin.via {
+        Some(EventVia::Timer | EventVia::Reaction) => true,
+        Some(EventVia::Request) => event.params.as_object().is_none_or(|params| {
+            params
+                .iter()
+                .all(|(name, value)| after.fields.get(name) == Some(value))
+        }),
+        None => false,
+    }
 }
 
 /// Whether a successful move leaves its record exactly as it found it, and
@@ -66,11 +75,18 @@ pub(super) fn leaves_record_unchanged(
         || !scheduled.armed.is_empty()
         || scheduled.fired.is_some();
     // What only its event would say: that a timer which fires once has fired
-    // (the status clock's entry for its action), and that a move naming
-    // someone came after a timer stopped for want of one (`timer_needs_person`).
+    // (the status clock's entry for its action), that a move naming someone
+    // came after a timer stopped for want of one (`timer_needs_person`), and
+    // that someone other than the last to move asked for this one. A record says
+    // who moved it last on every read, and its later timers run as the newest
+    // move that names someone (`journal_setter`), so that first move changes
+    // the record. The same caller asking again changes nothing.
     let clears_timer_stop =
         before.last_event.timer_needs_person.is_some() && event.origin.by.is_some();
-    record_kept && !writes_beside && !fires_timer_once && !clears_timer_stop
+    let names_someone_new = event.origin.via == Some(EventVia::Request)
+        && event.origin.by.is_some()
+        && event.origin.by != before.last_event.last_event_by;
+    record_kept && !writes_beside && !fires_timer_once && !clears_timer_stop && !names_someone_new
 }
 
 impl EntityActor {
@@ -120,5 +136,80 @@ impl EntityActor {
             store_unavailable: false,
             unrecorded_at: Some(event.timestamp),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::entity_actor::EventOrigin;
+
+    fn event(via: Option<EventVia>, params: serde_json::Value) -> EntityEvent {
+        EntityEvent {
+            action: "Look".to_string(),
+            from_status: "Open".to_string(),
+            to_status: "Open".to_string(),
+            timestamp: chrono::DateTime::UNIX_EPOCH,
+            params,
+            origin: EventOrigin {
+                via,
+                ..Default::default()
+            },
+            idempotency_key: None,
+            kind: Default::default(),
+            outcome: None,
+        }
+    }
+
+    fn record(fields: serde_json::Value) -> EntityState {
+        EntityState {
+            entity_type: "Thing".to_string(),
+            entity_id: "t".to_string(),
+            status: "Open".to_string(),
+            item_count: 0,
+            counters: Default::default(),
+            booleans: Default::default(),
+            lists: Default::default(),
+            fields,
+            events: Default::default(),
+            total_event_count: 1,
+            events_since_snapshot: 1,
+            last_snapshot_sequence_nr: 0,
+            sequence_nr: 1,
+            processed_idempotency_keys: Default::default(),
+            last_event: Default::default(),
+            status_clock: Default::default(),
+            spawn_reservations: Default::default(),
+        }
+    }
+
+    #[test]
+    fn a_request_is_written_only_for_what_the_record_does_not_hold() {
+        let kept = record(json!({ "note": "same" }));
+        let via = Some(EventVia::Request);
+        assert!(record_holds_what_it_says(&event(via, json!({})), &kept));
+        assert!(record_holds_what_it_says(
+            &event(via, json!({ "note": "same" })),
+            &kept
+        ));
+        assert!(
+            !record_holds_what_it_says(&event(via, json!({ "PackBytes": "abc" })), &kept),
+            "a param the record does not keep exists only in the event"
+        );
+    }
+
+    #[test]
+    fn a_machine_says_nothing_of_its_own_and_an_unknown_origin_is_written() {
+        let kept = record(json!({}));
+        let params = json!({ "asked": "x" });
+        for via in [EventVia::Timer, EventVia::Reaction] {
+            assert!(record_holds_what_it_says(
+                &event(Some(via), params.clone()),
+                &kept
+            ));
+        }
+        assert!(!record_holds_what_it_says(&event(None, json!({})), &kept));
     }
 }

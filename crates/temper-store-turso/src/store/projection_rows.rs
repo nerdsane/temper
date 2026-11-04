@@ -132,7 +132,7 @@ pub(super) async fn write_projection(
     .await
     .map_err(storage_error)?;
 
-    let indexed = indexed_projection_fields(status, fields);
+    let indexed = indexed_projection_fields(fields);
     sync_field_index(tx, [tenant, entity_type, entity_id], &indexed).await?;
     super::projection_delta::applied(
         tx,

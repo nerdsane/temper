@@ -4,11 +4,14 @@
 //! The poller's `Poll` repeats every [`POLL`] and changes nothing; its trigger
 //! is a relay's `Pass`, a reaction's move that changes nothing either, whose
 //! own trigger counts on a tally. So every period the tally's journal gains a
-//! `Count`, while the poller's and the relay's gain nothing. A person's `Poll`
-//! changes nothing too, and is recorded: they asked for it. A restart arms the
-//! poll from the newest unrecorded one, whose timer row it reads.
+//! `Count`, while the poller's and the relay's gain nothing, and the poller's
+//! timer row stays as it is. A person's `Poll` changes nothing too, and is
+//! written once, as the first to name them; asked again, it writes nothing. A
+//! restart finds the row past due and looks once at once, then keeps the pace.
 
 use std::time::Duration;
+
+use temper_runtime::persistence::StateTimerRecord;
 
 use super::server::{SETTLE, Server, World, millis_between, person};
 
@@ -22,6 +25,11 @@ const MARGIN: Duration = Duration::from_millis(500);
 /// How many times `action` appears in `journal`.
 fn count(journal: &[String], action: &str) -> usize {
     journal.iter().filter(|entry| *entry == action).count()
+}
+
+/// The ids of `rows`, which say which arm each timer row belongs to.
+fn arm_ids(rows: &[StateTimerRecord]) -> Vec<String> {
+    rows.iter().map(|row| row.arm_id.clone()).collect()
 }
 
 /// A poller watching since now, with its relay and tally made.
@@ -38,6 +46,7 @@ pub(crate) fn polls_that_change_nothing_write_nothing_and_still_trigger(world: &
     watch(&server, id);
     let watched = server.journal("Poller", id);
     let relayed = server.journal("Relay", id);
+    let row = server.rows();
     assert_eq!(
         count(&watched, "Watch"),
         1,
@@ -70,20 +79,42 @@ pub(crate) fn polls_that_change_nothing_write_nothing_and_still_trigger(world: &
         "a reaction's move that changes nothing writes no event"
     );
     assert_eq!(
+        arm_ids(&server.rows()),
+        arm_ids(&row),
+        "a poll that changes nothing writes no timer row"
+    );
+    assert_eq!(
         count(&server.journal("Tally", id), "Count"),
         4,
         "the trigger's move that changes its record is written once per period"
     );
 
-    // The same Poll, asked for by a person: it changes nothing, and is recorded.
+    // The same Poll, asked for by a person. The first names someone new, so it
+    // is written: the record says who moved it last, and its timers follow them.
     server.act("Poller", id, "Poll", &person("bob"));
     let asked = server.journal("Poller", id);
     assert_eq!(
         count(&asked, "Poll"),
         1,
-        "a person's move is recorded even when it changes nothing: {asked:?}"
+        "the first move to name someone is written: {asked:?}"
     );
     assert_eq!(server.read("Tally", id, "count").0, 5);
+    assert_ne!(
+        arm_ids(&server.rows()),
+        arm_ids(&row),
+        "a reset by someone else writes the timer's row"
+    );
+
+    // The same person again: nothing new to say, so no event, and its trigger
+    // still runs.
+    server.act("Poller", id, "Poll", &person("bob"));
+    let again = server.journal("Poller", id);
+    assert_eq!(
+        count(&again, "Poll"),
+        1,
+        "the same caller's move that changes nothing writes no event: {again:?}"
+    );
+    assert_eq!(server.read("Tally", id, "count").0, 6);
     let stopped = server.now();
     server.kill(world, stopped);
 }
@@ -104,11 +135,49 @@ pub(crate) fn polls_that_change_the_record_are_recorded(world: &World) {
     server.kill(world, stopped);
 }
 
-pub(crate) fn a_restart_arms_the_poll_from_the_newest_unrecorded_one(world: &World) {
+/// A poll that wrote nothing leaves its row's clock behind the live timer's. A
+/// reconcile reads that row, and a move in `fire_now_on` newer than the row but
+/// older than the live clock must not bring the timer forward a second time.
+pub(crate) fn an_unrelated_move_does_not_fire_a_poll_early(world: &World) {
+    let id = "noted-poller";
+    let server = Server::start(world, "unrecorded-run-3");
+    let t0 = server.now();
+    watch(&server, id);
+    server.run_until(t0 + POLL + MARGIN);
+    assert_eq!(server.read("Tally", id, "count").0, 1);
+
+    server.act("Poller", id, "Heard", &person("carol"));
+    server.run_for(SETTLE);
+    assert_eq!(
+        server.read("Tally", id, "count").0,
+        2,
+        "the delivery brings the poll forward once"
+    );
+    let looked = server.now();
+
+    server.act("Poller", id, "Note", &person("carol"));
+    server.run_for(SETTLE);
+    assert_eq!(
+        server.read("Tally", id, "count").0,
+        2,
+        "a move that does not reset the timer leaves it waiting"
+    );
+    server.run_until(looked + POLL - MARGIN);
+    assert_eq!(
+        server.read("Tally", id, "count").0,
+        2,
+        "the poll waits its period from the look the delivery brought forward"
+    );
+    server.run_until(looked + POLL + MARGIN);
+    assert_eq!(server.read("Tally", id, "count").0, 3);
+    let stopped = server.now();
+    server.kill(world, stopped);
+}
+
+pub(crate) fn a_restart_looks_once_then_keeps_the_pace(world: &World) {
     let mut rng = world.rng();
     // Down from just after the third poll until some time before the fourth
-    // falls due. A timer armed from the last event (the `Watch`, three
-    // periods back) would be overdue at boot.
+    // falls due. The polls wrote no row, so the row is three periods old.
     let back = millis_between(&mut rng, 1_500, 13_000);
     let id = "restarted-poller";
 
@@ -119,26 +188,27 @@ pub(crate) fn a_restart_arms_the_poll_from_the_newest_unrecorded_one(world: &Wor
     first.run_until(t0 + POLL * 3 + MARGIN);
     assert_eq!(first.read("Tally", id, "count").0, 3);
     assert!(first.has_row(id), "the poll's timer keeps its row");
-    first.kill(world, t0 + POLL * 3 + back);
+    let back_up = t0 + POLL * 3 + back;
+    first.kill(world, back_up);
 
     let second = Server::start(world, "unrecorded-restart-2");
     second.run_for(SETTLE);
     assert_eq!(
         second.read("Tally", id, "count").0,
-        3,
-        "the restart arms the poll from the newest unrecorded one's row, so it is not overdue"
+        4,
+        "the restart finds the row past due, and the poll looks once at once"
     );
-    second.run_until(t0 + POLL * 4 - MARGIN);
-    assert_eq!(
-        second.read("Tally", id, "count").0,
-        3,
-        "a waiting poll does not fire early"
-    );
-    second.run_until(t0 + POLL * 4 + MARGIN);
+    second.run_until(back_up + POLL - MARGIN);
     assert_eq!(
         second.read("Tally", id, "count").0,
         4,
-        "the poll fires a period after the newest unrecorded one"
+        "that look re-armed the poll: it does not fire again early"
+    );
+    second.run_until(back_up + POLL + SETTLE + MARGIN);
+    assert_eq!(
+        second.read("Tally", id, "count").0,
+        5,
+        "the poll fires a period after that look"
     );
     assert_eq!(
         second.journal("Poller", id),

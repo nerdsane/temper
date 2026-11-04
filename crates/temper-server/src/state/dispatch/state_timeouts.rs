@@ -490,17 +490,27 @@ impl crate::state::ServerState {
         );
         // The event that entered or reset the state committed this timer's
         // row under this id (`committed_timer_row`). A move that wrote no
-        // event reset the clock at the same sequence as the last arm, so its
-        // arm has an id of its own, and `start_armed_timer` writes its row:
-        // one row per record, replaced on each reset, so a restart arms the
-        // timer from this move's time.
+        // event reset the clock at the same sequence as the last arm:
+        // - the timer's own fire goes on under the row it fired from, so a
+        //   poll that changes nothing writes no row either. A restart finds
+        //   that row past due and looks once at once, which a look may do;
+        // - anyone else's reset has an id of its own, and `start_armed_timer`
+        //   writes its row, so a restart keeps the time they moved it to.
         timer.arm_id = match response.unrecorded_at {
             None => super::entity_rows::timer_arm_id(&st.state, response.state.sequence_nr),
-            Some(at) => super::entity_rows::unrecorded_timer_arm_id(
-                &st.state,
-                response.state.sequence_nr,
-                at,
-            ),
+            Some(at) => match ctx.agent_ctx.state_timer_fire(
+                ctx.tenant.as_str(),
+                ctx.entity_type,
+                ctx.entity_id,
+                ctx.action,
+            ) {
+                Some(fire) if fire.state == st.state => fire.arm_id.clone(),
+                _ => super::entity_rows::unrecorded_timer_arm_id(
+                    &st.state,
+                    response.state.sequence_nr,
+                    at,
+                ),
+            },
         };
         self.start_armed_timer(timer, Reservation::Fresh).await;
     }
@@ -856,6 +866,7 @@ impl ArmedTimer {
             state: self.state.clone(),
             action: self.action.clone(),
             armed_seq: self.sequence_nr,
+            arm_id: self.arm_id.clone(),
             repeats,
         });
         agent

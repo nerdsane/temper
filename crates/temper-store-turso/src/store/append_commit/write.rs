@@ -11,10 +11,11 @@ use crate::store::instrumentation::record_turso_query_duration;
 
 const APPEND_BATCH_INSERT_CHUNK_ROWS: usize = 400;
 
-/// Write `append`'s rows in `tx`: its events after a sequence check, its
-/// segment's end, the scheduled actions it arms and fires (a row exists
-/// exactly while its action waits; a repeated arm keeps its row), and the
-/// entity's query-plane, timer and vector rows as its events leave it.
+/// Write `append`'s rows in `tx`: its events after a sequence check, the
+/// scheduled actions it arms and fires (a row exists exactly while its action
+/// waits; a repeated arm keeps its row), and the entity's query-plane, timer
+/// and vector rows as its events leave it. An open segment's row is written
+/// when it opens and when a snapshot seals it: its events say how far it goes.
 pub(super) async fn write_append(
     tx: &Transaction<'_>,
     append: &OwnedAppend,
@@ -105,21 +106,6 @@ pub(super) async fn write_append(
             return Err(PersistenceError::Storage(msg));
         }
     }
-
-    tx.execute(
-        "UPDATE event_segments
-         SET end_sequence_nr = ?5, event_count = MAX(?5 - start_sequence_nr + 1, 0)
-         WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND segment_index = ?4",
-        params![
-            tenant,
-            entity_type,
-            entity_id,
-            segment_index,
-            new_seq as i64
-        ],
-    )
-    .await
-    .map_err(storage_error)?;
 
     for action in &append.scheduled_actions {
         tx.execute(

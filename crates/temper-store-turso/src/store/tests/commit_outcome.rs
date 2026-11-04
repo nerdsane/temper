@@ -70,9 +70,9 @@ fn second_append(
     }
 }
 
-/// What the store holds for the record: its newest sequence, its open
-/// segment's end, and whether the second event's row is there.
-async fn stored(store: &TursoEventStore) -> (u64, Option<i64>, bool) {
+/// What the store holds for the record: its newest sequence, and whether the
+/// second event's row is there.
+async fn stored(store: &TursoEventStore) -> (u64, bool) {
     let conn = store.connection().await.expect("connection");
     let mut rows = conn
         .query(
@@ -89,27 +89,13 @@ async fn stored(store: &TursoEventStore) -> (u64, Option<i64>, bool) {
         .map(|row| row.get::<i64>(0).expect("sequence") as u64)
         .unwrap_or(0);
     drop(rows);
-    let mut rows = conn
-        .query(
-            "SELECT MAX(end_sequence_nr) FROM event_segments \
-             WHERE tenant = 'tenant-a' AND entity_type = 'Job' AND entity_id = 'job-1'",
-            (),
-        )
-        .await
-        .expect("read segments");
-    let segment_end = rows
-        .next()
-        .await
-        .expect("row")
-        .and_then(|row| row.get::<Option<i64>>(0).expect("end"));
-    drop(rows);
     let row = store
         .list_scheduled_actions("tenant-a")
         .await
         .expect("rows list")
         .iter()
         .any(|row| row.arm_id == "2.0");
-    (sequence, segment_end, row)
+    (sequence, row)
 }
 
 /// A store holding the record's first event.
@@ -138,7 +124,7 @@ async fn an_attempt_timeout_at_any_point_answers_what_the_commit_did() {
             let answer = second_append(&store, shape).await;
             // Let a write that outlived its answer finish.
             tokio::time::sleep(Duration::from_secs(5)).await;
-            let (sequence, segment_end, row) = stored(&store).await;
+            let (sequence, row) = stored(&store).await;
             let landed = sequence == 2;
             assert!(probe.fired(), "{shape:?} never reached {point:?}");
             let agrees = match &answer {
@@ -148,11 +134,6 @@ async fn an_attempt_timeout_at_any_point_answers_what_the_commit_did() {
             if !agrees {
                 wrong.push(format!(
                     "{shape:?} paused at {point:?}: answered {answer:?}, journal at {sequence}"
-                ));
-            }
-            if landed && segment_end != Some(2) {
-                wrong.push(format!(
-                    "{shape:?} paused at {point:?}: event landed, segment ends at {segment_end:?}"
                 ));
             }
             if matches!(shape, Shape::WithRows) && landed != row {
@@ -217,13 +198,8 @@ async fn a_caller_that_stops_waiting_leaves_all_or_nothing_and_no_lock() {
             drop(conn);
 
             // All or nothing.
-            let (sequence, segment_end, row) = stored(&store).await;
+            let (sequence, row) = stored(&store).await;
             let landed = sequence == 2;
-            if landed && segment_end != Some(2) {
-                wrong.push(format!(
-                    "{shape:?} dropped after {polls} polls: event landed, segment ends at {segment_end:?}"
-                ));
-            }
             if matches!(shape, Shape::WithRows) && landed != row {
                 wrong.push(format!(
                     "{shape:?} dropped after {polls} polls: event landed {landed}, its row {row}"

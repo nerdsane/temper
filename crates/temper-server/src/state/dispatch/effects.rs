@@ -379,8 +379,8 @@ impl crate::state::ServerState {
 
         // 2. Record trajectory outside the action critical path. The entity
         // transition is already durable; trajectory persistence is an
-        // observability/audit side effect. A move that wrote nothing (a
-        // machine's, leaving its record as it was) has no history to add.
+        // observability/audit side effect. A move that wrote nothing (it
+        // left its record as it was) has no history to add.
         let recorded = response.unrecorded_at.is_none();
         if recorded {
             self.record_dispatch_trajectory(ctx, &response);

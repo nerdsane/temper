@@ -4,7 +4,7 @@
 //! updates or deletes. The triggers below record those same row writes, so each
 //! test reads what a move adds to that log from the field index. A move that
 //! sets one field of a record writes one index row, whatever else it indexes,
-//! and a status change writes only the `Status` row.
+//! and a status change writes none: the catalog row holds the status.
 
 use std::collections::BTreeMap;
 
@@ -14,8 +14,7 @@ use super::{QueryProjectionUpsert, TursoEventStore, make_store};
 use crate::driver::params;
 
 const ENTITY_TYPE: &str = "Ticket";
-/// Scalar fields on the test record; with the `Status` pseudo-field the record
-/// has one more index row than this.
+/// Scalar fields on the test record, one index row each.
 const FIELD_COUNT: usize = 20;
 
 /// A record with `FIELD_COUNT` scalar fields, `Field00` to `Field19`, each
@@ -201,17 +200,14 @@ async fn rows_with_status(store: &TursoEventStore, [tenant, entity_id]: [&str; 2
         .expect("count")
 }
 
-/// The index rows a record with `fields` and `status` should have: one value
-/// per field, and the status as the `Status` pseudo-field.
-fn expected_rows(fields: &Value, status: &str) -> BTreeMap<String, Option<String>> {
-    let mut expected = fields
+/// The index rows a record with `fields` should have: one value per field.
+fn expected_rows(fields: &Value) -> BTreeMap<String, Option<String>> {
+    fields
         .as_object()
         .expect("fields object")
         .iter()
         .map(|(name, value)| (name.clone(), value.as_str().map(str::to_string)))
-        .collect::<BTreeMap<_, _>>();
-    expected.insert("Status".to_string(), Some(status.to_string()));
-    expected
+        .collect()
 }
 
 /// Each kind of move writes only the index rows it changes, and leaves the
@@ -227,13 +223,10 @@ async fn a_move_writes_only_the_index_rows_it_changes(write: Write, name: &str) 
     let writes = take_writes(&store).await;
     assert_eq!(
         total(&writes),
-        FIELD_COUNT as i64 + 1,
+        FIELD_COUNT as i64,
         "the first projection writes one row per indexed field: {writes:?}"
     );
-    assert_eq!(
-        index_rows(&store, ticket).await,
-        expected_rows(&created, "Open")
-    );
+    assert_eq!(index_rows(&store, ticket).await, expected_rows(&created));
 
     // (what the move does, the fields it sets, the status it leaves, the index
     // rows it writes). Each move keeps what the moves before it set.
@@ -256,13 +249,13 @@ async fn a_move_writes_only_the_index_rows_it_changes(write: Write, name: &str) 
         ),
         ("adds a field", vec![("Assignee", json!("ana"))], "Open", 1),
         ("removes a field", vec![("Field19", Value::Null)], "Open", 1),
-        ("changes status", vec![], "Closed", 1),
+        ("changes status", vec![], "Closed", 0),
         // The Factory's usual move: a new status and a field or two.
         (
             "changes status and sets two fields",
             vec![("Field04", json!("four")), ("Field05", json!("five"))],
             "Review",
-            3,
+            2,
         ),
     ];
     let mut changes = Vec::new();
@@ -278,14 +271,14 @@ async fn a_move_writes_only_the_index_rows_it_changes(write: Write, name: &str) 
         );
         assert_eq!(
             index_rows(&store, ticket).await,
-            expected_rows(&fields, status),
+            expected_rows(&fields),
             "index rows after a move that {what}"
         );
     }
 
-    // No row copies the status, so a status change has only the `Status` row
-    // to write. A filter finds the record by the status in its catalog row,
-    // and by a field through the index.
+    // No row holds the status, so a status change writes none. A filter finds
+    // the record by the status in its catalog row, and by a field through the
+    // index.
     assert_eq!(rows_with_status(&store, ticket).await, 0);
     for (status, found) in [("Review", true), ("Open", false)] {
         let ids = store

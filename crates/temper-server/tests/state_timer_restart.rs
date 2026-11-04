@@ -131,10 +131,26 @@ initial = "Idle"
 allow_indefinite_states = ["Idle", "Watching"]
 strict_action_params = true
 
+[[state]]
+name = "notes"
+type = "counter"
+initial = 0
+
 [[action]]
 name = "Watch"
 from = ["Idle"]
 to = "Watching"
+params = []
+
+[[action]]
+name = "Note"
+from = ["Watching"]
+params = []
+effect = ["notes += 1"]
+
+[[action]]
+name = "Heard"
+from = ["Watching"]
 params = []
 
 [[action]]
@@ -154,6 +170,7 @@ state = "Watching"
 after_seconds = 15
 on_timeout = "Poll"
 reset_on = ["Poll"]
+fire_now_on = ["Heard"]
 "#;
 
 /// `POLLER_IOA` whose `Poll` counts itself, so each poll changes the record.
@@ -432,8 +449,13 @@ fn turso_one_shot_reset_survives_reconciliation_and_restart() {
 }
 
 #[test]
-fn turso_a_restart_arms_the_poll_from_the_newest_unrecorded_one() {
-    on_turso(unrecorded::a_restart_arms_the_poll_from_the_newest_unrecorded_one);
+fn turso_an_unrelated_move_does_not_fire_a_poll_early() {
+    on_turso(unrecorded::an_unrelated_move_does_not_fire_a_poll_early);
+}
+
+#[test]
+fn turso_a_restart_looks_once_then_keeps_the_pace() {
+    on_turso(unrecorded::a_restart_looks_once_then_keeps_the_pace);
 }
 
 #[test]
@@ -459,7 +481,7 @@ fn postgres_timers_survive_restart() {
             let world = World::new(seed, Backend::Postgres(url.clone(), schema.clone()));
             timers_fire_once_as_their_principal_after_restart(&world);
             repeating_timer_resumes_without_replaying_missed_ticks(&world);
-            unrecorded::a_restart_arms_the_poll_from_the_newest_unrecorded_one(&world);
+            unrecorded::a_restart_looks_once_then_keeps_the_pace(&world);
             unrecorded::one_shot_reset_survives_reconciliation_and_restart(&world);
         }
         runtime.block_on(async {
