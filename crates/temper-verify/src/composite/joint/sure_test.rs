@@ -195,3 +195,56 @@ permit(principal, action == Action::"Finish", resource is Child) when {
     };
     assert!(reason.contains("Child.Finish arrives"), "{result}");
 }
+
+#[test]
+fn a_walk_out_of_room_says_so_even_with_an_undecided_move() {
+    // Flags anyone may set make the walk too big for a small room, and the
+    // undecided Finish is near the start, so some room sees that move and
+    // still stops. The verdict has to name both, the room first.
+    const FLAGS: usize = 14;
+    let reads = (0..FLAGS)
+        .map(|i| format!("(b{i} || !b{i})"))
+        .collect::<Vec<_>>()
+        .join(" && ");
+    let mut child = CHILD.replace(
+        "assert = \"Parent[Id].status != 'Gone' || status == 'Done'\"",
+        &format!("assert = \"(Parent[Id].status != 'Gone' || status == 'Done') && {reads}\""),
+    );
+    let mut policies = FINISH_WHEN_FINE.to_string();
+    for i in 0..FLAGS {
+        child.push_str(&format!(
+            "\n[[state]]\nname = 'b{i}'\ntype = 'bool'\ninitial = false\n\
+             \n[[action]]\nname = 'Set{i}'\nkind = 'input'\nfrom = ['Waiting', 'Done']\neffect = ['b{i} = true']\n"
+        ));
+        policies.push_str(&format!(
+            "permit(principal, action == Action::\"Set{i}\", resource is Child);\n"
+        ));
+    }
+    let sources = [parent(&[]), child];
+    let automatons: Vec<Automaton> = sources
+        .iter()
+        .map(|source| parse_automaton(source).expect("fixture parses"))
+        .collect();
+    let refs: Vec<&Automaton> = automatons.iter().collect();
+    let analysis = SendAnalysis::new(&policies).expect("fixture policies parse");
+    let reasons: Vec<String> = (23..28)
+        .filter_map(|bits| {
+            let (room, progress) = (Bytes::new(1 << bits), Progress::default());
+            let bound = Bound {
+                room: &room,
+                progress: &progress,
+            };
+            let mut results = verify_joint_invariants(&refs, Some(&analysis), bound);
+            match results.remove(0).outcome {
+                JointOutcome::Incomplete { reason } => Some(reason),
+                _ => None,
+            }
+        })
+        .collect();
+    let named = |reason: &&String| {
+        let room = reason.find("does not fit in the memory it may hold");
+        let undecided = reason.find("Child.Finish refused by Cedar");
+        matches!((room, undecided), (Some(room), Some(undecided)) if room < undecided)
+    };
+    assert!(reasons.iter().any(|r| named(&r)), "{reasons:#?}");
+}

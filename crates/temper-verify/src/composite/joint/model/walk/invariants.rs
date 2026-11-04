@@ -143,11 +143,14 @@ impl JointModel {
                 (None, Some(index)) => match self.way_resting_on_moves(&explored, *index, false) {
                     Some(path) => JointOutcome::Broken { path },
                     None => JointOutcome::Incomplete {
-                        reason: maybe_broken(first[i].map(|label| explored.label(label))),
+                        reason: stopped_first(
+                            &explored.stopped,
+                            maybe_broken(first[i].map(|label| explored.label(label))),
+                        ),
                     },
                 },
                 (None, None) if unknown[i] => JointOutcome::Incomplete {
-                    reason: "an invariant read is unknown".into(),
+                    reason: stopped_first(&explored.stopped, "an invariant read is unknown".into()),
                 },
                 (None, None) => match &explored.stopped {
                     Some(reason) => JointOutcome::Incomplete {
@@ -229,6 +232,15 @@ impl Found {
             .iter()
             .map(|flag| flag.load(Ordering::Relaxed))
             .collect()
+    }
+}
+
+/// A walk that ran out of room says so first, whatever else kept the invariant
+/// from a verdict: more of the walk might have settled it either way.
+fn stopped_first(stopped: &Option<String>, reason: String) -> String {
+    match stopped {
+        Some(stop) => format!("{stop}; and {reason}"),
+        None => reason,
     }
 }
 
