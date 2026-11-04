@@ -22,6 +22,7 @@ mod policy_replace;
 mod rows;
 mod scheduled_actions;
 mod secrets;
+mod spec_originals;
 mod specs;
 mod state_timers;
 pub use inputs::{PostgresEvolutionRecordInsert, PostgresPolicyApprovalCommit};

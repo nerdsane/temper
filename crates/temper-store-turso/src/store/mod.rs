@@ -61,6 +61,7 @@ mod published_artifacts;
 mod query_page;
 mod scheduled_actions;
 mod secrets;
+mod spec_originals;
 mod spec_versions;
 mod specs;
 mod state_timers;
@@ -468,6 +469,9 @@ impl TursoEventStore {
             .await
             .map_err(storage_error)?;
         conn.execute(schema::CREATE_MODULE_REVIEWS_TABLE, ())
+            .await
+            .map_err(storage_error)?;
+        conn.execute(schema::CREATE_SPEC_ORIGINALS_TABLE, ())
             .await
             .map_err(storage_error)?;
 

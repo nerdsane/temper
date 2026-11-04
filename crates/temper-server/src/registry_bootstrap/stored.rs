@@ -7,16 +7,20 @@
 //! ([`register_stored_tenant`]).
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use temper_store_turso::{TursoEventStore, TursoSpecRow};
 
-use super::{PersistedSpecRow, register_tenant_rows};
+use super::{Converted, PersistedSpecRow, register_tenant_rows};
+use crate::platform_store::PlatformStore;
 use crate::registry::SpecRegistry;
 
 /// One stored tenant's spec rows and constraints, read but not registered.
 pub struct StoredTenant {
     rows: StoredRows,
     constraints: Option<String>,
+    /// The store the rows were read from, where a conversion is written back.
+    store: Arc<dyn PlatformStore>,
 }
 
 /// A tenant's spec rows as the store they came from returned them.
@@ -82,6 +86,7 @@ pub async fn read_stored_tenants_from_postgres(
         constraints_by_tenant,
         |row| row.tenant.clone(),
         StoredRows::Postgres,
+        Arc::new(store.clone()),
     ))
 }
 
@@ -117,6 +122,7 @@ pub async fn read_stored_tenants_from_turso(
         constraints_by_tenant,
         |row| row.tenant.clone(),
         StoredRows::Turso,
+        Arc::new(turso.clone()),
     ))
 }
 
@@ -126,6 +132,7 @@ fn group<R>(
     mut constraints_by_tenant: BTreeMap<String, String>,
     tenant_of: impl Fn(&R) -> String,
     stored_rows: impl Fn(Vec<R>) -> StoredRows,
+    store: Arc<dyn PlatformStore>,
 ) -> StoredTenants {
     let mut grouped: BTreeMap<String, Vec<R>> = BTreeMap::new();
     for row in rows {
@@ -138,25 +145,31 @@ fn group<R>(
             let stored = StoredTenant {
                 rows: stored_rows(rows),
                 constraints,
+                store: store.clone(),
             };
             (tenant, stored)
         })
         .collect()
 }
 
-/// Register `stored`, the rows read for `tenant`, into `registry`, and
-/// return how many specs it restored. A tenant whose rows do not load is
-/// marked unavailable, as at boot.
+/// Register `stored`, the rows read for `tenant`, into `registry`. Returns
+/// how many specs it restored, and what it converted from the old syntax,
+/// which the caller writes back once it no longer holds the registry. A
+/// tenant whose rows do not load is marked unavailable, as at boot.
 pub fn register_stored_tenant(
     registry: &mut SpecRegistry,
     tenant: String,
     stored: StoredTenant,
-) -> usize {
-    let StoredTenant { rows, constraints } = stored;
-    match rows {
+) -> (usize, Converted) {
+    let StoredTenant {
+        rows,
+        constraints,
+        store,
+    } = stored;
+    let (restored, specs) = match rows {
         StoredRows::Postgres(rows) => register_tenant_rows(
             registry,
-            tenant,
+            &tenant,
             rows,
             constraints,
             &|row| row.csdl_xml.clone(),
@@ -164,11 +177,17 @@ pub fn register_stored_tenant(
         ),
         StoredRows::Turso(rows) => register_tenant_rows(
             registry,
-            tenant,
+            &tenant,
             rows,
             constraints,
             &|row| row.csdl_xml.clone(),
             &|row| (row.entity_type.clone(), row.ioa_source.clone()),
         ),
-    }
+    };
+    let converted = Converted {
+        store,
+        tenant,
+        specs,
+    };
+    (restored, converted)
 }

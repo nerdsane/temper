@@ -3,7 +3,9 @@
 
 use std::collections::BTreeMap;
 
-use super::{StoredSpec, read_stored_spec, restored_csdl_for_rows};
+use super::converted::{ConvertedSpec, StoredSpec, read_stored_spec, write_back};
+use super::restored_csdl_for_rows;
+use crate::platform_store::{PlatformStore, SpecRow};
 use crate::registry::SpecRegistry;
 
 /// Restore a [`SpecRegistry`] from a [`PlatformStore`] (trait-based).
@@ -12,12 +14,12 @@ use crate::registry::SpecRegistry;
 /// store backend (Turso, Sim, etc.). Used by both the CLI bootstrap and
 /// the DST harness — ensuring simulation runs identical code.
 ///
-/// Unlike [`restore_registry_from_turso`], this does not restore verification
+/// Unlike [`super::restore_registry_from_turso`], this does not restore verification
 /// status or cross-entity constraints (the `PlatformStore` trait returns simpler
 /// `SpecRow` types). Specs are registered with `Pending` verification status.
 pub async fn restore_registry_from_platform_store(
     registry: &mut SpecRegistry,
-    store: &dyn crate::platform_store::PlatformStore,
+    store: &dyn PlatformStore,
 ) -> Result<usize, String> {
     match store.delete_uncommitted_specs().await {
         Ok(0) => {}
@@ -36,7 +38,7 @@ pub async fn restore_registry_from_platform_store(
     }
 
     // Group by tenant.
-    let mut grouped: BTreeMap<String, Vec<crate::platform_store::SpecRow>> = BTreeMap::new();
+    let mut grouped: BTreeMap<String, Vec<SpecRow>> = BTreeMap::new();
     for row in rows {
         grouped.entry(row.tenant.clone()).or_default().push(row);
     }
@@ -70,7 +72,7 @@ pub async fn restore_registry_from_platform_store(
         // converted here, once, and written back. One that still cannot be
         // read disables only its own entity type and stays in the store.
         let mut readable: Vec<(String, String)> = Vec::with_capacity(tenant_rows.len());
-        let mut converted: Vec<(&crate::platform_store::SpecRow, String)> = Vec::new();
+        let mut converted: Vec<(&SpecRow, String)> = Vec::new();
         for row in tenant_rows {
             match read_stored_spec(tenant, &row.entity_type, &row.ioa_source) {
                 StoredSpec::Current => {
@@ -98,7 +100,7 @@ pub async fn restore_registry_from_platform_store(
         ) {
             Ok(()) => {
                 restored_specs += readable.len();
-                persist_converted_specs(store, tenant, &converted).await;
+                write_back_converted_rows(store, tenant, converted).await;
             }
             Err(e) => {
                 tracing::warn!(tenant = %tenant, "reconciling orphaned specs for tenant that failed registration: {e}");
@@ -124,17 +126,13 @@ pub async fn restore_registry_from_platform_store(
     Ok(restored_specs)
 }
 
-/// Write converted specs back so the conversion happens once. A failed write
-/// only means the next boot converts the stored source again.
-///
-/// Writing a new source resets the row's verification, and nothing re-verifies
-/// a restored spec, so its entity type would refuse writes (423). The
-/// conversion keeps the spec's meaning, so a spec that was verified as stored
-/// stays verified as converted, as the kernel already trusts prebuilt bundles.
-async fn persist_converted_specs(
-    store: &dyn crate::platform_store::PlatformStore,
+/// Write back a tenant's converted rows. These rows carry no verification
+/// flag, so whether each was verified as stored comes from the store's
+/// verification cache, matched on the row's own content hash.
+async fn write_back_converted_rows(
+    store: &dyn PlatformStore,
     tenant: &str,
-    converted: &[(&crate::platform_store::SpecRow, String)],
+    converted: Vec<(&SpecRow, String)>,
 ) {
     if converted.is_empty() {
         return;
@@ -146,53 +144,17 @@ async fn persist_converted_specs(
             tracing::warn!(tenant, %error, "failed to read verification before converting specs");
             BTreeMap::new()
         });
-    let mut carry_verification = Vec::new();
-    let mut written: Vec<(&str, String, &str)> = Vec::new();
-    for (row, source) in converted {
-        let hash = temper_store_turso::spec_content_hash(source);
-        let csdl_xml = row.csdl_xml.as_deref().unwrap_or_default();
-        if let Err(error) = store
-            .upsert_spec(tenant, &row.entity_type, source, csdl_xml, &hash)
-            .await
-        {
-            tracing::warn!(tenant, entity_type = %row.entity_type, %error, "failed to store converted spec");
-            continue;
-        }
-        written.push((row.entity_type.as_str(), hash, csdl_xml));
-        if verified_before
-            .get(&row.entity_type)
-            .is_some_and(|(cached_hash, verified)| *verified && *cached_hash == row.content_hash)
-        {
-            carry_verification.push(row.entity_type.as_str());
-        }
-    }
-    for entity_type in carry_verification {
-        if let Err(error) = store
-            .persist_spec_verification(
-                tenant,
-                entity_type,
-                crate::platform_store::SpecVerificationUpdate {
-                    status: "completed",
-                    verified: true,
-                    levels_passed: None,
-                    levels_total: None,
-                    verification_result_json: None,
-                },
-            )
-            .await
-        {
-            tracing::warn!(tenant, entity_type, %error, "failed to carry verification to converted spec");
-        }
-    }
-    // upsert_spec marks a changed row uncommitted; commit exactly the
-    // converted rows, or restore keeps loading the stored version.
-    let versions: Vec<(&str, &str, &str)> = written
-        .iter()
-        .map(|(entity_type, hash, csdl_xml)| (*entity_type, hash.as_str(), *csdl_xml))
+    let converted: Vec<ConvertedSpec> = converted
+        .into_iter()
+        .map(|(row, source)| ConvertedSpec {
+            entity_type: row.entity_type.clone(),
+            source,
+            original: row.ioa_source.clone(),
+            csdl_xml: row.csdl_xml.clone().unwrap_or_default(),
+            verified: verified_before
+                .get(&row.entity_type)
+                .is_some_and(|(hash, verified)| *verified && *hash == row.content_hash),
+        })
         .collect();
-    match store.commit_spec_versions(tenant, &versions, &[]).await {
-        Ok(true) => {}
-        Ok(false) => tracing::warn!(tenant, "converted specs changed before commit"),
-        Err(error) => tracing::warn!(tenant, %error, "failed to commit converted specs"),
-    }
+    write_back(store, tenant, &converted).await;
 }

@@ -317,6 +317,18 @@ CREATE TABLE IF NOT EXISTS spec_committed_versions (
     PRIMARY KEY(tenant, entity_type)
 );";
 
+/// The source a spec was stored with before a boot converted it to the
+/// current syntax, kept by the first conversion and never replaced, so the
+/// conversion can be undone by writing it back to `specs`.
+pub const CREATE_SPEC_ORIGINALS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS spec_originals (
+    tenant TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    ioa_source TEXT NOT NULL,
+    kept_at TEXT NOT NULL,
+    PRIMARY KEY(tenant, entity_type)
+);";
+
 /// What the newest review of each app's modules said, one row per app of a
 /// tenant: `result` is JSON, `{"warnings": [...], "modules_reviewed": [...]}`.
 /// `version` names what was reviewed: the commit the app's files say, else the

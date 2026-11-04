@@ -38,6 +38,7 @@ mod policy_rows;
 mod proofs;
 mod reconcile;
 mod runtime_heal;
+mod spec_findings;
 mod system_files;
 mod types;
 mod unchanged_replay;
@@ -695,6 +696,7 @@ async fn install_once(
     })?;
     if plan.specs && origin == InstallOrigin::Request {
         install_checks::trigger_target_args(app_name, &bundle.specs)?;
+        spec_findings::log(tenant, app_name, &bundle.specs, bundle.csdl.as_deref());
     }
     if origin == InstallOrigin::Replay {
         reconcile::ensure_replay_bundle_is_recorded(state, tenant, app_name, &bundle).await?;

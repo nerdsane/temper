@@ -53,6 +53,18 @@ pub struct ModuleReviewRow {
     pub result: String,
 }
 
+/// The source a spec was stored with before a boot converted it to the
+/// current syntax, returned by [`PlatformStore::load_spec_originals`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpecOriginalRow {
+    /// Tenant the spec belongs to.
+    pub tenant: String,
+    /// The spec's entity type.
+    pub entity_type: String,
+    /// The source as stored before its conversion, byte for byte.
+    pub ioa_source: String,
+}
+
 /// WASM module row returned by [`PlatformStore`] WASM queries.
 #[derive(Debug, Clone)]
 pub struct WasmModuleRow {
@@ -264,6 +276,22 @@ pub trait PlatformStore: Send + Sync {
         app_name: &str,
     ) -> Result<Option<ModuleReviewRow>, String>;
 
+    // ── Spec originals ───────────────────────────────────────────────
+
+    /// Keep `ioa_source`, the source `entity_type` is stored with, as its
+    /// original before a boot writes back its conversion to the current
+    /// syntax. Only the first original is kept: once one is, this changes
+    /// nothing. Undoing the conversion is an [`Self::upsert_spec`] of it.
+    async fn keep_spec_original(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        ioa_source: &str,
+    ) -> Result<(), String>;
+
+    /// Every original [`Self::keep_spec_original`] kept.
+    async fn load_spec_originals(&self) -> Result<Vec<SpecOriginalRow>, String>;
+
     /// Upsert a WASM module binary for a tenant.
     ///
     /// `source` distinguishes the os-apps install pipeline (`"bundled"`) from
@@ -291,6 +319,32 @@ use temper_store_turso::{TursoEventStore, TursoInstalledAppRow, TursoSpecVerific
 
 #[async_trait::async_trait]
 impl PlatformStore for TursoEventStore {
+    async fn keep_spec_original(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        ioa_source: &str,
+    ) -> Result<(), String> {
+        self.keep_spec_original(tenant, entity_type, ioa_source)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn load_spec_originals(&self) -> Result<Vec<SpecOriginalRow>, String> {
+        let rows = self
+            .load_spec_originals()
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(rows
+            .into_iter()
+            .map(|(tenant, entity_type, ioa_source)| SpecOriginalRow {
+                tenant,
+                entity_type,
+                ioa_source,
+            })
+            .collect())
+    }
+
     async fn save_module_review(
         &self,
         tenant: &str,
@@ -592,6 +646,32 @@ impl PlatformStore for TursoEventStore {
 
 #[async_trait::async_trait]
 impl PlatformStore for PostgresEventStore {
+    async fn keep_spec_original(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        ioa_source: &str,
+    ) -> Result<(), String> {
+        self.keep_spec_original(tenant, entity_type, ioa_source)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn load_spec_originals(&self) -> Result<Vec<SpecOriginalRow>, String> {
+        let rows = self
+            .load_spec_originals()
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(rows
+            .into_iter()
+            .map(|(tenant, entity_type, ioa_source)| SpecOriginalRow {
+                tenant,
+                entity_type,
+                ioa_source,
+            })
+            .collect())
+    }
+
     async fn save_module_review(
         &self,
         tenant: &str,
@@ -1008,6 +1088,8 @@ mod sim_platform_store {
         constraints: BTreeMap<String, String>,
         /// The newest module review, keyed by (tenant, app_name).
         module_reviews: BTreeMap<(String, String), ModuleReviewRow>,
+        /// Sources as stored before a conversion, keyed by (tenant, entity_type).
+        spec_originals: BTreeMap<(String, String), String>,
         /// Installed apps: (tenant, app_name).
         installed_apps: BTreeSet<(String, String)>,
         /// Installed app digest metadata keyed by (tenant, app_name).
@@ -1032,6 +1114,7 @@ mod sim_platform_store {
                     policy_entries: BTreeMap::new(),
                     constraints: BTreeMap::new(),
                     module_reviews: BTreeMap::new(),
+                    spec_originals: BTreeMap::new(),
                     installed_apps: BTreeSet::new(),
                     installed_app_records: BTreeMap::new(),
                     pending_decisions: BTreeMap::new(),
@@ -1098,6 +1181,33 @@ mod sim_platform_store {
 
     #[async_trait::async_trait]
     impl PlatformStore for SimPlatformStore {
+        async fn keep_spec_original(
+            &self,
+            tenant: &str,
+            entity_type: &str,
+            ioa_source: &str,
+        ) -> Result<(), String> {
+            let mut inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
+            inner
+                .spec_originals
+                .entry((tenant.to_string(), entity_type.to_string()))
+                .or_insert_with(|| ioa_source.to_string());
+            Ok(())
+        }
+
+        async fn load_spec_originals(&self) -> Result<Vec<SpecOriginalRow>, String> {
+            let inner = self.inner.lock().expect("SimPlatformStore lock poisoned"); // ci-ok: infallible lock
+            Ok(inner
+                .spec_originals
+                .iter()
+                .map(|((tenant, entity_type), ioa_source)| SpecOriginalRow {
+                    tenant: tenant.clone(),
+                    entity_type: entity_type.clone(),
+                    ioa_source: ioa_source.clone(),
+                })
+                .collect())
+        }
+
         async fn save_module_review(
             &self,
             tenant: &str,

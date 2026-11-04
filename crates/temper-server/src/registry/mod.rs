@@ -11,7 +11,8 @@ mod server_derived_names;
 pub mod types;
 mod unavailable;
 
-use server_derived_names::warn_on_server_derived_csdl_properties;
+use server_derived_names::debug_server_derived_csdl_properties;
+pub use server_derived_names::server_derived_csdl_properties;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
@@ -180,7 +181,7 @@ impl SpecRegistry {
                 })
             })
             .transpose()?;
-        warn_on_server_derived_csdl_properties(&tenant_name, &csdl);
+        debug_server_derived_csdl_properties(&tenant_name, &csdl);
 
         // Parse every incoming spec, and refuse the install, before anything
         // in the tenant changes.

@@ -22,8 +22,10 @@ pub enum AutomatonParseError {
 /// Liveness enforcement mode (ADR-0050).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LivenessEnforcement {
-    /// Missing coverage logs `tracing::warn!` and the spec loads. Default
-    /// during rollout.
+    /// Missing coverage does not stop the spec loading. Default during
+    /// rollout. A parse logs it only at debug: every boot parses every stored
+    /// spec, more than once, so the install that brings a spec reports its
+    /// gaps ([`Automaton::validate_liveness_coverage`]).
     WarnOnly,
     /// Missing coverage produces `AutomatonParseError::Validation`.
     Enforce,
@@ -194,7 +196,7 @@ fn check_liveness_coverage(
         }
         LivenessEnforcement::WarnOnly => {
             for v in &violations {
-                tracing::warn!(
+                tracing::debug!(
                     entity = %v.entity,
                     state = %v.state,
                     "liveness coverage missing (ADR-0050): non-terminal state has no state_timeout and is not in allow_indefinite_states"

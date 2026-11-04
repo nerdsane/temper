@@ -96,8 +96,11 @@ async fn restore(
     }
     if !left.registered {
         if let Some(specs) = left.specs.take() {
-            let mut registry = state.registry.write().expect("registry lock poisoned");
-            register_stored_tenant(&mut registry, name.to_string(), specs);
+            let (_, converted) = {
+                let mut registry = state.registry.write().expect("registry lock poisoned");
+                register_stored_tenant(&mut registry, name.to_string(), specs)
+            };
+            converted.write_back().await;
         }
         left.registered = true;
     }

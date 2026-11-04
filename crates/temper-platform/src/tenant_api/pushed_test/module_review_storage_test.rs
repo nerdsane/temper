@@ -1,7 +1,8 @@
 //! Pause or fail only the writes relevant to review lifecycle regressions.
 use super::*;
 use temper_server::platform_store::{
-    ModuleReviewRow, PolicyEntryRow, SpecRow, SpecVerificationUpdate, WasmModuleRow,
+    ModuleReviewRow, PolicyEntryRow, SpecOriginalRow, SpecRow, SpecVerificationUpdate,
+    WasmModuleRow,
 };
 use tokio::sync::Notify;
 
@@ -84,6 +85,8 @@ macro_rules! review_store {
 
 review_store! {
     async fn load_specs(&self) -> Result<Vec<SpecRow>, String>;
+    async fn keep_spec_original(&self, tenant: &str, entity_type: &str, ioa_source: &str,) -> Result<(), String>;
+    async fn load_spec_originals(&self) -> Result<Vec<SpecOriginalRow>, String>;
     async fn delete_spec(&self, tenant: &str, entity_type: &str) -> Result<(), String>;
     async fn commit_specs(&self, tenant: &str) -> Result<(), String>;
     async fn commit_spec_versions(&self, tenant: &str, versions: &[(&str, &str, &str)], removed: &[&str],) -> Result<bool, String>;

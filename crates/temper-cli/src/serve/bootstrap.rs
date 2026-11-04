@@ -227,7 +227,9 @@ pub(super) async fn build_registry(
     let mut restored = 0usize;
     for (tenant, rows) in stored {
         if later.is_own(&tenant) {
-            restored += register_stored_tenant(&mut registry, tenant, rows);
+            let (specs, converted) = register_stored_tenant(&mut registry, tenant, rows);
+            converted.write_back().await;
+            restored += specs;
         } else {
             later.tenant(&tenant).specs = Some(rows);
         }
