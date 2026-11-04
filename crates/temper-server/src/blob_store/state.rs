@@ -380,7 +380,8 @@ fn object_key_prefix(prefix: Option<&str>, tenant: &TenantId) -> Option<String> 
     let prefix = prefix
         .map(|p| p.trim_matches('/'))
         .filter(|p| !p.is_empty());
-    let namespace = tenant_object_namespace(tenant).map(|namespace| format!("tenants/{namespace}"));
+    let namespace = tenant_object_namespace(tenant)
+        .map(|namespace| format!("{}/{namespace}", super::TENANT_NAMESPACE_SEGMENT));
     match (prefix, namespace) {
         (Some(prefix), Some(namespace)) => Some(format!("{prefix}/{namespace}")),
         (Some(prefix), None) => Some(prefix.to_string()),
@@ -395,7 +396,7 @@ fn tenant_object_namespace(tenant: &TenantId) -> Option<String> {
 
 fn tenant_blob_root(root: PathBuf, tenant: &TenantId) -> PathBuf {
     match tenant_object_namespace(tenant) {
-        Some(namespace) => root.join("tenants").join(namespace),
+        Some(namespace) => root.join(super::TENANT_NAMESPACE_SEGMENT).join(namespace),
         None => root,
     }
 }

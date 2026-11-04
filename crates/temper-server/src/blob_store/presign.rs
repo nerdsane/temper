@@ -61,7 +61,7 @@ impl S3BlobStore {
         };
         assert!(amz_date.len() >= 8, "amz_date is %Y%m%dT%H%M%SZ");
         let expires = expires_secs.clamp(1, MAX_PRESIGN_SECS).to_string();
-        let url = self.object_url(key);
+        let url = self.object_url(key).ok()?;
         let (host, path) = aws_sigv4::parse_url_host_path(&url);
         let date = &amz_date[..8];
         let scope = format!("{date}/auto/s3/aws4_request");

@@ -73,20 +73,11 @@ when {
         .authz
         .reload_tenant_policies("other-tenant", "")
         .expect("other tenant should default-deny");
-    seed_file(
-        &store,
-        "File",
-        "file-a",
-        "sha256:artifactcontent",
-        b"artifact body",
-        None,
-    )
-    .await;
+    seed_file(&store, "File", "file-a", b"artifact body", None).await;
     seed_file(
         &store,
         "FileVersion",
         "version-a",
-        "sha256:artifactversion",
         b"artifact version",
         Some("file-a"),
     )
@@ -95,7 +86,6 @@ when {
         &store,
         "FileVersion",
         "version-mismatch",
-        "sha256:artifactmismatch",
         b"artifact mismatch",
         Some("file-b"),
     )
@@ -201,15 +191,7 @@ async fn local_artifact_publish_uses_direct_tenant_blob_store() {
 );"#,
         )
         .expect("artifact policy should parse");
-    seed_file(
-        &store,
-        "File",
-        "file-a",
-        "sha256:localartifact",
-        b"local artifact body",
-        None,
-    )
-    .await;
+    seed_file(&store, "File", "file-a", b"local artifact body", None).await;
     let state_for_read = state.clone();
     let app = build_router(state);
 

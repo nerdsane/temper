@@ -71,14 +71,16 @@ fn json_request(
     request
 }
 
+/// Seed a File or FileVersion whose recorded content hash is its bytes' hash.
 async fn seed_file(
     store: &TursoEventStore,
     entity_type: &str,
     id: &str,
-    hash: &str,
     body: &[u8],
     source_file_id: Option<&str>,
 ) {
+    use sha2::Digest as _;
+    let hash = format!("sha256:{:x}", sha2::Sha256::digest(body));
     let mut fields = serde_json::json!({
         "content_hash": hash,
         "mime_type": "text/markdown",
@@ -127,22 +129,13 @@ permit(
         .authz
         .reload_tenant_policies("other-tenant", "")
         .expect("other tenant should default-deny");
-    seed_file(&store, "File", "file-a", "sha256:filea", b"file-a", None).await;
+    seed_file(&store, "File", "file-a", b"file-a", None).await;
     let oversized_text = vec![b'x'; 2 * 1024 * 1024 + 1];
-    seed_file(
-        &store,
-        "File",
-        "file-large",
-        "sha256:filelarge",
-        &oversized_text,
-        None,
-    )
-    .await;
+    seed_file(&store, "File", "file-large", &oversized_text, None).await;
     seed_file(
         &store,
         "FileVersion",
         "version-a",
-        "sha256:versiona",
         b"version-a",
         Some("file-a"),
     )

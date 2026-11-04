@@ -7,7 +7,17 @@ use tracing_subscriber::layer::Context;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{Layer, registry::LookupSpan};
 
-use crate::storage::PublishedArtifactStoreRow;
+use temper_runtime::ActorSystem;
+use temper_runtime::tenant::TenantId;
+use temper_store_turso::TursoEventStore;
+use wiremock::matchers::method;
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+use crate::aws_sigv4::sha256_hex;
+use crate::registry::SpecRegistry;
+use crate::secrets::vault::SecretsVault;
+use crate::state::{ServerState, native_file_blob_key};
+use crate::storage::{PublishedArtifactStoreRow, StorageStack};
 
 use super::{
     PublishFileArtifactRequest, PublishedArtifactTelemetry, emit_published_artifact_persisted_log,
@@ -60,6 +70,7 @@ impl Visit for FieldVisitor {
 #[test]
 fn public_storage_key_is_generic_and_content_addressed() {
     let key = public_storage_key(
+        &TenantId::new("tenant-a"),
         "public-demo-artifacts",
         "Report",
         "quarterly-2026",
@@ -71,7 +82,10 @@ fn public_storage_key_is_generic_and_content_addressed() {
 
     assert_eq!(
         key,
-        "public-demo-artifacts/Report/quarterly-2026/preview-image-abc123.png"
+        format!(
+            "public-demo-artifacts/tenants/{}/Report/quarterly-2026/preview-image-abc123.png",
+            sha256_hex(b"tenant-a")
+        )
     );
 }
 
@@ -265,4 +279,149 @@ fn published_artifact_success_log_carries_publication_observability_fields() {
         event.get("public_blob_endpoint_host").map(String::as_str),
         Some("r2.example.test")
     );
+}
+
+/// A server whose tenants publish to one shared public endpoint, each keeping its File bytes in its own local store.
+struct Publishing {
+    state: ServerState,
+    store: TursoEventStore,
+    _dir: tempfile::TempDir,
+}
+
+async fn publishing(endpoint: &MockServer, tenants: &[&TenantId]) -> Publishing {
+    let dir = tempfile::tempdir().expect("data dir");
+    let db_url = format!("file:{}", dir.path().join("publishing.db").display());
+    let store = TursoEventStore::new(&db_url, None)
+        .await
+        .expect("local turso db");
+    let vault = SecretsVault::new(&[9u8; 32]);
+    for tenant in tenants {
+        vault.cache_secret(
+            tenant.as_str(),
+            "published_blob_public_base_url",
+            format!("{}/public", endpoint.uri()),
+        );
+        vault.cache_secret(tenant.as_str(), "published_blob_endpoint", endpoint.uri());
+    }
+    let mut state = ServerState::from_registry(
+        ActorSystem::new("published-artifact-keys"),
+        SpecRegistry::new(),
+    )
+    .with_secrets_vault(vault);
+    state.set_storage_stack(StorageStack::from_turso(store.clone()));
+    state.data_dir = dir.path().to_path_buf();
+    Publishing {
+        state,
+        store,
+        _dir: dir,
+    }
+}
+
+impl Publishing {
+    /// Keep `bytes` as `tenant`'s File `file_id`, recorded with `content_hash`.
+    async fn file(&self, tenant: &TenantId, file_id: &str, content_hash: &str, bytes: &[u8]) {
+        self.state
+            .put_file_content_blob(tenant, &native_file_blob_key(content_hash), bytes)
+            .await
+            .expect("keep File bytes");
+        self.store
+            .upsert_query_projection(
+                tenant.as_str(),
+                "File",
+                file_id,
+                "Ready",
+                &serde_json::json!({
+                    "content_hash": content_hash,
+                    "mime_type": "text/markdown",
+                    "has_content": true,
+                }),
+                1,
+            )
+            .await
+            .expect("File projection");
+    }
+
+    async fn publish(
+        &self,
+        tenant: &TenantId,
+        file_id: &str,
+    ) -> Result<PublishedArtifactStoreRow, String> {
+        self.state
+            .publish_file_artifact(
+                tenant,
+                PublishFileArtifactRequest {
+                    file_id: file_id.to_string(),
+                    label: "latest".to_string(),
+                    owner_ref_type: "Doc".to_string(),
+                    owner_ref_id: "doc-a".to_string(),
+                    source_file_version_id: String::new(),
+                    namespace: Some("publish-test".to_string()),
+                },
+            )
+            .await
+    }
+}
+
+async fn public_endpoint(puts: u64) -> MockServer {
+    let endpoint = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(puts)
+        .mount(&endpoint)
+        .await;
+    endpoint
+}
+
+#[tokio::test]
+async fn a_published_artifact_is_written_only_with_bytes_that_match_its_content_hash() {
+    let endpoint = public_endpoint(0).await;
+    let tenant = TenantId::new("tenant-a");
+    let publishing = publishing(&endpoint, &[&tenant]).await;
+    let recorded = format!("sha256:{}", sha256_hex(b"the bytes the hash names"));
+    publishing
+        .file(&tenant, "file-a", &recorded, b"other bytes")
+        .await;
+
+    let published = publishing.publish(&tenant, "file-a").await;
+
+    assert!(
+        published.is_err(),
+        "bytes that do not hash to the recorded content hash are not published: {published:?}"
+    );
+    endpoint.verify().await;
+}
+
+#[tokio::test]
+async fn tenants_publishing_the_same_owner_label_and_hash_get_different_keys() {
+    let endpoint = public_endpoint(2).await;
+    let (tenant_a, tenant_b) = (TenantId::new("tenant-a"), TenantId::new("tenant-b"));
+    let publishing = publishing(&endpoint, &[&tenant_a, &tenant_b]).await;
+    let bytes = b"the same bytes";
+    let content_hash = format!("sha256:{}", sha256_hex(bytes));
+    for tenant in [&tenant_a, &tenant_b] {
+        publishing
+            .file(tenant, "file-a", &content_hash, bytes)
+            .await;
+    }
+
+    let first = publishing
+        .publish(&tenant_a, "file-a")
+        .await
+        .expect("tenant A publishes");
+    let second = publishing
+        .publish(&tenant_b, "file-a")
+        .await
+        .expect("tenant B publishes");
+
+    assert_ne!(first.public_storage_key, second.public_storage_key);
+    assert_ne!(first.public_url, second.public_url);
+    for (artifact, tenant) in [(&first, &tenant_a), (&second, &tenant_b)] {
+        let tenant_segment = format!("/tenants/{}/", sha256_hex(tenant.as_str().as_bytes()));
+        assert!(
+            artifact.public_storage_key.contains(&tenant_segment),
+            "{} carries {tenant}",
+            artifact.public_storage_key
+        );
+    }
+    endpoint.verify().await;
 }

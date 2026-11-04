@@ -26,7 +26,10 @@ mod state;
 mod streaming;
 pub(crate) use endpoint::{LocalInternalBlobEndpoint, is_local_internal_blob_endpoint};
 pub use keys::KERNEL_BLOB_PREFIX;
-pub(crate) use keys::{DEFAULT_BLOB_BUCKET, hex_lower, kernel_owns, wasm_artifact_key};
+pub(crate) use keys::{
+    DEFAULT_BLOB_BUCKET, TENANT_NAMESPACE_SEGMENT, checked_object_key, hex_lower, kernel_owns,
+    wasm_artifact_key,
+};
 use limits::{BLOB_BUFFERED_OPERATION_TIMEOUT, BLOB_IO_QUEUE_TIMEOUT, blob_io_semaphore};
 use local::{get_local_blob_observed, local_blob_path, put_local_blob_observed};
 pub(crate) use presign::{MAX_PRESIGN_SECS, PresignedResponse};
@@ -268,7 +271,7 @@ impl S3BlobStore {
         let started_at = Instant::now(); // determinism-ok: production blob transport metric only
         let span = blob_transport_span(operation, "s3", request_bytes);
         let result = async {
-            let url = self.object_url(key);
+            let url = self.object_url(key).map_err(BlobTransportError::message)?;
             let mut request = self.client.put(&url).body(body.to_vec());
             let headers = self
                 .signed_headers(Method::PUT, &url)
@@ -332,7 +335,7 @@ impl S3BlobStore {
         let started_at = Instant::now(); // determinism-ok: production blob transport metric only
         let span = blob_transport_span(operation, "s3", content_len);
         let result = async {
-            let url = self.object_url(key);
+            let url = self.object_url(key).map_err(BlobTransportError::message)?;
             let mut request = self
                 .client
                 .put(&url)
@@ -397,7 +400,7 @@ impl S3BlobStore {
         let started_at = Instant::now(); // determinism-ok: production blob transport metric only
         let span = blob_transport_span("head", "s3", 0);
         let result = async {
-            let url = self.object_url(key);
+            let url = self.object_url(key).map_err(BlobTransportError::message)?;
             let mut request = self.client.head(&url);
             let headers = self
                 .signed_headers(Method::HEAD, &url)
@@ -454,13 +457,13 @@ impl S3BlobStore {
         }
     }
 
-    fn object_url(&self, key: &str) -> String {
-        let key = key.trim_start_matches('/');
+    fn object_url(&self, key: &str) -> Result<String, String> {
+        let key = checked_object_key(key.trim_start_matches('/'))?;
         let object_path = self
             .key_prefix
             .as_deref()
             .map_or_else(|| key.to_string(), |prefix| format!("{prefix}/{key}"));
-        format!("{}/{}/{}", self.endpoint, self.bucket, object_path)
+        Ok(format!("{}/{}/{}", self.endpoint, self.bucket, object_path))
     }
 
     fn signed_headers(&self, method: Method, url: &str) -> Result<HeaderMap, String> {

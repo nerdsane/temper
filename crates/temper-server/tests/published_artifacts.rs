@@ -10,7 +10,10 @@ use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const TENANT: &str = "default";
-const CONTENT_HASH: &str = "sha256:published-artifact-content";
+/// The sha256 of [`BODY`]: a File's recorded hash names its bytes.
+const CONTENT_HASH: &str =
+    "sha256:dc895eef26d60c0a84344ff3d17d4ba15c248e2b570aceb163dc1cce7dbf669e";
+const BODY: &[u8] = b"public artifact body";
 const FILE_ID: &str = "file-published-artifact-test";
 
 fn secrets_vault(blob_endpoint: &str) -> SecretsVault {
@@ -70,10 +73,7 @@ async fn publish_file_artifact_persists_metadata_through_turso_metadata_store() 
     state.set_storage_stack(StorageStack::from_turso(store.clone()));
 
     store
-        .put_blob(
-            &format!("temper-fs/{CONTENT_HASH}"),
-            b"public artifact body",
-        )
+        .put_blob(&format!("temper-fs/{CONTENT_HASH}"), BODY)
         .await
         .expect("put source blob");
     store
@@ -135,10 +135,7 @@ async fn publish_file_artifact_persists_metadata_through_postgres_metadata_store
     state.set_storage_stack(StorageStack::from_postgres(store.clone()));
 
     store
-        .put_blob(
-            &format!("temper-fs/{CONTENT_HASH}"),
-            b"public artifact body",
-        )
+        .put_blob(&format!("temper-fs/{CONTENT_HASH}"), BODY)
         .await
         .expect("put source blob");
     store
