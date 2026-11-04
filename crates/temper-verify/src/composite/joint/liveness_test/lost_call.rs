@@ -36,7 +36,8 @@ fn a_lost_call_with_no_on_failure_after_a_one_shot_timer_leaves_the_record_stuck
 fn a_lost_call_with_an_on_failure_is_answered_by_it() {
     // Every call names `on_failure = "Again"`. A call lost to a restart is
     // answered by it as a failed call is, so `Again` asks the module again
-    // and the one-shot timer is not needed to settle.
+    // and the one-shot timer is not needed to settle. Each names its answer,
+    // so neither ends with no answer.
     let place = counting_place(true)
         .replace(
             "on_success = \"Placed\"",
@@ -44,7 +45,7 @@ fn a_lost_call_with_an_on_failure_is_answered_by_it() {
         )
         .replace(
             "module = \"steps\"\n\n[[action]]\nname = \"Again\"",
-            "module = \"steps\"\non_failure = \"Again\"\n\n[[action]]\nname = \"Again\"",
+            "module = \"steps\"\non_success = \"Placed\"\non_failure = \"Again\"\n\n[[action]]\nname = \"Again\"",
         );
     assert_eq!(
         place.matches("on_failure = \"Again\"").count(),

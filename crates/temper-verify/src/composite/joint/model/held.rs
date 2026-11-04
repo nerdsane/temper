@@ -155,7 +155,7 @@ impl Heap for Move {
             | Move::Reaction(entity, action, _) => entity.heap() + action.heap(),
             Move::Timer(entity, name) => entity.heap() + name.heap(),
             Move::Answer(call, action) => call.heap() + action.heap(),
-            Move::Fail(call) | Move::Lost(call) => call.heap(),
+            Move::Fail(call) | Move::Lost(call) | Move::Silent(call) => call.heap(),
             Move::Read(dispatch) | Move::Arrive(dispatch) => dispatch.heap(),
         }
     }

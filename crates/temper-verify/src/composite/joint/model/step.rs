@@ -3,7 +3,6 @@
 //! dispatch path, and dispatches their records take or refuse.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use temper_authz::May;
 use temper_spec::predicate::{Truth, eval};
@@ -20,63 +19,7 @@ use crate::model::{ModelString, TemperModelAction};
 #[path = "guard.rs"]
 mod guard;
 
-/// One move of the walk.
-#[derive(Debug, Clone)]
-pub(in crate::composite::joint) enum Move {
-    /// An action whose guard and constraints read only its own record, sent
-    /// from outside by a sender: its actor checks them as it writes, so
-    /// sending and taking are one step.
-    Take(String, TemperModelAction, u32),
-    /// An action whose guard reads related records, sent from outside by a
-    /// sender: the dispatch path read them and they allowed it; its actor
-    /// takes it later.
-    Send(String, TemperModelAction, u32),
-    /// A reaction from a type outside the scope, as the sender it runs as:
-    /// a move from outside the model, whenever its target's guard may let
-    /// it ([`from_outside::Outside`]).
-    Reaction(String, TemperModelAction, u32),
-    /// A record's state timer fires its action, with no parameters, as
-    /// whoever armed it.
-    Timer(String, String),
-    /// A module answers the call a record's trigger started.
-    Answer(Arc<Call>, TemperModelAction),
-    /// A module's call fails: its `on_failure` action, if any, is sent.
-    Fail(Arc<Call>),
-    /// A module's call is lost: the server restarts while it runs. Its
-    /// deadline answers it with its `on_failure` action, if it names one,
-    /// as a failed call is answered; otherwise nothing answers it.
-    Lost(Arc<Call>),
-    /// The dispatch path reads the related records a reaction needs.
-    Read(Arc<Dispatch>),
-    /// The target's actor takes a dispatch, or refuses it.
-    Arrive(Arc<Dispatch>),
-}
-
-impl Move {
-    /// Whether the system makes this move (a timer, a module, or the
-    /// kernel's dispatches) rather than someone outside or a restart.
-    pub(in crate::composite::joint) fn by_system(&self) -> bool {
-        !matches!(
-            self,
-            Move::Take(..) | Move::Send(..) | Move::Reaction(..) | Move::Lost(..)
-        )
-    }
-
-    /// Whether this is a reaction from a type outside the scope.
-    pub(in crate::composite::joint) fn is_outside_reaction(&self) -> bool {
-        matches!(self, Move::Reaction(..))
-    }
-
-    /// The entity and action an outside move sends.
-    pub(in crate::composite::joint) fn outside_action(&self) -> Option<(&str, &str)> {
-        match self {
-            Move::Take(entity, action, _) | Move::Send(entity, action, _) => {
-                Some((entity, &action.name))
-            }
-            _ => None,
-        }
-    }
-}
+pub(in crate::composite::joint) use super::moves::Move;
 
 /// What the model knows about one state a move leads to. The order is
 /// from most to least known; a step after a step knows the lesser of the two.
@@ -296,6 +239,14 @@ impl JointModel {
                     if !self.expansion.push(&mut outcomes, outcome) {
                         return (Vec::new(), false);
                     }
+                }
+            }
+            Move::Silent(call) => {
+                let mut next = state.clone();
+                remove_call(&mut next, call);
+                let text = format!("{call} ends with no answer");
+                if !self.expansion.push(&mut outcomes, (next, text, Sure)) {
+                    return (Vec::new(), false);
                 }
             }
             Move::Read(dispatch) if dispatch.unread_guard.is_some() => {

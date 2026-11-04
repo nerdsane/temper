@@ -37,7 +37,9 @@ pub(super) fn rename_label(
                 format!("{}.{new}", call.to),
             )
         }
-        Move::Timer(..) | Move::Fail(..) | Move::Lost(..) => return text.to_string(),
+        Move::Timer(..) | Move::Fail(..) | Move::Lost(..) | Move::Silent(..) => {
+            return text.to_string();
+        }
         Move::Read(dispatch) | Move::Arrive(dispatch) => {
             let mut new = (**dispatch).clone();
             rename_params(&mut new.params);

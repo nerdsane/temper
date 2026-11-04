@@ -153,10 +153,10 @@ fn a_failed_call_nothing_retries_is_stuck_whatever_the_module_may_answer() {
 }
 
 #[test]
-fn an_unnamed_answer_that_is_the_only_way_out_leaves_a_rule_not_checked() {
-    // A failed call asks again, so the record never comes to rest. Only the
-    // module's answer leads on, and it may never give it, so this is neither
-    // a pass nor a broken rule.
+fn an_unnamed_answer_that_is_the_only_way_out_can_be_no_answer() {
+    // A failed call asks again, and only the module's answer leads on. The
+    // trigger names no answer, so the call can also end with none, and with
+    // no timer the record stays where it is.
     let spec = ask(
         "input",
         false,
@@ -188,7 +188,7 @@ eventually = "status == 'Asked' => status == 'Done'"
     let mut results = bounded(|bound| verify_joint_liveness(&refs, Some(&analysis), bound));
     let result = results.remove(0);
     assert!(
-        matches!(result.outcome, LivenessOutcome::Incomplete { .. }),
+        matches!(result.outcome, LivenessOutcome::Stuck { .. }),
         "{result}"
     );
 }

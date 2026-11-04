@@ -297,6 +297,7 @@ fn kind(mv: &Move) -> (u8, String, String) {
         Move::Read(dispatch) => (6, dispatch.to.clone(), dispatch.action.clone()),
         Move::Arrive(dispatch) => (7, dispatch.to.clone(), dispatch.action.clone()),
         Move::Reaction(entity, action, _) => (8, entity.clone(), action.name.clone()),
+        Move::Silent(call) => (9, call.to.clone(), call.module.clone()),
     }
 }
 
