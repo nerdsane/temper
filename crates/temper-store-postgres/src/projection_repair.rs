@@ -12,6 +12,24 @@ const HEADS: &str = "WITH heads AS (
         SELECT entity_type, entity_id, sequence_nr FROM {schema}snapshots WHERE tenant = $1
     ) s GROUP BY entity_type, entity_id
 ) ";
+/// The journal head of each record the projection delta holds
+/// (`projection_delta.rs`). Every commit that leaves a record's catalog row
+/// behind its journal marks the record in the same transaction, only a
+/// projection write that reached the mark's sequence retires it, and migration
+/// 0023 marked every record of an older database. So a record whose row is
+/// behind is always held, and a restart reads two index seeks per held record
+/// instead of every event and snapshot of the tenant. The delta grows with
+/// records the field index cannot vouch for and deleted records' terminal
+/// marks, never with events.
+const PENDING_HEADS: &str = "WITH heads AS (
+    SELECT p.entity_type, p.entity_id, GREATEST(
+        COALESCE((SELECT MAX(e.sequence_nr) FROM {schema}events e
+            WHERE e.tenant = $1 AND e.entity_type = p.entity_type AND e.entity_id = p.entity_id), 0),
+        COALESCE((SELECT s.sequence_nr FROM {schema}snapshots s
+            WHERE s.tenant = $1 AND s.entity_type = p.entity_type AND s.entity_id = p.entity_id), 0)
+    ) AS sequence_nr
+    FROM {schema}entity_projection_delta p WHERE p.tenant = $1
+) ";
 const DELETED: &str = concat!(
     "EXISTS (SELECT 1 FROM {schema}events d WHERE d.tenant = $1
     AND d.entity_type = h.entity_type AND d.entity_id = h.entity_id AND ",
@@ -60,12 +78,15 @@ impl PostgresEventStore {
     }
 
     /// Only missing/behind catalog rows, compared with the journal in one query.
+    /// It compares only the records the projection delta holds
+    /// (`PENDING_HEADS`), so a restart of a tenant whose rows are current
+    /// reads no journal however long its history.
     pub async fn lagging_query_projections(
         &self,
         tenant: &str,
     ) -> Result<Vec<ProjectionRepairCandidate>, PersistenceError> {
         let sql = format!(
-            "{HEADS}
+            "{PENDING_HEADS}
             SELECT h.entity_type, h.entity_id, h.sequence_nr, {DELETED}, c.sequence_nr, c.status
             FROM heads h LEFT JOIN {{schema}}entity_catalog c
               ON c.tenant = $1 AND c.entity_type = h.entity_type AND c.entity_id = h.entity_id

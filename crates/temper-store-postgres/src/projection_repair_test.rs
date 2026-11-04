@@ -122,3 +122,102 @@ fn boot_comparison_uses_the_selected_postgres_schema_and_only_lagging_rows() {
         .unwrap();
     });
 }
+
+/// Rows of `schema`'s events table that scans and index reads have handed out
+/// so far, as the statistics system counts them. The pool has one connection,
+/// so every statement the store ran is this backend's, and forcing its flush
+/// first makes them all visible.
+async fn events_rows_read(pool: &sqlx::PgPool, schema: &PostgresSchema) -> i64 {
+    sqlx::query("SELECT pg_stat_force_next_flush()")
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query_scalar(
+        "SELECT (COALESCE(t.seq_tup_read, 0) + COALESCE((SELECT SUM(i.idx_tup_read)
+             FROM pg_stat_user_indexes i WHERE i.relid = t.relid), 0))::bigint
+         FROM pg_stat_user_tables t WHERE t.relid = to_regclass($1)",
+    )
+    .bind(format!("{}events", schema.prefix()))
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// Journal rows a restart's comparison reads for `records` records of
+/// `events` events each, every one committed with its catalog row.
+async fn current_tenant_comparison_journal_reads(url: &str, records: usize, events: usize) -> i64 {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(url)
+        .await
+        .unwrap();
+    let schema = PostgresSchema::new(format!("history.{}", uuid::Uuid::new_v4())).unwrap();
+    run_migrations_in_schema(&pool, &schema).await.unwrap();
+    let store = PostgresEventStore::with_schema(pool.clone(), schema.clone());
+    let fields = serde_json::json!({ "title": "current" });
+    let state = serde_json::json!({});
+    for n in 0..records {
+        let batch: Vec<_> = (0..events)
+            .map(|_| PersistenceEnvelope {
+                sequence_nr: 0,
+                event_type: "Touch".to_string(),
+                payload: serde_json::json!({}),
+                metadata: EventMetadata {
+                    event_id: uuid::Uuid::new_v4(),
+                    causation_id: uuid::Uuid::new_v4(),
+                    correlation_id: uuid::Uuid::new_v4(),
+                    timestamp: chrono::Utc::now(),
+                    actor_id: "repair-test".to_string(),
+                },
+            })
+            .collect();
+        store
+            .append_with_rows(
+                &format!("acme:Doc:doc-{n}"),
+                0,
+                &batch,
+                temper_runtime::persistence::CommitRows {
+                    projection: Some(temper_runtime::persistence::ProjectionRow::Upsert {
+                        status: "Open",
+                        fields: &fields,
+                        state: &state,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let before = events_rows_read(&pool, &schema).await;
+    let lagging = store.lagging_query_projections("acme").await.unwrap();
+    let read = events_rows_read(&pool, &schema).await - before;
+    assert!(lagging.is_empty(), "every record is current: {lagging:?}");
+    sqlx::query(&format!(
+        "DROP SCHEMA {} CASCADE",
+        schema.prefix().trim_end_matches('.')
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    read
+}
+
+/// A busy record gains an event every few seconds, and a restart must not pay
+/// for each of them again. With every projection committed with its events,
+/// records 400 events long cost the comparison no more journal reads than
+/// records one event long.
+#[test]
+fn boot_comparison_journal_reads_do_not_grow_with_history() {
+    let Some(url) = temper_test_resource::env_var("DATABASE_URL") else {
+        return;
+    };
+    sqlx::test_block_on(async {
+        let short = current_tenant_comparison_journal_reads(&url, 50, 1).await;
+        let long = current_tenant_comparison_journal_reads(&url, 50, 400).await;
+        assert!(
+            long <= short,
+            "the comparison read {long} journal rows for 50 current records of 400 events \
+             each, against {short} for one event each: it reads the tenant's history"
+        );
+    });
+}

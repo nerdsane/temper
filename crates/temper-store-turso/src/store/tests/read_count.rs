@@ -4,6 +4,7 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use super::{TursoEventStore, sqlite_test_url};
 use turso::core::io::{FileId, FileSyncType};
 use turso::core::{
     Buffer, Clock, Completion, File, IO, MemoryIO, MonotonicInstant, OpenFlags, PlatformIO, Result,
@@ -32,6 +33,27 @@ impl CountingIo {
     pub(super) fn reset(&self) {
         self.reads.store(0, Ordering::SeqCst);
     }
+}
+
+/// The database at `url`, its writer dropped, opened again as a restart
+/// would: from a cold cache, through counted reads. It is a copy at a new
+/// path named after `name`: the engine shares one open database, and its
+/// cache, per path within a process.
+pub(super) async fn reopen_cold(url: &str, name: &str) -> (TursoEventStore, Arc<CountingIo>) {
+    let from = url.strip_prefix("file:").unwrap();
+    let copy = sqlite_test_url(name);
+    let copy = copy.strip_prefix("file:").unwrap();
+    for suffix in ["", "-wal"] {
+        if std::path::Path::new(&format!("{from}{suffix}")).exists() {
+            std::fs::copy(format!("{from}{suffix}"), format!("{copy}{suffix}")).unwrap();
+        }
+    }
+    let io = CountingIo::new();
+    let db = crate::driver::Database::local_with_io(copy, io.clone())
+        .await
+        .unwrap();
+    let store = TursoEventStore::open(db, false, None).await.unwrap();
+    (store, io)
 }
 
 struct CountingFile {

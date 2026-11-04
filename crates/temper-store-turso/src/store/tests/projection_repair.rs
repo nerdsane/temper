@@ -189,21 +189,7 @@ async fn boot_comparison_reads_no_record_whole() {
             .unwrap();
     }
     drop(store);
-    // A copy at a new path: the engine shares one open database, and its
-    // cache, per path within a process.
-    let from = url.strip_prefix("file:").unwrap();
-    let copy = sqlite_test_url("boot-comparison-reads-copy");
-    let copy = copy.strip_prefix("file:").unwrap();
-    for suffix in ["", "-wal"] {
-        if std::path::Path::new(&format!("{from}{suffix}")).exists() {
-            std::fs::copy(format!("{from}{suffix}"), format!("{copy}{suffix}")).unwrap();
-        }
-    }
-    let io = super::read_count::CountingIo::new();
-    let db = crate::driver::Database::local_with_io(copy, io.clone())
-        .await
-        .unwrap();
-    let store = TursoEventStore::open(db, false, None).await.unwrap();
+    let (store, io) = super::read_count::reopen_cold(&url, "boot-comparison-reads-copy").await;
 
     io.reset();
     let lagging = store.lagging_query_projections("acme").await.unwrap();
