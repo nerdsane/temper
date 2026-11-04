@@ -195,6 +195,56 @@ fn a_pass_that_asks_which_run_ended_holds_for_two_runs() {
     holds_for_two(&pass_fixed());
 }
 
+fn late_guard() -> Model {
+    model!("lateguard", "Order", "Shelf")
+}
+
+/// `Confirm` asks again when it lands, so the order's shelf can't have moved.
+fn late_guard_asks_again() -> Model {
+    fixed(
+        &late_guard(),
+        0,
+        "to = \"Confirmed\"\n",
+        "to = \"Confirmed\"\nguard = \"!empty(shelf) && Shelf[shelf].status == 'Stocked'\"\n",
+    )
+}
+
+#[test]
+fn a_late_guard_reads_the_field_as_its_move_committed() {
+    let moves = moves(&check(&late_guard(), 1));
+    let moved = moves.iter().filter(|m| m.contains(".Move(")).count();
+    assert_eq!(moved, 2, "{moves:#?}");
+    assert!(
+        moves.iter().any(|m| m.contains("guard holds")),
+        "{moves:#?}"
+    );
+}
+
+#[test]
+fn a_late_guard_that_names_the_status_still_reads_it() {
+    let model = fixed(
+        &late_guard(),
+        0,
+        "guard = \"!empty(shelf) && Shelf",
+        "guard = \"status == 'Placed' && !empty(shelf) && Shelf",
+    );
+    let moves = moves(&check(&model, 1));
+    assert!(
+        moves.iter().any(|m| m.contains("guard holds")),
+        "{moves:#?}"
+    );
+}
+
+#[test]
+fn a_status_a_late_guard_never_reads_splits_no_state() {
+    let result = check(&late_guard_asks_again(), 1);
+    assert!(
+        !matches!(result.outcome, JointOutcome::Broken { .. }),
+        "{result}"
+    );
+    assert!(result.states <= 1_900, "{result}");
+}
+
 #[test]
 fn a_spawn_makes_one_child() {
     let result = check(&pass(), 2);

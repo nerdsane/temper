@@ -103,11 +103,12 @@ impl Dispatch {
 }
 
 /// What a trigger's guard reads of its source, as the source committed:
-/// its status and the fields the guard names.
+/// the fields it names, and its status if it names that.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Committed {
-    /// The source's status after its move.
-    pub status: String,
+    /// The source's status after its move, when the guard reads it. Holding
+    /// one it doesn't read would split a state by a value nothing can see.
+    pub status: Option<String>,
     /// The fields the guard reads, by name.
     pub fields: BTreeMap<String, ParamValue>,
 }
@@ -116,7 +117,7 @@ impl Committed {
     /// The source record as the guard reads it.
     pub(super) fn record(&self) -> TemperModelState {
         let mut record = TemperModelState {
-            status: self.status.clone(),
+            status: self.status.clone().unwrap_or_default(),
             counters: BTreeMap::new(),
             booleans: BTreeMap::new(),
             lists: BTreeMap::new(),

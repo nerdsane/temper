@@ -1,0 +1,10 @@
+[automaton]
+name = "Shelf"
+states = ["Empty", "Stocked"]
+initial = "Empty"
+
+[[action]]
+name = "Stock"
+kind = "input"
+from = ["Empty"]
+to = "Stocked"

@@ -339,6 +339,7 @@ impl JointModel {
         }
         let mut fields = BTreeMap::new();
         let mut lists = false;
+        let mut reads_status = false;
         let mut keep = |field: &str| {
             let value = if matches!(field, "Id" | "id") {
                 record.strings.get(ID).cloned().map(ParamValue::Str)
@@ -368,13 +369,14 @@ impl JointModel {
             Name::CrossStatus { id_field, .. } | Name::CrossField { id_field, .. } => {
                 keep(id_field);
             }
-            Name::Status | Name::Param(_) => {}
+            Name::Status => reads_status = true,
+            Name::Param(_) => {}
         });
         if let Some(id) = record.strings.get(ID) {
             fields.insert(ID.to_string(), ParamValue::Str(id.clone()));
         }
         (!lists).then(|| Committed {
-            status: record.status.clone(),
+            status: reads_status.then(|| record.status.clone()),
             fields,
         })
     }
