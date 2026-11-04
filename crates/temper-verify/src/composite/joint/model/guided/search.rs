@@ -1,6 +1,8 @@
 //! Phase two by any order, for measuring one against [`plain`] offline.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use temper_spec::automaton::Automaton;
 use temper_spec::predicate::{Expr, Truth, eval};
@@ -75,23 +77,36 @@ pub fn guided_search(
         kernel_moves: true,
         relies_on: BTreeSet::new(),
     };
-    let model = JointModel::new(&by_name, &scope, owner, &invariants, sending, true)
-        .without_silent(&by_name);
+    let model = Arc::new(
+        JointModel::new(&by_name, &scope, owner, &invariants, sending, true)
+            .without_silent(&by_name),
+    );
     let (bytes, progress) = (Bytes::new(room), Progress::default());
     let bound = Bound {
         room: &bytes,
         progress: &progress,
     };
-    let mut expanded = 0;
-    let mut met = false;
-    let explored = model.walk_with(bound, Keep::Sure, |_, state, sure| {
-        expanded += 1;
-        if sure && state.settled() {
-            let env = model.env(owner, state);
-            met = invariants.iter().any(|inv| eval(inv, &env) == Truth::False);
-        }
-        met
-    });
+    let expanded = Arc::new(AtomicUsize::new(0));
+    let met = Arc::new(AtomicBool::new(false));
+    let explored = {
+        let (expanded, met) = (Arc::clone(&expanded), Arc::clone(&met));
+        let owner = owner.to_string();
+        let invariants: Vec<Expr> = invariants.iter().map(|inv| (*inv).clone()).collect();
+        model.walk_with(bound, Keep::Sure, move |model, _, state, sure| {
+            expanded.fetch_add(1, Ordering::Relaxed);
+            if sure && state.settled() {
+                let env = model.env(&owner, state);
+                if invariants.iter().any(|inv| eval(inv, &env) == Truth::False) {
+                    met.store(true, Ordering::Relaxed);
+                }
+            }
+            met.load(Ordering::Relaxed)
+        })
+    };
+    let (expanded, met) = (
+        expanded.load(Ordering::Relaxed),
+        met.load(Ordering::Relaxed),
+    );
     let outcomes: Vec<JointOutcome> = invariants
         .iter()
         .map(|_| JointOutcome::Incomplete {

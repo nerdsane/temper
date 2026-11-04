@@ -1,6 +1,7 @@
 //! One walk of the joint checks, and the digest its verdict is kept by.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 use temper_authz::SendAnalysis;
@@ -81,7 +82,7 @@ pub struct InvariantProof<'room> {
     scope: BTreeSet<String>,
     /// The model, or why there is none: a type the invariants read that the
     /// app does not declare.
-    model: Result<JointModel, String>,
+    model: Result<Arc<JointModel>, String>,
     /// The model with the types reactions from outside the scope come from
     /// taken in too, built when there are any, to walk once more.
     wider: Option<Box<Wider<'room>>>,
@@ -151,7 +152,7 @@ fn invariant_model(
     invariants: &[Invariant],
     policies: Option<&SendAnalysis>,
     memory: &Construction<'_>,
-) -> Result<JointModel, String> {
+) -> Result<Arc<JointModel>, String> {
     let reserve = |bytes| memory.set(bytes);
     let exprs: Vec<&Expr> = invariants.iter().map(|inv| &inv.assert).collect();
     // Code outside the specs sends what a liveness property relies on,
@@ -179,6 +180,7 @@ fn invariant_model(
     JointModel::new(by_name, scope, name, &exprs, sending, true)
         .without_silent(by_name)
         .built(memory)
+        .map(Arc::new)
 }
 
 /// The walks that check every `[[invariant]]` in `automatons` that reads a
@@ -264,7 +266,7 @@ pub struct LivenessProof<'room> {
     scope: BTreeSet<String>,
     /// The model, or why there is none: a type the condition reads that the
     /// app does not declare.
-    model: Result<JointModel, String>,
+    model: Result<Arc<JointModel>, String>,
     // Declared last so the model releases its allocations before its room.
     _memory: Construction<'room>,
 }
@@ -291,7 +293,7 @@ impl LivenessProof<'_> {
                 return result;
             }
         };
-        let mut explored = model.walk_with(bound, model::Keep::Edges, |_, _, _| false);
+        let mut explored = model.walk_with(bound, model::Keep::Edges, |_, _, _, _| false);
         result.states = explored.len();
         result.in_flight_bound = explored.held_back.then_some(model::MAX_IN_FLIGHT);
         let settling = settle_bytes(&explored);
@@ -370,6 +372,7 @@ pub fn liveness_proofs<'room>(
                 JointModel::new(&by_name, &scope, name, &[goal], sending, true)
                     .without_silent(&by_name)
                     .built(&memory)
+                    .map(Arc::new)
             } else {
                 Err(format!(
                     "it reads {}, which this app does not declare",

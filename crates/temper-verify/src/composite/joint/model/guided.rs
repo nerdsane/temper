@@ -645,7 +645,7 @@ fn seeds(explored: &Explored<'_>, packer: &mut Packer) -> Vec<Vec<Step>> {
             let mut path = Vec::new();
             loop {
                 let node = &explored.nodes[index];
-                let (parent, sure) = (node.parent, node.sure);
+                let (parent, sure) = (node.parent, node.sure());
                 let label = parent.map(|(_, label)| packer.id(explored.packer.name(label)));
                 path.push((label, packer.pack(&explored.state(index)), sure));
                 match parent {

@@ -462,6 +462,7 @@ fn oversized_parameter_expansion_is_incomplete() {
 }
 
 mod cause;
+mod cycles;
 mod lost_call;
 mod sender;
 mod sure;

@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::sync::{Arc, Mutex};
 
 use temper_spec::automaton::{Automaton, TargetResolver};
 use temper_spec::predicate::Truth;
@@ -113,18 +114,25 @@ impl JointModel {
     /// the walk, naming each distinct reaction a target refuses when it
     /// lands. A move from outside waits until every dispatch in flight has
     /// landed, so the walk sees every order they can land in.
-    pub(in crate::composite::joint) fn drops(&self, bound: Bound<'_>) -> Drops {
-        let mut drops = BTreeSet::new();
-        let explored = self.walk_with(bound, Keep::States, |_, state, _| {
-            if !state.inflight.is_empty() {
-                drops.extend(
-                    self.moves(state)
+    pub(in crate::composite::joint) fn drops(self: &Arc<Self>, bound: Bound<'_>) -> Drops {
+        let found = Arc::new(Mutex::new(BTreeSet::new()));
+        let explored = {
+            let found = Arc::clone(&found);
+            self.walk_with(bound, Keep::States, move |model, _, state, _| {
+                if !state.inflight.is_empty() {
+                    let drops: Vec<_> = model
+                        .moves(state)
                         .iter()
-                        .filter_map(|mv| self.dropped(state, mv)),
-                );
-            }
-            false
-        });
+                        .filter_map(|mv| model.dropped(state, mv))
+                        .collect();
+                    if !drops.is_empty() {
+                        found.lock().expect("a walk thread panicked").extend(drops);
+                    }
+                }
+                false
+            })
+        };
+        let drops = std::mem::take(&mut *found.lock().expect("a walk thread panicked"));
         Drops {
             drops: drops.into_iter().collect(),
             states: explored.len(),
@@ -174,5 +182,5 @@ pub(crate) fn dropped_reactions(
         .iter()
         .map(|a| (a.automaton.name.as_str(), *a))
         .collect();
-    JointModel::whole(&by_name, scope).drops(bound)
+    Arc::new(JointModel::whole(&by_name, scope)).drops(bound)
 }

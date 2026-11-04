@@ -115,7 +115,7 @@ pub(super) struct Walk {
 /// The joint model of one entity's properties that read related entities.
 #[derive(Debug)]
 pub(super) struct JointModel {
-    expansion: Expansion,
+    expansion: PerThread,
     /// The literals each type's id can meet, by type.
     id_literals: BTreeMap<String, BTreeSet<String>>,
     models: BTreeMap<String, TemperModel>,
@@ -153,10 +153,10 @@ pub(super) struct JointModel {
     /// child's type is outside the scope.
     outside_spawns: BTreeMap<(String, String), Vec<String>>,
     /// Each type's record as it first stands, made on first use.
-    first: std::cell::OnceCell<BTreeMap<String, TemperModelState>>,
+    first: std::sync::OnceLock<BTreeMap<String, TemperModelState>>,
     /// Each type's statuses from which its record can send nothing more,
     /// made on first use.
-    settled: std::cell::OnceCell<BTreeMap<String, BTreeSet<String>>>,
+    settled: std::sync::OnceLock<BTreeMap<String, BTreeSet<String>>>,
 }
 
 impl JointModel {
@@ -308,7 +308,7 @@ impl JointModel {
         // Cedar is told which literals a made-up value may not be.
         let senders = senders.meeting(&classes, &models);
         Self {
-            expansion: Expansion::default(),
+            expansion: PerThread::default(),
             id_literals,
             models,
             reactions,
@@ -325,8 +325,8 @@ impl JointModel {
             unsent,
             outside,
             outside_spawns: spawn::outside_spawns(by_name, scope),
-            first: std::cell::OnceCell::new(),
-            settled: std::cell::OnceCell::new(),
+            first: std::sync::OnceLock::new(),
+            settled: std::sync::OnceLock::new(),
         }
     }
 
@@ -445,4 +445,24 @@ fn deciding(automaton: &Automaton, reactions: &[Reaction], entity: &str) -> BTre
         });
     }
     fields
+}
+
+/// A walk's accounting for what one state's expansion builds, one to a
+/// thread, since a walk's threads each expand their own state.
+#[derive(Default)]
+struct PerThread(thread_local::ThreadLocal<Expansion>);
+
+impl std::ops::Deref for PerThread {
+    type Target = Expansion;
+
+    fn deref(&self) -> &Expansion {
+        self.0.get_or_default()
+    }
+}
+
+/// Only the name, as [`Expansion`]'s own says: it is no part of the model.
+impl std::fmt::Debug for PerThread {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Expansion")
+    }
 }

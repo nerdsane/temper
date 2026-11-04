@@ -143,9 +143,9 @@ impl Senders {
             requests,
             may,
             policies: policies.cloned(),
-            decided: RefCell::default(),
-            alike: RefCell::default(),
-            decided_bytes: std::cell::Cell::default(),
+            decided: RwLock::default(),
+            alike: RwLock::default(),
+            decided_bytes: std::sync::atomic::AtomicUsize::default(),
             reread,
             meets: BTreeMap::new(),
         }
@@ -163,11 +163,30 @@ impl Senders {
             requests: None,
             may: None,
             policies: None,
-            decided: RefCell::default(),
-            alike: RefCell::default(),
-            decided_bytes: std::cell::Cell::default(),
+            decided: RwLock::default(),
+            alike: RwLock::default(),
+            decided_bytes: std::sync::atomic::AtomicUsize::default(),
             reread: BTreeSet::new(),
             meets: BTreeMap::new(),
         }
+    }
+}
+
+/// What a walk reads of its senders, which a model's digest
+/// ([`JointProof::digest`](super::JointProof::digest)) is of: who sends,
+/// what Cedar lets each send, and the policies it may read again. Policies
+/// no walk can read, and the answers decided so far, are left out.
+impl std::fmt::Debug for Senders {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Senders")
+            .field("askers", &self.askers)
+            .field("outside", &self.outside)
+            .field("detached", &self.detached)
+            .field("timer_chains", &self.timer_chains)
+            .field("requests", &self.requests)
+            .field("may", &self.may)
+            .field("reread", &self.reread)
+            .field("meets", &self.meets)
+            .finish()
     }
 }

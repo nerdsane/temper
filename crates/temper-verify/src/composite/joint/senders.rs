@@ -42,10 +42,11 @@
 //! (`resolve_target` `field`) needs this, since only the state says whether
 //! that record is one its source may act on.
 
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::sync::Arc;
+use std::sync::RwLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::Value;
 use temper_authz::{Asker, Attr, Cause, Hop, May, SendAnalysis};
@@ -101,12 +102,12 @@ pub(super) struct Senders {
     policies: Option<SendAnalysis>,
     /// The answers decided again so far: a walk asks the same few questions
     /// over and over, and reading the policies takes far longer than a step.
-    decided: RefCell<HashMap<Question, May>>,
+    decided: RwLock<HashMap<Question, May>>,
     /// The senders each (entity, action) is sent as from outside, of those
     /// that may, one for each way what follows can go.
-    alike: RefCell<AlikeSenders>,
+    alike: RwLock<AlikeSenders>,
     /// The bytes `decided` holds, as a walk counts them against its room.
-    decided_bytes: std::cell::Cell<usize>,
+    decided_bytes: AtomicUsize,
     /// The policies that may apply to a move whose answer depends on the
     /// request ([`SendAnalysis::applicable`]): all a walk reads of `policies`
     /// when it decides one again.
@@ -115,25 +116,6 @@ pub(super) struct Senders {
     /// field): a value the model made up in one may be any literal it never
     /// meets, which the model does not offer it.
     meets: BTreeMap<(String, String), BTreeSet<String>>,
-}
-
-/// What a walk reads of its senders, which a model's digest
-/// ([`JointProof::digest`](super::JointProof::digest)) is of: who sends,
-/// what Cedar lets each send, and the policies it may read again. Policies
-/// no walk can read, and the answers decided so far, are left out.
-impl fmt::Debug for Senders {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Senders")
-            .field("askers", &self.askers)
-            .field("outside", &self.outside)
-            .field("detached", &self.detached)
-            .field("timer_chains", &self.timer_chains)
-            .field("requests", &self.requests)
-            .field("may", &self.may)
-            .field("reread", &self.reread)
-            .field("meets", &self.meets)
-            .finish()
-    }
 }
 
 /// A move decided again: its sender, record type and action, the rule that
@@ -183,7 +165,7 @@ impl Senders {
             }
         }
         self.reread = reread(self.policies.as_ref(), &self.askers, self.may.as_ref());
-        self.alike.borrow_mut().clear();
+        self.alike.write().expect("a walk thread panicked").clear();
     }
 
     /// Bytes retained by the partition after its temporary work is dropped.
@@ -225,13 +207,19 @@ impl Senders {
     /// The senders `entity`'s `action` is sent as from outside, once worked
     /// out ([`Self::note_alike`]).
     pub(super) fn alike(&self, entity: &str, action: &str) -> Option<Arc<[u32]>> {
-        self.alike.borrow().get(entity)?.get(action).cloned()
+        self.alike
+            .read()
+            .expect("a walk thread panicked")
+            .get(entity)?
+            .get(action)
+            .cloned()
     }
 
     /// Note the senders `entity`'s `action` is sent as from outside.
     pub(super) fn note_alike(&self, entity: &str, action: &str, senders: Arc<[u32]>) {
         self.alike
-            .borrow_mut()
+            .write()
+            .expect("a walk thread panicked")
             .entry(entity.to_string())
             .or_default()
             .insert(action.to_string(), senders);
@@ -304,7 +292,12 @@ impl Senders {
             target.strings.clone(),
             target.booleans.clone(),
         );
-        if let Some(may) = self.decided.borrow().get(&question) {
+        if let Some(may) = self
+            .decided
+            .read()
+            .expect("a walk thread panicked")
+            .get(&question)
+        {
             return *may;
         }
         // A value the model made up is none of the literals it holds that
@@ -357,14 +350,17 @@ impl Senders {
             + question.5.heap()
             + question.6.heap()
             + question.7.heap();
-        self.decided_bytes.set(self.decided_bytes.get() + entry);
-        self.decided.borrow_mut().insert(question, may);
+        self.decided_bytes.fetch_add(entry, Ordering::Relaxed);
+        self.decided
+            .write()
+            .expect("a walk thread panicked")
+            .insert(question, may);
         may
     }
 
     /// The bytes the answers decided again so far hold.
     pub(super) fn held(&self) -> usize {
-        self.decided_bytes.get()
+        self.decided_bytes.load(Ordering::Relaxed)
     }
 
     /// The number of the sender a reaction runs as: its declared principal,

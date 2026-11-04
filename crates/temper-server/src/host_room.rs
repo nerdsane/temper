@@ -70,6 +70,13 @@ impl Room for HostRoom {
     fn give(&self, bytes: usize) {
         self.held.fetch_sub(bytes, Ordering::Relaxed);
     }
+
+    /// Half of the cores this process may use, for the reason it takes half
+    /// the memory: the server goes on serving while a walk runs.
+    fn threads(&self) -> usize {
+        let cores = std::thread::available_parallelism().map_or(1, |cores| cores.get());
+        (cores / 2).max(1)
+    }
 }
 
 /// The memory this process can still take: the least of what the machine

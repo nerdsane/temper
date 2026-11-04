@@ -2,6 +2,8 @@
 //! where sure moves alone lead.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::super::super::{JointOutcome, premise};
 use super::super::{JointModel, Walk};
@@ -15,7 +17,7 @@ impl JointModel {
     /// broken only where sure moves alone lead: elsewhere the walk may have
     /// gone a way the runtime never goes, so it cannot tell.
     pub(in crate::composite::joint) fn walk(
-        &self,
+        self: &Arc<Self>,
         owner: &str,
         invariants: &[&Expr],
         bound: Bound<'_>,
@@ -76,29 +78,39 @@ impl JointModel {
                     .collect(),
             };
         }
-        let mut unknown = vec![false; invariants.len()];
-        let mut broken: Vec<Option<usize>> = vec![None; invariants.len()];
-        // The first state where it is false that sure moves alone may not reach.
-        let mut maybe: Vec<Option<usize>> = vec![None; invariants.len()];
         let premises: Vec<Option<&Expr>> = invariants.iter().map(|inv| premise(inv)).collect();
-        let mut met: Vec<bool> = premises.iter().map(Option::is_none).collect();
-        let explored = self.walk_with(bound, Keep::Sure, |index, state, sure| {
-            if state.settled() {
-                let env = self.env(owner, state);
-                for (i, inv) in invariants.iter().enumerate() {
-                    match eval(inv, &env) {
-                        Truth::False if sure && broken[i].is_none() => broken[i] = Some(index),
-                        Truth::False if maybe[i].is_none() => maybe[i] = Some(index),
-                        Truth::Unknown => unknown[i] = true,
-                        _ => {}
-                    }
-                    if let (false, Some(premise)) = (met[i], premises[i]) {
-                        met[i] = eval(premise, &env) != Truth::False;
+        let found = Arc::new(Found::new(&premises));
+        let explored = {
+            let found = Arc::clone(&found);
+            let owner = owner.to_string();
+            let invariants: Vec<Expr> = invariants.iter().map(|inv| (*inv).clone()).collect();
+            let premises: Vec<Option<Expr>> =
+                premises.iter().map(|premise| premise.cloned()).collect();
+            self.walk_with(bound, Keep::Sure, move |model, index, state, sure| {
+                if state.settled() {
+                    let env = model.env(&owner, state);
+                    for (i, inv) in invariants.iter().enumerate() {
+                        match eval(inv, &env) {
+                            Truth::False if sure => found.broken(i, index),
+                            Truth::False => found.maybe(i, index),
+                            Truth::Unknown => found.unknown[i].store(true, Ordering::Relaxed),
+                            _ => {}
+                        }
+                        if let Some(premise) = &premises[i]
+                            && !found.met[i].load(Ordering::Relaxed)
+                            && eval(premise, &env) != Truth::False
+                        {
+                            found.met[i].store(true, Ordering::Relaxed);
+                        }
                     }
                 }
-            }
-            broken.iter().all(Option::is_some)
-        });
+                found.all_broken()
+            })
+        };
+        let broken = found.indices(&found.broken);
+        let maybe = found.indices(&found.maybe);
+        let unknown: Vec<bool> = found.flags(&found.unknown);
+        let met: Vec<bool> = found.flags(&found.met);
         // The first move each invariant's first maybe-break rests on, and
         // the types outside the scope it comes from when it is a reaction
         // from them.
@@ -154,6 +166,64 @@ impl JointModel {
             held_back,
             outside,
         }
+    }
+}
+
+/// What the walk's threads find of each invariant. Of the states it is false
+/// in, the earliest one found is kept: it has about the shortest way there.
+struct Found {
+    /// The state it is false in that sure moves alone reach.
+    broken: Vec<AtomicUsize>,
+    /// The state it is false in that sure moves alone may not reach.
+    maybe: Vec<AtomicUsize>,
+    unknown: Vec<AtomicBool>,
+    /// A settled state met its premise, or it has none.
+    met: Vec<AtomicBool>,
+}
+
+const NONE: usize = usize::MAX;
+
+impl Found {
+    fn new(premises: &[Option<&Expr>]) -> Self {
+        Self {
+            broken: premises.iter().map(|_| AtomicUsize::new(NONE)).collect(),
+            maybe: premises.iter().map(|_| AtomicUsize::new(NONE)).collect(),
+            unknown: premises.iter().map(|_| AtomicBool::new(false)).collect(),
+            met: premises
+                .iter()
+                .map(|premise| AtomicBool::new(premise.is_none()))
+                .collect(),
+        }
+    }
+
+    fn broken(&self, invariant: usize, state: usize) {
+        self.broken[invariant].fetch_min(state, Ordering::Relaxed);
+    }
+
+    fn maybe(&self, invariant: usize, state: usize) {
+        if self.broken[invariant].load(Ordering::Relaxed) == NONE {
+            self.maybe[invariant].fetch_min(state, Ordering::Relaxed);
+        }
+    }
+
+    fn all_broken(&self) -> bool {
+        self.broken
+            .iter()
+            .all(|state| state.load(Ordering::Relaxed) != NONE)
+    }
+
+    fn indices(&self, states: &[AtomicUsize]) -> Vec<Option<usize>> {
+        states
+            .iter()
+            .map(|state| Some(state.load(Ordering::Relaxed)).filter(|&state| state != NONE))
+            .collect()
+    }
+
+    fn flags(&self, flags: &[AtomicBool]) -> Vec<bool> {
+        flags
+            .iter()
+            .map(|flag| flag.load(Ordering::Relaxed))
+            .collect()
     }
 }
 

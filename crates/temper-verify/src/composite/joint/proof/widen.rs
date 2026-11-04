@@ -2,6 +2,7 @@
 //! scope come from.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use temper_authz::SendAnalysis;
 use temper_spec::automaton::{Automaton, Invariant};
@@ -18,7 +19,7 @@ use super::{InvariantProof, invariant_model};
 #[derive(Debug)]
 pub(super) struct Wider<'room> {
     scope: BTreeSet<String>,
-    model: JointModel,
+    model: Arc<JointModel>,
     // Declared last so the model releases its allocations before its room.
     _memory: Construction<'room>,
 }

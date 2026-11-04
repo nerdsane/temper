@@ -133,10 +133,10 @@ fn duplicate_outcomes_only_reserve_distinct_states() {
     let other =
         parse_automaton("[automaton]\nname = 'Other'\nstates = ['Open']\ninitial = 'Open'\n")
             .unwrap();
-    let model = JointModel::whole(
+    let model = std::sync::Arc::new(JointModel::whole(
         &BTreeMap::from([("Many", &many), ("Other", &other)]),
         BTreeSet::from(["Many".into()]),
-    );
+    ));
     let (room, progress) = (Bytes::new(1 << 28), Progress::default());
     let explored = model.walk_with(
         Bound {
@@ -144,7 +144,7 @@ fn duplicate_outcomes_only_reserve_distinct_states() {
             progress: &progress,
         },
         super::super::Keep::Edges,
-        |_, _, _| false,
+        |_, _, _, _| false,
     );
     assert!(explored.stopped.is_none(), "{:?}", explored.stopped);
     assert!(explored.edges.len() >= 512, "exercise duplicate edges");

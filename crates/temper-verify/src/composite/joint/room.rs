@@ -20,6 +20,10 @@ pub trait Room: Sync {
     fn take(&self, bytes: usize) -> Result<(), String>;
     /// Give back `bytes` taken before.
     fn give(&self, bytes: usize);
+    /// How many threads a walk may use.
+    fn threads(&self) -> usize {
+        1
+    }
 }
 
 /// A fixed amount of memory, for tools and tests.
@@ -27,6 +31,7 @@ pub trait Room: Sync {
 pub struct Bytes {
     limit: usize,
     held: AtomicUsize,
+    threads: usize,
 }
 
 impl Bytes {
@@ -35,7 +40,13 @@ impl Bytes {
         Self {
             limit,
             held: AtomicUsize::new(0),
+            threads: 1,
         }
+    }
+
+    /// The same room, walked by `threads` threads.
+    pub fn with_threads(self, threads: usize) -> Self {
+        Self { threads, ..self }
     }
 
     /// The bytes taken and not given back.
@@ -64,6 +75,10 @@ impl Room for Bytes {
 
     fn give(&self, bytes: usize) {
         self.held.fetch_sub(bytes, Ordering::Relaxed);
+    }
+
+    fn threads(&self) -> usize {
+        self.threads
     }
 }
 

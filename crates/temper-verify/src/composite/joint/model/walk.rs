@@ -1,16 +1,18 @@
-//! The breadth-first walk over joint states.
+//! What the walk over joint states finds (`walk/run.rs` walks them).
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use super::super::pack::{Packed, Packer};
-use super::super::room::{Bound, Held, MB, block};
+use super::super::room::{Held, MB};
 use super::super::state::render;
 use super::super::{JointState, JointStep};
 use super::JointModel;
-use super::held::Tables;
-use super::step::{Certainty, Move};
 
+mod checked;
 mod invariants;
+mod run;
+mod shared;
 
 /// One move made from a walked state.
 #[derive(Debug, Clone, Copy)]
@@ -58,10 +60,51 @@ pub(super) struct Node {
     /// The state and move (a name in `packer`) it was first reached by, or
     /// once sure moves alone reach it, the first sure one.
     pub(super) parent: Option<(u32, u32)>,
+    /// Whether sure moves alone reach it, and whether it waits to be walked.
+    /// One word, so a thread starting to walk it and one finding a sure way
+    /// to it cannot both miss the other: either the walk starts sure, or the
+    /// state is walked again.
+    flags: AtomicU8,
+}
+
+const SURE: u8 = 1;
+const QUEUED: u8 = 2;
+
+impl Node {
+    pub(super) fn new(
+        packed: Packed,
+        parent: Option<(u32, u32)>,
+        sure: bool,
+        queued: bool,
+    ) -> Self {
+        let flags = if sure { SURE } else { 0 } | if queued { QUEUED } else { 0 };
+        Self {
+            packed,
+            parent,
+            flags: AtomicU8::new(flags),
+        }
+    }
+
     /// Sure moves alone reach it from a start.
-    pub(super) sure: bool,
+    pub(super) fn sure(&self) -> bool {
+        self.flags.load(Ordering::Acquire) & SURE != 0
+    }
+
     /// It waits in the walk's queue.
-    pub(super) queued: bool,
+    fn queued(&self) -> bool {
+        self.flags.load(Ordering::Acquire) & QUEUED != 0
+    }
+
+    /// Start walking it: it no longer waits. Whether sure moves alone reach it.
+    fn start(&self) -> bool {
+        self.flags.fetch_and(!QUEUED, Ordering::AcqRel) & SURE != 0
+    }
+
+    /// Sure moves alone reach it now. Whether it must be walked again: it
+    /// does not wait to be walked already.
+    fn found_sure(&self) -> bool {
+        self.flags.fetch_or(SURE | QUEUED, Ordering::AcqRel) & QUEUED == 0
+    }
 }
 
 /// What a walk saw, and the memory it holds for it.
@@ -157,7 +200,7 @@ impl Explored<'_> {
     pub(in crate::composite::joint) fn first_unsure(&self, mut index: usize) -> Option<u32> {
         let mut first = None;
         while let Some((from, label)) = self.nodes[index].parent {
-            if !self.nodes[index].sure && self.nodes[from as usize].sure {
+            if !self.nodes[index].sure() && self.nodes[from as usize].sure() {
                 first = Some(label);
             }
             index = from as usize;
@@ -177,16 +220,6 @@ impl Explored<'_> {
             .get(&label)
             .map(|(entity, action)| (entity.as_str(), action.as_str()))
     }
-
-    /// Remember that `label` names `mv`, when it is a reaction from a type
-    /// outside the scope.
-    fn note_outside(&mut self, label: u32, mv: &Move) {
-        if let Move::Reaction(entity, action, _) = mv {
-            self.outside
-                .entry(label)
-                .or_insert_with(|| (entity.clone(), action.name.clone()));
-        }
-    }
 }
 
 impl JointModel {
@@ -196,227 +229,5 @@ impl JointModel {
             self.relies_on
                 .contains(&(entity.to_string(), action.to_string()))
         })
-    }
-
-    /// Walk every reachable joint state breadth first, so each state is
-    /// first reached by a shortest path. `visit` sees each state as it is
-    /// taken from the queue, with whether sure moves alone reach it, and
-    /// returns true to stop the walk. `keep` says what else the walk keeps;
-    /// only with [`Keep::Sure`] is every state sure moves reach seen as one.
-    /// The walk takes the memory it holds from `bound`'s room and stops when
-    /// the room says no.
-    pub(in crate::composite::joint) fn walk_with<'a>(
-        &self,
-        bound: Bound<'a>,
-        keep: Keep,
-        mut visit: impl FnMut(usize, &JointState, bool) -> bool,
-    ) -> Explored<'a> {
-        let edges = keep == Keep::Edges;
-        // The room bounds what the walk holds; a model's expansion work has
-        // no count or clock of its own here.
-        self.expansion.reset(usize::MAX, None);
-        let mut explored = Explored {
-            nodes: Vec::new(),
-            packer: Packer::default(),
-            made: Vec::new(),
-            edges: Vec::new(),
-            stopped: None,
-            held_back: false,
-            outside: BTreeMap::new(),
-            held: Held::new(bound),
-        };
-        if let Some(reason) = &self.senders.problem {
-            explored.stopped = Some(reason.clone());
-            return explored;
-        }
-        // Check the sliced models before either caller can expand a move.
-        let oversized: Vec<_> = self
-            .models
-            .iter()
-            .filter_map(|(entity, model)| {
-                crate::model::semantics::oversized_transition(model)
-                    .map(|(action, _)| format!("{entity}.{action} parameter expansion"))
-            })
-            .collect();
-        if !oversized.is_empty() {
-            explored.stopped = Some(format!(
-                "unsupported reads or expansion: {}",
-                oversized.join(", ")
-            ));
-            return explored;
-        }
-        let mut seen: HashMap<Packed, u32> = HashMap::new();
-        let mut queue = VecDeque::new();
-        let mut tables = Tables::default();
-        // One start per way the records' ids can be equal: many records start
-        // in millions of ways, so the starts take their memory from the room
-        // as the walk's states do.
-        for init in self.inits() {
-            if !self.expansion.take() {
-                break;
-            }
-            let packed = explored.packer.pack(&init);
-            if seen.contains_key(&packed) {
-                continue;
-            }
-            if let Err(reason) = tables.make_room(&mut explored, &mut seen, &mut queue, edges) {
-                explored.stop_for_room(reason);
-                return explored;
-            }
-            tables.states += block(size_of::<[usize; 2]>() + 4 * packed.len());
-            seen.insert(packed.clone(), explored.nodes.len() as u32);
-            queue.push_back(explored.nodes.len());
-            explored.nodes.push(Node {
-                packed,
-                parent: None,
-                sure: true,
-                queued: true,
-            });
-        }
-        while let Some(index) = queue.pop_front() {
-            explored.nodes[index].queued = false;
-            let sure = explored.nodes[index].sure;
-            let state = explored.state(index);
-            if visit(index, &state, sure) {
-                break;
-            }
-            explored.held.walked(explored.nodes.len());
-            if let Err(reason) = tables.make_room(&mut explored, &mut seen, &mut queue, edges) {
-                explored.stop_for_room(reason);
-                break;
-            }
-            let before = [
-                explored.nodes.len(),
-                explored.made.len(),
-                explored.edges.len(),
-            ];
-            let moves = match self.within(&mut explored.held, &mut tables, || self.moves(&state)) {
-                Ok(moves) => moves,
-                Err(reason) => {
-                    explored.stop_for_room(reason);
-                    break;
-                }
-            };
-            for mv in &moves.0 {
-                if !self.expansion.take() {
-                    break;
-                }
-                let ((nexts, held), room) =
-                    match self.within(&mut explored.held, &mut tables, || self.next(&state, mv)) {
-                        Ok(built) => built,
-                        Err(reason) => {
-                            explored.stop_for_room(reason);
-                            break;
-                        }
-                    };
-                explored.held_back |= held;
-                tables.decided = self.senders.held();
-                // Every outcome needs an edge; state slots are reserved only
-                // when an unseen packed state is about to be kept.
-                let reserved =
-                    tables.reserve(&mut explored, &mut seen, &mut queue, edges, 0, nexts.len());
-                if let Err(reason) = reserved {
-                    tables.give(&mut explored.held, room);
-                    explored.stop_for_room(reason);
-                    break;
-                }
-                if edges {
-                    explored.made.push(Made {
-                        from: index as u32,
-                        by_system: mv.by_system(),
-                        relied: self.relies(mv),
-                        outside: mv.is_outside_reaction(),
-                        covered: !held
-                            && !nexts.is_empty()
-                            && nexts.iter().all(|n| n.certainty != Certainty::Unsure),
-                        held,
-                    });
-                }
-                let made = explored.made.len().saturating_sub(1) as u32;
-                for next in nexts {
-                    let packed = explored.packer.pack(&next.state);
-                    let surely = sure && next.certainty == Certainty::Sure;
-                    let at = match seen.get(&packed) {
-                        Some(&at)
-                            if keep == Keep::Sure
-                                && surely
-                                && !explored.nodes[at as usize].sure =>
-                        {
-                            // Sure moves alone reach it now: walk it again
-                            // unless it still waits to be walked.
-                            if !explored.nodes[at as usize].queued {
-                                if let Err(reason) = tables.reserve(
-                                    &mut explored,
-                                    &mut seen,
-                                    &mut queue,
-                                    false,
-                                    1,
-                                    0,
-                                ) {
-                                    explored.stop_for_room(reason);
-                                    break;
-                                }
-                                queue.push_back(at as usize);
-                            }
-                            let label = explored.packer.id(&next.label);
-                            explored.note_outside(label, mv);
-                            let node = &mut explored.nodes[at as usize];
-                            node.sure = true;
-                            node.queued = true;
-                            node.parent = Some((index as u32, label));
-                            at
-                        }
-                        Some(&at) => at,
-                        None => {
-                            if let Err(reason) =
-                                tables.reserve(&mut explored, &mut seen, &mut queue, false, 1, 0)
-                            {
-                                explored.stop_for_room(reason);
-                                break;
-                            }
-                            let at = explored.nodes.len() as u32;
-                            let label = explored.packer.id(&next.label);
-                            explored.note_outside(label, mv);
-                            tables.states += block(size_of::<[usize; 2]>() + 4 * packed.len());
-                            seen.insert(packed.clone(), at);
-                            explored.nodes.push(Node {
-                                packed,
-                                parent: Some((index as u32, label)),
-                                sure: surely,
-                                queued: true,
-                            });
-                            queue.push_back(at as usize);
-                            at
-                        }
-                    };
-                    if edges {
-                        explored.edges.push(Edge {
-                            made,
-                            to: at,
-                            sure: next.certainty == Certainty::Sure,
-                        });
-                    }
-                }
-                tables.give(&mut explored.held, room);
-                if let Err(reason) = tables.count(&mut explored, &seen, &queue) {
-                    explored.stop_for_room(reason);
-                    break;
-                }
-            }
-            tables.give(&mut explored.held, moves.1);
-            if explored.stopped.is_some() {
-                break;
-            }
-            let after = [
-                explored.nodes.len(),
-                explored.made.len(),
-                explored.edges.len(),
-            ];
-            tables.saw([0, 1, 2].map(|i| after[i] - before[i]));
-        }
-        if self.expansion.exhausted.get() {
-            explored.stopped = Some("the joint expansion exhausted its work or time budget".into());
-        }
-        explored
     }
 }

@@ -7569,6 +7569,7 @@ dependencies = [
 name = "temper-verify"
 version = "0.1.0"
 dependencies = [
+ "dashmap",
  "proptest",
  "serde",
  "serde_json",
@@ -7578,6 +7579,7 @@ dependencies = [
  "temper-jit",
  "temper-runtime",
  "temper-spec",
+ "thread_local",
  "z3",
 ]
 

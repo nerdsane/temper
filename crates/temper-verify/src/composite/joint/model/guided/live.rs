@@ -52,12 +52,7 @@ impl Engine<'_, '_> {
             tables.states += block(size_of::<[usize; 2]>() + 4 * packed.len());
             seen.insert(packed.clone(), 0);
             queue.push_back(0);
-            sub.nodes.push(Node {
-                packed,
-                parent: None,
-                sure: false,
-                queued: false,
-            });
+            sub.nodes.push(Node::new(packed, None, false, false));
             while let Some(index) = queue.pop_front() {
                 if steps == cap || self.left == 0 {
                     return Ok(false);
@@ -103,12 +98,12 @@ impl Engine<'_, '_> {
                                 let label = sub.packer.id(&next.label);
                                 tables.states += block(size_of::<[usize; 2]>() + 4 * packed.len());
                                 seen.insert(packed.clone(), to);
-                                sub.nodes.push(Node {
+                                sub.nodes.push(Node::new(
                                     packed,
-                                    parent: Some((index as u32, label)),
-                                    sure: false,
-                                    queued: false,
-                                });
+                                    Some((index as u32, label)),
+                                    false,
+                                    false,
+                                ));
                                 queue.push_back(to as usize);
                                 to
                             }
