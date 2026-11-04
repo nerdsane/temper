@@ -500,6 +500,7 @@ fn a_walk_its_room_cannot_hold_is_not_checked_and_gives_its_memory_back() {
         panic!("expected not checked, got {}", results[0]);
     };
     assert!(reason.contains("does not fit"), "{reason}");
+    assert!(reason.contains("within 0 moves of a start"), "{reason}");
     assert_eq!(room.held(), 0, "the walk gives back what it took");
 }
 

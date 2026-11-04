@@ -3,6 +3,8 @@
 //! only on acyclic paths, and looks for the goal along a path rather than from
 //! each state, so these are the cases it cannot decide.
 
+use std::sync::atomic::Ordering;
+
 use stateright::{Checker, Model, Property};
 
 use super::*;
@@ -94,6 +96,27 @@ fn stuck_cases(automaton: &Automaton) -> Vec<String> {
     assert_eq!(one.states, four.states, "{one} / {four}");
     assert_eq!(resting(&one).len(), resting(&four).len(), "{one} / {four}");
     resting(&one)
+}
+
+#[test]
+fn a_finished_walk_says_how_many_moves_it_covered() {
+    let lap = looping(DONE, LEADS_OUT, r#""Go", "Finish""#);
+    for threads in [1, 4] {
+        let (room, progress) = (
+            Bytes::new(1 << 28).with_threads(threads),
+            Progress::default(),
+        );
+        let bound = Bound {
+            room: &room,
+            progress: &progress,
+        };
+        verify_joint_liveness(&[&lap], None, bound);
+        assert_eq!(
+            progress.depth.load(Ordering::Relaxed),
+            2,
+            "Start, Far, Done"
+        );
+    }
 }
 
 #[test]

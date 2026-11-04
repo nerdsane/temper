@@ -13,6 +13,7 @@ use super::super::super::pack::{Packed, Packer};
 use super::super::super::room::{Bound, Held, bytes, grow, map_bytes};
 use super::super::JointModel;
 use super::checked::Walker;
+use super::levels::Levels;
 use super::shared::{Seen, Shared, Trail, lock, read, state_bytes};
 use super::{Explored, Keep, Node};
 
@@ -46,6 +47,8 @@ impl JointModel {
             stopped: None,
             held_back: false,
             outside: BTreeMap::new(),
+            covered: 0,
+            reached: 0,
             held: Held::new(bound),
         };
         if let Some(reason) = &self.senders.problem {
@@ -96,7 +99,14 @@ impl JointModel {
             }
             states += state_bytes(&packed);
             let at = explored.nodes.len() as u32;
-            seen.insert(packed.clone(), Seen { at, sure: true });
+            seen.insert(
+                packed.clone(),
+                Seen {
+                    at,
+                    sure: true,
+                    depth: 0,
+                },
+            );
             explored.nodes.push(Node::new(packed, None, true, true));
         }
         let starts = explored.nodes.len() as u32;
@@ -115,6 +125,7 @@ impl JointModel {
             build_room: AtomicUsize::new(BUILD_ROOM),
             wanted: AtomicUsize::new(0),
             waiting: AtomicUsize::new(starts as usize),
+            levels: Levels::new(starts as usize),
             count_at: AtomicUsize::new(0),
             over: AtomicBool::new(false),
             gate: Mutex::new(()),
@@ -136,6 +147,10 @@ impl JointModel {
         );
         let shared = Arc::into_inner(shared).expect("the walk's threads have ended");
         let stopped = shared.stop.load(Ordering::Relaxed);
+        explored.covered = shared.levels.covered();
+        explored.held.covered(explored.covered);
+        explored.reached = shared.levels.reached();
+        explored.held.reached(explored.reached);
         let trail = shared.trail.into_inner().expect("a walk thread panicked");
         explored.nodes = trail.nodes;
         explored.made = trail.made;

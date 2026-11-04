@@ -19,6 +19,7 @@ use super::super::super::JointState;
 use super::super::super::pack::Packed;
 use super::super::JointModel;
 use super::super::step::{Certainty, Move};
+use super::levels::deeper;
 use super::shared::{Seen, Shared, Trail, read, state_bytes, write};
 use super::{Edge, Keep, Made, Node};
 
@@ -33,6 +34,8 @@ pub(super) struct Walked {
     /// Sure moves alone have come to reach it since it was first walked. It
     /// happens to a state once, so this and the number name one job.
     again: bool,
+    /// How many moves from a start it was found.
+    depth: u16,
 }
 
 /// One way a move leads, waiting to be added to the trail.
@@ -84,12 +87,22 @@ impl Model for Walker {
 
     fn init_states(&self) -> Vec<Walked> {
         (0..self.starts)
-            .map(|at| Walked { at, again: false })
+            .map(|at| Walked {
+                at,
+                again: false,
+                depth: 0,
+            })
             .collect()
     }
 
     fn actions(&self, state: &Walked, actions: &mut Vec<Walked>) {
         self.walk(*state, actions);
+        // A walk that stopped may have left this one half done.
+        let ended =
+            self.shared.stop.load(Ordering::Acquire) || self.shared.over.load(Ordering::Acquire);
+        if !ended {
+            self.shared.levels.finished(state.depth);
+        }
     }
 
     fn next_state(&self, _: &Walked, action: Walked) -> Option<Walked> {
@@ -152,10 +165,14 @@ impl Walker {
                 });
             }
             let made = batch.made.len().saturating_sub(1) as u32;
+            let depth = deeper(job.depth);
             for next in &nexts {
                 let packed = self.pack(&next.state);
                 let surely = sure && next.certainty == Certainty::Sure;
                 let found = shared.seen.get(&packed).map(|seen| *seen);
+                if let Some(seen) = found {
+                    shared.levels.found_again(seen.depth, depth);
+                }
                 let to = match found {
                     Some(seen) if self.keep != Keep::Sure || !surely || seen.sure => {
                         if !edges {
@@ -177,10 +194,10 @@ impl Walker {
                 });
             }
             if batch.ways.len() >= BATCH {
-                self.add(job.at, &mut batch, &moves, jobs);
+                self.add(job, &mut batch, &moves, jobs);
             }
         }
-        let states = self.add(job.at, &mut batch, &moves, jobs);
+        let states = self.add(job, &mut batch, &moves, jobs);
         if states >= shared.count_at.load(Ordering::Acquire) {
             shared.wait(|| shared.count_at.load(Ordering::Acquire) > states);
         }
@@ -223,9 +240,15 @@ impl Walker {
         }
     }
 
-    /// Add what walking the state numbered `from` found to the trail, and
-    /// say how many states the walk has.
-    fn add(&self, from: u32, batch: &mut Batch, moves: &[Move], jobs: &mut Vec<Walked>) -> usize {
+    /// Add what walking the state `from` found to the trail, and say how many
+    /// states the walk has.
+    fn add(
+        &self,
+        from: Walked,
+        batch: &mut Batch,
+        moves: &[Move],
+        jobs: &mut Vec<Walked>,
+    ) -> usize {
         let shared = &*self.shared;
         let before = jobs.len();
         let states = {
@@ -244,7 +267,8 @@ impl Walker {
                     } => self.check(
                         trail,
                         packed,
-                        (from, label),
+                        from,
+                        label,
                         surely,
                         &moves[by as usize],
                         jobs,
@@ -260,35 +284,44 @@ impl Walker {
             }
             trail.nodes.len()
         };
-        shared
-            .waiting
-            .fetch_add(jobs.len() - before, Ordering::Relaxed);
+        let made = jobs.len() - before;
+        shared.levels.made(deeper(from.depth), made);
+        shared.waiting.fetch_add(made, Ordering::Relaxed);
         states
     }
 
-    /// The number of the state `packed`, which `mv` leads to from the state
-    /// and by the move `parent` names: a new one when the walk does not have
-    /// it. A job follows when it is new, or when sure moves alone now reach
-    /// it and it does not wait to be walked.
+    /// The number of the state `packed`, which `mv` (named `label`) leads to
+    /// from the state `from`: a new one when the walk does not have it. A job
+    /// follows when it is new, or when sure moves alone now reach it and it
+    /// does not wait to be walked.
+    #[allow(clippy::too_many_arguments)]
     fn check(
         &self,
         trail: &mut Trail,
         packed: Packed,
-        parent: (u32, u32),
+        from: Walked,
+        label: u32,
         surely: bool,
         mv: &Move,
         jobs: &mut Vec<Walked>,
     ) -> u32 {
+        let parent = (from.at, label);
+        let depth = deeper(from.depth);
         match self.shared.seen.entry(packed.clone()) {
             Entry::Occupied(mut found) => {
                 let at = found.get().at;
+                self.shared.levels.found_again(found.get().depth, depth);
                 if self.keep == Keep::Sure && surely && !found.get().sure {
                     found.get_mut().sure = true;
                     note_outside(&mut trail.outside, parent.1, mv);
                     let node = &mut trail.nodes[at as usize];
                     node.parent = Some(parent);
                     if node.found_sure() {
-                        jobs.push(Walked { at, again: true });
+                        jobs.push(Walked {
+                            at,
+                            again: true,
+                            depth,
+                        });
                     }
                 }
                 at
@@ -297,11 +330,19 @@ impl Walker {
                 let at = u32::try_from(trail.nodes.len()).expect("fewer than 2^32 states");
                 note_outside(&mut trail.outside, parent.1, mv);
                 trail.states += state_bytes(&packed);
-                free.insert(Seen { at, sure: surely });
+                free.insert(Seen {
+                    at,
+                    sure: surely,
+                    depth,
+                });
                 trail
                     .nodes
                     .push(Node::new(packed, Some(parent), surely, true));
-                jobs.push(Walked { at, again: false });
+                jobs.push(Walked {
+                    at,
+                    again: false,
+                    depth,
+                });
                 at
             }
         }

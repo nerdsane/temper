@@ -40,6 +40,8 @@ impl Engine<'_, '_> {
             stopped: None,
             held_back: false,
             outside: BTreeMap::new(),
+            covered: 0,
+            reached: 0,
             held: Held::new(self.bound),
         };
         let mut seen: HashMap<Packed, u32> = HashMap::new();

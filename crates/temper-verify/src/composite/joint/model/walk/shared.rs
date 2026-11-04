@@ -14,6 +14,7 @@ use dashmap::DashMap;
 
 use super::super::super::pack::{Packed, Packer};
 use super::super::super::room::{Held, List, MB, block, bytes, grow, map_bytes};
+use super::levels::Levels;
 use super::{Edge, Made, Node};
 
 /// What Stateright's checker holds, as a walk counts it: an entry in its
@@ -29,6 +30,8 @@ const CHECKER_PER_JOB: usize = 2 * 96;
 pub(super) struct Seen {
     pub(super) at: u32,
     pub(super) sure: bool,
+    /// How many moves from a start it was first found.
+    pub(super) depth: u16,
 }
 
 /// What the threads add to as they find it, in one go for each state.
@@ -56,6 +59,8 @@ pub(super) struct Shared {
     pub(super) wanted: AtomicUsize,
     /// Jobs given to the checker and not yet taken.
     pub(super) waiting: AtomicUsize,
+    /// What the walk has covered, by how many moves from a start.
+    pub(super) levels: Levels,
     /// How many states the walk may have before it is counted again.
     pub(super) count_at: AtomicUsize,
     /// The checker has ended, or is about to: nothing is left to wait for.
@@ -155,6 +160,8 @@ impl Shared {
         let states = read(&self.trail).nodes.len();
         self.count_at
             .fetch_max(next_count(states), Ordering::AcqRel);
+        held.covered(self.levels.covered());
+        held.reached(self.levels.reached());
         Ok(())
     }
 
