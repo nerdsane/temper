@@ -198,6 +198,12 @@ pub fn invariant_proofs<'room>(
         .iter()
         .map(|a| (a.automaton.name.as_str(), *a))
         .collect();
+    let app: Arc<BTreeMap<String, Automaton>> = Arc::new(
+        automatons
+            .iter()
+            .map(|a| (a.automaton.name.clone(), (*a).clone()))
+            .collect(),
+    );
     let mut proofs = Vec::new();
     for (name, automaton) in &by_name {
         let invariants: Vec<Invariant> = automaton
@@ -230,16 +236,9 @@ pub fn invariant_proofs<'room>(
             ))
         };
         let wider = match &model {
-            Ok(model) => Wider::new(
-                &by_name,
-                &scope,
-                model.outside_types(),
-                name,
-                &invariants,
-                policies,
-                room,
-            )
-            .map(Box::new),
+            Ok(model) => {
+                Wider::new(&app, &scope, model.outside_types(), policies, room).map(Box::new)
+            }
             Err(_) => None,
         };
         proofs.push(InvariantProof {

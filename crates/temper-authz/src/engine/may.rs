@@ -259,6 +259,22 @@ impl SendAnalysis {
         applicable
     }
 
+    /// Every policy whose action and resource scopes fit `action` on a
+    /// `resource_type` record, as text in a fixed order: no other policy can
+    /// answer about it, whoever asks and whatever the record holds.
+    pub fn fitting(&self, action: &str, resource_type: &str) -> Vec<String> {
+        let mut fitting: Vec<String> = self
+            .scoped(action, resource_type)
+            .iter()
+            .map(|&at| {
+                let (effect, policy) = &self.policies[at];
+                format!("{effect:?} {policy}")
+            })
+            .collect();
+        fitting.sort();
+        fitting
+    }
+
     /// Whether some policy can tell a move in a timer's chain from the same
     /// move in a request's ([`Cause::reaction`]): when none can, a model
     /// need not keep the two apart.

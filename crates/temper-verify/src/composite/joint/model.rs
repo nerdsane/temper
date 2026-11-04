@@ -39,6 +39,7 @@ pub(super) use classes::Classes;
 pub use drops::DroppedReaction;
 pub(crate) use drops::dropped_reactions;
 pub(super) use fair_key::{FairKey, MoveKind};
+pub(super) use from_outside::reads_beyond;
 use from_outside::{Outside, outside_reactions};
 pub use guided::{Candidate, Guide, GuidedSearch, STEPS as GUIDED_STEPS, guided_search, plain};
 use order::{Order, Specs};

@@ -2,39 +2,77 @@
 //! scope come from.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::sync::Arc;
 
 use temper_authz::SendAnalysis;
-use temper_spec::automaton::{Automaton, Invariant};
+use temper_spec::automaton::Automaton;
 use temper_spec::predicate::Expr;
 
-use super::super::model::{self, JointModel};
+use super::super::model;
 use super::super::room::{Bound, Construction, Room};
 use super::super::{JointInvariantResult, JointOutcome};
 use super::{InvariantProof, invariant_model};
 
-/// The joint model of a proof's invariants with the types whose reactions
-/// reach its scope from outside taken in too. The proof holds it, so its
-/// digest covers what the second walk reads, and its room pays for it.
-#[derive(Debug)]
+/// The app as a proof's wider model would read it, kept to build that model
+/// if a walk needs it: most walks never do, and most of what building a model
+/// costs is asking Cedar about its senders. The proof's digest covers what
+/// the model would read through `reads`. That is the whole of each type in
+/// the scope, so a change a cut would leave out walks the proof once more too.
 pub(super) struct Wider<'room> {
     scope: BTreeSet<String>,
-    model: Arc<JointModel>,
-    // Declared last so the model releases its allocations before its room.
-    _memory: Construction<'room>,
+    app: Arc<BTreeMap<String, Automaton>>,
+    policies: Option<SendAnalysis>,
+    reads: String,
+    room: &'room dyn Room,
+}
+
+impl fmt::Debug for Wider<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Wider")
+            .field("scope", &self.scope)
+            .field("reads", &self.reads)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The app's automatons by name, as a model reads them.
+fn named(app: &BTreeMap<String, Automaton>) -> BTreeMap<&str, &Automaton> {
+    app.iter().map(|(name, a)| (name.as_str(), a)).collect()
+}
+
+/// All a model of `scope` reads of the app and of Cedar, as text: its types,
+/// the reactions that reach them from beyond it, and the policies that fit an
+/// action of its types, since no others can answer about one.
+fn reads(
+    app: &BTreeMap<String, Automaton>,
+    scope: &BTreeSet<String>,
+    policies: Option<&SendAnalysis>,
+) -> String {
+    let by_name = named(app);
+    let mut text = model::reads_beyond(&by_name, scope);
+    for entity in scope {
+        let automaton = by_name[entity.as_str()];
+        text.push_str(&format!("{automaton:?}"));
+        let Some(policies) = policies else { continue };
+        for action in &automaton.actions {
+            let fitting = policies.fitting(&action.name, entity);
+            text.push_str(&format!("{fitting:?}"));
+        }
+    }
+    if let Some(policies) = policies {
+        text.push_str(&format!("{}", policies.tells_timer_chains()));
+    }
+    text
 }
 
 impl<'room> Wider<'room> {
-    /// The wider model for `invariants` of `name`, whose scope is `scope`
-    /// and whose model `outside` reaches from outside: none when nothing
-    /// does, or when it does not fit in `room`, and then no break walks
-    /// again.
+    /// What a wider model for a proof with `scope`, whose model `outside`
+    /// reaches from outside, would read: nothing when nothing does.
     pub(super) fn new(
-        by_name: &BTreeMap<&str, &Automaton>,
+        app: &Arc<BTreeMap<String, Automaton>>,
         scope: &BTreeSet<String>,
         outside: BTreeSet<String>,
-        name: &str,
-        invariants: &[Invariant],
         policies: Option<&SendAnalysis>,
         room: &'room dyn Room,
     ) -> Option<Self> {
@@ -42,12 +80,13 @@ impl<'room> Wider<'room> {
             return None;
         }
         let scope: BTreeSet<String> = scope.union(&outside).cloned().collect();
-        let memory = Construction::new(room);
-        let model = invariant_model(by_name, &scope, name, invariants, policies, &memory).ok()?;
+        let reads = reads(app, &scope, policies);
         Some(Self {
             scope,
-            model,
-            _memory: memory,
+            app: Arc::clone(app),
+            policies: policies.cloned(),
+            reads,
+            room,
         })
     }
 
@@ -58,7 +97,8 @@ impl<'room> Wider<'room> {
     /// of it. Here it comes from its own source: a break sure moves alone
     /// reach is one the runtime can reach, so it is broken. Anything else
     /// stays not checked, naming the types: this walk holds one record of
-    /// each type, and a reaction from beyond it is again unsure.
+    /// each type, and a reaction from beyond it is again unsure. When the
+    /// model does not fit in the room, no break walks again.
     pub(super) fn walk(
         &self,
         proof: &InvariantProof<'_>,
@@ -66,8 +106,20 @@ impl<'room> Wider<'room> {
         results: &mut [JointInvariantResult],
         bound: Bound<'_>,
     ) {
+        // Declared first so the model releases its allocations before its room.
+        let memory = Construction::new(self.room);
+        let Ok(model) = invariant_model(
+            &named(&self.app),
+            &self.scope,
+            &proof.entity,
+            &proof.invariants,
+            self.policies.as_ref(),
+            &memory,
+        ) else {
+            return;
+        };
         let exprs: Vec<&Expr> = proof.invariants.iter().map(|inv| &inv.assert).collect();
-        let walk = self.model.walk(&proof.entity, &exprs, bound);
+        let walk = model.walk(&proof.entity, &exprs, bound);
         for ((found, from), outcome) in results.iter_mut().zip(outside).zip(&walk.outcomes) {
             if from.is_empty() {
                 continue;

@@ -194,6 +194,18 @@ impl JointModel {
 static CREATE: Option<temper_spec::automaton::TargetResolver> =
     Some(temper_spec::automaton::TargetResolver::Create);
 
+/// All a model of `scope` reads of the types outside it, as text.
+pub(in crate::composite::joint) fn reads_beyond(
+    by_name: &BTreeMap<&str, &Automaton>,
+    scope: &BTreeSet<String>,
+) -> String {
+    format!(
+        "{:?}{:?}",
+        outside_reactions(by_name, scope),
+        super::read::reactions_into(by_name, scope)
+    )
+}
+
 /// The reactions from types outside `scope` into actions of types in it
 /// ([`Outside`]), by their target (entity, action).
 pub(super) fn outside_reactions(

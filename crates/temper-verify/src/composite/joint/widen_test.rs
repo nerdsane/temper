@@ -133,3 +133,68 @@ fn a_rule_the_reaction_from_outside_the_scope_breaks_as_sent_is_broken() {
         "{text}"
     );
 }
+
+/// The digests of `sources`' proofs under `policies`.
+fn digests(sources: &[&str], policies: &str) -> Vec<String> {
+    let automatons: Vec<Automaton> = sources
+        .iter()
+        .map(|source| parse_automaton(source).expect("fixture parses"))
+        .collect();
+    let refs: Vec<&Automaton> = automatons.iter().collect();
+    let analysis = SendAnalysis::new(policies).expect("fixture policies parse");
+    let room = Bytes::new(1 << 30);
+    joint_proofs(&refs, Some(&analysis), &room)
+        .iter()
+        .map(JointProof::digest)
+        .collect()
+}
+
+#[test]
+fn a_change_only_the_wider_walk_reads_changes_the_digest() {
+    // What the note hands over decides this proof, and only the second walk
+    // reads it: the first sends the reaction with any holder.
+    let before = digests(&[&note("main"), BOX, LID], POLICIES);
+    assert_eq!(before, digests(&[&note("main"), BOX, LID], POLICIES));
+    assert_ne!(before, digests(&[&note("other"), BOX, LID], POLICIES));
+    // Who may send the note is Cedar only the second walk reads.
+    let closed = POLICIES.replace(
+        "permit(principal, action == Action::\"Send\", resource is Note);",
+        "",
+    );
+    assert_ne!(before, digests(&[&note("main"), BOX, LID], &closed));
+}
+
+#[test]
+fn a_change_the_wider_walk_does_not_read_keeps_the_digest() {
+    let before = digests(&[&note("main"), BOX, LID], POLICIES);
+    let more =
+        format!("{POLICIES}\npermit(principal, action == Action::\"Elsewhere\", resource);\n");
+    assert_eq!(before, digests(&[&note("main"), BOX, LID], &more));
+}
+
+#[test]
+fn a_proof_holds_room_for_its_wider_model_only_while_it_walks_it() {
+    let automatons: Vec<Automaton> = [note("other").as_str(), BOX, LID]
+        .iter()
+        .map(|source| parse_automaton(source).expect("fixture parses"))
+        .collect();
+    let refs: Vec<&Automaton> = automatons.iter().collect();
+    let analysis = SendAnalysis::new(POLICIES).expect("fixture policies parse");
+    let (room, progress) = (Bytes::new(1 << 30), Progress::default());
+    let proofs = joint_proofs(&refs, Some(&analysis), &room);
+    let held = room.held();
+    let bound = Bound {
+        room: &room,
+        progress: &progress,
+    };
+    let JointProof::Invariants(proof) = &proofs[0] else {
+        panic!("expected the invariants' proof");
+    };
+    let results = proof.check(bound);
+    assert!(
+        matches!(results[0].outcome, JointOutcome::Broken { .. }),
+        "the second walk ran: {}",
+        results[0]
+    );
+    assert_eq!(room.held(), held);
+}
