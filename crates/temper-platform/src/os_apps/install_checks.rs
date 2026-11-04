@@ -11,7 +11,7 @@ use temper_runtime::tenant::TenantId;
 use temper_server::tenant_restore::Standing;
 use temper_spec::automaton::Automaton;
 use temper_spec::cross_invariant;
-use temper_verify::composite::{Bound, JointOutcome, JointProof, LivenessOutcome};
+use temper_verify::composite::{Bound, FairOutcome, JointOutcome, JointProof, LivenessOutcome};
 
 use super::InstallWarning;
 use super::proofs::{self, Attempt, Keys, Proof, Verdict, Wait, Walked};
@@ -98,12 +98,12 @@ pub(super) fn parse_cross_invariants(source: Option<&str>, app_name: &str) -> Re
 /// tenant runs, proven when they were installed, so it walks nothing.
 ///
 /// Only a rule the check finds broken refuses the install: an invariant with
-/// a path of moves that breaks it, or a liveness rule with a path to a state
-/// from which no move reaches its condition. A rule it could not prove (the
-/// walk did not fit in its memory, it reads a type nobody declares, a module
-/// answer not walked, or a premise no state meets) is a warning and the
-/// install goes ahead; those rules are returned for the install's answer. It
-/// runs before the install writes or swaps anything, so a refused bundle
+/// a path of moves that breaks it, a liveness rule with a path to a state
+/// from which no move reaches its condition, or a fair cycle that misses it.
+/// A rule it could not prove (the walk did not fit in its memory, it reads a
+/// type nobody declares, a module answer not walked, or a premise no state
+/// meets) is a warning and the install goes ahead; those rules are returned
+/// for the install's answer. It runs before the install writes or swaps anything, so a refused bundle
 /// leaves the tenant as it was and reads keep serving the old specs
 /// meanwhile. Each walk's verdict is kept by the digest of its model and by
 /// the digest of the specs and Cedar (see [`proofs`]), so a rule whose cut
@@ -229,14 +229,21 @@ fn walk(proof: &JointProof, bound: Bound<'_>) -> Walked {
         JointProof::Liveness(liveness) => {
             let result = liveness.check(bound);
             let text = result.to_string();
-            match result.outcome {
-                LivenessOutcome::Holds => held.push(text),
-                LivenessOutcome::Vacuous { .. } => unproved.push(text),
-                LivenessOutcome::Incomplete { .. } => {
+            // A rule asking for fairness answers for both checks: the worse decides.
+            let fair = result.fair.as_ref().map(|fair| &fair.outcome);
+            match (&result.outcome, fair) {
+                (LivenessOutcome::Stuck { .. }, _) | (_, Some(FairOutcome::Broken { .. })) => {
+                    broken.push(text)
+                }
+                (LivenessOutcome::Incomplete { .. }, _)
+                | (_, Some(FairOutcome::Incomplete { .. })) => {
                     fit = false;
                     unproved.push(text);
                 }
-                LivenessOutcome::Stuck { .. } => broken.push(text),
+                (LivenessOutcome::Vacuous { .. }, _) | (_, Some(FairOutcome::Vacuous { .. })) => {
+                    unproved.push(text)
+                }
+                (LivenessOutcome::Holds, None | Some(FairOutcome::Holds { .. })) => held.push(text),
             }
         }
     }

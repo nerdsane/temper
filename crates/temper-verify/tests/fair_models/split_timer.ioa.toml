@@ -1,0 +1,50 @@
+[automaton]
+name = "T"
+states = ["Idle", "A", "B", "Out"]
+initial = "Idle"
+
+[[action]]
+name = "Begin"
+kind = "input"
+from = ["Idle"]
+to = "A"
+
+[[action]]
+name = "X"
+kind = "input"
+from = ["A"]
+to = "B"
+
+[[action]]
+name = "Y"
+kind = "input"
+from = ["B"]
+to = "A"
+
+[[action]]
+name = "GoA"
+kind = "internal"
+from = ["A"]
+to = "Out"
+
+[[action]]
+name = "GoB"
+kind = "internal"
+from = ["B"]
+to = "Out"
+
+[[state_timeout]]
+state = "A"
+after_seconds = 60
+on_timeout = "GoA"
+
+[[state_timeout]]
+state = "B"
+after_seconds = 60
+on_timeout = "GoB"
+
+[[liveness]]
+name = "GetsOut"
+eventually = "status == 'Idle' || status == 'Out'"
+relies_on = ["X", "Y"]
+fairness = {}

@@ -1,0 +1,47 @@
+[automaton]
+name = "P"
+states = ["Idle", "Polling", "Out"]
+initial = "Idle"
+
+[[action]]
+name = "Begin"
+kind = "input"
+from = ["Idle"]
+to = "Polling"
+
+[[action.triggers]]
+name = "call"
+kind = "wasm"
+module = "work"
+on_success = ["Still", "Finished"]
+on_failure = "Failed"
+
+[[action]]
+name = "Still"
+kind = "internal"
+from = ["Polling"]
+to = "Polling"
+
+[[action.triggers]]
+name = "call"
+kind = "wasm"
+module = "work"
+on_success = ["Still", "Finished"]
+on_failure = "Failed"
+
+[[action]]
+name = "Finished"
+kind = "internal"
+from = ["Polling"]
+to = "Out"
+
+[[action]]
+name = "Failed"
+kind = "internal"
+from = ["Polling"]
+to = "Out"
+
+[[liveness]]
+name = "G"
+eventually = "status == 'Idle' || status == 'Out'"
+fairness = {}

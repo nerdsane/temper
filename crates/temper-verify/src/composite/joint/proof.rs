@@ -5,9 +5,10 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 use temper_authz::SendAnalysis;
-use temper_spec::automaton::{Automaton, Invariant};
+use temper_spec::automaton::{Automaton, Fairness, Invariant};
 use temper_spec::predicate::Expr;
 
+use super::fair::{FairOutcome, FairVerdict, fair_bytes, fair_check};
 use super::liveness::{settle, settle_bytes};
 use super::model::{self, JointModel, Sending};
 use super::room::{Bound, Construction, MB, Room};
@@ -263,6 +264,8 @@ pub struct LivenessProof<'room> {
     pub(super) name: String,
     goal: Expr,
     relies_on: Vec<String>,
+    /// What its fairness check assumes, when it asks for one.
+    fairness: Option<Box<Fairness>>,
     scope: BTreeSet<String>,
     /// The model, or why there is none: a type the condition reads that the
     /// app does not declare.
@@ -283,6 +286,15 @@ impl LivenessProof<'_> {
             states: 0,
             in_flight_bound: None,
             outcome: LivenessOutcome::Holds,
+            fair: None,
+        };
+        let verdict = |outcome| {
+            self.fairness.as_ref().map(|fairness| FairVerdict {
+                weak: fairness.weak.clone(),
+                strong: fairness.strong.clone(),
+                in_flight_bound: None,
+                outcome,
+            })
         };
         let model = match &self.model {
             Ok(model) => model,
@@ -290,6 +302,9 @@ impl LivenessProof<'_> {
                 result.outcome = LivenessOutcome::Incomplete {
                     reason: reason.clone(),
                 };
+                result.fair = verdict(FairOutcome::Incomplete {
+                    reason: reason.clone(),
+                });
                 return result;
             }
         };
@@ -299,30 +314,53 @@ impl LivenessProof<'_> {
         let settling = settle_bytes(&explored);
         // Past where the walk stops, phase two (`model/guided.rs`).
         if let Some(reason) = explored.stopped.clone() {
+            result.fair = verdict(FairOutcome::Incomplete {
+                reason: reason.clone(),
+            });
             result.outcome =
                 model.guided_liveness(&self.entity, &self.goal, explored, reason, bound);
             return result;
         }
-        result.outcome = match explored.held.add(settling) {
-            Ok(()) => match settle(model, &self.entity, &self.goal, &explored) {
-                (LivenessOutcome::Holds, false) => LivenessOutcome::Vacuous {
-                    premise: super::premise(&self.goal)
-                        .map(ToString::to_string)
-                        .unwrap_or_default(),
-                },
-                (outcome, _) => outcome,
+        if let Err(reason) = explored.held.add(settling) {
+            let reason = format!(
+                "deciding the walk does not fit in the memory it may hold: {reason} \
+                 (it held {} MB at {} states and needs {} MB more)",
+                explored.held.bytes / MB,
+                explored.len(),
+                settling / MB
+            );
+            result.fair = verdict(FairOutcome::Incomplete {
+                reason: reason.clone(),
+            });
+            result.outcome =
+                model.guided_liveness(&self.entity, &self.goal, explored, reason, bound);
+            return result;
+        }
+        result.outcome = match settle(model, &self.entity, &self.goal, &explored) {
+            (LivenessOutcome::Holds, false) => LivenessOutcome::Vacuous {
+                premise: super::premise(&self.goal)
+                    .map(ToString::to_string)
+                    .unwrap_or_default(),
             },
-            Err(reason) => {
-                let reason = format!(
-                    "deciding the walk does not fit in the memory it may hold: {reason} \
-                         (it held {} MB at {} states and needs {} MB more)",
-                    explored.held.bytes / MB,
-                    explored.len(),
-                    settling / MB
-                );
-                model.guided_liveness(&self.entity, &self.goal, explored, reason, bound)
-            }
+            (outcome, _) => outcome,
         };
+        if let Some(fairness) = &self.fairness {
+            let needs = fair_bytes(&explored);
+            let outcome = match explored.held.add(needs) {
+                Ok(()) => fair_check(model, &self.entity, &self.goal, &explored, fairness),
+                Err(reason) => FairOutcome::Incomplete {
+                    reason: format!(
+                        "the fairness check does not fit in the memory it may hold: {reason} \
+                         (it needs {} MB more)",
+                        needs / MB
+                    ),
+                },
+            };
+            result.fair = verdict(outcome).map(|mut fair| {
+                fair.in_flight_bound = result.in_flight_bound;
+                fair
+            });
+        }
         result
     }
 }
@@ -385,6 +423,7 @@ pub fn liveness_proofs<'room>(
                 name: live.name.clone(),
                 goal: goal.clone(),
                 relies_on: live.relies_on.clone(),
+                fairness: live.fairness.clone().map(Box::new),
                 scope,
                 model,
             });

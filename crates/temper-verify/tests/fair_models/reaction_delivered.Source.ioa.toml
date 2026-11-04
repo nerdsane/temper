@@ -1,0 +1,19 @@
+[automaton]
+name = "Source"
+states = ["Idle", "Sent"]
+initial = "Idle"
+
+[[action]]
+name = "Send"
+kind = "input"
+from = ["Idle"]
+to = "Sent"
+
+[[action.triggers]]
+name = "tell"
+kind = "entity"
+target_entity = "Target"
+target_action = "Take"
+
+[action.triggers.resolve_target]
+kind = "same_id"

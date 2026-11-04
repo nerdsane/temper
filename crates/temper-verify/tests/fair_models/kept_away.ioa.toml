@@ -1,0 +1,39 @@
+[automaton]
+name = "Flip"
+states = ["Idle", "A", "Flipped", "Out"]
+initial = "Idle"
+
+[[action]]
+name = "Begin"
+kind = "input"
+from = ["Idle"]
+to = "A"
+
+[[action]]
+name = "Flip"
+kind = "input"
+from = ["A"]
+to = "Flipped"
+
+[[action]]
+name = "Flop"
+kind = "internal"
+from = ["Flipped"]
+to = "A"
+
+[[action]]
+name = "Exit"
+kind = "input"
+from = ["A"]
+to = "Out"
+
+[[state_timeout]]
+state = "Flipped"
+after_seconds = 60
+on_timeout = "Flop"
+
+[[liveness]]
+name = "GetsOut"
+eventually = "status == 'Idle' || status == 'Out'"
+relies_on = ["Exit"]
+fairness = {}

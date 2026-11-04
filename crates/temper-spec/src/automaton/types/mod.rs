@@ -276,6 +276,25 @@ pub struct Liveness {
     /// the condition is false.
     #[serde(default)]
     pub relies_on: Vec<String>,
+    /// Ask for a second check of `eventually`: not only that a way exists,
+    /// but that it comes, under fairness. Its absence leaves the rule a
+    /// can-reach rule. An empty table assumes only what the runtime owes.
+    #[serde(default)]
+    pub fairness: Option<Fairness>,
+}
+
+/// What a `[[liveness]]` rule's fairness check assumes beyond what the runtime
+/// owes: actions of this entity that are taken in the end, whoever sends them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Fairness {
+    /// Each is taken in the end if it stays possible without a break.
+    #[serde(default)]
+    pub weak: Vec<String>,
+    /// Each is taken in the end if it keeps becoming possible, even when it
+    /// is not possible all the time.
+    #[serde(default)]
+    pub strong: Vec<String>,
 }
 
 /// A dispatch record the runtime's WASM and adapter dispatchers look up by

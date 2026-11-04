@@ -1,0 +1,49 @@
+[automaton]
+name = "H"
+states = ["Idle", "A", "Out"]
+initial = "Idle"
+
+[[state]]
+name = "f"
+type = "string"
+initial = "x"
+
+[[action]]
+name = "Begin"
+kind = "input"
+from = ["Idle"]
+to = "A"
+
+[[action]]
+name = "Beat1"
+kind = "input"
+from = ["A"]
+to = "A"
+guard = "f == 'x'"
+effect = ["f = 'y'"]
+
+[[action]]
+name = "Beat2"
+kind = "input"
+from = ["A"]
+to = "A"
+guard = "f == 'y'"
+effect = ["f = 'x'"]
+
+[[action]]
+name = "Expire"
+kind = "internal"
+from = ["A"]
+to = "Out"
+
+[[state_timeout]]
+state = "A"
+after_seconds = 60
+on_timeout = "Expire"
+reset_on = ["Beat1", "Beat2"]
+
+[[liveness]]
+name = "G"
+eventually = "status == 'Idle' || status == 'Out'"
+relies_on = ["Beat1", "Beat2"]
+fairness = {}

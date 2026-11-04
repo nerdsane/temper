@@ -1,0 +1,44 @@
+[automaton]
+name = "Loop"
+states = ["Idle", "A", "B", "Out"]
+initial = "Idle"
+
+[[action]]
+name = "Begin"
+kind = "input"
+from = ["Idle"]
+to = "A"
+
+[[action]]
+name = "Go"
+kind = "internal"
+from = ["A"]
+to = "B"
+
+[[action]]
+name = "Back"
+kind = "internal"
+from = ["B"]
+to = "A"
+
+[[action]]
+name = "Exit"
+kind = "input"
+from = ["A"]
+to = "Out"
+
+[[state_timeout]]
+state = "A"
+after_seconds = 60
+on_timeout = "Go"
+
+[[state_timeout]]
+state = "B"
+after_seconds = 60
+on_timeout = "Back"
+
+[[liveness]]
+name = "GetsOut"
+eventually = "status == 'Idle' || status == 'Out'"
+relies_on = ["Exit"]
+fairness = { weak = ["Exit"] }

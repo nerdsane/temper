@@ -61,6 +61,7 @@
 //! move from outside, and names each reaction a target refuses.
 
 mod env;
+mod fair;
 mod liveness;
 mod model;
 mod pack;
@@ -70,6 +71,7 @@ mod senders;
 mod slice;
 mod state;
 
+pub use fair::{FairOutcome, FairVerdict, Lasso};
 pub use liveness::{JointLivenessResult, LivenessOutcome, StuckCase, verify_joint_liveness};
 pub use proof::{
     InvariantProof, JointProof, LivenessProof, invariant_proofs, joint_proofs, liveness_proofs,

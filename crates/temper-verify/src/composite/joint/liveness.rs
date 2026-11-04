@@ -55,13 +55,15 @@ use temper_spec::automaton::Automaton;
 use temper_spec::predicate::{Truth, eval};
 
 use super::JointStep;
+use super::fair::FairVerdict;
 use super::model::{self, JointModel};
 use super::proof::liveness_proofs;
 use super::room::Bound;
 
 #[path = "liveness_stuck.rs"]
 mod stuck;
-use stuck::{may_reach, sure_path, unsure_reason};
+pub(super) use stuck::sure_path;
+use stuck::{may_reach, unsure_reason};
 
 /// What the joint check found for one `eventually` property.
 #[derive(Debug, Clone)]
@@ -84,6 +86,8 @@ pub struct JointLivenessResult {
     /// Settles, stuck (with a shortest path to a state it cannot leave),
     /// proves nothing, or not fully checked.
     pub outcome: LivenessOutcome,
+    /// Whether it comes under fairness, when the rule asks.
+    pub fair: Option<FairVerdict>,
 }
 
 impl JointLivenessResult {
@@ -152,6 +156,20 @@ impl fmt::Display for StuckCase {
 
 impl fmt::Display for JointLivenessResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.fmt_can_reach(f)?;
+        let Some(fair) = &self.fair else {
+            return Ok(());
+        };
+        if !matches!(self.outcome, LivenessOutcome::Stuck { .. }) {
+            writeln!(f)?;
+        }
+        write!(f, "{}.{} {fair}", self.entity, self.name)
+    }
+}
+
+impl JointLivenessResult {
+    /// What the can-reach check found.
+    fn fmt_can_reach(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let scope = self.scope.join(" + ");
         let relying = if self.relies_on.is_empty() {
             String::new()
@@ -219,6 +237,47 @@ pub fn verify_joint_liveness(
         .collect()
 }
 
+/// What a rule's condition says of each walked state.
+pub(super) struct Marks {
+    /// It holds there, with nothing in flight.
+    pub(super) done: Vec<bool>,
+    /// It is not known to hold there.
+    pub(super) failing: Vec<bool>,
+    /// It may hold there, with nothing in flight.
+    pub(super) maybe_done: Vec<bool>,
+    /// A walked state meets its premise (always, when it has none).
+    pub(super) met: bool,
+}
+
+/// Read a rule's condition on every walked state.
+pub(super) fn marks(
+    model: &JointModel,
+    owner: &str,
+    goal: &temper_spec::predicate::Expr,
+    explored: &model::Explored,
+) -> Marks {
+    let count = explored.len();
+    let premise = super::premise(goal);
+    let mut marks = Marks {
+        done: vec![false; count],
+        failing: vec![false; count],
+        maybe_done: vec![false; count],
+        met: premise.is_none(),
+    };
+    for index in 0..count {
+        let state = explored.state(index);
+        let env = model.env(owner, &state);
+        let truth = eval(goal, &env);
+        if let (false, Some(premise)) = (marks.met, premise) {
+            marks.met = eval(premise, &env) != Truth::False;
+        }
+        marks.failing[index] = truth != Truth::True;
+        marks.done[index] = truth == Truth::True && state.settled();
+        marks.maybe_done[index] = truth != Truth::False && state.settled();
+    }
+    marks
+}
+
 /// Whether every walked state reaches `goal` through the system's moves,
 /// and if not, each way the stuck states come to rest: the first stuck state
 /// with nothing in flight (in walk order, so with a shortest path) for each
@@ -236,20 +295,9 @@ pub(super) fn settle(
     explored: &model::Explored,
 ) -> (LivenessOutcome, bool) {
     let count = explored.len();
-    let premise = super::premise(goal);
-    let mut met = premise.is_none();
-    let mut failing = vec![false; count];
-    let mut done = vec![false; count];
-    for index in 0..count {
-        let state = explored.state(index);
-        let env = model.env(owner, &state);
-        let truth = eval(goal, &env);
-        if let (false, Some(premise)) = (met, premise) {
-            met = eval(premise, &env) != Truth::False;
-        }
-        failing[index] = truth != Truth::True;
-        done[index] = truth == Truth::True && state.settled();
-    }
+    let Marks {
+        done, failing, met, ..
+    } = marks(model, owner, goal, explored);
     let good = reach(explored, &done, &failing, false);
     if good.iter().all(|&g| g) {
         return (LivenessOutcome::Holds, met);

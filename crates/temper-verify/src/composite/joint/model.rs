@@ -4,6 +4,7 @@
 mod classes;
 mod commit;
 mod drops;
+mod fair_key;
 mod from_outside;
 mod guided;
 mod held;
@@ -36,6 +37,7 @@ use crate::model::{ModelString, ParamValue, ResolvedTransition, TemperModel, Tem
 pub(super) use classes::Classes;
 pub use drops::DroppedReaction;
 pub(crate) use drops::dropped_reactions;
+pub(super) use fair_key::{FairKey, MoveKind};
 use from_outside::{Outside, outside_reactions};
 pub use guided::{Candidate, Guide, GuidedSearch, STEPS as GUIDED_STEPS, guided_search, plain};
 use order::{Order, Specs};
@@ -43,7 +45,7 @@ pub(super) use read::Timeout;
 use read::{Kernel, Reaction, Unchecked, named_literals, tracked, unchecked_constraints};
 pub(super) use step::{Certainty, Move};
 pub(super) use walk::Keep;
-pub(super) use walk::{Explored, Made};
+pub(super) use walk::{Edge, Explored, Made};
 
 /// Counter ceiling for the joint models, as for the composite plans.
 const JOINT_MAX_COUNTER: usize = 3;

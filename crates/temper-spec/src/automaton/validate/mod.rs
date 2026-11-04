@@ -338,6 +338,9 @@ fn validate_predicates(automaton: &Automaton) -> Result<(), AutomatonParseError>
             if !live.relies_on.is_empty() {
                 return Err(invalid(slot, "`relies_on` needs `eventually`".into()));
             }
+            if live.fairness.is_some() {
+                return Err(invalid(slot, "`fairness` needs `eventually`".into()));
+            }
             if !live.can_reach.is_empty() {
                 validate_can_reach(automaton, live).map_err(|e| invalid(slot, e))?;
             }
@@ -372,6 +375,27 @@ fn validate_predicates(automaton: &Automaton) -> Result<(), AutomatonParseError>
                 slot,
                 format!("`relies_on` names no action '{unknown}'"),
             ));
+        }
+        if let Some(fairness) = &live.fairness {
+            let mut named = fairness.weak.iter().chain(&fairness.strong);
+            if let Some(unknown) =
+                named.find(|name| !automaton.actions.iter().any(|a| &a.name == *name))
+            {
+                return Err(invalid(
+                    slot,
+                    format!("`fairness` names no action '{unknown}'"),
+                ));
+            }
+            if let Some(both) = fairness
+                .weak
+                .iter()
+                .find(|name| fairness.strong.contains(name))
+            {
+                return Err(invalid(
+                    slot,
+                    format!("`fairness` names '{both}' as both weak and strong"),
+                ));
+            }
         }
     }
     for inv in &automaton.field_invariants {

@@ -1,0 +1,27 @@
+[automaton]
+name = "Job"
+states = ["Idle", "Working", "Out"]
+initial = "Idle"
+
+[[action]]
+name = "Begin"
+kind = "input"
+from = ["Idle"]
+to = "Working"
+
+[[action.triggers]]
+name = "call"
+kind = "wasm"
+module = "work"
+on_failure = "Failed"
+
+[[action]]
+name = "Failed"
+kind = "internal"
+from = ["Working"]
+to = "Out"
+
+[[liveness]]
+name = "GetsOut"
+eventually = "status != 'Working'"
+fairness = {}

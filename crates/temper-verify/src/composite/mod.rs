@@ -17,10 +17,10 @@ pub mod joint;
 pub mod verify;
 
 pub use joint::{
-    Bound, Bytes, DroppedReaction, InvariantProof, JointInvariantResult, JointLivenessResult,
-    JointOutcome, JointProof, JointReplay, JointStep, LivenessOutcome, LivenessProof, Progress,
-    Room, StuckCase, TraceMove, invariant_proofs, joint_proofs, liveness_proofs,
-    replay_joint_invariants, verify_joint_invariants, verify_joint_liveness,
+    Bound, Bytes, DroppedReaction, FairOutcome, FairVerdict, InvariantProof, JointInvariantResult,
+    JointLivenessResult, JointOutcome, JointProof, JointReplay, JointStep, Lasso, LivenessOutcome,
+    LivenessProof, Progress, Room, StuckCase, TraceMove, invariant_proofs, joint_proofs,
+    liveness_proofs, replay_joint_invariants, verify_joint_invariants, verify_joint_liveness,
 };
 pub use verify::{
     CompositeOutcome, CompositeVerifyResult, seed_cover, verify_all, verify_composite,

@@ -63,7 +63,7 @@ pub(super) fn unsure_reason(explored: &Explored, good: &[bool], out: &[bool]) ->
 }
 
 /// The moves sure moves alone reach the state walked `index`th by.
-pub(super) fn sure_path(
+pub(in crate::composite::joint) fn sure_path(
     model: &JointModel,
     explored: &Explored,
     parents: &[Option<u32>],
