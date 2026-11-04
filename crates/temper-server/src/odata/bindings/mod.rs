@@ -342,6 +342,8 @@ pub(crate) async fn check_bound_action(
     action: &str,
 ) -> axum::response::Response {
     let tenant = authenticated.tenant();
+    // Cedar knows an action by its bare name, as the move's own path parses it.
+    let action = action.rsplit('.').next().unwrap_or(action);
     let Some(entity_type) = crate::odata::resolve_entity_type(state, tenant, entity_set) else {
         return odata_error(
             StatusCode::NOT_FOUND,

@@ -92,9 +92,14 @@ fn delayed_boot_recovery_does_not_answer_a_current_process_call() {
                     .iter()
                     .any(|action| action == "GiveUp")
             );
-            tokio::time::advance(Duration::from_secs(3600)).await;
-            for _ in 0..600 {
-                tokio::task::yield_now().await;
+            // The write outlasted its handler's limit, so the record gave it up.
+            // The answer is kept and sent again, each wait on the clock's next
+            // step: its second write lands.
+            for _ in 0..8 {
+                tokio::time::advance(Duration::from_secs(60)).await;
+                for _ in 0..600 {
+                    tokio::task::yield_now().await;
+                }
             }
             assert_eq!(
                 journal(&store).await.last().map(String::as_str),

@@ -147,8 +147,13 @@ impl<A: Actor> ActorCell<A> {
                         {
                             error!(actor = %id, error = %e, "actor handle (ask) failed");
                             if let Some(tx) = ctx.reply_channel.take() {
-                                let _ = tx
-                                    .send(Err(ActorError::custom(format!("handler failed: {e}"))));
+                                // Stopped keeps its kind: it tells the caller the
+                                // message did not finish and can be tried again.
+                                let answer = match e {
+                                    ActorError::Stopped => ActorError::Stopped,
+                                    e => ActorError::custom(format!("handler failed: {e}")),
+                                };
+                                let _ = tx.send(Err(answer));
                             }
                             if should_restart(&strategy, restart_count) {
                                 break 'message_loop true;

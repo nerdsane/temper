@@ -10,6 +10,7 @@ use crate::registry::SpecRegistry;
 use crate::{ServerState, StorageStack};
 use temper_jit::table::TransitionTable;
 use temper_runtime::ActorSystem;
+use temper_runtime::actor::ActorError;
 use temper_runtime::scheduler::install_deterministic_context;
 use temper_runtime::tenant::TenantId;
 use temper_spec::csdl::parse_csdl;
@@ -179,8 +180,8 @@ async fn dst_a_message_past_its_deadline_is_given_up_and_the_record_takes_the_ne
         ];
         assert_eq!(lines.with(&abandoned), 1, "seed {seed}: {}", lines.text());
         assert!(
-            reply.await.unwrap().is_err(),
-            "seed {seed}: the given-up message is answered with an error"
+            matches!(reply.await.unwrap(), Err(ActorError::Stopped)),
+            "seed {seed}: the caller of a given-up message can try it again"
         );
 
         let next: EntityResponse = actor

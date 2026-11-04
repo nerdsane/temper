@@ -147,7 +147,9 @@ impl Attempt {
     /// answered as a duplicate under the same key. An actor that stopped
     /// before answering (its starts failed, as they do while its journal
     /// cannot be read) never handled the move, and a later try starts it
-    /// again. A write kept for a reason that never clears stays held, which
+    /// again. An actor that gave the move up past its handler deadline answers
+    /// the same: the outcome is unknown, and the later try is answered as a
+    /// duplicate if it landed. A write kept for a reason that never clears stays held, which
     /// `temper_owed_writes_held` shows.
     pub(crate) fn of_error(error: &DispatchError) -> Self {
         match error {

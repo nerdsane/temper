@@ -13,7 +13,11 @@
 //!
 //! A message that outruns [`handler_deadline`] is given up: [`limited`] logs
 //! `handler abandoned` with the await it was in, drops it and fails it, which
-//! makes the actor rebuild from its journal and take the next message. Memory
+//! makes the actor rebuild from its journal and take the next message. Its
+//! caller is answered [`ActorError::Stopped`], as if the actor had stopped
+//! before answering, because the move's outcome is unknown and a later try can
+//! still land it: a write a committed move owes, such as a call's answer, is
+//! kept and sent again under its key rather than lost. Memory
 //! cannot be wrong after that, and a write the dropped message began cannot
 //! land twice: the store runs an append to its own end whatever happens to its
 //! caller or is one transaction that rolls back, and a later write is checked
@@ -213,13 +217,7 @@ pub(super) async fn limited<T, F: Future<Output = Result<T, ActorError>>>(
                 deadline_secs = deadline.as_secs(),
                 "handler abandoned"
             );
-            Err(ActorError::custom(format!(
-                "{}:{} gave up {message} after {}s, {}",
-                record.entity_type,
-                record.entity_id,
-                deadline.as_secs(),
-                now.get().name(),
-            )))
+            Err(ActorError::Stopped)
         }
     }
 }
