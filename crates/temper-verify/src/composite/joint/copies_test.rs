@@ -359,3 +359,49 @@ assert = "status == 'C' => Toggle[other].status != 'Z' || status == 'C'"
     let two = check(&model, 2);
     assert!(two.states < one.states * one.states, "{one} {two}");
 }
+
+fn parent_read() -> Model {
+    model!("parentread", "Alarm", "Probe")
+}
+
+#[test]
+fn a_trigger_guard_finds_its_record_by_a_field_of_the_sender() {
+    // Clearing the alarm before the probe opens is refused at the probe; the
+    // probe then ends itself, because its trigger reads its parent. With the
+    // parent's id unread the guard went both ways and the rule could not hold.
+    for records in [1, 2] {
+        assert!(check(&parent_read(), records).holds(), "{records} records");
+    }
+}
+
+#[test]
+fn without_the_read_of_its_parent_the_probe_stays_open() {
+    let unread = fixed(
+        &parent_read(),
+        1,
+        "Alarm[parent_id].status == 'Cleared'",
+        "false",
+    );
+    let moves = moves(&check(&unread, 1));
+    assert!(moves.iter().any(|m| m.contains("Alarm.Clear")), "{moves:?}");
+    assert!(moves.iter().any(|m| m.contains("Probe.Open")), "{moves:?}");
+}
+
+#[test]
+fn a_reaction_carries_what_its_target_requires() {
+    // The target refuses `End` with no reason: with the reason the rule holds
+    // above, and without it the probe stays open under a cleared alarm.
+    let silent = fixed(
+        &parent_read(),
+        0,
+        "[action.triggers.args]\nwhy = \"why\"\n",
+        "",
+    );
+    let moves = moves(&check(&silent, 1));
+    assert!(
+        moves
+            .iter()
+            .any(|m| m.contains("Probe.End") && m.contains("refused")),
+        "{moves:?}"
+    );
+}

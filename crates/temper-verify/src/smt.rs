@@ -122,7 +122,7 @@ fn approximation_notes(model: &TemperModel) -> Vec<String> {
     }
 
     vec![format!(
-        "{cross_entity_guard_count} transition(s) use abstract cross-entity guards; single-entity SMT reads their cross-entity parts as unknowns and leaves them out of reachability"
+        "{cross_entity_guard_count} transition(s) use abstract cross-entity guards; single-entity SMT reads their cross-entity parts as unknowns"
     )]
 }
 
@@ -445,7 +445,9 @@ fn broken_by(model: &TemperModel, t: &ResolvedTransition, candidates: &[usize]) 
 // Unreachable state detection (graph-based, no Z3 needed)
 // ---------------------------------------------------------------------------
 
-/// Check which states are unreachable from the initial state.
+/// Check which states no move leads to from the initial state. A guard is not
+/// read here, so a move whose guard reads another record may fire: a state
+/// named here is out of reach whatever that record does.
 fn check_unreachable_states(model: &TemperModel) -> Vec<String> {
     let mut reachable: BTreeSet<&str> = BTreeSet::new();
     let mut queue: Vec<&str> = vec![&model.initial_status];
@@ -455,9 +457,6 @@ fn check_unreachable_states(model: &TemperModel) -> Vec<String> {
             continue;
         }
         for t in &model.transitions {
-            if reads_related_entities(&t.guard) {
-                continue;
-            }
             let can_fire_from =
                 t.from_states.is_empty() || t.from_states.iter().any(|s| s == state);
             if can_fire_from

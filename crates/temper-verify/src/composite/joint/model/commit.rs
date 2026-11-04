@@ -275,6 +275,14 @@ impl JointModel {
             match dispatch.params.get(param) {
                 Some(ParamValue::Str(sent)) if sent.is_blank() => return Arrival::Refused,
                 Some(ParamValue::Str(_)) => {}
+                // A reaction sends its args and nothing else, and the record
+                // refuses a move with this one absent.
+                None if dispatch
+                    .via
+                    .is_some_and(|via| !self.reactions[via].args.contains_key(param)) =>
+                {
+                    return Arrival::Refused;
+                }
                 _ => carried = false,
             }
         }

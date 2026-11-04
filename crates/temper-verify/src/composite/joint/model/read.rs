@@ -8,7 +8,9 @@ mod constraints;
 use std::collections::{BTreeMap, BTreeSet};
 
 use temper_authz::Asker;
-use temper_spec::automaton::{ActionKind, Automaton, TargetResolver, TriggerKind};
+use temper_spec::automaton::{
+    ActionConstraint, ActionKind, Automaton, TargetResolver, TriggerKind,
+};
 use temper_spec::predicate::{Arg, CmpOp, Expr, Literal, Name, Operand, Set, VarKind};
 
 use super::super::env::Records;
@@ -39,6 +41,16 @@ pub(super) struct Reaction {
     pub(super) may_drop: bool,
     /// What it does as a spawn, when it stands for one.
     pub(super) spawn: Option<super::spawn::Spawn>,
+}
+
+/// Whether `automaton` refuses `action` with `param` empty.
+fn requires(automaton: &Automaton, action: &str, param: &str) -> bool {
+    automaton
+        .actions
+        .iter()
+        .filter(|a| a.name == action)
+        .flat_map(|a| &a.constraints)
+        .any(|c| matches!(c, ActionConstraint::ParamNonempty { param: p } if p == param))
 }
 
 /// The models of the types in `scope` and the reactions between them,
@@ -105,6 +117,17 @@ pub(super) fn tracked(
                     }
                 });
             }
+            // A trigger's guard may find a record by a field of its sender,
+            // and the walk can read that record only from the field's value.
+            if records == Records::ById
+                && let Some(guard) = &reaction.guard
+            {
+                for (related, id_field) in guard.related_types() {
+                    if scope.contains(&related) {
+                        grew |= track(&reaction.from, &id_field);
+                    }
+                }
+            }
             if let Some(TargetResolver::CreateIfMissing { id_field }) = &reaction.resolve {
                 grew |= track(&reaction.from, id_field);
             }
@@ -116,10 +139,16 @@ pub(super) fn tracked(
             for (param, arg) in &reaction.args {
                 let Arg::Var(field) = arg else { continue };
                 let from = &models[&reaction.from];
-                // A string is passed only where the target models it; any
-                // other field the sender holds only when something reads it.
+                // A string is passed only where the target models it or
+                // refuses a move without it; any other field the sender holds
+                // only when something reads it.
                 let needed = if from.var_kinds.get(field) == Some(&VarKind::Str) {
-                    models[&reaction.to].models_string(&reaction.target_action, param)
+                    (models[&reaction.to].models_string(&reaction.target_action, param)
+                        || requires(
+                            by_name[reaction.to.as_str()],
+                            &reaction.target_action,
+                            param,
+                        ))
                         && !from.tracked_strings.contains(field)
                 } else {
                     !from.holds(field)

@@ -37,12 +37,11 @@ assert = "status != 'Ready'"
         "expected cross-entity approximation note, got {:?}",
         result.approximation_notes
     );
+    // The other record may make the guard true, so Ready is not out of reach.
     assert!(
-        result
-            .unreachable_states
-            .iter()
-            .any(|state| state == "Ready"),
-        "single-entity reachability must not walk through abstract cross-entity edge"
+        result.unreachable_states.is_empty(),
+        "{:?}",
+        result.unreachable_states
     );
     assert!(
         result.all_passed,
