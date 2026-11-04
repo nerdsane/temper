@@ -142,7 +142,7 @@ impl SendAnalysis {
         Ok(kinds)
     }
 
-    fn partition(
+    pub(super) fn partition(
         &self,
         questions: &[Question<'_>],
         reserve: &dyn Fn(usize) -> Result<(), String>,

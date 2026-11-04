@@ -118,8 +118,8 @@ fn refused_by_cedar(path: &[JointStep]) -> bool {
 #[test]
 fn a_break_only_where_cedar_may_refuse_is_not_checked() {
     // The child is left waiting only if Cedar refuses its finish, which the
-    // real policy never does. The walk cannot tell, so it does not say the
-    // rule breaks: it says it cannot check it, and names that move.
+    // real policy never does. Its answer turns on a field alone, so no caller
+    // can bring the refusal about: it says it cannot check it, and names that move.
     let result = check(&[]);
     let JointOutcome::Incomplete { reason } = &result.outcome else {
         panic!("expected not checked, got {result}");

@@ -1,5 +1,9 @@
 use super::*;
 
+/// The principal types the kernel builds for someone outside (its
+/// `PrincipalKind`, without the `System` no request from outside is).
+const OUTSIDE_KINDS: [&str; 3] = ["Admin", "Agent", "Customer"];
+
 impl Tests {
     /// The profiles that tell `profile` apart on `test`: between them,
     /// every value it may have, a literal no question's policy compares with
@@ -17,16 +21,25 @@ impl Tests {
                     .iter()
                     .map(|kind| Json::from(kind.as_str()))
                     .collect();
+                // Someone outside is one of the principals the kernel builds:
+                // a type no principal has describes no sender, and the other
+                // values stand for those no question's policy names.
                 let mut facts: Vec<Fact> = self
                     .asked_kinds
                     .iter()
+                    .filter(|kind| OUTSIDE_KINDS.contains(&kind.as_str()))
                     .map(|kind| Fact::Is(Json::from(kind.as_str())))
                     .collect();
-                facts.push(Fact::Other {
-                    unlike,
-                    like: BTreeMap::new(),
-                    string: None,
-                });
+                if OUTSIDE_KINDS
+                    .iter()
+                    .any(|kind| !self.asked_kinds.iter().any(|asked| asked == kind))
+                {
+                    facts.push(Fact::Other {
+                        unlike,
+                        like: BTreeMap::new(),
+                        string: None,
+                    });
+                }
                 facts
                     .into_iter()
                     .map(|fact| with(&|p: &mut Profile| p.kind = Some(fact.clone())))

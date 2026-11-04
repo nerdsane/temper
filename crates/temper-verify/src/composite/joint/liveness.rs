@@ -64,6 +64,7 @@ use super::room::Bound;
 mod stuck;
 pub(super) use stuck::sure_path;
 use stuck::{may_reach, unsure_reason};
+use stuck::{outside_moves, system_moves};
 
 /// What the joint check found for one `eventually` property.
 #[derive(Debug, Clone)]
@@ -191,9 +192,10 @@ impl JointLivenessResult {
             LivenessOutcome::Stuck { stuck, cases } => {
                 writeln!(
                     f,
-                    "{}.{} NEVER SETTLES: from {stuck} of {} joint states no path of the system's moves leads to `{}` ({scope}{relying}{bound}). It comes to rest short of it in {} ways, each with a shortest path:",
+                    "{}.{} NEVER SETTLES{}: from {stuck} of {} joint states no path of the system's moves leads to `{}` ({scope}{relying}{bound}). It comes to rest short of it in {} ways, each with a shortest path:",
                     self.entity,
                     self.name,
+                    super::condition(cases.first().map_or(&[], |case| &case.path)),
                     self.states,
                     self.eventually,
                     cases.len()
@@ -335,10 +337,28 @@ pub(super) fn settle(
     let stuck: Vec<usize> = (0..count)
         .filter(|&index| !out[index] && parents[index].is_some())
         .collect();
+    // With no such state, one that sure moves don't reach is stuck if the
+    // runtime can make the moves on the way there.
     let Some(&first) = stuck.first() else {
+        let on_a_way = (0..count)
+            .find(|&index| !out[index])
+            .and_then(|index| Some((index, model.way_resting_on_moves(explored, index, true)?)));
+        let Some((index, path)) = on_a_way else {
+            return (
+                LivenessOutcome::Incomplete {
+                    reason: unsure_reason(explored, &good, &out),
+                },
+                met,
+            );
+        };
+        let case = StuckCase {
+            path,
+            moves: system_moves(model, &explored.state(index), failing[index]),
+        };
         return (
-            LivenessOutcome::Incomplete {
-                reason: unsure_reason(explored, &good, &out),
+            LivenessOutcome::Stuck {
+                stuck: (0..count).filter(|&index| !out[index]).count(),
+                cases: vec![case],
             },
             met,
         );
@@ -358,22 +378,9 @@ pub(super) fn settle(
     }
     let cases = resting
         .into_iter()
-        .map(|index| {
-            let state = &explored.state(index);
-            let mut moves = BTreeSet::new();
-            for mv in model.moves(state) {
-                let relied = failing[index] && model.relies(&mv);
-                if !mv.by_system() && !relied {
-                    continue;
-                }
-                for next in model.next(state, &mv).0 {
-                    moves.insert(next.label);
-                }
-            }
-            StuckCase {
-                path: sure_path(model, explored, &parents, index),
-                moves: moves.into_iter().collect(),
-            }
+        .map(|index| StuckCase {
+            path: sure_path(model, explored, &parents, index),
+            moves: system_moves(model, &explored.state(index), failing[index]),
         })
         .collect();
     (
@@ -445,31 +452,6 @@ fn reach(explored: &model::Explored, done: &[bool], failing: &[bool], outside: b
         }
     }
     good
-}
-
-/// The reactions from types outside the scope that may be taken in `state`,
-/// as `Entity.Action (from Status) by a reaction from Type`.
-fn outside_moves(model: &JointModel, state: &super::JointState) -> Vec<String> {
-    model
-        .moves(state)
-        .into_iter()
-        .filter_map(|mv| match mv {
-            model::Move::Reaction(entity, action, _) => Some(format!(
-                "{entity}.{} (from {}) by a reaction from {}",
-                action.name,
-                state.records[entity.as_str()].status,
-                model
-                    .outside_from(&entity, &action.name)
-                    .map(|from| from
-                        .iter()
-                        .map(String::as_str)
-                        .collect::<Vec<_>>()
-                        .join(" or "))
-                    .unwrap_or_default()
-            )),
-            _ => None,
-        })
-        .collect()
 }
 
 /// The bytes [`settle`] holds for `explored`: per state, its marks, its sure

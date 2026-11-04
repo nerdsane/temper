@@ -1,11 +1,11 @@
 //! What a stuck verdict may say: it refuses the install, so it rests on what
 //! the runtime is known to do, and what is less sure is not checked.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 
-use super::super::JointStep;
-use super::super::model::{Certainty, Explored, JointModel, Made};
+use super::super::model::{self, Certainty, Explored, JointModel, Made};
 use super::super::state::render;
+use super::super::{JointState, JointStep};
 
 /// Which walked states any move the system makes may lead to the goal from:
 /// every way it may go counts, sure or not, and so does a move the walk held
@@ -86,6 +86,7 @@ pub(in crate::composite::joint) fn sure_path(
         steps.push(JointStep {
             action,
             state: render(&state),
+            unsure: false,
         });
         match parent {
             Some(from) => index = from as usize,
@@ -94,4 +95,44 @@ pub(in crate::composite::joint) fn sure_path(
     }
     steps.reverse();
     steps
+}
+
+/// The moves the system makes from a stuck `state`, in words; with `failing`,
+/// those outside code is relied on to send too.
+pub(super) fn system_moves(model: &JointModel, state: &JointState, failing: bool) -> Vec<String> {
+    let mut moves = BTreeSet::new();
+    for mv in model.moves(state) {
+        if !(mv.by_system() || failing && model.relies(&mv)) {
+            continue;
+        }
+        for next in model.next(state, &mv).0 {
+            moves.insert(next.label);
+        }
+    }
+    moves.into_iter().collect()
+}
+
+/// The reactions from types outside the scope that may be taken in `state`,
+/// as `Entity.Action (from Status) by a reaction from Type`.
+pub(super) fn outside_moves(model: &JointModel, state: &JointState) -> Vec<String> {
+    model
+        .moves(state)
+        .into_iter()
+        .filter_map(|mv| match mv {
+            model::Move::Reaction(entity, action, _) => Some(format!(
+                "{entity}.{} (from {}) by a reaction from {}",
+                action.name,
+                state.records[entity.as_str()].status,
+                model
+                    .outside_from(&entity, &action.name)
+                    .map(|from| from
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>()
+                        .join(" or "))
+                    .unwrap_or_default()
+            )),
+            _ => None,
+        })
+        .collect()
 }

@@ -164,6 +164,26 @@ pub struct JointStep {
     pub action: Option<String>,
     /// The joint state after it.
     pub state: String,
+    /// The move rests on what the model cannot decide: a Cedar answer, a
+    /// guard, a reference or a reaction from outside the scope. The verdict
+    /// holds if the runtime can make it.
+    pub unsure: bool,
+}
+
+/// The moves `path` rests on, as a condition on a verdict; empty when sure
+/// moves alone make it.
+pub(super) fn condition(path: &[JointStep]) -> String {
+    let moves: Vec<String> = path
+        .iter()
+        .filter(|step| step.unsure)
+        .filter_map(|step| step.action.as_ref())
+        .map(|action| format!("`{action}`"))
+        .collect();
+    if moves.is_empty() {
+        String::new()
+    } else {
+        format!(" if the runtime can make {}", moves.join(" and "))
+    }
 }
 
 impl fmt::Display for JointInvariantResult {
@@ -184,9 +204,10 @@ impl fmt::Display for JointInvariantResult {
             JointOutcome::Broken { path } => {
                 writeln!(
                     f,
-                    "{}.{} BROKEN after {} moves ({scope}, {} joint states walked): {}",
+                    "{}.{} BROKEN{} after {} moves ({scope}, {} joint states walked): {}",
                     self.entity,
                     self.invariant,
+                    condition(path),
                     path.len().saturating_sub(1),
                     self.states,
                     self.assert
@@ -295,6 +316,7 @@ pub fn replay_joint_invariants(
     let mut steps = vec![JointStep {
         action: None,
         state: render(&state),
+        unsure: false,
     }];
     for (i, wanted) in trace.iter().enumerate() {
         loop {
@@ -390,6 +412,7 @@ pub fn replay_joint_invariants(
             steps.push(JointStep {
                 action: Some(next.label),
                 state: render(&next.state),
+                unsure: false,
             });
             state = next.state;
             if done {
@@ -415,6 +438,10 @@ mod tests;
 mod vacuous_tests;
 
 #[cfg(test)]
+#[path = "both_ways_test.rs"]
+mod both_ways_tests;
+
+#[cfg(test)]
 mod chain_test;
 
 #[cfg(test)]
@@ -428,6 +455,10 @@ mod guided_tests;
 #[cfg(test)]
 #[path = "sure_test.rs"]
 mod sure_tests;
+
+#[cfg(test)]
+#[path = "someone_test.rs"]
+mod someone_tests;
 
 #[cfg(test)]
 #[path = "outside_test.rs"]

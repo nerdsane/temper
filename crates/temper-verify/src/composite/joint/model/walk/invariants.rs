@@ -138,8 +138,11 @@ impl JointModel {
                 (Some(index), _) => JointOutcome::Broken {
                     path: explored.path(*index),
                 },
-                (None, Some(_)) => JointOutcome::Incomplete {
-                    reason: maybe_broken(first[i].map(|label| explored.label(label))),
+                (None, Some(index)) => match self.way_resting_on_moves(&explored, *index, false) {
+                    Some(path) => JointOutcome::Broken { path },
+                    None => JointOutcome::Incomplete {
+                        reason: maybe_broken(first[i].map(|label| explored.label(label))),
+                    },
                 },
                 (None, None) if unknown[i] => JointOutcome::Incomplete {
                     reason: "an invariant read is unknown".into(),

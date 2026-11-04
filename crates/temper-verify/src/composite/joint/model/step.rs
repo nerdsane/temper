@@ -27,6 +27,9 @@ pub(in crate::composite::joint) use super::moves::Move;
 pub(in crate::composite::joint) enum Certainty {
     /// The move can lead here.
     Sure,
+    /// Cedar may answer this request either way and the model cannot say
+    /// which. Each is a way the runtime goes if Cedar answers so.
+    Either,
     /// The move leads to one of the states it lists with this, and the model
     /// cannot tell which: a guard or constraint it cannot decide, taken and
     /// refused, or Cedar that may refuse.
@@ -70,7 +73,7 @@ impl JointModel {
         if !self.expansion.take() {
             return (Vec::new(), false);
         }
-        use Certainty::{OneOf, Sure, Unsure};
+        use Certainty::{Either, OneOf, Sure, Unsure};
         let mut outcomes: Vec<(JointState, String, Certainty)> = Vec::new();
         match mv {
             Move::Take(entity, action, by) => {
@@ -91,8 +94,8 @@ impl JointModel {
                     && self.outside_may(*by, entity, &action.name) == May::Yes
                     && self.unchecked.meets(entity, &action.name)
                     && self.exact(entity, &action.name, state);
-                let text = format!("{entity}.{action}{}", self.as_sender(*by));
-                for (outcome, then) in self.commit(state.clone(), entity, action, &[], *by) {
+                let text = self.request_label(entity, action, *by, "");
+                for (outcome, then) in self.commit_request(state.clone(), entity, action, *by) {
                     let certainty = Certainty::unless(known, Unsure).then(then);
                     if !self
                         .expansion
@@ -110,7 +113,7 @@ impl JointModel {
                     && self.truth(entity, action, state) == Truth::True;
                 let mut next = state.clone();
                 add(&mut next, sent(entity, action, *by));
-                let text = format!("{entity}.{action} sent{}", self.as_sender(*by));
+                let text = self.request_label(entity, action, *by, " sent");
                 if !self.expansion.push(
                     &mut outcomes,
                     (next, text, Certainty::unless(known, Unsure)),
@@ -310,13 +313,17 @@ impl JointModel {
                     );
                     if !self.expansion.push(
                         &mut outcomes,
-                        (next.clone(), text, Certainty::unless(may == May::No, OneOf)),
+                        (
+                            next.clone(),
+                            text,
+                            Certainty::unless(may == May::No, Either),
+                        ),
                     ) {
                         return (Vec::new(), false);
                     };
                 }
                 if may != May::No {
-                    let cedar = Certainty::unless(may == May::Yes, OneOf);
+                    let cedar = Certainty::unless(may == May::Yes, Either);
                     for outcome in self
                         .deliver(next, dispatch, &dispatch.to_string())
                         .into_iter()
@@ -406,6 +413,27 @@ impl JointModel {
 
     /// Whether the guard of the transition `action` names holds on `state`,
     /// as far as the model knows.
+    /// Whether all that is open of an outside move in `state` is what Cedar
+    /// answers, or a guard on its own record's fields, which a sender can
+    /// meet either way.
+    pub(super) fn take_rests_on_cedar_or_own_guard(
+        &self,
+        entity: &str,
+        action: &TemperModelAction,
+        state: &JointState,
+    ) -> bool {
+        let guard = match self.truth(entity, action, state) {
+            Truth::True => true,
+            Truth::False => false,
+            Truth::Unknown => !self.action_reads_related(entity, &action.name),
+        };
+        guard
+            && self.exceeds(entity, &action.name, &action.params, &state.records[entity])
+                == Truth::True
+            && self.unchecked.meets(entity, &action.name)
+            && self.exact(entity, &action.name, state)
+    }
+
     fn truth(&self, entity: &str, action: &TemperModelAction, state: &JointState) -> Truth {
         let status = &state.records[entity].status;
         self.models[entity]

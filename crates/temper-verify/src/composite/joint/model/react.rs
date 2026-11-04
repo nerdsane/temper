@@ -17,20 +17,30 @@ use super::step::Certainty;
 use super::{Delivery, JointModel};
 use crate::model::ParamValue;
 
+/// Who made a move, as what follows it reads.
+#[derive(Clone, Copy)]
+pub(super) struct Sent<'a> {
+    /// The chain it came in; empty when it starts one.
+    pub(super) chain: &'a [ReactionStep],
+    pub(super) by: u32,
+    pub(super) params: &'a BTreeMap<String, ParamValue>,
+    /// Whether it is a request, whose sender chose all its parameters.
+    pub(super) request: bool,
+}
+
 impl JointModel {
-    /// What follows `source.action` committing, sent by `by`: its
+    /// What follows `source.action` committing, `sent` by someone: its
     /// reactions, then the module calls its triggers start (when the model
-    /// makes the kernel's moves). Each call answers as `by`, inline or in the
-    /// background. Each outcome says what the model knows of it.
+    /// makes the kernel's moves). Each call answers as its sender, inline or
+    /// in the background. Each outcome says what the model knows of it.
     pub(super) fn after_commit(
         &self,
         state: JointState,
         source: &str,
         action: &str,
-        chain: &[ReactionStep],
-        by: u32,
-        params: &BTreeMap<String, ParamValue>,
+        sent: Sent<'_>,
     ) -> Vec<(JointState, Certainty)> {
+        let Sent { chain, by, .. } = sent;
         let mut state = state;
         self.store_outside_spawns(&mut state, source, action);
         // Outside actions and detached work start a fresh chain.
@@ -40,7 +50,7 @@ impl JointModel {
             generated_for: None,
         }];
         let chain = if chain.is_empty() { &root } else { chain };
-        let mut outcomes = self.react(state, source, action, chain, by, params);
+        let mut outcomes = self.react(state, source, action, Sent { chain, ..sent });
         let key = (source.to_string(), action.to_string());
         let Some(specs) = self.kernel.calls_on.get(&key).filter(|_| self.kernel_moves) else {
             return outcomes;
@@ -117,10 +127,11 @@ impl JointModel {
         state: JointState,
         source: &str,
         action: &str,
-        chain: &[ReactionStep],
-        by: u32,
-        params: &BTreeMap<String, ParamValue>,
+        sent: Sent<'_>,
     ) -> Vec<(JointState, Certainty)> {
+        let Sent {
+            chain, by, params, ..
+        } = sent;
         let mut outcomes = Vec::new();
         if !self.keep(&mut outcomes, state, Certainty::Sure) {
             return outcomes;
@@ -162,7 +173,8 @@ impl JointModel {
                     (Some(guard), Truth::Unknown) => self.committed(guard, source, &state),
                     _ => None,
                 };
-                let decided = fires != Truth::Unknown || unread_guard.is_some();
+                let chosen = sent.request && self.chosen_guards.contains(&index);
+                let decided = fires != Truth::Unknown || unread_guard.is_some() || chosen;
                 let known = known.then(Certainty::unless(decided, Certainty::OneOf));
                 if fires != Truth::True
                     && unread_guard.is_none()

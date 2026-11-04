@@ -6,9 +6,44 @@ use temper_authz::{Asker, May, SendAnalysis};
 use temper_spec::automaton::Automaton;
 
 use super::super::room::{Heap, block};
+use super::{Senders, asker_name};
 use crate::model::heap::tree_bytes;
 
 type Answers = BTreeMap<String, BTreeMap<String, Vec<May>>>;
+
+impl Senders {
+    /// Who sender `by` is, in words, on a request it makes of `action` on an
+    /// `entity` record: one of its senders that may, for it may stand for
+    /// others that may not.
+    pub(in crate::composite::joint) fn name_asking(
+        &self,
+        by: u32,
+        entity: &str,
+        action: &str,
+    ) -> String {
+        let key = (by, entity.to_string(), action.to_string());
+        if let Some(name) = self
+            .asking
+            .read()
+            .expect("a walk thread panicked")
+            .get(&key)
+        {
+            return name.clone();
+        }
+        let allowed = self
+            .policies
+            .as_ref()
+            .zip(self.askers.get(by as usize / 2))
+            .and_then(|(policies, asker)| policies.allowed(asker, action, entity));
+        let name =
+            allowed.map_or_else(|| self.name(by), |kind| asker_name(&Asker::OutsideAs(kind)));
+        self.asking
+            .write()
+            .expect("a walk thread panicked")
+            .insert(key, name.clone());
+        name
+    }
+}
 
 /// Room for both tables, including every key, tree node and answer vector.
 /// Each row is built in place, so no second table-sized buffer coexists.

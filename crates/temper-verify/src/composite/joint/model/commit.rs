@@ -9,6 +9,7 @@ use super::super::env::Blind;
 use super::super::state::ReactionStep;
 use super::super::{Call, Dispatch, JointState};
 use super::JointModel;
+use super::react::Sent;
 use super::step::Certainty;
 use crate::model::semantics::{rule_for, step, successors_budgeted, within_bounds};
 use crate::model::{
@@ -108,14 +109,13 @@ impl JointModel {
         }
         let text = format!("{text} arrives -> {}", moved.status);
         self.place(&mut state, &dispatch.to, moved, &action, dispatch.by);
-        let after = self.after_commit(
-            state,
-            &dispatch.to,
-            &action,
-            &dispatch.chain,
-            dispatch.by,
-            &dispatch.params,
-        );
+        let sent = Sent {
+            chain: &dispatch.chain,
+            by: dispatch.by,
+            params: &dispatch.params,
+            request: false,
+        };
+        let after = self.after_commit(state, &dispatch.to, &action, sent);
         outcomes.extend(
             after
                 .into_iter()
@@ -134,6 +134,29 @@ impl JointModel {
         chain: &[ReactionStep],
         by: u32,
     ) -> Vec<(JointState, Certainty)> {
+        self.commit_as(state, entity, action, chain, by, false)
+    }
+
+    /// [`Self::commit`], for a request `by` made with these parameters.
+    pub(super) fn commit_request(
+        &self,
+        state: JointState,
+        entity: &str,
+        action: &TemperModelAction,
+        by: u32,
+    ) -> Vec<(JointState, Certainty)> {
+        self.commit_as(state, entity, action, &[], by, true)
+    }
+
+    fn commit_as(
+        &self,
+        state: JointState,
+        entity: &str,
+        action: &TemperModelAction,
+        chain: &[ReactionStep],
+        by: u32,
+        request: bool,
+    ) -> Vec<(JointState, Certainty)> {
         let record = &state.records[entity];
         let Some(t) = rule_for(&self.models[entity], &action.name, &record.status) else {
             return Vec::new();
@@ -141,7 +164,13 @@ impl JointModel {
         let moved = step(t, record, &action.params);
         let mut next = state;
         self.place(&mut next, entity, moved, &action.name, by);
-        self.after_commit(next, entity, &action.name, chain, by, &action.params)
+        let sent = Sent {
+            chain,
+            by,
+            params: &action.params,
+            request,
+        };
+        self.after_commit(next, entity, &action.name, sent)
     }
 
     /// Put `entity`'s record, after it took `action` from `by`, into

@@ -56,6 +56,7 @@ fn step(model: &JointModel, graph: &Graph, edge: u32) -> JointStep {
     JointStep {
         action,
         state: render(&after),
+        unsure: false,
     }
 }
 

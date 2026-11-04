@@ -4,6 +4,21 @@ use super::table::each;
 use super::*;
 
 impl Senders {
+    /// Whether an open answer to sender `by`'s `action` on an `entity` record
+    /// can come out differently for different callers.
+    pub(in crate::composite::joint) fn turns_on_who_asks(
+        &self,
+        by: u32,
+        entity: &str,
+        action: &str,
+    ) -> bool {
+        let (Some(policies), Some(asker)) = (&self.policies, self.askers.get(by as usize / 2))
+        else {
+            return false;
+        };
+        policies.turns_on_who_asks(asker, action, entity)
+    }
+
     /// The senders of the moves among `entities`, and what `policies` lets
     /// each send. A request to one of `roots` starts a chain that runs as
     /// its sender through the `inheriting` moves (entity, action): those
@@ -78,6 +93,7 @@ impl Senders {
         // The partition's questions do not include every action these
         // tables cache. Reserve their full size before allocating a row,
         // with the finished profiles still held alongside them.
+        let mut tables = 0;
         if policies.is_some() {
             let profiles: usize = askers
                 .iter()
@@ -87,25 +103,38 @@ impl Senders {
                 })
                 .sum();
             let room = table::room(by_name, entities.clone(), kind_count + 1, askers.len())
-                .and_then(|tables| {
+                .and_then(|room| {
                     profiles
-                        .checked_add(tables)
+                        .checked_add(room)
                         .ok_or_else(|| "sender table size overflows addressable memory".to_string())
                 })
-                .and_then(reserve.unwrap_or(&unlimited));
+                .and_then(|room| {
+                    tables = room;
+                    reserve.unwrap_or(&unlimited)(room)
+                });
             if let Err(reason) = room {
                 return Self::failed(format!("sender answer tables do not fit: {reason}"));
             }
         }
         let none = BTreeMap::new();
+        // A request asks once, and only what follows it depends on who sent
+        // it, which the askers here answer alike, or stand for one sender.
         let requests = policies.map(|policies| {
-            each(by_name, entities.clone(), &|entity, action| {
-                let request = Cause::request();
+            let beside_tables = |bytes: usize| {
+                let total = tables
+                    .checked_add(bytes)
+                    .ok_or_else(|| "sender-kind size overflows addressable memory".to_string())?;
+                reserve.unwrap_or(&unlimited)(total)
+            };
+            let requests = each(by_name, entities.clone(), &|entity, action| {
                 askers[..=kind_count]
                     .iter()
-                    .map(|asker| policies.may(asker, action, entity, &none, Some(&request)))
+                    .map(|asker| policies.may_request(asker, action, entity, &beside_tables))
                     .collect()
-            })
+            });
+            // Hand back what the last look took, which `tables` already holds.
+            let _ = beside_tables(0);
+            requests
         });
         let may = policies.map(|policies| {
             each(by_name, entities.clone(), &|entity, action| {
@@ -145,6 +174,7 @@ impl Senders {
             policies: policies.cloned(),
             decided: RwLock::default(),
             alike: RwLock::default(),
+            asking: RwLock::default(),
             decided_bytes: std::sync::atomic::AtomicUsize::default(),
             reread,
             meets: BTreeMap::new(),
@@ -165,6 +195,7 @@ impl Senders {
             policies: None,
             decided: RwLock::default(),
             alike: RwLock::default(),
+            asking: RwLock::default(),
             decided_bytes: std::sync::atomic::AtomicUsize::default(),
             reread: BTreeSet::new(),
             meets: BTreeMap::new(),

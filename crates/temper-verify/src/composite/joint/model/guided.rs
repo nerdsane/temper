@@ -578,6 +578,7 @@ impl<'m, 'a> Engine<'m, 'a> {
         let mut path = vec![JointStep {
             action: None,
             state: render(&first),
+            unsure: false,
         }];
         let mut state = first;
         for (at, (label, packed, sure)) in trace.iter().enumerate().skip(1) {
@@ -613,6 +614,7 @@ impl<'m, 'a> Engine<'m, 'a> {
             path.push(JointStep {
                 action: name,
                 state: render(&want),
+                unsure: false,
             });
             state = want;
         }

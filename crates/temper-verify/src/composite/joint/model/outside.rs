@@ -9,6 +9,7 @@ use temper_authz::May;
 
 use super::super::senders::OUTSIDE;
 use super::JointModel;
+use crate::model::TemperModelAction;
 
 impl JointModel {
     /// The outside senders a move sends `action` to an `entity` record as:
@@ -146,12 +147,20 @@ impl JointModel {
             .contains(&(entity.to_string(), action.to_string()))
     }
 
-    /// The outside sender `by` in a move's words, when it is of a kind.
-    pub(super) fn as_sender(&self, by: u32) -> String {
+    /// A request `by` makes in a move's words: `then` after the action, then
+    /// who sent it, when it is of a kind.
+    pub(super) fn request_label(
+        &self,
+        entity: &str,
+        action: &TemperModelAction,
+        by: u32,
+        then: &str,
+    ) -> String {
         if by == OUTSIDE {
-            String::new()
+            format!("{entity}.{action}{then}")
         } else {
-            format!(" as {}", self.senders.name(by))
+            let sender = self.senders.name_asking(by, entity, &action.name);
+            format!("{entity}.{action}{then} as {sender}")
         }
     }
 }

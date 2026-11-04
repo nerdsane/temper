@@ -10,6 +10,7 @@ use super::super::{JointState, JointStep};
 use super::JointModel;
 
 mod checked;
+mod conditions;
 mod invariants;
 mod levels;
 mod run;
@@ -164,6 +165,7 @@ impl Explored<'_> {
             steps.push(JointStep {
                 action: parent.map(|(_, label)| self.packer.name(label).to_string()),
                 state: render(&self.state(index)),
+                unsure: false,
             });
             match parent {
                 Some((from, _)) => index = from as usize,
