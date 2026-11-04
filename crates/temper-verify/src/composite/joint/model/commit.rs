@@ -153,14 +153,16 @@ impl JointModel {
                 } else {
                     super::super::senders::OUTSIDE
                 };
-                state.armed.insert(entity.to_string(), sender);
+                state.armed.insert(entity.into(), sender);
             }
             Some(_) => {}
             None => {
                 state.armed.remove(entity);
             }
         }
-        state.records.insert(entity.to_string(), moved);
+        if let Some(record) = state.records.get_mut(entity) {
+            *record = std::rc::Rc::new(moved);
+        }
     }
 
     /// What the target's actor does with `dispatch`: refuses it, or takes a
@@ -168,7 +170,7 @@ impl JointModel {
     /// own state; the related records were read on the dispatch path.
     pub(super) fn arrive(&self, state: &JointState, dispatch: &Dispatch) -> Arrival {
         let model = &self.models[&dispatch.to];
-        let target = &state.records[&dispatch.to];
+        let target = &state.records[dispatch.to.as_str()];
         let enabled: Vec<&ResolvedTransition> = self
             .transitions_for(dispatch)
             .filter(|t| self.enabled(&dispatch.to, t, state, Blind::Related))
@@ -355,8 +357,8 @@ fn related_only(part: &Expr) -> bool {
 
 /// Put `dispatch` in flight, kept in order.
 pub(super) fn add(state: &mut JointState, dispatch: Dispatch) {
-    let at = state.inflight.partition_point(|d| d < &dispatch);
-    state.inflight.insert(at, dispatch);
+    let at = state.inflight.partition_point(|d| **d < dispatch);
+    state.inflight.insert(at, dispatch.into());
 }
 
 /// Whether the string parameters `params` passes satisfy the action's

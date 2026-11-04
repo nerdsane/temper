@@ -124,7 +124,7 @@ impl JointModel {
             })
         };
         state.inflight.iter().any(|other| {
-            other != dispatch
+            **other != *dispatch
                 && other.chain.starts_with(parent)
                 && match other.chain.len() - parent.len().min(other.chain.len()) {
                     0 => false,

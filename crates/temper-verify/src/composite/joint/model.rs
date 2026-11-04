@@ -329,7 +329,7 @@ impl JointModel {
     }
 
     /// The records as they start, without their ids.
-    fn blank(&self) -> BTreeMap<String, TemperModelState> {
+    fn blank(&self) -> BTreeMap<std::rc::Rc<str>, std::rc::Rc<TemperModelState>> {
         self.models
             .iter()
             .map(|(entity, model)| {
@@ -337,7 +337,7 @@ impl JointModel {
                     .into_iter()
                     .next()
                     .expect("a model has one initial state");
-                (entity.clone(), init)
+                (entity.as_str().into(), std::rc::Rc::new(init))
             })
             .collect()
     }
@@ -353,12 +353,14 @@ impl JointModel {
         let mut records = self.blank();
         for (entity, record) in &mut records {
             let name = ids
-                .get(entity)
+                .get(&**entity)
                 .cloned()
                 .unwrap_or_else(|| format!("{entity}#id"));
             let next = ModelString::Symbol(names.len() + 1);
             let value = names.entry(name).or_insert(next).clone();
-            record.strings.insert(ID.to_string(), value);
+            std::rc::Rc::make_mut(record)
+                .strings
+                .insert(ID.to_string(), value);
         }
         let mut state = JointState {
             records,
@@ -398,7 +400,7 @@ impl JointModel {
 
     /// The strings `state` holds, in records and in dispatches.
     pub(super) fn values(&self, state: &JointState) -> BTreeSet<ModelString> {
-        let mut values = string_values(state.records.values());
+        let mut values = string_values(state.records.values().map(|record| &**record));
         for dispatch in &state.inflight {
             for value in dispatch.values() {
                 if let ParamValue::Str(text) = value

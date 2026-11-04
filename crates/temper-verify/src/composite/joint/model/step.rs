@@ -3,6 +3,7 @@
 //! dispatch path, and dispatches their records take or refuse.
 
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use temper_authz::May;
 use temper_spec::predicate::{Truth, eval};
@@ -38,17 +39,17 @@ pub(in crate::composite::joint) enum Move {
     /// whoever armed it.
     Timer(String, String),
     /// A module answers the call a record's trigger started.
-    Answer(Call, TemperModelAction),
+    Answer(Rc<Call>, TemperModelAction),
     /// A module's call fails: its `on_failure` action, if any, is sent.
-    Fail(Call),
+    Fail(Rc<Call>),
     /// A module's call is lost: the server restarts while it runs. Its
     /// deadline answers it with its `on_failure` action, if it names one,
     /// as a failed call is answered; otherwise nothing answers it.
-    Lost(Call),
+    Lost(Rc<Call>),
     /// The dispatch path reads the related records a reaction needs.
-    Read(Dispatch),
+    Read(Rc<Dispatch>),
     /// The target's actor takes a dispatch, or refuses it.
-    Arrive(Dispatch),
+    Arrive(Rc<Dispatch>),
 }
 
 impl Move {
@@ -133,8 +134,12 @@ impl JointModel {
                 // An outside move the model cannot decide may also be
                 // refused, which leaves the state as it is; one that does not
                 // exceed a counter it must is refused.
-                let exceeds =
-                    self.exceeds(entity, &action.name, &action.params, &state.records[entity]);
+                let exceeds = self.exceeds(
+                    entity,
+                    &action.name,
+                    &action.params,
+                    &state.records[entity.as_str()],
+                );
                 if exceeds == Truth::False {
                     return (Vec::new(), false);
                 }
@@ -178,7 +183,7 @@ impl JointModel {
                 }
             }
             Move::Timer(entity, name) => {
-                let armed = state.armed.get(entity).copied().unwrap_or(OUTSIDE);
+                let armed = state.armed.get(entity.as_str()).copied().unwrap_or(OUTSIDE);
                 let by = self.senders.timer(armed);
                 let text = if self.sender_matters.contains(entity) {
                     format!("{entity}.{name} (timer, as {})", self.senders.name(by))
@@ -186,7 +191,7 @@ impl JointModel {
                     format!("{entity}.{name} (timer)")
                 };
                 let mut next = state.clone();
-                next.armed.remove(entity);
+                next.armed.remove(entity.as_str());
                 for outcome in self.fire(next, entity, name, &text, by) {
                     if !self.expansion.push(&mut outcomes, outcome) {
                         return (Vec::new(), false);
@@ -222,7 +227,7 @@ impl JointModel {
                         &call.to,
                         &action.name,
                         &action.params,
-                        &state.records[&call.to],
+                        &state.records[call.to.as_str()],
                     ) == Truth::False
                 {
                     // The module answers about the record as the call found
@@ -243,7 +248,7 @@ impl JointModel {
                             &call.to,
                             &action.name,
                             &action.params,
-                            &state.records[&call.to],
+                            &state.records[call.to.as_str()],
                         ) == Truth::True
                         && self.unchecked.meets(&call.to, &action.name)
                         && self.exact(&call.to, &action.name, state);
@@ -315,7 +320,7 @@ impl JointModel {
                     };
                 }
                 if allows != Truth::False {
-                    let mut read = dispatch.clone();
+                    let mut read = (**dispatch).clone();
                     read.read = true;
                     add(&mut next, read);
                     let text = format!("{dispatch}: related records read");
@@ -434,7 +439,7 @@ impl JointModel {
     /// Whether a field `action` ties a parameter to has changed since `call`
     /// started, so its record refuses the module's answer.
     fn stale(&self, call: &Call, action: &str, state: &JointState) -> bool {
-        let strings = &state.records[&call.to].strings;
+        let strings = &state.records[call.to.as_str()].strings;
         self.unchecked
             .equals
             .get(&(call.to.clone(), action.to_string()))
@@ -478,13 +483,13 @@ pub(super) fn sent(entity: &str, action: &TemperModelAction, by: u32) -> Dispatc
 }
 
 pub(super) fn remove(state: &mut JointState, dispatch: &Dispatch) {
-    if let Some(at) = state.inflight.iter().position(|d| d == dispatch) {
+    if let Some(at) = state.inflight.iter().position(|d| **d == *dispatch) {
         state.inflight.remove(at);
     }
 }
 
 fn remove_call(state: &mut JointState, call: &Call) {
-    if let Some(at) = state.calls.iter().position(|c| c == call) {
+    if let Some(at) = state.calls.iter().position(|c| **c == *call) {
         state.calls.remove(at);
     }
 }

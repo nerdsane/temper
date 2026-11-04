@@ -6,7 +6,7 @@ use serde_json::Value as Json;
 use super::super::Attr;
 use super::super::json::same;
 use super::super::profile::{Fact, Profile};
-use super::{Asker, FALSE, Request, Results, TRUE_OR_FALSE, Val};
+use super::{Asker, FALSE, Request, Results, TRUE, TRUE_OR_FALSE, Val};
 
 impl Request<'_> {
     /// The service principal's attributes, as the engine builds them.
@@ -79,5 +79,18 @@ pub(super) fn fact_equal(fact: &Fact, value: &Json) -> Results {
         Fact::Is(known) => Results::of(same(known, value)),
         Fact::Other { unlike, .. } if unlike.iter().any(|other| same(other, value)) => FALSE,
         Fact::Other { .. } => TRUE_OR_FALSE,
+    }
+}
+
+impl Request<'_> {
+    /// Whether `policy`'s action and resource scopes fit this request; they
+    /// read neither the sender nor the cause.
+    pub(in crate::engine::may) fn scope_fits(&self, policy: &Json) -> bool {
+        let Some(object) = policy.as_object() else {
+            return true;
+        };
+        self.action_scope(&object["action"])
+            .and_then(|| self.resource_scope(&object["resource"]))
+            .can(TRUE)
     }
 }

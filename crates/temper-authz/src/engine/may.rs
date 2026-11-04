@@ -131,6 +131,10 @@ pub struct SendAnalysis {
     /// The kinds found for each set of questions: the proofs of one app ask
     /// the same ones again ([`SendAnalysis::outside_kinds`]).
     kinds: Arc<Mutex<HashMap<String, Vec<Kind>>>>,
+    /// The policies whose action and resource scopes fit each (action,
+    /// resource type): a proof asks about every action of every type for
+    /// every sender, and most policies name one type's actions.
+    scoped: Arc<Mutex<HashMap<(String, String), Arc<[usize]>>>>,
 }
 
 impl SendAnalysis {
@@ -152,6 +156,7 @@ impl SendAnalysis {
         Ok(Self {
             policies,
             kinds: Arc::default(),
+            scoped: Arc::default(),
         })
     }
 
@@ -171,6 +176,7 @@ impl SendAnalysis {
             _ => std::slice::from_ref(&UNKNOWN),
         };
         // A kind may be any of its profiles.
+        let scoped = self.scoped(action, resource_type);
         let mut answers = profiles.iter().map(|profile| {
             let request = Request {
                 asker,
@@ -180,17 +186,43 @@ impl SendAnalysis {
                 record,
                 cause,
             };
-            decide(
-                self.policies
-                    .iter()
-                    .map(|(effect, policy)| (*effect, request.applies(policy))),
-            )
+            decide(scoped.iter().map(|&at| {
+                let (effect, policy) = &self.policies[at];
+                (*effect, request.applies(policy))
+            }))
         });
         let first = answers.next().unwrap_or(May::No);
         answers.fold(
             first,
             |sofar, next| if sofar == next { sofar } else { May::Maybe },
         )
+    }
+
+    /// The policies whose action and resource scopes fit `action` on a
+    /// `resource_type` record. A policy out of scope applies to nobody, so
+    /// it never changes an answer.
+    fn scoped(&self, action: &str, resource_type: &str) -> Arc<[usize]> {
+        let mut scoped = self
+            .scoped
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = (action.to_string(), resource_type.to_string());
+        scoped
+            .entry(key)
+            .or_insert_with(|| {
+                let fits = Request {
+                    asker: &Asker::Outside,
+                    profile: &UNKNOWN,
+                    action,
+                    resource_type,
+                    record: &BTreeMap::new(),
+                    cause: None,
+                };
+                (0..self.policies.len())
+                    .filter(|&at| fits.scope_fits(&self.policies[at].1))
+                    .collect()
+            })
+            .clone()
     }
 
     /// The policies that may apply when `asker` sends `action` to a

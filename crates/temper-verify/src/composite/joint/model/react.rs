@@ -69,14 +69,18 @@ impl JointModel {
                         .filter_map(|field| strings.get(field).map(|value| (field, value)))
                 };
                 let count = asked_entries().count();
-                let call_heap = crate::model::heap::block(source.len())
-                    + spec.module.heap()
-                    + spec.on_success.heap()
-                    + spec.on_failure.heap()
-                    + crate::model::heap::tree_bytes::<String, crate::model::ModelString>(count)
-                    + asked_entries()
-                        .map(|(k, v)| k.heap() + v.heap())
-                        .sum::<usize>();
+                let call_heap =
+                    crate::model::heap::block(2 * size_of::<usize>() + size_of::<Call>())
+                        + crate::model::heap::block(source.len())
+                        + spec.module.heap()
+                        + spec.on_success.heap()
+                        + spec.on_failure.heap()
+                        + crate::model::heap::tree_bytes::<String, crate::model::ModelString>(
+                            count,
+                        )
+                        + asked_entries()
+                            .map(|(k, v)| k.heap() + v.heap())
+                            .sum::<usize>();
                 if !self.expansion.hold(call_heap) || !self.expansion.reserve(&mut outcome.calls) {
                     return Vec::new();
                 }
@@ -90,8 +94,8 @@ impl JointModel {
                         .map(|(field, value)| (field.clone(), value.clone()))
                         .collect(),
                 };
-                let at = outcome.calls.partition_point(|c| c < &call);
-                outcome.calls.insert(at, call);
+                let at = outcome.calls.partition_point(|c| **c < call);
+                outcome.calls.insert(at, call.into());
             }
         }
         outcomes

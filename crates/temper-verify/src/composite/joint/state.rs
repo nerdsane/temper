@@ -3,26 +3,29 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::rc::Rc;
 
-use crate::model::semantics::canonical_values;
+use crate::model::semantics::canonical_names;
 use crate::model::{ModelString, ParamValue, TemperModelAction, TemperModelState};
 
 /// The records in scope, one per type, and the dispatches and module calls
-/// on their way.
+/// on their way. A move changes one record or two and the rest stay as they
+/// were, so states share their records, dispatches and calls; a walk's states
+/// differ only in which ones they hold.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct JointState {
     /// Each type's record.
-    pub records: BTreeMap<String, TemperModelState>,
+    pub records: BTreeMap<Rc<str>, Rc<TemperModelState>>,
     /// Dispatches sent and not yet taken, sorted; the same dispatch may be
     /// in flight twice.
-    pub inflight: Vec<Dispatch>,
+    pub inflight: Vec<Rc<Dispatch>>,
     /// Module calls started and not yet answered, sorted. Tracked only when
     /// the model makes the kernel's moves itself.
-    pub calls: Vec<Call>,
+    pub calls: Vec<Rc<Call>>,
     /// Who armed each record's state timer, by sender number, for the
     /// records whose timer is still armed. Presence tracks arming even when
     /// sender identity does not affect any reaction.
-    pub armed: BTreeMap<String, u32>,
+    pub armed: BTreeMap<Rc<str>, u32>,
 }
 
 impl JointState {
@@ -174,48 +177,80 @@ pub(super) fn render(state: &JointState) -> String {
 }
 
 /// Renumber new strings over the whole joint state, records first, then
-/// the dispatches in flight; returns each value's new name.
+/// the dispatches in flight; returns each value's new name. What a renaming
+/// leaves as it was stays shared with the states that hold it.
 pub(super) fn canonical(state: &mut JointState) -> BTreeMap<ModelString, ModelString> {
-    let mut dispatches = std::mem::take(&mut state.inflight);
-    let mut strings: Vec<BTreeMap<String, ModelString>> = dispatches
-        .iter()
-        .map(|d| {
-            d.params
-                .iter()
-                .filter_map(|(name, value)| match value {
-                    ParamValue::Str(text) => Some((name.clone(), text.clone())),
-                    _ => None,
-                })
-                .collect()
-        })
-        .collect();
-    let renamed = {
-        let committed = dispatches
-            .iter_mut()
-            .filter_map(|d| d.unread_guard.as_mut())
-            .flat_map(|c| c.fields.values_mut())
-            .filter_map(|value| match value {
-                ParamValue::Str(text) => Some(text),
-                _ => None,
-            });
-        let values = state
+    let renamed = canonical_names(
+        state
             .records
-            .values_mut()
-            .flat_map(|s| s.strings.values_mut().chain(s.lists.values_mut().flatten()))
-            .chain(strings.iter_mut().flat_map(|s| s.values_mut()))
-            .chain(committed)
-            .chain(state.calls.iter_mut().flat_map(|c| c.asked.values_mut()));
-        canonical_values(values)
+            .values()
+            .flat_map(|s| s.strings.values().chain(s.lists.values().flatten()))
+            .chain(
+                state
+                    .inflight
+                    .iter()
+                    .flat_map(|d| strings(d.params.values())),
+            )
+            .chain(state.inflight.iter().flat_map(|d| {
+                d.unread_guard
+                    .iter()
+                    .flat_map(|c| strings(c.fields.values()))
+            }))
+            .chain(state.calls.iter().flat_map(|c| c.asked.values())),
+    );
+    let moved = |value: &ModelString| renamed.get(value).is_some_and(|name| name != value);
+    let rewrite = |value: &mut ModelString| {
+        if let Some(name) = renamed.get(value) {
+            value.clone_from(name);
+        }
     };
-    for (dispatch, renamed_strings) in dispatches.iter_mut().zip(strings) {
-        for (name, text) in renamed_strings {
-            dispatch.params.insert(name, ParamValue::Str(text));
+    let rewrite_param = |value: &mut ParamValue| {
+        if let ParamValue::Str(text) = value {
+            rewrite(text);
+        }
+    };
+    if renamed.iter().any(|(value, name)| value != name) {
+        for record in state.records.values_mut() {
+            let touched = record
+                .strings
+                .values()
+                .chain(record.lists.values().flatten())
+                .any(moved);
+            if touched {
+                let record = Rc::make_mut(record);
+                record.strings.values_mut().for_each(rewrite);
+                record.lists.values_mut().flatten().for_each(rewrite);
+            }
+        }
+        for dispatch in &mut state.inflight {
+            let touched = strings(dispatch.values()).any(moved);
+            if touched {
+                let dispatch = Rc::make_mut(dispatch);
+                dispatch.params.values_mut().for_each(rewrite_param);
+                if let Some(committed) = &mut dispatch.unread_guard {
+                    committed.fields.values_mut().for_each(rewrite_param);
+                }
+            }
+        }
+        for call in &mut state.calls {
+            if call.asked.values().any(moved) {
+                Rc::make_mut(call).asked.values_mut().for_each(rewrite);
+            }
         }
     }
-    dispatches.sort();
-    state.inflight = dispatches;
+    state.inflight.sort();
     state.calls.sort();
     renamed
+}
+
+/// The strings among `values`.
+fn strings<'a>(
+    values: impl Iterator<Item = &'a ParamValue>,
+) -> impl Iterator<Item = &'a ModelString> {
+    values.filter_map(|value| match value {
+        ParamValue::Str(text) => Some(text),
+        _ => None,
+    })
 }
 
 /// One admitted reaction step. The model holds one record per type, but

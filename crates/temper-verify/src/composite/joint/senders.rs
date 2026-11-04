@@ -45,6 +45,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
+use std::rc::Rc;
 
 use serde_json::Value;
 use temper_authz::{Asker, Attr, Cause, Hop, May, SendAnalysis};
@@ -98,6 +99,9 @@ pub(super) struct Senders {
     /// The answers decided again so far: a walk asks the same few questions
     /// over and over, and reading the policies takes far longer than a step.
     decided: RefCell<HashMap<Question, May>>,
+    /// The senders each (entity, action) is sent as from outside, of those
+    /// that may, one for each way what follows can go.
+    alike: RefCell<BTreeMap<String, BTreeMap<String, Rc<[u32]>>>>,
     /// The bytes `decided` holds, as a walk counts them against its room.
     decided_bytes: std::cell::Cell<usize>,
     /// The policies that may apply to a move whose answer depends on the
@@ -176,6 +180,7 @@ impl Senders {
             }
         }
         self.reread = reread(self.policies.as_ref(), &self.askers, self.may.as_ref());
+        self.alike.borrow_mut().clear();
     }
 
     /// Bytes retained by the partition after its temporary work is dropped.
@@ -212,6 +217,21 @@ impl Senders {
             .and_then(|answers| answers.get(by as usize / 2))
             .copied()
             .unwrap_or(May::No)
+    }
+
+    /// The senders `entity`'s `action` is sent as from outside, once worked
+    /// out ([`Self::note_alike`]).
+    pub(super) fn alike(&self, entity: &str, action: &str) -> Option<Rc<[u32]>> {
+        self.alike.borrow().get(entity)?.get(action).cloned()
+    }
+
+    /// Note the senders `entity`'s `action` is sent as from outside.
+    pub(super) fn note_alike(&self, entity: &str, action: &str, senders: Rc<[u32]>) {
+        self.alike
+            .borrow_mut()
+            .entry(entity.to_string())
+            .or_default()
+            .insert(action.to_string(), senders);
     }
 
     /// The senders an outside request is sent as.

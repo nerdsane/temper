@@ -46,6 +46,26 @@ impl Heap for String {
     }
 }
 
+/// What a value shared with others holds is theirs too: it counts here only
+/// while nothing else holds it.
+impl<T: Heap> Heap for std::rc::Rc<T> {
+    fn heap(&self) -> usize {
+        match std::rc::Rc::strong_count(self) {
+            1 => block(2 * size_of::<usize>() + size_of::<T>()) + (**self).heap(),
+            _ => 0,
+        }
+    }
+}
+
+impl Heap for std::rc::Rc<str> {
+    fn heap(&self) -> usize {
+        match std::rc::Rc::strong_count(self) {
+            1 => block(2 * size_of::<usize>() + self.len()),
+            _ => 0,
+        }
+    }
+}
+
 impl<T: Heap> Heap for Option<T> {
     fn heap(&self) -> usize {
         self.as_ref().map_or(0, Heap::heap)

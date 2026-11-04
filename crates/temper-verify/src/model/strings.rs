@@ -177,15 +177,30 @@ pub fn canonical_state(state: &mut TemperModelState) {
 pub fn canonical_values<'a>(
     values: impl IntoIterator<Item = &'a mut ModelString>,
 ) -> BTreeMap<ModelString, ModelString> {
+    let values: Vec<&mut ModelString> = values.into_iter().collect();
+    let renamed = canonical_names(values.iter().map(|value| &**value));
+    for value in values {
+        if let Some(name) = renamed.get(value) {
+            value.clone_from(name);
+        }
+    }
+    renamed
+}
+
+/// The new name of each symbol among `values`, numbered in order of first
+/// use. Literals keep their names and are left out.
+pub fn canonical_names<'a>(
+    values: impl IntoIterator<Item = &'a ModelString>,
+) -> BTreeMap<ModelString, ModelString> {
     let mut renamed = BTreeMap::new();
     for value in values {
         let id = renamed.len() + 1;
-        let next = match value {
+        let name = match value {
             ModelString::Literal(_) => continue,
             ModelString::Symbol(_) => ModelString::Symbol(id),
             ModelString::BlankSymbol(_) => ModelString::BlankSymbol(id),
         };
-        *value = renamed.entry(value.clone()).or_insert(next).clone();
+        renamed.entry(value.clone()).or_insert(name);
     }
     renamed
 }

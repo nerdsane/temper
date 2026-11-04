@@ -104,7 +104,7 @@ fn module_calls_count_before_inflight_pruning_and_stay_charged() {
     assert!(
         !model.expansion.hold(
             room - (block(outcomes.capacity() * size_of::<(JointState, Certainty)>())
-                + outcomes.iter().map(|(s, _)| s.heap()).sum::<usize>())
+                + outcomes[0].0.calls.heap())
                 + 1
         ),
         "returned states must remain charged"

@@ -99,10 +99,7 @@ permit(principal == Agent::"service:chain", action, resource) when {
         ]);
         let (mut state, _) = model.init_with_ids(&ids);
         let destination = state.records["C"].strings["Id"].clone();
-        state
-            .records
-            .get_mut("B")
-            .unwrap()
+        std::rc::Rc::make_mut(state.records.get_mut("B").unwrap())
             .strings
             .insert("destination".into(), destination);
         // Start and Forward each have one permitted outcome.
@@ -210,19 +207,13 @@ permit(principal == Agent::"service:chain", action == Action::"Finish", resource
                 ]);
                 let (mut state, _) = model.init_with_ids(&ids);
                 for (entity, id) in &ids {
-                    state
-                        .records
-                        .get_mut(entity)
-                        .unwrap()
+                    std::rc::Rc::make_mut(state.records.get_mut(entity.as_str()).unwrap())
                         .strings
                         .insert("Id".into(), crate::model::ModelString::from(id.clone()));
                 }
                 for (from, to) in [("A", "B"), ("B", "C")] {
                     let destination = state.records[to].strings["Id"].clone();
-                    state
-                        .records
-                        .get_mut(from)
-                        .unwrap()
+                    std::rc::Rc::make_mut(state.records.get_mut(from).unwrap())
                         .strings
                         .insert("destination".into(), destination);
                 }

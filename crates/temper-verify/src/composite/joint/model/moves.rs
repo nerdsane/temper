@@ -19,7 +19,7 @@ impl JointModel {
         let mut out = Vec::new();
         let asked = self.delivery == Delivery::Any || state.inflight.is_empty();
         for (entity, model) in self.models.iter().filter(|_| asked) {
-            let local = &state.records[entity];
+            let local = &state.records[entity.as_str()];
             for t in &model.transitions {
                 if !self.expansion.take() {
                     return out;
@@ -41,7 +41,7 @@ impl JointModel {
                         target_state: t.to_state.clone(),
                         params,
                     };
-                    for &by in &senders {
+                    for &by in senders.iter() {
                         let mv = if reads {
                             Move::Send(entity.clone(), action.clone(), by)
                         } else {
@@ -53,7 +53,7 @@ impl JointModel {
                     }
                 }
             }
-            if state.armed.contains_key(entity)
+            if state.armed.contains_key(entity.as_str())
                 && let Some(timeout) = self.timeout(entity, &local.status)
             {
                 let mv = Move::Timer(entity.clone(), timeout.action.clone());
@@ -108,12 +108,12 @@ impl JointModel {
     fn answers(
         &self,
         state: &JointState,
-        call: &Call,
+        call: &std::rc::Rc<Call>,
         values: &BTreeSet<ModelString>,
         out: &mut Vec<Move>,
     ) -> bool {
         let model = &self.models[&call.to];
-        let local = &state.records[&call.to];
+        let local = &state.records[call.to.as_str()];
         for t in &model.transitions {
             let answers = if call.on_success.is_empty() {
                 self.kernel

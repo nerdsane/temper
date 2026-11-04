@@ -409,7 +409,7 @@ fn outside_moves(model: &JointModel, state: &super::JointState) -> Vec<String> {
             model::Move::Reaction(entity, action, _) => Some(format!(
                 "{entity}.{} (from {}) by a reaction from {}",
                 action.name,
-                state.records[&entity].status,
+                state.records[entity.as_str()].status,
                 model
                     .outside_from(&entity, &action.name)
                     .map(|from| from

@@ -25,7 +25,7 @@ impl JointModel {
                 literals
                     .iter()
                     .enumerate()
-                    .filter(|(_, literal)| self.id_literals[entity].contains(**literal))
+                    .filter(|(_, literal)| self.id_literals[&**entity].contains(**literal))
                     .map(|(at, _)| at)
                     .collect()
             })
@@ -40,7 +40,9 @@ impl JointModel {
                 .map(move |ids| {
                     let mut records = blank.clone();
                     for (record, id) in records.values_mut().zip(ids) {
-                        record.strings.insert(ID.to_string(), id);
+                        std::rc::Rc::make_mut(record)
+                            .strings
+                            .insert(ID.to_string(), id);
                     }
                     let mut state = JointState {
                         records,

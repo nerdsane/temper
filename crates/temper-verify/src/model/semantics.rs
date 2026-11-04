@@ -16,7 +16,8 @@ pub(crate) use super::expansion::Expansion;
 use super::heap::{Heap, step_room};
 use super::parameters::{any_inputs, checks_inputs, inputs_allow};
 pub use super::strings::{
-    apply_string_params, canonical_state, canonical_strings, canonical_values, string_values,
+    apply_string_params, canonical_names, canonical_state, canonical_strings, canonical_values,
+    string_values,
 };
 
 /// Parameter assignments explored per step for one transition, at most

@@ -99,7 +99,7 @@ fn liveness_in(sources: &[&str], room: usize) -> JointLivenessResult {
 }
 
 /// Rooms the fixtures fill breadth first long before Trap.
-const SMALL: usize = 2 << 20;
+const SMALL: usize = 4 << 20;
 const DEPTH: usize = 24;
 const FLAGS: usize = 10;
 

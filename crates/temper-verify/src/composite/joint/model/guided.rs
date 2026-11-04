@@ -266,7 +266,10 @@ fn reads(owner: &str, rules: &[&Expr]) -> BTreeMap<String, BTreeSet<String>> {
 /// Whether a field or status `read` names differs between `from` and `to`.
 fn changes(read: &BTreeMap<String, BTreeSet<String>>, from: &JointState, to: &JointState) -> bool {
     read.iter().any(|(entity, fields)| {
-        let (Some(a), Some(b)) = (from.records.get(entity), to.records.get(entity)) else {
+        let (Some(a), Some(b)) = (
+            from.records.get(entity.as_str()),
+            to.records.get(entity.as_str()),
+        ) else {
             return false;
         };
         fields.iter().any(|field| {

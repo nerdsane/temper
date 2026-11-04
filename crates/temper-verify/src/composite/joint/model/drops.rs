@@ -156,7 +156,7 @@ impl JointModel {
             trigger_name: reaction.trigger.clone(),
             target_entity: dispatch.to.clone(),
             target_action: dispatch.action.clone(),
-            target_state: state.records[&dispatch.to].status.clone(),
+            target_state: state.records[dispatch.to.as_str()].status.clone(),
         })
     }
 }

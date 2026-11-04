@@ -260,26 +260,30 @@ impl Order {
         let records = &state.records;
         state
             .inflight
-            .retain(|dispatch| !self.doomed(dispatch, &records[&dispatch.to]));
+            .retain(|dispatch| !self.doomed(dispatch, &records[dispatch.to.as_str()]));
         for family in &self.families {
             let newest = values(family, state).last().copied().unwrap_or(0);
-            let keep = |value: &mut usize| *value = BEHIND - (newest - *value).min(BEHIND);
+            let keep = |value: usize| BEHIND - (newest - value).min(BEHIND);
             for (entity, field) in &family.fields {
-                if let Some(value) = state
-                    .records
-                    .get_mut(entity)
-                    .and_then(|record| record.counters.get_mut(field))
+                if let Some(record) = state.records.get_mut(entity.as_str())
+                    && let Some(&value) = record.counters.get(field)
+                    && keep(value) != value
                 {
-                    keep(value);
+                    std::rc::Rc::make_mut(record)
+                        .counters
+                        .insert(field.clone(), keep(value));
                 }
             }
             for dispatch in &mut state.inflight {
                 for (entity, action, param) in &family.params {
                     if &dispatch.to == entity
                         && &dispatch.action == action
-                        && let Some(ParamValue::Count(value)) = dispatch.params.get_mut(param)
+                        && let Some(&ParamValue::Count(value)) = dispatch.params.get(param)
+                        && keep(value) != value
                     {
-                        keep(value);
+                        std::rc::Rc::make_mut(dispatch)
+                            .params
+                            .insert(param.clone(), ParamValue::Count(keep(value)));
                     }
                 }
             }
@@ -293,7 +297,7 @@ fn values(family: &Family, state: &JointState) -> BTreeSet<usize> {
     for (entity, field) in &family.fields {
         if let Some(value) = state
             .records
-            .get(entity)
+            .get(entity.as_str())
             .and_then(|r| r.counters.get(field))
         {
             values.insert(*value);
