@@ -275,6 +275,15 @@ impl SendAnalysis {
         fitting
     }
 
+    /// Whether some policy can read an attribute named `name`, of the
+    /// record, the context or the principal. A policy with no JSON form
+    /// (template-linked) may read anything.
+    pub fn reads_attr(&self, name: &str) -> bool {
+        self.policies
+            .iter()
+            .any(|(_, policy)| policy.is_null() || json::names_attr(policy, name))
+    }
+
     /// Whether some policy can tell a move in a timer's chain from the same
     /// move in a request's ([`Cause::reaction`]): when none can, a model
     /// need not keep the two apart.

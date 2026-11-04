@@ -1,0 +1,34 @@
+[automaton]
+name = "Items"
+states = ["Open", "Spoiled"]
+initial = "Open"
+
+[[state]]
+name = "items"
+type = "list"
+initial = []
+
+[[state]]
+name = "board"
+type = "string"
+initial = ""
+
+[[invariant]]
+name = "NeverSpoiled"
+assert = "status == 'Spoiled' && 'c' in items => Board[board].status == 'Never'"
+
+[[action]]
+name = "Add"
+kind = "input"
+from = ["Open"]
+to = "Open"
+params = ["item", "board"]
+guard = "params.item in ['a', 'b', 'c'] && params.board != ''"
+effect = ["append(items, params.item)"]
+
+[[action]]
+name = "Spoil"
+kind = "input"
+from = ["Open"]
+to = "Spoiled"
+guard = "'c' in items && board != ''"

@@ -471,6 +471,7 @@ mod tests {
             initial_strings: BTreeMap::new(),
             tracked_strings: Default::default(),
             string_literals: BTreeMap::new(),
+            literals_by_class: false,
             limit: None,
         }
     }

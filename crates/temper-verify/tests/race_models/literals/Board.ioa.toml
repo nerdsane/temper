@@ -1,0 +1,10 @@
+[automaton]
+name = "Board"
+states = ["Open", "Never"]
+initial = "Open"
+
+[[action]]
+name = "Keep"
+kind = "input"
+from = ["Open"]
+to = "Open"

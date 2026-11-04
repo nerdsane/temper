@@ -162,6 +162,7 @@ pub fn build_model_tracking(
         initial_booleans,
         initial_lists,
         string_literals: string_literals(automaton, &string_inputs),
+        literals_by_class: false,
         initial_strings,
         tracked_strings,
         counter_bounds,

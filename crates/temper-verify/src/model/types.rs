@@ -309,6 +309,9 @@ pub struct TemperModel {
     /// Concrete initial, predicate and effect literals for tracked string inputs,
     /// including literals tied to them indirectly through related statuses.
     pub(crate) string_literals: BTreeMap<String, BTreeSet<String>>,
+    /// Whether `string_literals` is all a parameter can meet: a literal held
+    /// elsewhere is a value like any made-up one to whatever reads it.
+    pub(crate) literals_by_class: bool,
     /// Per-counter upper bounds for bounded exploration.
     pub(crate) counter_bounds: BTreeMap<String, usize>,
     /// Default upper bound for counters not in counter_bounds.
@@ -389,6 +392,7 @@ impl fmt::Debug for TemperModel {
             initial_strings,
             tracked_strings,
             string_literals,
+            literals_by_class,
             counter_bounds,
             default_max_counter,
             list_bounds,
@@ -410,6 +414,7 @@ impl fmt::Debug for TemperModel {
             .field("initial_strings", initial_strings)
             .field("tracked_strings", tracked_strings)
             .field("string_literals", string_literals)
+            .field("literals_by_class", literals_by_class)
             .field("counter_bounds", counter_bounds)
             .field("default_max_counter", default_max_counter)
             .field("list_bounds", list_bounds)

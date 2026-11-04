@@ -219,7 +219,7 @@ impl JointModel {
     fn compose(
         by_name: &BTreeMap<&str, &Automaton>,
         scope: &BTreeSet<String>,
-        (models, reactions): (BTreeMap<String, TemperModel>, Vec<Reaction>),
+        (mut models, reactions): (BTreeMap<String, TemperModel>, Vec<Reaction>),
         read: &BTreeMap<String, BTreeSet<String>>,
         sending: Sending<'_>,
         cut: bool,
@@ -253,6 +253,7 @@ impl JointModel {
             &inheriting,
             sending.reserve,
         );
+        classes.narrow(&mut models, |field| senders.reads_field(field));
         // A reaction from outside the scope chooses its parameters, as requests do.
         let outside = outside_reactions(by_name, scope);
         let chosen = |entity: &str, action: &str| {

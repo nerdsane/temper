@@ -310,6 +310,33 @@ fn unconstrained_strings_include_distinct_nonempty_blank_values() {
 }
 
 #[test]
+fn a_literal_held_elsewhere_reaches_a_parameter_only_as_its_class_says() {
+    let offered = |by_class: bool, own: &[&str]| {
+        let mut model = two_strings_model();
+        model.literals_by_class = by_class;
+        model.string_literals.clear();
+        model.string_literals.insert(
+            "b".into(),
+            own.iter().map(|literal| literal.to_string()).collect(),
+        );
+        let mut held = stateright::Model::init_states(&model).remove(0);
+        held.strings.insert("a".into(), "c".into());
+        successors(&model, &model.transitions[0], &held)
+            .iter()
+            .any(|(_, state)| state.strings["b"] == "c".into())
+    };
+    assert!(
+        offered(false, &[]),
+        "a model of one type offers what it holds"
+    );
+    assert!(
+        !offered(true, &[]),
+        "nothing reading `b` compares or copies it"
+    );
+    assert!(offered(true, &["c"]), "something reading `b` compares it");
+}
+
+#[test]
 fn field_and_list_symbols_share_one_canonical_scope() {
     let mut s = state("Ready");
     s.strings.insert("goal".into(), ModelString::Symbol(9));

@@ -67,3 +67,15 @@ pub(super) fn like(text: &str, pattern: &[Json]) -> bool {
     }
     matched[text.len()]
 }
+
+/// Whether `expr` reads or tests an attribute named `name`.
+pub(super) fn names_attr(expr: &Json, name: &str) -> bool {
+    match expr {
+        Json::Object(fields) => {
+            fields.get("attr").and_then(Json::as_str) == Some(name)
+                || fields.values().any(|value| names_attr(value, name))
+        }
+        Json::Array(items) => items.iter().any(|item| names_attr(item, name)),
+        _ => false,
+    }
+}

@@ -46,6 +46,13 @@ fn string_candidates(
             Some(value) => BTreeSet::from([value]),
             None => {
                 let mut all: BTreeSet<ModelString> = values.clone();
+                if model.literals_by_class {
+                    let own = model.string_literals.get(&param.name);
+                    all.retain(|value| match value {
+                        ModelString::Literal(text) => own.is_some_and(|own| own.contains(text)),
+                        _ => true,
+                    });
+                }
                 all.insert("".into());
                 all.insert(fresh_string(values, false));
                 all.insert(fresh_string(values, true));
