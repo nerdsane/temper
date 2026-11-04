@@ -217,10 +217,7 @@ fn keep_entity_sets(old: &Schema, slot: &mut Schema, type_name: &str) -> Vec<Str
 /// installed app declares is rebuilt from the installed apps, in the order
 /// the store lists them. A tenant whose installed apps cannot all be read is
 /// left as restored.
-pub(crate) async fn converge_installed_schemas(
-    state: &PlatformState,
-    installed: &[(String, String)],
-) {
+pub async fn converge_installed_schemas(state: &PlatformState, installed: &[(String, String)]) {
     let tenants: BTreeSet<&str> = installed
         .iter()
         .map(|(tenant, _)| tenant.as_str())

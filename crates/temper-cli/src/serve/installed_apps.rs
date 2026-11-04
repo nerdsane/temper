@@ -134,6 +134,11 @@ async fn replay(
     requested: BTreeMap<(String, String), AppBootstrapSource>,
     stored: &BTreeSet<(String, String)>,
 ) {
+    // A replay of an unchanged install only registers what the boot loaded,
+    // whose schema is the union of every stored row's: rebuild it from the
+    // installed apps first, as their installs did.
+    let installed: Vec<(String, String)> = stored.iter().cloned().collect();
+    temper_platform::os_apps::converge_installed_schemas(state, &installed).await;
     for ((tenant, app_name), source) in requested {
         if skip_unavailable_tenant(state, &tenant, &format!("app '{app_name}'")) {
             continue;

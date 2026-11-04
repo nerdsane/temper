@@ -40,6 +40,7 @@ mod reconcile;
 mod runtime_heal;
 mod system_files;
 mod types;
+mod unchanged_replay;
 mod wasm_replacement;
 pub(super) use app_catalog::catalog;
 pub use app_catalog::{
@@ -68,7 +69,7 @@ pub use file_source::{AppFileSource, list_install_dir};
 pub use install_lines::{installed_line, stored_line, waiting_line};
 pub(crate) use materialized_closure::resolve_materialized_app_closure;
 pub use module_review_step::ReviewAsked;
-pub(crate) use own_schema::converge_installed_schemas;
+pub use own_schema::converge_installed_schemas;
 #[cfg(test)]
 pub(super) use policy_rows::os_app_policy_row_id;
 pub(crate) use reconcile::{
@@ -559,6 +560,9 @@ pub async fn install_os_app(
 /// It runs the same installer as [`install_os_app`], but a replay is not a new
 /// install: it leaves the stored record's origin (Genesis registry and version,
 /// or local) as recorded, so any number of restarts converge on the same record.
+/// An app whose bundle is the one its record names, and which the boot already
+/// serves whole, is registered without being installed again; a caller rebuilds
+/// the tenant's schema with [`converge_installed_schemas`] first.
 pub async fn restore_os_app(
     state: &PlatformState,
     tenant: &str,
@@ -577,8 +581,17 @@ async fn install_os_app_and_dependencies(
 
     let mut final_result = None;
     for app in order {
-        let result =
-            install_os_app_with_plan(state, tenant, &app, OsAppInstallPlan::all(), origin).await?;
+        let unchanged = match origin {
+            InstallOrigin::Replay => unchanged_replay::registered(state, tenant, &app).await,
+            InstallOrigin::Request => None,
+        };
+        let result = match unchanged {
+            Some(result) => result,
+            None => {
+                install_os_app_with_plan(state, tenant, &app, OsAppInstallPlan::all(), origin)
+                    .await?
+            }
+        };
         result.publish_reviews();
         if app == app_name {
             final_result = Some(result);

@@ -770,6 +770,7 @@ mod policy_joint;
 mod policy_reinstall;
 mod spec_change;
 mod timer_strands;
+mod unchanged_replay;
 
 #[test]
 fn test_agent_spec_entity_names() {
