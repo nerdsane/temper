@@ -3,7 +3,7 @@
 //! dispatch path, and dispatches their records take or refuse.
 
 use std::collections::BTreeMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use temper_authz::May;
 use temper_spec::predicate::{Truth, eval};
@@ -39,17 +39,17 @@ pub(in crate::composite::joint) enum Move {
     /// whoever armed it.
     Timer(String, String),
     /// A module answers the call a record's trigger started.
-    Answer(Rc<Call>, TemperModelAction),
+    Answer(Arc<Call>, TemperModelAction),
     /// A module's call fails: its `on_failure` action, if any, is sent.
-    Fail(Rc<Call>),
+    Fail(Arc<Call>),
     /// A module's call is lost: the server restarts while it runs. Its
     /// deadline answers it with its `on_failure` action, if it names one,
     /// as a failed call is answered; otherwise nothing answers it.
-    Lost(Rc<Call>),
+    Lost(Arc<Call>),
     /// The dispatch path reads the related records a reaction needs.
-    Read(Rc<Dispatch>),
+    Read(Arc<Dispatch>),
     /// The target's actor takes a dispatch, or refuses it.
-    Arrive(Rc<Dispatch>),
+    Arrive(Arc<Dispatch>),
 }
 
 impl Move {

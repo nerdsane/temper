@@ -48,18 +48,18 @@ impl Heap for String {
 
 /// What a value shared with others holds is theirs too: it counts here only
 /// while nothing else holds it.
-impl<T: Heap> Heap for std::rc::Rc<T> {
+impl<T: Heap> Heap for std::sync::Arc<T> {
     fn heap(&self) -> usize {
-        match std::rc::Rc::strong_count(self) {
+        match std::sync::Arc::strong_count(self) {
             1 => block(2 * size_of::<usize>() + size_of::<T>()) + (**self).heap(),
             _ => 0,
         }
     }
 }
 
-impl Heap for std::rc::Rc<str> {
+impl Heap for std::sync::Arc<str> {
     fn heap(&self) -> usize {
-        match std::rc::Rc::strong_count(self) {
+        match std::sync::Arc::strong_count(self) {
             1 => block(2 * size_of::<usize>() + self.len()),
             _ => 0,
         }

@@ -269,7 +269,7 @@ impl Order {
                     && let Some(&value) = record.counters.get(field)
                     && keep(value) != value
                 {
-                    std::rc::Rc::make_mut(record)
+                    std::sync::Arc::make_mut(record)
                         .counters
                         .insert(field.clone(), keep(value));
                 }
@@ -281,7 +281,7 @@ impl Order {
                         && let Some(&ParamValue::Count(value)) = dispatch.params.get(param)
                         && keep(value) != value
                     {
-                        std::rc::Rc::make_mut(dispatch)
+                        std::sync::Arc::make_mut(dispatch)
                             .params
                             .insert(param.clone(), ParamValue::Count(keep(value)));
                     }

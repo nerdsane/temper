@@ -329,7 +329,7 @@ impl JointModel {
     }
 
     /// The records as they start, without their ids.
-    fn blank(&self) -> BTreeMap<std::rc::Rc<str>, std::rc::Rc<TemperModelState>> {
+    fn blank(&self) -> BTreeMap<std::sync::Arc<str>, std::sync::Arc<TemperModelState>> {
         self.models
             .iter()
             .map(|(entity, model)| {
@@ -337,7 +337,7 @@ impl JointModel {
                     .into_iter()
                     .next()
                     .expect("a model has one initial state");
-                (entity.as_str().into(), std::rc::Rc::new(init))
+                (entity.as_str().into(), std::sync::Arc::new(init))
             })
             .collect()
     }
@@ -358,7 +358,7 @@ impl JointModel {
                 .unwrap_or_else(|| format!("{entity}#id"));
             let next = ModelString::Symbol(names.len() + 1);
             let value = names.entry(name).or_insert(next).clone();
-            std::rc::Rc::make_mut(record)
+            std::sync::Arc::make_mut(record)
                 .strings
                 .insert(ID.to_string(), value);
         }

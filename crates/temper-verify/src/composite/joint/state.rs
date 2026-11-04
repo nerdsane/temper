@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::model::semantics::canonical_names;
 use crate::model::{ModelString, ParamValue, TemperModelAction, TemperModelState};
@@ -15,17 +15,17 @@ use crate::model::{ModelString, ParamValue, TemperModelAction, TemperModelState}
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct JointState {
     /// Each type's record.
-    pub records: BTreeMap<Rc<str>, Rc<TemperModelState>>,
+    pub records: BTreeMap<Arc<str>, Arc<TemperModelState>>,
     /// Dispatches sent and not yet taken, sorted; the same dispatch may be
     /// in flight twice.
-    pub inflight: Vec<Rc<Dispatch>>,
+    pub inflight: Vec<Arc<Dispatch>>,
     /// Module calls started and not yet answered, sorted. Tracked only when
     /// the model makes the kernel's moves itself.
-    pub calls: Vec<Rc<Call>>,
+    pub calls: Vec<Arc<Call>>,
     /// Who armed each record's state timer, by sender number, for the
     /// records whose timer is still armed. Presence tracks arming even when
     /// sender identity does not affect any reaction.
-    pub armed: BTreeMap<Rc<str>, u32>,
+    pub armed: BTreeMap<Arc<str>, u32>,
 }
 
 impl JointState {
@@ -217,7 +217,7 @@ pub(super) fn canonical(state: &mut JointState) -> BTreeMap<ModelString, ModelSt
                 .chain(record.lists.values().flatten())
                 .any(moved);
             if touched {
-                let record = Rc::make_mut(record);
+                let record = Arc::make_mut(record);
                 record.strings.values_mut().for_each(rewrite);
                 record.lists.values_mut().flatten().for_each(rewrite);
             }
@@ -225,7 +225,7 @@ pub(super) fn canonical(state: &mut JointState) -> BTreeMap<ModelString, ModelSt
         for dispatch in &mut state.inflight {
             let touched = strings(dispatch.values()).any(moved);
             if touched {
-                let dispatch = Rc::make_mut(dispatch);
+                let dispatch = Arc::make_mut(dispatch);
                 dispatch.params.values_mut().for_each(rewrite_param);
                 if let Some(committed) = &mut dispatch.unread_guard {
                     committed.fields.values_mut().for_each(rewrite_param);
@@ -234,7 +234,7 @@ pub(super) fn canonical(state: &mut JointState) -> BTreeMap<ModelString, ModelSt
         }
         for call in &mut state.calls {
             if call.asked.values().any(moved) {
-                Rc::make_mut(call).asked.values_mut().for_each(rewrite);
+                Arc::make_mut(call).asked.values_mut().for_each(rewrite);
             }
         }
     }

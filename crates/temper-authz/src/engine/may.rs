@@ -123,6 +123,9 @@ fn decide(applies: impl Iterator<Item = (Effect, Results)>) -> May {
     }
 }
 
+/// The indexes of the policies whose scopes fit an (action, resource type).
+type PoliciesByScope = HashMap<(String, String), Arc<[usize]>>;
+
 /// A tenant's policies with the built-in platform policy, read for
 /// [`SendAnalysis::may`].
 #[derive(Debug, Clone)]
@@ -134,7 +137,7 @@ pub struct SendAnalysis {
     /// The policies whose action and resource scopes fit each (action,
     /// resource type): a proof asks about every action of every type for
     /// every sender, and most policies name one type's actions.
-    scoped: Arc<Mutex<HashMap<(String, String), Arc<[usize]>>>>,
+    scoped: Arc<Mutex<PoliciesByScope>>,
 }
 
 impl SendAnalysis {

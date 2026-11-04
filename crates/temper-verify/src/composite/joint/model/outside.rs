@@ -3,7 +3,7 @@
 //! elsewhere.
 
 use std::collections::BTreeSet;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use temper_authz::May;
 
@@ -16,7 +16,7 @@ impl JointModel {
     /// matters only to a record with a reaction that runs as them; elsewhere,
     /// and for an action outside code is relied on to send whoever sends it,
     /// someone outside of no known kind stands for all.
-    pub(super) fn outside_senders(&self, entity: &str, action: &str) -> Rc<[u32]> {
+    pub(super) fn outside_senders(&self, entity: &str, action: &str) -> Arc<[u32]> {
         if let Some(known) = self.senders.alike(entity, action) {
             return known;
         }
@@ -27,7 +27,7 @@ impl JointModel {
         };
         let asked = self.asked_after(entity, action);
         let mut ways = BTreeSet::new();
-        let kept: Rc<[u32]> = senders
+        let kept: Arc<[u32]> = senders
             .iter()
             .copied()
             .filter(|&by| {

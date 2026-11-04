@@ -40,7 +40,7 @@ impl JointModel {
                 .map(move |ids| {
                     let mut records = blank.clone();
                     for (record, id) in records.values_mut().zip(ids) {
-                        std::rc::Rc::make_mut(record)
+                        std::sync::Arc::make_mut(record)
                             .strings
                             .insert(ID.to_string(), id);
                     }

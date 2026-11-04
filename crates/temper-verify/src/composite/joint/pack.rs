@@ -4,19 +4,19 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::hash::Hash;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use super::room::{Heap, block, map_bytes};
 use super::state::{Call, Dispatch, JointState};
 use crate::model::TemperModelState;
 
 /// A packed joint state, shared by the walk's list and its index.
-pub(super) type Packed = Rc<[u32]>;
+pub(super) type Packed = Arc<[u32]>;
 
 /// Each distinct value once.
 struct Table<T> {
-    items: Vec<Rc<T>>,
-    ids: HashMap<Rc<T>, u32>,
+    items: Vec<Arc<T>>,
+    ids: HashMap<Arc<T>, u32>,
     /// The values `items` holds, by where they are. Those `items` keeps stay
     /// where they are, and a state unpacked holds these same ones, so most
     /// values packed are found here without being read.
@@ -37,8 +37,8 @@ impl<T> Default for Table<T> {
 }
 
 impl<T: Eq + Hash + Heap> Table<T> {
-    fn id(&mut self, item: &Rc<T>) -> u32 {
-        if let Some(&id) = self.at.get(&Rc::as_ptr(item)) {
+    fn id(&mut self, item: &Arc<T>) -> u32 {
+        if let Some(&id) = self.at.get(&Arc::as_ptr(item)) {
             return id;
         }
         if let Some(&id) = self.ids.get(item) {
@@ -47,15 +47,15 @@ impl<T: Eq + Hash + Heap> Table<T> {
         let id = u32::try_from(self.items.len()).expect("fewer than 2^32 values");
         self.items.push(item.clone());
         self.ids.insert(item.clone(), id);
-        self.at.insert(Rc::as_ptr(item), id);
+        self.at.insert(Arc::as_ptr(item), id);
         self.heap += block(2 * size_of::<usize>() + size_of::<T>()) + (**item).heap();
         id
     }
 
     fn bytes(&self) -> usize {
         self.heap
-            + block(self.items.capacity() * size_of::<Rc<T>>())
-            + map_bytes::<Rc<T>, u32>(self.ids.capacity())
+            + block(self.items.capacity() * size_of::<Arc<T>>())
+            + map_bytes::<Arc<T>, u32>(self.ids.capacity())
             + map_bytes::<*const T, u32>(self.at.capacity())
     }
 }
@@ -69,10 +69,10 @@ pub(super) struct Packer {
     heap: usize,
     /// The types of the records every state of the walk holds, in order. A
     /// move replaces a record and never adds one.
-    types: Vec<Rc<str>>,
+    types: Vec<Arc<str>>,
     /// The types armed timers name.
-    armed: HashMap<Rc<str>, u32>,
-    armed_types: Vec<Rc<str>>,
+    armed: HashMap<Arc<str>, u32>,
+    armed_types: Vec<Arc<str>>,
     records: Table<TemperModelState>,
     dispatches: Table<Dispatch>,
     calls: Table<Call>,
@@ -182,7 +182,7 @@ mod tests {
         let state = JointState {
             records: BTreeMap::new(),
             inflight: Vec::new(),
-            calls: vec![Rc::new(Call {
+            calls: vec![Arc::new(Call {
                 to: "T".into(),
                 module: "worker".into(),
                 on_success: Vec::new(),

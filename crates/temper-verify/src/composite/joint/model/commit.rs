@@ -161,7 +161,7 @@ impl JointModel {
             }
         }
         if let Some(record) = state.records.get_mut(entity) {
-            *record = std::rc::Rc::new(moved);
+            *record = std::sync::Arc::new(moved);
         }
     }
 

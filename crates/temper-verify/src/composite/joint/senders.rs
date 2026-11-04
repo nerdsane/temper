@@ -45,7 +45,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use serde_json::Value;
 use temper_authz::{Asker, Attr, Cause, Hop, May, SendAnalysis};
@@ -66,6 +66,9 @@ mod unknown;
 
 /// Someone outside the kernel, of no known kind, in a request's chain.
 pub(super) const OUTSIDE: u32 = 0;
+
+/// Sender ids by entity, then by action.
+type AlikeSenders = BTreeMap<String, BTreeMap<String, Arc<[u32]>>>;
 
 /// The senders a model knows, by number, and what Cedar lets each send.
 ///
@@ -101,7 +104,7 @@ pub(super) struct Senders {
     decided: RefCell<HashMap<Question, May>>,
     /// The senders each (entity, action) is sent as from outside, of those
     /// that may, one for each way what follows can go.
-    alike: RefCell<BTreeMap<String, BTreeMap<String, Rc<[u32]>>>>,
+    alike: RefCell<AlikeSenders>,
     /// The bytes `decided` holds, as a walk counts them against its room.
     decided_bytes: std::cell::Cell<usize>,
     /// The policies that may apply to a move whose answer depends on the
@@ -221,12 +224,12 @@ impl Senders {
 
     /// The senders `entity`'s `action` is sent as from outside, once worked
     /// out ([`Self::note_alike`]).
-    pub(super) fn alike(&self, entity: &str, action: &str) -> Option<Rc<[u32]>> {
+    pub(super) fn alike(&self, entity: &str, action: &str) -> Option<Arc<[u32]>> {
         self.alike.borrow().get(entity)?.get(action).cloned()
     }
 
     /// Note the senders `entity`'s `action` is sent as from outside.
-    pub(super) fn note_alike(&self, entity: &str, action: &str, senders: Rc<[u32]>) {
+    pub(super) fn note_alike(&self, entity: &str, action: &str, senders: Arc<[u32]>) {
         self.alike
             .borrow_mut()
             .entry(entity.to_string())

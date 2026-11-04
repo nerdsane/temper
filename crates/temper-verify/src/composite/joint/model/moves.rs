@@ -108,7 +108,7 @@ impl JointModel {
     fn answers(
         &self,
         state: &JointState,
-        call: &std::rc::Rc<Call>,
+        call: &std::sync::Arc<Call>,
         values: &BTreeSet<ModelString>,
         out: &mut Vec<Move>,
     ) -> bool {
