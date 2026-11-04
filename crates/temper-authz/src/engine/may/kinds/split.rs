@@ -2,7 +2,8 @@ use super::*;
 
 impl Tests {
     /// The profiles that tell `profile` apart on `test`: between them,
-    /// every value it may have.
+    /// every value it may have, a literal no question's policy compares with
+    /// standing with the other values.
     pub(super) fn split(&self, profile: &Profile, test: &Test) -> Vec<Profile> {
         let with = |set: &dyn Fn(&mut Profile)| {
             let mut next = profile.clone();
@@ -16,7 +17,11 @@ impl Tests {
                     .iter()
                     .map(|kind| Json::from(kind.as_str()))
                     .collect();
-                let mut facts: Vec<Fact> = unlike.iter().cloned().map(Fact::Is).collect();
+                let mut facts: Vec<Fact> = self
+                    .asked_kinds
+                    .iter()
+                    .map(|kind| Fact::Is(Json::from(kind.as_str())))
+                    .collect();
                 facts.push(Fact::Other {
                     unlike,
                     like: BTreeMap::new(),
@@ -37,7 +42,8 @@ impl Tests {
                 if !always {
                     facts.push(Fact::Absent);
                 }
-                facts.extend(literals.iter().cloned().map(Fact::Is));
+                let asked = self.asked_literals.get(&of);
+                facts.extend(asked.into_iter().flatten().cloned().map(Fact::Is));
                 facts.push(Fact::Other {
                     unlike: literals,
                     like: BTreeMap::new(),

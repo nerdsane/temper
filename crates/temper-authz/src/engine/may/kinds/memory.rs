@@ -1,4 +1,4 @@
-//! Conservative byte reservations for the sender partition, not a work cap.
+//! Byte reservations for the sender partition, not a work cap.
 
 use super::*;
 
@@ -16,6 +16,8 @@ pub(super) fn tests_room(policies: &[(Effect, Json)], questions: usize) -> usize
 pub(super) struct Memory<'a> {
     base: usize,
     node: usize,
+    /// What a kind's form holds, while the partition remembers it.
+    pub(super) form: usize,
     pub(super) branches: usize,
     reserve: &'a dyn Fn(usize) -> Result<(), String>,
 }
@@ -67,30 +69,22 @@ impl<'a> Memory<'a> {
             + types;
         let policy_bytes =
             |at: usize| size_of::<Json>() + json_heap(&policies[at].1) + json_text(&policies[at].1);
-        let policies: usize = candidates
+        // One policy's residual JSON and its text at once, for the one being
+        // read: the forms keep only each distinct text ([`Forms`]).
+        let residual = candidates
             .iter()
             .flatten()
-            .copied()
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .map(policy_bytes)
-            .sum();
-        // Each sibling may keep a signature for every candidate question;
-        // one residual JSON and its serialized text can coexist.
-        let signature = candidates
-            .iter()
-            .flatten()
-            .copied()
-            .map(policy_bytes)
-            .sum::<usize>()
-            * 2
-            + questions * size_of::<Vec<String>>();
+            .map(|&at| policy_bytes(at))
+            .max()
+            .unwrap_or(0)
+            * 2;
+        let form = size_of::<Vec<u32>>() + (questions + 1) * size_of::<u32>();
         let node = size_of::<Node>()
             + profile
             + tree::<Test, ()>(reads.len())
             + strings
             + questions * size_of::<May>()
-            + signature;
+            + form;
         let branches = tests
             .literals
             .values()
@@ -99,18 +93,20 @@ impl<'a> Memory<'a> {
             .max()
             .unwrap_or(3);
         Self {
-            base: metadata + policies + signature,
+            base: metadata + residual,
             node,
+            form,
             branches,
             reserve,
         }
     }
 
-    pub(super) fn reserve(&self, nodes: usize) -> Result<(), String> {
+    pub(super) fn reserve(&self, nodes: usize, held: usize) -> Result<(), String> {
         let bytes = self
             .node
             .checked_mul(nodes)
             .and_then(|n| n.checked_add(self.base))
+            .and_then(|n| n.checked_add(held))
             .ok_or_else(|| {
                 "sender-kind construction size overflows addressable memory".to_string()
             })?;

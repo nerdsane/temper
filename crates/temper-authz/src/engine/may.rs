@@ -23,8 +23,11 @@ mod request;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_kinds;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::{Arc, Mutex};
 
 use cedar_policy::{Effect, PolicySet};
 use serde_json::Value as Json;
@@ -125,6 +128,9 @@ fn decide(applies: impl Iterator<Item = (Effect, Results)>) -> May {
 #[derive(Debug, Clone)]
 pub struct SendAnalysis {
     policies: Vec<(Effect, Json)>,
+    /// The kinds found for each set of questions: the proofs of one app ask
+    /// the same ones again ([`SendAnalysis::outside_kinds`]).
+    kinds: Arc<Mutex<HashMap<String, Vec<Kind>>>>,
 }
 
 impl SendAnalysis {
@@ -143,7 +149,10 @@ impl SendAnalysis {
                 (policy.effect(), json)
             })
             .collect();
-        Ok(Self { policies })
+        Ok(Self {
+            policies,
+            kinds: Arc::default(),
+        })
     }
 
     /// Whether `asker` may send `action` to a record of `resource_type`, of

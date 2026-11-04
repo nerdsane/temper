@@ -337,3 +337,82 @@ fn a_denied_partition_reservation_never_returns_a_partial_cover() {
     );
     assert_eq!(calls.get(), 3, "construction must stop at the first denial");
 }
+
+/// The steps a partition takes on these policies for one question, as its
+/// reservations count them, and the kinds it finds.
+fn partition_steps(policy: &str) -> (usize, usize) {
+    let analysis = SendAnalysis::new(policy).unwrap();
+    let calls = std::cell::Cell::new(0);
+    let kinds = analysis
+        .outside_kinds(
+            &[Question {
+                action: "Add",
+                resource_type: "Note",
+                cause: Cause::request(),
+            }],
+            &|_| {
+                calls.set(calls.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+    (calls.get(), kinds.len())
+}
+
+#[test]
+fn senders_a_policy_has_finished_with_do_not_multiply_the_kinds() {
+    // Once one pair decides, or fails, what is left is the same whatever
+    // made it fail: a tree of every value would take over 3^12 steps.
+    let condition = (0..6)
+        .map(|at| format!("(principal has a{at} && principal has b{at})"))
+        .collect::<Vec<_>>()
+        .join(" || ");
+    let (steps, kinds) = partition_steps(&format!(
+        "permit(principal, action, resource) when {{ {condition} }};"
+    ));
+    assert_eq!(kinds, 2, "may send, and may not");
+    assert!(steps < 200, "took {steps} steps");
+}
+
+#[test]
+fn a_literal_only_other_actions_compare_with_tells_no_senders_apart() {
+    let (_, without) = partition_steps(
+        r#"permit(principal, action == Action::"Add", resource is Note)
+        when { principal has role && principal.role == "member" };"#,
+    );
+    let (_, with) = partition_steps(
+        r#"permit(principal, action == Action::"Add", resource is Note)
+        when { principal has role && principal.role == "member" };
+        permit(principal, action == Action::"Other", resource is Note)
+        when { principal has role && principal.role == "helper" };"#,
+    );
+    assert_eq!(without, with);
+}
+
+#[test]
+fn the_same_questions_are_answered_once() {
+    let analysis = SendAnalysis::new(
+        r#"permit(principal, action, resource)
+        when { principal has role && principal.role == "member" };"#,
+    )
+    .unwrap();
+    let questions = [Question {
+        action: "Add",
+        resource_type: "Note",
+        cause: Cause::request(),
+    }];
+    let calls = std::cell::Cell::new(0);
+    let reserve = |_: usize| {
+        calls.set(calls.get() + 1);
+        Ok(())
+    };
+    let first = analysis.outside_kinds(&questions, &reserve).unwrap();
+    let after_first = calls.get();
+    let again = analysis.outside_kinds(&questions, &reserve).unwrap();
+    assert_eq!(first, again);
+    assert_eq!(
+        calls.get(),
+        after_first + 1,
+        "only what it holds is reserved"
+    );
+}

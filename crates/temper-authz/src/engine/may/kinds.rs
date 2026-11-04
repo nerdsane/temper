@@ -6,23 +6,27 @@
 //! a chain runs as one principal throughout. [`SendAnalysis::outside_kinds`]
 //! splits the outside senders by what the policies test of the principal
 //! (its type, its attributes, the context keys only the kernel sets), only
-//! as far as a split changes a residual policy, and joins kinds whose
-//! answers are definite and alike. Every outside principal is of
-//! one kind, so asking each question for each kind misses no sender.
+//! as far as a split changes a residual policy, keeps one sender of those
+//! the policies leave the same, and joins kinds whose answers are definite
+//! and alike. Every outside principal is of one kind, so asking each
+//! question for each kind misses no sender.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use cedar_policy::Effect;
 use serde_json::Value as Json;
 
 use super::json::{entity_parts, single};
 use super::profile::{Fact, Kind, Profile, UNKNOWN};
-use super::request::{Request, Results, TRUE};
+use super::request::{Request, TRUE};
 use super::{Asker, Cause, May, SendAnalysis, decide};
 use crate::platform_keys;
 
+mod forms;
 mod memory;
 mod split;
+mod tests_of;
+use forms::{Classes, Forms, Part, reads_of, reads_whole_sender};
 use memory::Memory;
 
 /// A question a walk asks of each outside sender: whether it may send
@@ -41,6 +45,10 @@ struct Node {
     profile: Profile,
     answers: Vec<May>,
     undecided: BTreeSet<Test>,
+    /// What decides this kind's senders from here on ([`Forms`]).
+    form: Vec<u32>,
+    /// What each class of policy says of this kind ([`Part`]).
+    known: Vec<Option<Part>>,
 }
 
 /// Where a sender's value is read.
@@ -97,6 +105,10 @@ struct Tests {
     kinds: Vec<String>,
     /// The literals the policies compare each value with.
     literals: BTreeMap<(Place, String), Vec<Json>>,
+    /// The entity types and literals of the policies some question may
+    /// apply: no other tells senders apart, so a split need not try them.
+    asked_kinds: Vec<String>,
+    asked_literals: BTreeMap<(Place, String), Vec<Json>>,
 }
 
 impl SendAnalysis {
@@ -110,8 +122,33 @@ impl SendAnalysis {
         questions: &[Question<'_>],
         reserve: &dyn Fn(usize) -> Result<(), String>,
     ) -> Result<Vec<Kind>, String> {
+        let key = format!("{questions:?}");
+        let found = |kinds: &HashMap<String, Vec<Kind>>| kinds.get(&key).cloned();
+        let held = self
+            .kinds
+            .lock()
+            .map_err(|_| "a partition panicked".to_string())?;
+        if let Some(kinds) = found(&held) {
+            reserve(kinds.iter().map(Kind::bytes).sum())?;
+            return Ok(kinds);
+        }
+        drop(held);
+        let kinds = self.partition(questions, reserve)?;
+        let mut held = self
+            .kinds
+            .lock()
+            .map_err(|_| "a partition panicked".to_string())?;
+        held.insert(key, kinds.clone());
+        Ok(kinds)
+    }
+
+    fn partition(
+        &self,
+        questions: &[Question<'_>],
+        reserve: &dyn Fn(usize) -> Result<(), String>,
+    ) -> Result<Vec<Kind>, String> {
         reserve(memory::tests_room(&self.policies, questions.len()))?;
-        let tests = Tests::read(&self.policies);
+        let mut tests = Tests::read(&self.policies);
         let none = BTreeMap::new();
         let anyone = Asker::Outside;
         // Knowing more of the sender only rules policies out, so a policy
@@ -125,98 +162,116 @@ impl SendAnalysis {
                     .collect()
             })
             .collect();
+        tests.ask(&self.policies, &candidates);
         let memory = Memory::new(&tests, &self.policies, &candidates, reserve);
-        memory.reserve(4)?;
-        let read = |profile: Profile| {
+        memory.reserve(4, 0)?;
+        let forms = Forms::default();
+        let classes = Classes::read(&self.policies, questions, &candidates);
+        let read = |profile: Profile, parent: Option<&Node>| {
             let mut answers = Vec::with_capacity(questions.len());
-            let mut undecided = BTreeSet::new();
-            for (question, candidates) in questions.iter().zip(&candidates) {
+            let mut form = Vec::with_capacity(questions.len() + 1);
+            // What the parts still open read: the facts they will go on to read.
+            let mut reads = BTreeSet::new();
+            let mut whole = false;
+            // A policy reads alike for every question of its class, and what
+            // it has decided for a kind it decides for all of that kind.
+            let mut known: Vec<Option<Part>> = parent.map_or_else(
+                || vec![None; classes.count],
+                |parent| parent.known.iter().map(Part::stays).collect(),
+            );
+            for (at_question, question) in questions.iter().enumerate() {
                 let request = ask(&anyone, &profile, question, &none);
-                let applies: Vec<(usize, Results)> = candidates
-                    .iter()
-                    .map(|&at| (at, request.applies(&self.policies[at].1)))
-                    .collect();
-                let answer = decide(applies.iter().map(|(at, r)| (self.policies[*at].0, *r)));
-                if answer == May::Maybe {
-                    for (at, applies) in &applies {
-                        if applies.can(TRUE) && *applies != TRUE {
-                            undecided.extend(tests.reads[*at].iter().cloned());
-                        }
-                    }
+                let of = &classes.of[at_question];
+                let mut decided = Vec::with_capacity(of.len());
+                for (&at, &class) in candidates[at_question].iter().zip(of) {
+                    let part = known[class].get_or_insert_with(|| Part {
+                        applies: request.applies(&self.policies[at].1),
+                        text: None,
+                    });
+                    decided.push((self.policies[at].0, part.applies));
                 }
+                let answer = decide(decided.into_iter());
                 answers.push(answer);
+                if answer != May::Maybe {
+                    // More known of the sender cannot change a definite answer.
+                    form.push(forms.answer(answer));
+                    continue;
+                }
+                let mut left = Vec::new();
+                for (&at, &class) in candidates[at_question].iter().zip(of) {
+                    let Some(part) = known[class].as_mut().filter(|part| part.applies.can(TRUE))
+                    else {
+                        continue;
+                    };
+                    let text = *part.text.get_or_insert_with(|| {
+                        let (effect, policy) = &self.policies[at];
+                        let note = |expr: &Json| {
+                            reads.extend(Tests::of(expr));
+                            whole |= reads_whole_sender(expr);
+                            false
+                        };
+                        let note = std::cell::RefCell::new(note);
+                        let residual = request.residual(policy, &|expr| (note.borrow_mut())(expr));
+                        reads.extend(tests.scopes[at].iter().cloned());
+                        forms.text(&format!("{effect:?}{}", residual.unwrap_or(Json::Null)))
+                    });
+                    left.push(text);
+                }
+                left.sort_unstable();
+                left.dedup();
+                form.push(forms.list(left));
             }
-            undecided.retain(|test| tests.open(&profile, test));
+            form.push(forms.text(&reads_of(&profile, &reads, whole)));
+            let undecided = reads
+                .into_iter()
+                .filter(|test| tests.open(&profile, test))
+                .collect();
             Node {
                 profile,
                 answers,
                 undecided,
+                form,
+                known,
             }
         };
-        // What every policy that reads `test` leaves open for `node`'s
-        // senders. Senders that differ only in `test` and leave these the
-        // same answer alike from here on, however the rest comes to be
-        // known, so one of them stands for the others. None when a part
-        // still open reads `test`.
-        let signature = |node: &Node, test: &Test| -> Option<Vec<String>> {
-            let mut parts = Vec::new();
-            for (question, candidates) in questions.iter().zip(&candidates) {
-                let request = ask(&anyone, &node.profile, question, &none);
-                for &at in candidates
-                    .iter()
-                    .filter(|&&at| tests.touch(&tests.reads[at], test))
-                {
-                    let policy = &self.policies[at].1;
-                    let applies = request.applies(policy);
-                    let decided = applies == TRUE || !applies.can(TRUE);
-                    if !decided && tests.touch(&tests.scopes[at], test) {
-                        return None;
-                    }
-                    let reads = |expr: &Json| tests.touch(&Tests::of(expr), test);
-                    parts.push(request.residual(policy, &reads)?.to_string());
-                }
-            }
-            Some(parts)
-        };
-        // Split a kind on the first test it leaves open that some answer
-        // turns on; a test no answer turns on here tells nothing apart.
+        // Split a kind on the first test some part still open reads. Senders
+        // with one form answer alike from here on, however the rest comes to
+        // be known, so the first stands for the others: without this, the
+        // tests no policy reads together multiply the kinds out.
         let mut leaves: Vec<Node> = Vec::new();
-        let mut open = vec![read(Profile::default())];
+        let mut seen = HashSet::new();
+        let first = read(Profile::default(), None);
+        seen.insert(first.form.clone());
+        let mut open = vec![first];
         while let Some(node) = open.pop() {
             // Include vector spare capacity, reallocation overlap, children,
-            // signatures, and the result being assembled before allocating.
-            memory.reserve(4 * (open.len() + leaves.len() + memory.branches + 1))?;
-            let split = node.undecided.first().map(|test| {
-                let children: Vec<Node> = tests
-                    .split(&node.profile, test)
-                    .into_iter()
-                    .map(read)
-                    .collect();
-                // Equal Maybe answers can hide a condition on another test.
-                // Only equal residuals let one branch stand for another.
-                let mut alike: Vec<(Vec<String>, Node)> = Vec::new();
-                let mut apart = Vec::new();
-                for child in children {
-                    match signature(&child, test) {
-                        Some(sig) => match alike.iter_mut().find(|(known, _)| *known == sig) {
-                            // An example that stands for any value says
-                            // nothing of the kind.
-                            Some((_, first)) if test.any(&child.profile) => {
-                                first.profile.stand_ins.insert(test.name());
-                            }
-                            Some(_) => {}
-                            None => alike.push((sig, child)),
-                        },
-                        None => apart.push(child),
+            // and the result being assembled before allocating.
+            memory.reserve(
+                4 * (open.len() + leaves.len() + memory.branches + 1),
+                forms.bytes() + seen.len() * memory.form,
+            )?;
+            let Some(test) = node.undecided.first() else {
+                leaves.push(node);
+                continue;
+            };
+            let mut children: Vec<Node> = Vec::new();
+            let split = tests.split(&node.profile, test);
+            for child in split.into_iter().map(|profile| read(profile, Some(&node))) {
+                match children.iter_mut().find(|known| known.form == child.form) {
+                    // An example that stands for any value says nothing of
+                    // the kind.
+                    Some(first) if test.any(&child.profile) => {
+                        first.profile.stand_ins.insert(test.name());
                     }
+                    Some(_) => {}
+                    None => children.push(child),
                 }
-                apart.extend(alike.into_iter().map(|(_, child)| child));
-                apart
-            });
-            match split {
-                Some(children) => open.extend(children),
-                None => leaves.push(node),
             }
+            open.extend(
+                children
+                    .into_iter()
+                    .filter(|child| seen.insert(child.form.clone())),
+            );
         }
         let mut kinds: Vec<(Vec<May>, Vec<Profile>)> = Vec::new();
         for Node {
@@ -289,132 +344,6 @@ fn value(expr: &Json) -> Option<&Json> {
     match single(expr)? {
         ("Value", value) => Some(value),
         _ => None,
-    }
-}
-
-impl Tests {
-    fn read(policies: &[(Effect, Json)]) -> Self {
-        let mut tests = Tests::default();
-        for (_, policy) in policies {
-            let mut reads = BTreeSet::new();
-            let scope = &policy["principal"];
-            match scope["op"].as_str() {
-                Some("==") => tests.principal_is_entity(&scope["entity"], &mut reads),
-                Some("is") => tests.principal_is_kind(scope["entity_type"].as_str(), &mut reads),
-                _ => {}
-            }
-            tests.scopes.push(reads.clone());
-            tests.walk(&policy["conditions"], &mut reads);
-            tests.reads.push(reads);
-        }
-        tests.kinds.sort();
-        tests.kinds.dedup();
-        tests
-    }
-
-    /// The tests `expr` makes.
-    fn of(expr: &Json) -> BTreeSet<Test> {
-        let mut reads = BTreeSet::new();
-        Tests::default().walk(expr, &mut reads);
-        reads
-    }
-
-    /// Whether a part that makes `reads` turns on `test`.
-    fn touch(&self, reads: &BTreeSet<Test>, test: &Test) -> bool {
-        match test {
-            Test::Named(place, name) => reads.iter().any(|read| match read {
-                Test::Named(p, n) | Test::Like(p, n, _) => p == place && n == name,
-                Test::Kind => false,
-            }),
-            _ => reads.contains(test),
-        }
-    }
-
-    fn principal_is_kind(&mut self, kind: Option<&str>, reads: &mut BTreeSet<Test>) {
-        // Someone outside is never the kernel's `System`.
-        if let Some(kind) = kind.filter(|kind| *kind != "System") {
-            self.kinds.push(kind.to_string());
-            reads.insert(Test::Kind);
-        }
-    }
-
-    fn principal_is_entity(&mut self, entity: &Json, reads: &mut BTreeSet<Test>) {
-        let Some((kind, id)) = entity_parts(entity) else {
-            return;
-        };
-        self.principal_is_kind(Some(kind), reads);
-        let id_attr = (Place::Principal, "id".to_string());
-        self.literal(&id_attr, Json::from(id));
-        reads.insert(Test::Named(id_attr.0, id_attr.1));
-    }
-
-    fn literal(&mut self, of: &(Place, String), value: Json) {
-        let literals = self.literals.entry(of.clone()).or_default();
-        if !literals.contains(&value) {
-            literals.push(value);
-        }
-    }
-
-    fn walk(&mut self, expr: &Json, reads: &mut BTreeSet<Test>) {
-        let Some((op, arg)) = single(expr) else {
-            match expr {
-                Json::Object(object) => object.values().for_each(|child| self.walk(child, reads)),
-                Json::Array(items) => items.iter().for_each(|child| self.walk(child, reads)),
-                _ => {}
-            }
-            return;
-        };
-        if op == "Value" {
-            return;
-        }
-        if let Some(of) = named(op, arg) {
-            reads.insert(Test::Named(of.0, of.1));
-        }
-        let (left, right) = (&arg["left"], &arg["right"]);
-        let side = |expr: &Json| single(expr).and_then(|(op, arg)| named(op, arg));
-        match op {
-            "==" | "!=" => {
-                for (subject, other) in [(left, right), (right, left)] {
-                    let Some(other) = value(other) else { continue };
-                    if let Some(of) = side(subject) {
-                        self.literal(&of, other.clone());
-                    } else if place(subject) == Some(Place::Principal) {
-                        self.principal_is_entity(other, reads);
-                    }
-                }
-            }
-            "in" => {
-                if let (Some(of), Some(("Set", Json::Array(members)))) = (side(left), single(right))
-                {
-                    for member in members.iter().filter_map(value) {
-                        self.literal(&of, member.clone());
-                    }
-                }
-            }
-            "is" if place(left) == Some(Place::Principal) => {
-                self.principal_is_kind(arg["entity_type"].as_str(), reads);
-            }
-            "like" => {
-                if let Some(of) = side(left) {
-                    reads.insert(Test::Like(of.0, of.1, arg["pattern"].to_string()));
-                }
-            }
-            _ => {}
-        }
-        self.walk(arg, reads);
-    }
-
-    /// Whether `profile` leaves `test` open.
-    fn open(&self, profile: &Profile, test: &Test) -> bool {
-        match test {
-            Test::Kind => profile.kind.is_none(),
-            Test::Named(place, name) => !facts(profile, *place).contains_key(name),
-            Test::Like(place, name, pattern) => matches!(
-                facts(profile, *place).get(name),
-                Some(Fact::Other { like, string, .. })
-                    if *string != Some(false) && !like.contains_key(pattern)
-            ),
-        }
     }
 }
 

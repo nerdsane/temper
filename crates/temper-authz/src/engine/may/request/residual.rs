@@ -6,6 +6,15 @@ use super::super::json::single;
 use super::{ERROR, FALSE, Request, Results, TRUE};
 
 impl Request<'_> {
+    /// What `policy`'s action and resource scope say of this question,
+    /// which no sender changes.
+    pub(in crate::engine::may) fn fixed_scope(&self, policy: &Json) -> (Results, Results) {
+        (
+            self.action_scope(&policy["action"]),
+            self.resource_scope(&policy["resource"]),
+        )
+    }
+
     /// `policy` as this request leaves it: its scope's results, and each
     /// condition with every part this request decides replaced by its
     /// result. None when a part it leaves open reads something `reads`
