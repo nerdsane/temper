@@ -51,14 +51,10 @@ impl ServerState {
             }
         };
         let policy = self.dispatch_retry_policy();
-        let response = retry::ask_with_backoff::<_, EntityResponse, _>(
-            &actor_ref,
-            || EntityMsg::GetState,
-            &policy,
-        )
-        .await
-        .result
-        .map_err(|e| format!("Actor query failed: {e}"))?;
+        let response = retry::ask_state(&actor_ref, &policy)
+            .await
+            .result
+            .map_err(|e| format!("Actor query failed: {e}"))?;
         if response.state.status == "Deleted"
             || (from_index && !self.entity_exists(tenant, entity_type, entity_id))
         {

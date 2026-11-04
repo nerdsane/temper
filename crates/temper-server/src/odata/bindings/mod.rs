@@ -331,6 +331,67 @@ pub(super) async fn dispatch_bound_action(
     }
 }
 
+/// Decide whether the caller may make `action` on the record as it is now, and
+/// answer with the record as the action would, without making it. Writes nothing:
+/// no event, and no decision row for a refusal, which it answers as a read does.
+pub(crate) async fn check_bound_action(
+    state: &ServerState,
+    authenticated: &temper_authz::AuthenticatedRequestContext,
+    entity_set: &str,
+    entity_id: &str,
+    action: &str,
+) -> axum::response::Response {
+    let tenant = authenticated.tenant();
+    let Some(entity_type) = crate::odata::resolve_entity_type(state, tenant, entity_set) else {
+        return odata_error(
+            StatusCode::NOT_FOUND,
+            "EntitySetNotFound",
+            &format!("Entity set '{entity_set}' not found"),
+        )
+        .into_response();
+    };
+    let snapshot = match state
+        .load_authz_resource_snapshot(tenant, &entity_type, entity_id)
+        .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return odata_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "ReadError",
+                &error.to_string(),
+            )
+            .into_response();
+        }
+    };
+    if !snapshot.exists {
+        return odata_error(
+            StatusCode::NOT_FOUND,
+            "ResourceNotFound",
+            &format!("{entity_set}('{entity_id}') not found"),
+        )
+        .into_response();
+    }
+    if let Err(denial) = state.authorize_with_context(
+        authenticated.security_context(),
+        action,
+        &entity_type,
+        &snapshot.resource_attrs,
+        tenant.as_str(),
+    ) {
+        return odata_error(
+            StatusCode::FORBIDDEN,
+            "AuthorizationDenied",
+            &denial.to_string(),
+        )
+        .into_response();
+    }
+    let mut record = action_answer(&snapshot.current_state.state);
+    hydrate_blob_refs_for_tenant(state, tenant, &mut record).await;
+    let body = annotate_entity(record, format!("$metadata#{entity_set}/$entity"), None);
+    (StatusCode::OK, axum::Json(body)).into_response()
+}
+
 // Fresh answers and cached retries show the record as a read does, without its
 // recent events. Event params can each hold a whole document; fifty of them
 // pushed an endpoint admission's answer past its budget.

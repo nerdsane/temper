@@ -1341,12 +1341,7 @@ impl ServerState {
         // ADR-0048: retry transient ask failures (AskTimeout, MailboxFull)
         // so a single slow actor reply does not surface as HTTP 500.
         let policy = self.dispatch_retry_policy();
-        let outcome = retry::ask_with_backoff::<_, EntityResponse, _>(
-            &actor_ref,
-            || EntityMsg::GetState,
-            &policy,
-        )
-        .await;
+        let outcome = retry::ask_state(&actor_ref, &policy).await;
         outcome
             .result
             .map_err(|error| super::DispatchError::from_actor_error(error, outcome.attempts))
@@ -1475,14 +1470,7 @@ impl ServerState {
             .map_err(CreateError::Failed)?;
 
         let policy = self.dispatch_retry_policy();
-        let response = match retry::ask_with_backoff::<_, EntityResponse, _>(
-            &actor_ref,
-            || EntityMsg::GetState,
-            &policy,
-        )
-        .await
-        .result
-        {
+        let response = match retry::ask_state(&actor_ref, &policy).await.result {
             Ok(response) => response,
             // The store did not take the record's first write (its size and the
             // disk's room were checked above), so the record was not created.
@@ -2027,12 +2015,7 @@ impl ServerState {
         };
 
         let policy = self.dispatch_retry_policy();
-        let outcome = retry::ask_with_backoff::<_, EntityResponse, _>(
-            &actor_ref,
-            || EntityMsg::GetState,
-            &policy,
-        )
-        .await;
+        let outcome = retry::ask_state(&actor_ref, &policy).await;
         match outcome.result {
             Ok(response) if response.state.is_tombstoned() => {
                 let _ = actor_ref.stop();
@@ -2064,12 +2047,7 @@ impl ServerState {
                 .cloned()?
         };
         let policy = self.dispatch_retry_policy();
-        let outcome = retry::ask_with_backoff::<_, EntityResponse, _>(
-            &actor_ref,
-            || EntityMsg::GetState,
-            &policy,
-        )
-        .await;
+        let outcome = retry::ask_state(&actor_ref, &policy).await;
         outcome
             .result
             .ok()
@@ -2159,12 +2137,7 @@ impl ServerState {
         for (actor_key, actor_ref, _) in candidates {
             // ADR-0048: retry transient failures so passivation is not skipped
             // by a single AskTimeout under load.
-            let snapshot_outcome = retry::ask_with_backoff::<_, EntityResponse, _>(
-                &actor_ref,
-                || EntityMsg::GetState,
-                &policy,
-            )
-            .await;
+            let snapshot_outcome = retry::ask_state(&actor_ref, &policy).await;
             if let Some((store, _backend)) = journal.as_ref()
                 && let Ok(response) = snapshot_outcome.result
                 && response.state.sequence_nr > 0

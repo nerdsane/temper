@@ -1522,7 +1522,7 @@ impl Actor for EntityActor {
         ctx: &mut ActorContext<Self>,
     ) -> Result<(), ActorError> {
         let message = msg.name().to_owned();
-        let handled = super::watchdog::watched(
+        let handled = super::watchdog::limited(
             self.watched_record(),
             &message,
             self.action_dispatch_timeout,

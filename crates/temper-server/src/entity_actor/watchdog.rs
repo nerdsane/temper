@@ -9,14 +9,42 @@
 //! and how long it has run, then again each minute until it ends, and
 //! `handler finished` when it does. It is a log line from the record's own
 //! task, not a span, because a span is exported only when it closes and a hung
-//! await never closes one. It reports; it never ends or limits the message.
+//! await never closes one.
+//!
+//! A message that outruns [`handler_deadline`] is given up: [`limited`] logs
+//! `handler abandoned` with the await it was in, drops it and fails it, which
+//! makes the actor rebuild from its journal and take the next message. Memory
+//! cannot be wrong after that, and a write the dropped message began cannot
+//! land twice: the store runs an append to its own end whatever happens to its
+//! caller or is one transaction that rolls back, and a later write is checked
+//! against the journal's sequence. A record's start is not limited: replaying a
+//! long journal is real work, and nothing else can run until it is done either
+//! way.
 
 use std::future::Future;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
+use temper_runtime::actor::ActorError;
+
 /// How often a message still running is reported again.
 const REPORT_EVERY: Duration = Duration::from_secs(60);
+
+/// A caller retries an ask three times by default; twice that many ask deadlines
+/// means every caller that was waiting has given up, so the record is holding
+/// out everyone behind it for nobody.
+const HANDLER_DEADLINE_ASKS: u32 = 6;
+
+/// A store under load is slow, not stuck, and rebuilding costs a replay, so a
+/// short ask deadline does not shorten the wait below this.
+const MIN_HANDLER_DEADLINE: Duration = Duration::from_secs(120);
+
+/// How long one message may hold its record.
+fn handler_deadline(ask_deadline: Duration) -> Duration {
+    ask_deadline
+        .saturating_mul(HANDLER_DEADLINE_ASKS)
+        .max(MIN_HANDLER_DEADLINE)
+}
 
 /// What a record's current message is doing: every await its handler and its
 /// start make, plus the work between them.
@@ -106,6 +134,7 @@ impl Drop for Back<'_> {
 }
 
 /// The record a watch reports on.
+#[derive(Clone, Copy)]
 pub(super) struct Record<'a> {
     /// The tenant this record belongs to.
     pub tenant: &'a str,
@@ -157,6 +186,40 @@ pub(super) async fn watched<F: Future>(
                 );
                 next += REPORT_EVERY;
             }
+        }
+    }
+}
+
+/// [`watched`], for one message: give it up once it outruns [`handler_deadline`].
+pub(super) async fn limited<T, F: Future<Output = Result<T, ActorError>>>(
+    record: Record<'_>,
+    message: &str,
+    ask_deadline: Duration,
+    now: &Now,
+    work: F,
+) -> Result<T, ActorError> {
+    let deadline = handler_deadline(ask_deadline);
+    let watched = std::pin::pin!(watched(record, message, ask_deadline, now, work));
+    tokio::select! {
+        biased;
+        out = watched => out,
+        () = tokio::time::sleep(deadline) => { // determinism-ok: production watchdog, a wall-clock bound on one message
+            tracing::error!(
+                tenant = %record.tenant,
+                entity_type = %record.entity_type,
+                entity_id = %record.entity_id,
+                action = message,
+                awaiting = now.get().name(),
+                deadline_secs = deadline.as_secs(),
+                "handler abandoned"
+            );
+            Err(ActorError::custom(format!(
+                "{}:{} gave up {message} after {}s, {}",
+                record.entity_type,
+                record.entity_id,
+                deadline.as_secs(),
+                now.get().name(),
+            )))
         }
     }
 }

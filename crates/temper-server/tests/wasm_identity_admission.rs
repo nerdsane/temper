@@ -442,6 +442,39 @@ async fn endpoint_rejects_wrong_owner_and_rechecks_state_before_wasm() {
     assert!(response.status().is_client_error());
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_check_decides_who_may_and_makes_no_move() {
+    let (state, _dir) = fixture().await;
+    let route = temper_server::http_endpoint::route_from_entity_fields("probe", &json!({
+        "PathPrefix":"/probe/{id}", "Methods":"GET", "IntegrationModule":"capability-probe", "RequiresAuth":true,
+        "AdmissionActions":json!([{"name":"child", "entity_set":"Children", "entity_id":"{id}", "action":"Probe.Remove", "check":true}]).to_string()
+    })).unwrap();
+    state
+        .http_endpoint_tables
+        .table_for(&TenantId::new("probe"))
+        .await
+        .replace(vec![route])
+        .await;
+    let child = || async {
+        state
+            .get_tenant_entity_state(&TenantId::new("probe"), "Child", "mine")
+            .await
+            .unwrap()
+            .state
+    };
+    let before = child().await;
+    assert_eq!(endpoint_call(&state, "bob").await.status(), 403);
+    // Twice: the move itself would refuse a second time, and move the record.
+    assert_eq!(endpoint_call(&state, "alice").await.status(), 200);
+    assert_eq!(endpoint_call(&state, "alice").await.status(), 200);
+    let after = child().await;
+    assert_eq!(after.status, "Active");
+    assert_eq!(
+        after.sequence_nr, before.sequence_nr,
+        "nothing was journaled"
+    );
+}
+
 #[test]
 fn malformed_admission_configuration_is_not_silently_ignored() {
     for invalid in [

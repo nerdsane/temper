@@ -25,6 +25,7 @@ mod unavailable_tenant;
 mod write;
 mod write_key;
 
+pub(crate) use bindings::check_bound_action;
 pub(crate) use common::resolve_entity_type;
 pub use content_addressed::handle_blob_ingest_raw;
 pub use read::handle_hints;

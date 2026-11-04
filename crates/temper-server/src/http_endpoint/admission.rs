@@ -26,6 +26,20 @@ pub struct AdmissionAction {
     /// String parameters: literals or entire `{capture}` placeholders.
     #[serde(default)]
     pub params: BTreeMap<String, String>,
+    /// Decide whether the caller may make this move and answer with the record,
+    /// without making it: for a route that only reads, so a read writes nothing
+    /// to the record's journal and does not wait for a write. It decides who may
+    /// on the record as it is now; it does not ask whether the record's state
+    /// allows the move. Takes no params.
+    #[serde(default)]
+    pub check: bool,
+}
+
+/// One admission action declared as a check, resolved against the request.
+struct CheckedMove {
+    entity_set: String,
+    entity_id: String,
+    action: String,
 }
 
 pub(super) fn resolve(value: &str, captures: &BTreeMap<String, String>) -> Result<String, String> {
@@ -86,6 +100,9 @@ pub(crate) async fn admit(
         }) {
             return Err(invalid("invalid CSDL identifier in admission"));
         }
+        if gate.check && !gate.params.is_empty() {
+            return Err(invalid("an admission check takes no params"));
+        }
         let id = match resolve(&gate.entity_id, captures) {
             Ok(v) => v,
             Err(e) => return Err(invalid(&e)),
@@ -120,28 +137,46 @@ pub(crate) async fn admit(
             // Reject the whole declaration before ANY action can be queued.
             return Err(requires_completion());
         }
+        let check = gate.check.then(|| CheckedMove {
+            entity_set: gate.entity_set.clone(),
+            entity_id: id.clone(),
+            action: gate.action.clone(),
+        });
         prepared.push((
             gate.name,
             path,
             Bytes::from(Value::Object(params).to_string()),
+            check,
         ));
     }
     let mut admitted = BTreeMap::new();
-    for (name, path, params) in prepared {
-        // Do not inherit a user idempotency key: admission is evaluated on EVERY
-        // request, even when the remote application receives a repeated key.
-        // Boxed: the OData handler's future is among the largest in the
-        // kernel; inlined, every future above this route call would carry it.
-        let response = Box::pin(crate::odata::handle_odata_post(
-            State(state.clone()),
-            Some(Extension(authenticated.clone())),
-            HeaderMap::new(),
-            Path(path.clone()),
-            Query(BTreeMap::new()),
-            params,
-        ))
-        .await
-        .into_response();
+    for (name, path, params, check) in prepared {
+        let response = match check {
+            Some(check) => {
+                crate::odata::check_bound_action(
+                    state,
+                    authenticated,
+                    &check.entity_set,
+                    &check.entity_id,
+                    &check.action,
+                )
+                .await
+            }
+            // Do not inherit a user idempotency key: admission is evaluated on EVERY
+            // request, even when the remote application receives a repeated key.
+            // Boxed: the OData handler's future is among the largest in the
+            // kernel; inlined, every future above this route call would carry it.
+            None => Box::pin(crate::odata::handle_odata_post(
+                State(state.clone()),
+                Some(Extension(authenticated.clone())),
+                HeaderMap::new(),
+                Path(path.clone()),
+                Query(BTreeMap::new()),
+                params,
+            ))
+            .await
+            .into_response(),
+        };
         if response.status() == StatusCode::ACCEPTED {
             return Err(requires_completion());
         }

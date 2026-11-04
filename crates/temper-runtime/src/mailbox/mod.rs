@@ -106,6 +106,11 @@ impl<M: Message> MailboxReceiver<M> {
         self.inner.recv().await
     }
 
+    /// Whether nothing is queued right now.
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
     /// Take no more messages because the actor did not start: a later send
     /// answers `InitFailed(reason)`, and `recv` yields the messages already
     /// queued, then None.

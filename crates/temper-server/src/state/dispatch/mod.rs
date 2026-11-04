@@ -97,6 +97,16 @@ impl crate::state::ServerState {
         }
         .with_attempt_budget_floor()
     }
+
+    /// A loaded record's state, under the bound on reads ([`retry::ask_state`]).
+    pub(crate) async fn ask_loaded_state(
+        &self,
+        actor_ref: &temper_runtime::actor::ActorRef<crate::entity_actor::EntityMsg>,
+    ) -> Result<crate::entity_actor::EntityResponse, temper_runtime::actor::ActorError> {
+        retry::ask_state(actor_ref, &self.dispatch_retry_policy())
+            .await
+            .result
+    }
 }
 
 /// Options for the extended dispatch entry point.

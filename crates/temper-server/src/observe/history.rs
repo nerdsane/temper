@@ -9,7 +9,7 @@ use temper_runtime::persistence::PersistenceEnvelope;
 
 use crate::authz::require_authenticated_context;
 use crate::blobs::hydrate_blob_refs_for_tenant;
-use crate::entity_actor::{EntityEvent, EntityMsg, EntityResponse, EntityState};
+use crate::entity_actor::{EntityEvent, EntityState};
 use crate::state::ServerState;
 
 use super::entity_read::require_history_read;
@@ -181,8 +181,8 @@ async fn loaded_entity_state(state: &ServerState, actor_key: &str) -> Option<Ent
             .unwrap_or_else(|e| e.into_inner());
         registry.get(actor_key).cloned()
     }?;
-    actor_ref
-        .ask::<EntityResponse>(EntityMsg::GetState, state.action_dispatch_timeout)
+    state
+        .ask_loaded_state(&actor_ref)
         .await
         .ok()
         .map(|response| response.state)

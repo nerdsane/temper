@@ -136,6 +136,67 @@ async fn dst_a_hung_append_is_reported_until_it_ends_and_is_written_once() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn dst_a_message_past_its_deadline_is_given_up_and_the_record_takes_the_next() {
+    for seed in 0..8 {
+        let (_guard, _clock, _ids) = install_deterministic_context(seed);
+        let lines = Lines::default();
+        let writer = lines.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _logs = tracing::subscriber::set_default(subscriber);
+
+        let store = Arc::new(SimEventStore::no_faults(seed));
+        let mut server = server((*store).clone());
+        server.action_dispatch_timeout = Duration::from_secs(5);
+        let actor = server
+            .get_or_spawn_tenant_actor(&TenantId::default(), "Order", "stuck")
+            .unwrap();
+        let _: EntityResponse = actor
+            .ask(EntityMsg::GetState, Duration::from_secs(5))
+            .await
+            .unwrap();
+        let written_before = store.dump_journal("default:Order:stuck").len();
+
+        store.hang_next_append("default:Order:stuck");
+        let asked = actor.clone();
+        let reply = tokio::spawn(async move {
+            asked
+                .ask::<EntityResponse>(add_item(), Duration::from_secs(600))
+                .await
+        });
+
+        tokio::time::sleep(Duration::from_secs(119)).await;
+        assert_eq!(lines.with(&["handler abandoned"]), 0, "seed {seed}");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let abandoned = [
+            "handler abandoned",
+            "entity_type=Order",
+            "entity_id=stuck",
+            "action=\"AddItem\"",
+            "awaiting=\"appending to the journal\"",
+        ];
+        assert_eq!(lines.with(&abandoned), 1, "seed {seed}: {}", lines.text());
+        assert!(
+            reply.await.unwrap().is_err(),
+            "seed {seed}: the given-up message is answered with an error"
+        );
+
+        let next: EntityResponse = actor
+            .ask(add_item(), Duration::from_secs(60))
+            .await
+            .expect("the record takes the next message");
+        assert!(next.success, "seed {seed}: {:?}", next.error);
+        assert_eq!(
+            store.dump_journal("default:Order:stuck").len(),
+            written_before + 1,
+            "seed {seed}: only the message that finished is written"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_quick_message_is_never_reported() {
     let (_guard, _clock, _ids) = install_deterministic_context(3);
     let lines = Lines::default();

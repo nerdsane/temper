@@ -1,4 +1,5 @@
 use std::fmt;
+use std::marker::PhantomData;
 use std::time::Duration;
 
 use tokio::sync::oneshot;
@@ -89,12 +90,22 @@ impl<M: Message> ActorRef<M> {
     /// Send a message and wait for a typed response.
     /// Times out after the specified duration.
     pub async fn ask<R: Send + 'static>(&self, msg: M, timeout: Duration) -> Result<R, ActorError> {
-        let rx = self.send_ask(msg)?;
-        let result = tokio::time::timeout(timeout, rx)
-            .await
-            .map_err(|_| ActorError::AskTimeout(timeout))?
-            .map_err(|_| ActorError::Stopped)?;
-        Self::decode_reply(result)
+        self.send_pending(msg)?.wait(timeout).await
+    }
+
+    /// Send a message and hold its place in the queue. [`PendingAsk::wait`] can
+    /// be called again after a timeout, so a caller that keeps waiting does not
+    /// add a second copy behind the first. Dropping the handle gives up the ask:
+    /// if the message has not started, it never runs.
+    pub fn send_pending<R: Send + 'static>(
+        &self,
+        msg: M,
+    ) -> Result<PendingAsk<'_, M, R>, ActorError> {
+        Ok(PendingAsk {
+            actor: self,
+            reply: self.send_ask(msg)?,
+            answer: PhantomData,
+        })
     }
 
     /// Send a message and wait until the actor replies or stops, without a
@@ -151,6 +162,35 @@ impl<M: Message> ActorRef<M> {
     /// Mailbox total capacity.
     pub fn mailbox_capacity(&self) -> usize {
         self.sender.capacity()
+    }
+}
+
+/// An ask that has been sent and not yet answered. See [`ActorRef::send_pending`].
+pub struct PendingAsk<'a, M: Message, R> {
+    actor: &'a ActorRef<M>,
+    reply: oneshot::Receiver<AskReply>,
+    answer: PhantomData<R>,
+}
+
+impl<M: Message, R: Send + 'static> PendingAsk<'_, M, R> {
+    /// Wait up to `timeout` for the answer. After [`ActorError::AskTimeout`] the
+    /// ask is still queued and this may be called again; after any other answer
+    /// the ask is over and this handle must be dropped.
+    pub async fn wait(&mut self, timeout: Duration) -> Result<R, ActorError> {
+        match tokio::time::timeout(timeout, &mut self.reply).await {
+            Ok(Ok(answer)) => ActorRef::<M>::decode_reply(answer),
+            Ok(Err(_)) => Err(ActorError::Stopped),
+            Err(_) => {
+                tracing::warn!(
+                    actor = %self.actor.id,
+                    timeout_ms = timeout.as_millis() as u64,
+                    mailbox_depth = self.actor.mailbox_depth(),
+                    mailbox_capacity = self.actor.mailbox_capacity(),
+                    "ask timed out"
+                );
+                Err(ActorError::AskTimeout(timeout))
+            }
+        }
     }
 }
 

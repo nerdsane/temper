@@ -104,12 +104,28 @@ impl<A: Actor> ActorCell<A> {
             };
 
             // Phase 2: Message loop
+            let mut abandoned_asks: usize = 0;
             let restart_needed = 'message_loop: loop {
                 let Some(envelope) = rx.recv().await else {
                     // All senders dropped — actor is orphaned, stop.
                     info!(actor = %id, "all senders dropped, stopping");
                     break 'message_loop false;
                 };
+
+                // An ask whose caller has gone is dropped without running: nobody
+                // can learn its answer, and behind a slow message such asks are
+                // what the queue is made of. Running them would only delay the
+                // callers still waiting.
+                if let Envelope::Ask { reply, .. } = &envelope
+                    && reply.is_closed()
+                {
+                    abandoned_asks += 1;
+                    if rx.is_empty() {
+                        report_abandoned_asks(&id, &mut abandoned_asks);
+                    }
+                    continue;
+                }
+                report_abandoned_asks(&id, &mut abandoned_asks);
 
                 match envelope {
                     Envelope::Tell(msg) => {
@@ -172,6 +188,15 @@ impl<A: Actor> ActorCell<A> {
     }
 }
 
+/// Log how many asks were dropped since the last line: one line per run of them,
+/// so a long queue of abandoned asks costs one line.
+fn report_abandoned_asks(id: &ActorId, abandoned_asks: &mut usize) {
+    if *abandoned_asks > 0 {
+        warn!(actor = %id, dropped = *abandoned_asks, "dropped asks whose caller has gone");
+        *abandoned_asks = 0;
+    }
+}
+
 fn should_restart(strategy: &SupervisionStrategy, current_restarts: u32) -> bool {
     match strategy {
         SupervisionStrategy::Stop => false,
@@ -182,7 +207,114 @@ fn should_restart(strategy: &SupervisionStrategy, current_restarts: u32) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::actor::traits::Message;
+    use std::io::Write;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
+    use tokio::sync::oneshot;
+
+    #[derive(Debug)]
+    enum Step {
+        /// Hold the actor until the sender goes.
+        Hold(oneshot::Receiver<()>),
+        /// Count this message and answer it.
+        Count,
+    }
+    impl Message for Step {}
+
+    struct Counting(Arc<AtomicUsize>);
+
+    impl Actor for Counting {
+        type Msg = Step;
+        type State = ();
+
+        async fn pre_start(&self, _ctx: &mut ActorContext<Self>) -> Result<(), ActorError> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            msg: Step,
+            _state: &mut (),
+            ctx: &mut ActorContext<Self>,
+        ) -> Result<(), ActorError> {
+            match msg {
+                Step::Hold(until) => {
+                    let _ = until.await;
+                }
+                Step::Count => {
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                    ctx.reply(());
+                }
+            }
+            Ok(())
+        }
+
+        async fn post_stop(&self, _state: (), _ctx: &mut ActorContext<Self>) {}
+    }
+
+    #[derive(Clone, Default)]
+    struct Lines(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Lines {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn an_ask_whose_caller_has_gone_never_runs_and_the_line_counts_them() {
+        let lines = Lines::default();
+        let writer = lines.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _logs = tracing::subscriber::set_default(subscriber);
+
+        let counted = Arc::new(AtomicUsize::new(0));
+        let actor = ActorCell::new(
+            Counting(counted.clone()),
+            ActorId::new("count", "test/count"),
+        )
+        .spawn();
+        let (release, until) = oneshot::channel();
+        actor.tell(Step::Hold(until)).unwrap();
+
+        // Two callers give up behind the held message; one keeps waiting.
+        for _ in 0..2 {
+            let gave_up = actor.ask::<()>(Step::Count, Duration::from_millis(5)).await;
+            assert_eq!(gave_up, Err(ActorError::AskTimeout(Duration::ZERO)));
+        }
+        let waiting = actor.clone();
+        let live =
+            tokio::spawn(
+                async move { waiting.ask::<()>(Step::Count, Duration::from_secs(5)).await },
+            );
+        tokio::task::yield_now().await;
+        assert_eq!(counted.load(Ordering::SeqCst), 0);
+
+        drop(release);
+        live.await.unwrap().unwrap();
+        assert_eq!(
+            counted.load(Ordering::SeqCst),
+            1,
+            "only the caller still waiting runs"
+        );
+        let text = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            text.matches("dropped asks whose caller has gone").count(),
+            1,
+            "{text}"
+        );
+        assert!(text.contains("dropped=2"), "{text}");
+    }
 
     #[test]
     fn stop_strategy_never_restarts() {

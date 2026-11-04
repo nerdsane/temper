@@ -239,6 +239,14 @@ pub(crate) struct HostState {
 }
 
 impl HostState {
+    /// This invocation, for the line a host call to `url` logs at its deadline.
+    pub(crate) fn call_site<'a>(&'a self, url: &'a str) -> host_functions::HostCallSite<'a> {
+        host_functions::HostCallSite {
+            context_json: &self.context_json,
+            url,
+        }
+    }
+
     /// Remaining wall-clock budget for an async host call.
     pub(crate) fn remaining_host_call_timeout(&self) -> Duration {
         let remaining = self

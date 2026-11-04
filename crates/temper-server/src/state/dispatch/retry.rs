@@ -28,8 +28,10 @@
 
 use std::time::{Duration, Instant};
 
-use temper_runtime::actor::{ActorError, ActorRef, Message};
+use temper_runtime::actor::{ActorError, ActorRef, Message, PendingAsk};
 use temper_runtime::scheduler::sim_now;
+
+use crate::entity_actor::{EntityMsg, EntityResponse};
 
 /// Retry policy for `ask_with_backoff`.
 #[derive(Debug, Clone)]
@@ -119,8 +121,10 @@ pub struct AskResult<R> {
 
 /// Ask an actor with bounded retry on transient failures.
 ///
-/// `make_msg` is called once per attempt so each attempt builds a fresh
-/// `M` — required because `ActorRef::ask` moves its message.
+/// `make_msg` is called for each send: the first attempt, and any attempt after
+/// the previous ask ended without an answer. An attempt after a timeout keeps
+/// waiting on the same ask. When the attempts run out the ask is dropped, and if
+/// it has not started it never runs.
 ///
 /// Returns as soon as any of:
 /// - an attempt succeeds,
@@ -141,6 +145,7 @@ where
     let max_attempts = policy.max_attempts.max(1);
     let mut last_err: Option<ActorError> = None;
     let mut saw_transient = false;
+    let mut pending: Option<PendingAsk<'_, M, R>> = None;
 
     for attempt in 0..max_attempts {
         // Pre-attempt backoff (skipped on attempt 0).
@@ -167,8 +172,20 @@ where
             break;
         }
 
-        let msg = make_msg();
-        match actor_ref.ask::<R>(msg, attempt_timeout).await {
+        // A timed-out ask is still queued, so the next attempt keeps waiting on it
+        // rather than adding a second copy behind it. Only an ask that is over
+        // (the mailbox had no room, the actor stopped) is sent again.
+        let answer = match pending.as_mut() {
+            Some(ask) => ask.wait(attempt_timeout).await,
+            None => match actor_ref.send_pending::<R>(make_msg()) {
+                Ok(ask) => pending.insert(ask).wait(attempt_timeout).await,
+                Err(err) => Err(err),
+            },
+        };
+        if !matches!(answer, Err(ActorError::AskTimeout(_))) {
+            pending = None;
+        }
+        match answer {
             Ok(value) => {
                 return AskResult {
                     result: Ok(value),
@@ -200,6 +217,35 @@ where
         elapsed: start.elapsed(),
         retried_after_transient: saw_transient,
     }
+}
+
+/// Ask a record for its state: refused at once while its mailbox is half full.
+///
+/// A read waits behind everything queued, and a reader that times out and goes
+/// leaves its ask in the mailbox until the record reaches it. So while a record
+/// is slow, reads alone could fill the mailbox and every move would be refused
+/// for lack of room. Half is kept for them: the mailbox's size is the real limit,
+/// and a read refused here can be repeated, where a lost move cannot always.
+pub(crate) async fn ask_state(
+    actor_ref: &ActorRef<EntityMsg>,
+    policy: &RetryPolicy,
+) -> AskResult<EntityResponse> {
+    let depth = actor_ref.mailbox_depth();
+    if depth >= actor_ref.mailbox_capacity() / 2 {
+        tracing::warn!(
+            actor = %actor_ref.id(),
+            mailbox_depth = depth,
+            mailbox_capacity = actor_ref.mailbox_capacity(),
+            "read refused: the record's mailbox is half full"
+        );
+        return AskResult {
+            result: Err(ActorError::MailboxFull),
+            attempts: 1,
+            elapsed: Duration::ZERO,
+            retried_after_transient: false,
+        };
+    }
+    ask_with_backoff(actor_ref, || EntityMsg::GetState, policy).await
 }
 
 /// Deterministic "full jitter" in the range `[0, base_ms]`.
@@ -242,103 +288,5 @@ fn u32_env(name: &str, default: u32) -> u32 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn policy_with_attempts(max_attempts: u32, delays: Vec<u64>) -> RetryPolicy {
-        RetryPolicy {
-            total_deadline: Duration::from_secs(30),
-            per_attempt_timeout: Duration::from_secs(5),
-            max_attempts,
-            base_delays_ms: delays,
-        }
-    }
-
-    #[test]
-    fn base_delay_zero_for_first_attempt() {
-        let p = policy_with_attempts(4, vec![0, 50, 200, 800]);
-        assert_eq!(p.base_delay_ms_for(0), 0);
-    }
-
-    #[test]
-    fn base_delay_follows_index() {
-        let p = policy_with_attempts(4, vec![0, 50, 200, 800]);
-        assert_eq!(p.base_delay_ms_for(1), 50);
-        assert_eq!(p.base_delay_ms_for(2), 200);
-        assert_eq!(p.base_delay_ms_for(3), 800);
-    }
-
-    #[test]
-    fn base_delay_clamps_to_last_entry() {
-        let p = policy_with_attempts(10, vec![0, 50, 200, 800]);
-        // Past the end of the table — stays at the last defined value.
-        assert_eq!(p.base_delay_ms_for(7), 800);
-        assert_eq!(p.base_delay_ms_for(100), 800);
-    }
-
-    #[test]
-    fn base_delay_empty_table_always_zero() {
-        let p = policy_with_attempts(3, vec![]);
-        assert_eq!(p.base_delay_ms_for(1), 0);
-        assert_eq!(p.base_delay_ms_for(10), 0);
-    }
-
-    #[test]
-    fn remaining_budget_never_goes_negative() {
-        let p = policy_with_attempts(3, vec![0, 50]);
-        let long = Duration::from_secs(60);
-        assert_eq!(p.remaining(long), Duration::ZERO);
-    }
-
-    #[test]
-    fn jitter_stays_within_base_bound() {
-        // Property check: over many (base, attempt) combos, full-jitter must
-        // never exceed the base.
-        for base in [0u64, 1, 10, 50, 200, 800, 5000] {
-            for attempt in 0u32..16 {
-                let d = jittered_delay_ms(base, attempt);
-                assert!(
-                    d <= base,
-                    "jitter {d} exceeded base {base} at attempt {attempt}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn single_attempt_policy_has_one_attempt_and_zero_delays() {
-        let p = RetryPolicy::single_attempt();
-        assert_eq!(p.max_attempts, 1);
-        // Base delay at attempt 0 is always 0 regardless of table contents.
-        assert_eq!(p.base_delay_ms_for(0), 0);
-    }
-
-    #[test]
-    fn max_attempts_coerced_to_at_least_one() {
-        // Default() coerces invalid env values upwards; exposed via the
-        // `.max(1)` in Default::default(). A direct construction with 0 is
-        // allowed so tests can probe edge cases.
-        let p = RetryPolicy {
-            max_attempts: 0,
-            ..RetryPolicy::default()
-        };
-        // ask_with_backoff internally coerces max_attempts to >= 1 so the
-        // loop always runs at least once; this is the contract the dispatch
-        // layer depends on.
-        let effective = p.max_attempts.max(1);
-        assert_eq!(effective, 1);
-    }
-
-    #[test]
-    fn attempt_budget_floor_prevents_per_attempt_timeout_from_disabling_retry() {
-        let p = RetryPolicy {
-            total_deadline: Duration::from_secs(30),
-            per_attempt_timeout: Duration::from_secs(30),
-            max_attempts: 3,
-            base_delays_ms: vec![0, 50, 200],
-        }
-        .with_attempt_budget_floor();
-
-        assert_eq!(p.total_deadline, Duration::from_millis(90_250));
-    }
-}
+#[path = "retry_test.rs"]
+mod tests;
