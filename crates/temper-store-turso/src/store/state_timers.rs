@@ -67,7 +67,7 @@ impl TursoEventStore {
             .write_connection("turso.delete_state_timer", WritePriority::Low)
             .await?;
         conn.execute(
-            "DELETE FROM state_timers \
+            "DELETE FROM state_timers INDEXED BY sqlite_autoindex_state_timers_1 \
              WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND arm_id = ?4",
             params![tenant, entity_type, entity_id, arm_id],
         )
@@ -92,7 +92,7 @@ impl TursoEventStore {
             .write_connection("turso.date_state_timer", WritePriority::Low)
             .await?;
         conn.execute(
-            "UPDATE state_timers SET due_at = ?5 \
+            "UPDATE state_timers INDEXED BY sqlite_autoindex_state_timers_1 SET due_at = ?5 \
              WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND arm_id = ?4",
             params![tenant, entity_type, entity_id, arm_id, due_at],
         )
@@ -149,7 +149,7 @@ impl TursoEventStore {
         let mut rows = conn
             .query(
                 "SELECT state, arm_id, sequence_nr, started_at, params, armed_by, due_at \
-                 FROM state_timers WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
+                 FROM state_timers INDEXED BY sqlite_autoindex_state_timers_1 WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
                 params![tenant, entity_type, entity_id],
             )
             .await

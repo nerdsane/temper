@@ -24,7 +24,7 @@ impl TursoEventStore {
             .write_connection("turso.cancel_scheduled_action", WritePriority::Low)
             .await?;
         conn.execute(
-            "UPDATE scheduled_actions SET action = '' \
+            "UPDATE scheduled_actions INDEXED BY sqlite_autoindex_scheduled_actions_1 SET action = '' \
              WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND arm_id = ?4",
             params![tenant, entity_type, entity_id, arm_id],
         )
@@ -47,7 +47,7 @@ impl TursoEventStore {
             .write_connection("turso.delete_scheduled_action", WritePriority::Low)
             .await?;
         conn.execute(
-            "DELETE FROM scheduled_actions \
+            "DELETE FROM scheduled_actions INDEXED BY sqlite_autoindex_scheduled_actions_1 \
              WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND arm_id = ?4",
             params![tenant, entity_type, entity_id, arm_id],
         )
@@ -99,7 +99,7 @@ impl TursoEventStore {
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(
-                "SELECT arm_id, action, due_at, armed_by FROM scheduled_actions \
+                "SELECT arm_id, action, due_at, armed_by FROM scheduled_actions INDEXED BY sqlite_autoindex_scheduled_actions_1 \
                  WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
                 params![tenant, entity_type, entity_id],
             )

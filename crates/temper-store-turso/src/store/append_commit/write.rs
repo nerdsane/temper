@@ -142,7 +142,7 @@ pub(super) async fn write_append(
     }
     if let Some(arm_id) = append.fired_scheduled_action.as_deref() {
         tx.execute(
-            "DELETE FROM scheduled_actions \
+            "DELETE FROM scheduled_actions INDEXED BY sqlite_autoindex_scheduled_actions_1 \
              WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3 AND arm_id = ?4",
             params![tenant, entity_type, entity_id, arm_id],
         )

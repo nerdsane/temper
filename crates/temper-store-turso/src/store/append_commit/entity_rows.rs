@@ -96,7 +96,7 @@ impl EntityRows {
             Some(TimerRow::Arm(timer)) => arm_timer(tx, timer).await?,
             Some(TimerRow::End) => {
                 tx.execute(
-                    "DELETE FROM state_timers \
+                    "DELETE FROM state_timers INDEXED BY sqlite_autoindex_state_timers_1 \
                      WHERE tenant = ?1 AND entity_type = ?2 AND entity_id = ?3",
                     params![tenant, entity_type, entity_id],
                 )
