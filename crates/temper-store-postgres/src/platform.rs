@@ -2524,15 +2524,37 @@ impl PostgresEventStore {
         .execute(self.pool())
         .await
         .map_err(storage_error)?;
-        // Prune the inserting tenant every time: a global id cadence can
-        // indefinitely skip a tenant when writes from tenants interleave.
+        Ok(())
+    }
+
+    /// How many WASM invocation log rows `tenant` holds.
+    pub async fn count_wasm_invocations(&self, tenant: &str) -> Result<i64, PersistenceError> {
+        let (count,): (i64,) = crate::dbm::postgres_query_as!(
+            &self.schema,
+            "SELECT COUNT(*)::bigint FROM {schema}wasm_invocation_logs WHERE tenant = $1",
+        )
+        .bind(tenant)
+        .fetch_one(self.pool())
+        .await
+        .map_err(storage_error)?;
+        Ok(count)
+    }
+
+    /// Trim `tenant`'s WASM invocation log to its newest
+    /// [`temper_runtime::persistence::WASM_INVOCATIONS_KEPT_PER_TENANT`] rows.
+    ///
+    /// Kept apart from [`Self::persist_wasm_invocation`] so recording an
+    /// invocation is one insert; a global id cadence can indefinitely skip a
+    /// tenant when writes from tenants interleave, so the caller names the
+    /// tenant.
+    pub async fn prune_wasm_invocations(&self, tenant: &str) -> Result<(), PersistenceError> {
         crate::dbm::postgres_query!(
             &self.schema,
             "DELETE FROM {schema}wasm_invocation_logs WHERE tenant = $1 AND id <= ( \
                  SELECT id FROM {schema}wasm_invocation_logs WHERE tenant = $1 \
                  ORDER BY id DESC OFFSET $2 LIMIT 1)",
         )
-        .bind(entry.tenant)
+        .bind(tenant)
         .bind(temper_runtime::persistence::WASM_INVOCATIONS_KEPT_PER_TENANT)
         .execute(self.pool())
         .await

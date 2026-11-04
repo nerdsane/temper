@@ -26,6 +26,13 @@ pub const COMPOSITE_EVENT_TYPE: &str = "CompositeEvent";
 /// tenant ran.
 pub const WASM_INVOCATIONS_KEPT_PER_TENANT: i64 = 10_000;
 
+/// Rows one invocation-log delete removes while holding the shared writer.
+/// A journal append waits for at most one batch, so a backlog drains in
+/// batches rather than monopolizing the writer. A log is trimmed only once it
+/// holds this many rows over [`WASM_INVOCATIONS_KEPT_PER_TENANT`], so a
+/// delete runs once per this many inserts and never for a single row.
+pub const WASM_INVOCATIONS_PRUNE_BATCH_ROWS: i64 = 100;
+
 /// Replay/audit record for one Composite action application.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompositeEvent {

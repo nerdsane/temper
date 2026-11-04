@@ -44,6 +44,7 @@ async fn interleaved_tenants_each_keep_their_newest_invocations() {
     }
     let mut rows = Vec::new();
     for tenant in ["odd", "even"] {
+        store.prune_wasm_invocations(tenant).await.unwrap();
         rows.extend(
             store
                 .load_recent_wasm_invocations(tenant, 2 * inserted)

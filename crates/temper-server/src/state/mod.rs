@@ -30,6 +30,7 @@ pub mod status_cache;
 pub(crate) mod storage_caps;
 pub mod trajectory;
 pub mod wasm_invocation_log;
+pub(crate) mod wasm_log_pruner;
 pub(crate) mod write_record;
 
 pub use admission::{AdmissionController, AdmissionOutcome, AdmissionPermit};
@@ -425,6 +426,9 @@ pub struct ServerState {
     /// from this server can claim to have seen a whole run.
     pub(crate) capture_health: crate::trajectory_outbox::CaptureHealth,
 
+    /// Tenants whose WASM invocation log awaits trimming.
+    pub(crate) wasm_log_pruner: wasm_log_pruner::WasmLogPruner,
+
     /// The actor system for spawning and managing legacy in-memory entity actors.
     pub actor_system: Arc<ActorSystem>,
     /// Optional PG-backed actor system. When configured and an entity type is in
@@ -812,6 +816,7 @@ impl ServerState {
         let (observe_refresh_tx, _) = tokio::sync::broadcast::channel(64); // determinism-ok: broadcast for external observation
         let state = Self {
             capture_health: crate::trajectory_outbox::CaptureHealth::default(),
+            wasm_log_pruner: wasm_log_pruner::WasmLogPruner::default(),
             actor_system: Arc::new(system),
             pg_actor_system: None,
             actor_backed_types: BTreeSet::new(),
@@ -1096,6 +1101,7 @@ impl ServerState {
         let (observe_refresh_tx, _) = tokio::sync::broadcast::channel(64); // determinism-ok: broadcast for external observation
         let state = Self {
             capture_health: crate::trajectory_outbox::CaptureHealth::default(),
+            wasm_log_pruner: wasm_log_pruner::WasmLogPruner::default(),
             actor_system: Arc::new(system),
             pg_actor_system: None,
             actor_backed_types: BTreeSet::new(),

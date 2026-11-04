@@ -38,6 +38,7 @@ async fn a_tenants_invocation_log_keeps_its_newest_rows_up_to_the_bound() {
             .await
             .unwrap();
     }
+    store.prune_wasm_invocations("busy").await.unwrap();
     let rows = store
         .load_recent_wasm_invocations("busy", 2 * busy)
         .await
@@ -75,6 +76,7 @@ async fn interleaved_tenants_each_keep_their_newest_invocations() {
         }
     }
     for tenant in ["odd", "even"] {
+        store.prune_wasm_invocations(tenant).await.unwrap();
         let rows = store
             .load_recent_wasm_invocations(tenant, 2 * inserted)
             .await
@@ -125,8 +127,11 @@ async fn a_journal_append_can_land_between_log_cleanup_batches() {
     tx.commit().await.unwrap();
     drop(conn);
 
-    let newest = invocation("backlog", "newest");
-    let (pruned, remaining) = tokio::join!(store.persist_wasm_invocation(&newest), async {
+    store
+        .persist_wasm_invocation(&invocation("backlog", "newest"))
+        .await
+        .unwrap();
+    let (pruned, remaining) = tokio::join!(store.prune_wasm_invocations("backlog"), async {
         store
             .append(
                 "backlog:Job:job-1",
@@ -152,4 +157,37 @@ async fn a_journal_append_can_land_between_log_cleanup_batches() {
         .unwrap();
     assert_eq!(rows.len() as i64, WASM_INVOCATIONS_KEPT_PER_TENANT);
     assert!(rows.iter().any(|row| row.entity_id == "newest"));
+}
+
+/// Recording an invocation sits on the module call's path to the shared
+/// writer, so it only inserts: trimming the log is a separate call.
+#[tokio::test]
+async fn recording_an_invocation_deletes_nothing() {
+    let store = make_store("wasm-invocation-insert-only").await;
+    let inserted = WASM_INVOCATIONS_KEPT_PER_TENANT + 50;
+    for n in 0..inserted {
+        store
+            .persist_wasm_invocation(&invocation("busy", &format!("e-{n}")))
+            .await
+            .unwrap();
+    }
+    let rows = store
+        .load_recent_wasm_invocations("busy", 2 * inserted)
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.len() as i64,
+        inserted,
+        "every recorded invocation is still there until the log is trimmed"
+    );
+    assert_eq!(
+        store.count_wasm_invocations("busy").await.unwrap(),
+        inserted
+    );
+    store.prune_wasm_invocations("busy").await.unwrap();
+    assert_eq!(
+        store.count_wasm_invocations("busy").await.unwrap(),
+        WASM_INVOCATIONS_KEPT_PER_TENANT,
+        "a trim leaves exactly the bound"
+    );
 }

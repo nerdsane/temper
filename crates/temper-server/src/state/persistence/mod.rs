@@ -478,7 +478,9 @@ impl ServerState {
                     entry.module_name,
                     store.backend_name()
                 )
-            })
+            })?;
+        self.schedule_wasm_log_prune(&entry.tenant);
+        Ok(())
     }
 
     /// Load all WASM modules from the persistence backend and register them.
