@@ -195,7 +195,7 @@ impl SpecRegistry {
                 })?;
             // Restoring an old spec must not turn a new install check into
             // a boot refusal. Use the registered type, not just its TOML name.
-            for finding in automaton::lint_trigger_target_args(&automaton, entity_type) {
+            for finding in automaton::lint_install_refusals(&automaton, entity_type) {
                 tracing::warn!(tenant = %tenant_name, entity_type, "{}", finding.message);
             }
             parsed.push((*entity_type, *ioa_source, automaton));

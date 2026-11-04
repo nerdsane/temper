@@ -8,8 +8,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::{ActionKind, Automaton, Effect, FieldInvariant};
 
 mod absorbing;
+mod lost_params;
 mod trigger_args;
 
+pub use lost_params::lint_lost_params;
 pub use trigger_args::lint_trigger_target_args;
 
 /// Severity of a lint finding.
@@ -121,8 +123,17 @@ pub fn lint_automaton_for_type(automaton: &Automaton, registered_type: &str) -> 
 
     lint_field_invariants(automaton, &mut findings);
     absorbing::lint(automaton, &mut findings);
-    findings.extend(lint_trigger_target_args(automaton, registered_type));
+    findings.extend(lint_install_refusals(automaton, registered_type));
 
+    findings
+}
+
+/// The findings an install or upgrade refuses. A stored spec that has them
+/// still restores at boot, with a warning, because it was installed before the
+/// check existed.
+pub fn lint_install_refusals(automaton: &Automaton, registered_type: &str) -> Vec<LintFinding> {
+    let mut findings = lint_trigger_target_args(automaton, registered_type);
+    findings.extend(lint_lost_params(automaton));
     findings
 }
 

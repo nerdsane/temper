@@ -45,7 +45,7 @@ name = "CheckComplete"
 kind = "input"
 from = ["Checking"]
 to = "Idle"
-params = ["last_check_at", "jobs_triggered"]
+params = ["last_check_at"]
 hint = "Check finished. Schedule next check."
 effect = ["jobs_triggered += 1"]
 

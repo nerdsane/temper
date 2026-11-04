@@ -207,5 +207,8 @@ fn registering_unparseable_cross_invariants_returns_an_error_and_keeps_the_regis
 #[path = "bundle_refusal/trigger_args_test.rs"]
 mod trigger_args;
 
+#[path = "bundle_refusal/lost_params_test.rs"]
+mod lost_params;
+
 #[path = "bundle_refusal/principal_collision_test.rs"]
 mod principal_collision;

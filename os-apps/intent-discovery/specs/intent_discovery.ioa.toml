@@ -87,7 +87,7 @@ name = "AnalysisComplete"
 kind = "input"
 from = ["Analyzing"]
 to = "Proposing"
-params = ["analyst_agent_id", "analysis_json", "finding_count"]
+params = ["analyst_agent_id", "analysis_json"]
 effect = ["analysis_present = true", "finding_count += 1"]
 hint = "Store analyst output and materialize proposals."
 
