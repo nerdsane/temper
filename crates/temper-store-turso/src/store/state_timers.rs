@@ -3,7 +3,7 @@
 use crate::driver::params;
 use crate::metrics::TursoQueryTimer;
 use temper_runtime::persistence::{
-    OverdueTimerRows, OverdueTimers, PersistenceError, StateTimerRecord, storage_error,
+    OverdueTimerRow, OverdueTimerRows, PersistenceError, StateTimerRecord, storage_error,
 };
 use tracing::instrument;
 
@@ -173,9 +173,9 @@ impl TursoEventStore {
     }
 
     /// `tenant`'s state timers and scheduled actions due at or before `now`
-    /// (RFC 3339 in UTC, the form their rows keep): how many, and the
-    /// earliest due time. One statement, each half a range read of its
-    /// table's `(tenant, due_at)` index, so it reads only the rows past due.
+    /// (RFC 3339 in UTC, the form their rows keep). One statement, each half
+    /// a range read of its table's `(tenant, due_at)` index, so it reads only
+    /// the rows past due.
     #[instrument(skip_all, fields(tenant, otel.name = "turso.overdue_timer_rows"))]
     pub async fn overdue_timer_rows(
         &self,
@@ -186,10 +186,10 @@ impl TursoEventStore {
         let conn = self.configured_connection().await?;
         let mut rows = conn
             .query(
-                "SELECT 0, COUNT(*), MIN(due_at) FROM state_timers \
+                "SELECT 0, entity_type, entity_id, arm_id, due_at FROM state_timers \
                  WHERE tenant = ?1 AND due_at <= ?2 \
                  UNION ALL \
-                 SELECT 1, COUNT(*), MIN(due_at) FROM scheduled_actions \
+                 SELECT 1, entity_type, entity_id, arm_id, due_at FROM scheduled_actions \
                  WHERE tenant = ?1 AND due_at <= ?2",
                 params![tenant, now],
             )
@@ -197,13 +197,15 @@ impl TursoEventStore {
             .map_err(storage_error)?;
         let mut overdue = OverdueTimerRows::default();
         while let Some(row) = rows.next().await.map_err(storage_error)? {
-            let rows = OverdueTimers {
-                count: u64::try_from(row.get::<i64>(1).map_err(storage_error)?).unwrap_or_default(),
-                oldest_due_at: row.get::<Option<String>>(2).map_err(storage_error)?,
+            let past_due = OverdueTimerRow {
+                entity_type: row.get(1).map_err(storage_error)?,
+                entity_id: row.get(2).map_err(storage_error)?,
+                arm_id: row.get(3).map_err(storage_error)?,
+                due_at: row.get(4).map_err(storage_error)?,
             };
             match row.get::<i64>(0).map_err(storage_error)? {
-                0 => overdue.state_timers = rows,
-                _ => overdue.scheduled_actions = rows,
+                0 => overdue.state_timers.push(past_due),
+                _ => overdue.scheduled_actions.push(past_due),
             }
         }
         Ok(overdue)

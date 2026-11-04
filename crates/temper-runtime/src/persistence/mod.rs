@@ -207,26 +207,29 @@ pub struct StateTimerRecord {
     pub armed_by: String,
 }
 
-/// A tenant's timer rows of one kind that are past their due time: a timer
-/// that should have fired and has not, for whatever reason no process armed
-/// or fired it.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct OverdueTimers {
-    /// How many rows are past due.
-    pub count: u64,
-    /// The earliest due time among them, RFC 3339. None when none is.
-    pub oldest_due_at: Option<String>,
+/// One timer row past its due time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverdueTimerRow {
+    /// The record's type.
+    pub entity_type: String,
+    /// The record's id.
+    pub entity_id: String,
+    /// The row's arm id.
+    pub arm_id: String,
+    /// When the row says it is due, RFC 3339.
+    pub due_at: String,
 }
 
 /// A tenant's timer rows past their due time: state timers and scheduled
-/// actions.
+/// actions. Each is a timer that should have fired and has not, unless a timer
+/// of this process has gone on past its row: only the process knows that.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OverdueTimerRows {
     /// Armed `[[state_timeout]]`s ([`StateTimerRecord`]).
-    pub state_timers: OverdueTimers,
+    pub state_timers: Vec<OverdueTimerRow>,
     /// Pending `schedule(...)` and `schedule_at(...)` actions
     /// ([`ScheduledActionRecord`]).
-    pub scheduled_actions: OverdueTimers,
+    pub scheduled_actions: Vec<OverdueTimerRow>,
 }
 
 /// One pending `schedule(...)` or `schedule_at(...)` action, or the deadline

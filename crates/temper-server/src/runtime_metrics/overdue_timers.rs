@@ -18,7 +18,8 @@ fn gauges() -> &'static OverdueTimerGauges {
                 .u64_gauge("temper_timer_rows_overdue")
                 .with_description(
                     "Timer rows past their due time, read from the store: timers that should \
-                     have fired and have not, whether or not a process armed them.",
+                     have fired and have not, whether or not a process armed them. A row a live \
+                     timer of this process has gone on past is due when that timer is.",
                 )
                 .build(),
             oldest_seconds: meter

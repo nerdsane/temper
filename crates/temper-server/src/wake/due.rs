@@ -6,7 +6,8 @@
 //! commit waits to try again ([`DueTimes::retry_in`]), and leaves when its
 //! task ends ([`DueTimes::end`]). A timer waits until its wall-clock due time
 //! ([`Armed::wait_until`]): for the time left, on the process's monotonic
-//! clock, computed again after a resume.
+//! clock, computed again after a resume. It keeps the time it was armed for
+//! through its retries ([`DueTimes::armed_for`]): how late it is runs from then.
 //!
 //! A watch ([`DueTimes::start`]) compares, every [`WATCH_EVERY`], how far the
 //! wall clock and the monotonic clock moved. When the wall clock ran more than
@@ -76,7 +77,10 @@ pub(crate) struct Armed {
 
 struct Entry {
     id: u64,
+    /// When it next tries.
     at: DateTime<Utc>,
+    /// When it was armed for, which a retry does not move.
+    armed_for: DateTime<Utc>,
 }
 
 /// What the control plane was told, and what is on its way.
@@ -210,7 +214,14 @@ impl DueTimes {
             let id = inner.next_id;
             inner.remove(&key);
             inner.by_due.insert((at, key.clone()));
-            inner.timers.insert(key.clone(), Entry { id, at });
+            inner.timers.insert(
+                key.clone(),
+                Entry {
+                    id,
+                    at,
+                    armed_for: at,
+                },
+            );
             id
         };
         self.report();
@@ -231,21 +242,33 @@ impl DueTimes {
             .unwrap_or(DateTime::<Utc>::MAX_UTC);
         {
             let mut inner = self.lock();
-            if inner
+            let Some(armed_for) = inner
                 .timers
                 .get(&armed.key)
-                .is_none_or(|entry| entry.id != armed.id)
-            {
+                .filter(|entry| entry.id == armed.id)
+                .map(|entry| entry.armed_for)
+            else {
                 return at;
-            }
+            };
             inner.remove(&armed.key);
             inner.by_due.insert((at, armed.key.clone()));
-            inner
-                .timers
-                .insert(armed.key.clone(), Entry { id: armed.id, at });
+            inner.timers.insert(
+                armed.key.clone(),
+                Entry {
+                    id: armed.id,
+                    at,
+                    armed_for,
+                },
+            );
         }
         self.report();
         at
+    }
+
+    /// The time `key`'s live timer was armed for, retries aside. None: no
+    /// timer of this process holds it.
+    pub(crate) fn armed_for(&self, key: &TimerRef) -> Option<DateTime<Utc>> {
+        self.lock().timers.get(key).map(|entry| entry.armed_for)
     }
 
     /// `armed`'s task ended. A newer arm of the same timer keeps its entry.

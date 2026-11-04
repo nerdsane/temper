@@ -16,6 +16,23 @@ fn earliest(due: &DueTimes) -> Option<DateTime<Utc>> {
 }
 
 #[test]
+fn a_retry_keeps_the_time_the_timer_was_armed_for() {
+    let due = Arc::new(DueTimes::default());
+    let at = sim_now() + chrono::Duration::minutes(5);
+    assert_eq!(due.armed_for(&key()), None);
+    let armed = due.arm(key(), at);
+    assert_eq!(due.armed_for(&key()), Some(at));
+    due.retry_in(&armed, Duration::from_secs(7200));
+    assert_eq!(
+        due.armed_for(&key()),
+        Some(at),
+        "a fire stuck retrying grows later from when it was due"
+    );
+    due.end(&armed);
+    assert_eq!(due.armed_for(&key()), None);
+}
+
+#[test]
 fn a_newer_arm_keeps_its_due_time_when_the_older_task_ends() {
     let due = Arc::new(DueTimes::default());
     let now = sim_now();

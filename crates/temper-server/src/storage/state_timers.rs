@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use temper_runtime::persistence::{
-    OverdueTimerRows, OverdueTimers, PersistenceError, StateTimerRecord,
+    OverdueTimerRow, OverdueTimerRows, PersistenceError, StateTimerRecord,
 };
 use temper_store_postgres::PostgresEventStore;
 use temper_store_turso::TursoEventStore;
@@ -60,32 +60,29 @@ pub trait StateTimerStore: Send + Sync {
             .find(|row| row.entity_type == entity_type && row.entity_id == entity_id))
     }
 
-    /// `tenant`'s timer rows due at or before `now` (RFC 3339 in UTC): how
-    /// many, and the earliest due time. The default reads the tenant's state
-    /// timer rows and keeps no scheduled actions; a store with a due-time
-    /// index overrides it.
+    /// `tenant`'s timer rows due at or before `now` (RFC 3339 in UTC). The
+    /// default reads the tenant's state timer rows and keeps no scheduled
+    /// actions; a store with a due-time index overrides it.
     async fn overdue_timer_rows(
         &self,
         tenant: &str,
         now: &str,
     ) -> Result<OverdueTimerRows, PersistenceError> {
-        let mut state_timers = OverdueTimers::default();
+        let mut state_timers = Vec::new();
         for row in self.list_state_timers(tenant).await? {
             let Some(due_at) = row.due_at.filter(|due_at| due_at.as_str() <= now) else {
                 continue;
             };
-            state_timers.count += 1;
-            if state_timers
-                .oldest_due_at
-                .as_ref()
-                .is_none_or(|oldest| due_at < *oldest)
-            {
-                state_timers.oldest_due_at = Some(due_at);
-            }
+            state_timers.push(OverdueTimerRow {
+                entity_type: row.entity_type,
+                entity_id: row.entity_id,
+                arm_id: row.arm_id,
+                due_at,
+            });
         }
         Ok(OverdueTimerRows {
             state_timers,
-            scheduled_actions: OverdueTimers::default(),
+            scheduled_actions: Vec::new(),
         })
     }
 }

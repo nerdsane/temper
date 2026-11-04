@@ -1,7 +1,7 @@
 //! Armed state timers (ADR-0056), kept so a restart arms them again.
 
 use temper_runtime::persistence::{
-    OverdueTimerRows, OverdueTimers, PersistenceError, StateTimerRecord, storage_error,
+    OverdueTimerRow, OverdueTimerRows, PersistenceError, StateTimerRecord, storage_error,
 };
 
 use crate::PostgresEventStore;
@@ -152,20 +152,19 @@ impl PostgresEventStore {
 
     /// `tenant`'s state timers and scheduled actions due at or before `now`
     /// (RFC 3339 in UTC, the form their rows keep, compared as "C" so byte
-    /// order is time order): how many, and the earliest due time. One
-    /// statement, each half a range read of its table's `(tenant, due_at)`
-    /// index, so it reads only the rows past due.
+    /// order is time order). One statement, each half a range read of its
+    /// table's `(tenant, due_at)` index, so it reads only the rows past due.
     pub async fn overdue_timer_rows(
         &self,
         tenant: &str,
         now: &str,
     ) -> Result<OverdueTimerRows, PersistenceError> {
-        let rows: Vec<(i32, i64, Option<String>)> = crate::dbm::postgres_query_as!(
+        let rows: Vec<(i32, String, String, String, String)> = crate::dbm::postgres_query_as!(
             &self.schema,
-            "SELECT 0, COUNT(*), MIN(due_at COLLATE \"C\") FROM {schema}state_timers \
+            "SELECT 0, entity_type, entity_id, arm_id, due_at FROM {schema}state_timers \
              WHERE tenant = $1 AND due_at COLLATE \"C\" <= $2 \
              UNION ALL \
-             SELECT 1, COUNT(*), MIN(due_at COLLATE \"C\") FROM {schema}scheduled_actions \
+             SELECT 1, entity_type, entity_id, arm_id, due_at FROM {schema}scheduled_actions \
              WHERE tenant = $1 AND due_at COLLATE \"C\" <= $2",
         )
         .bind(tenant)
@@ -174,14 +173,16 @@ impl PostgresEventStore {
         .await
         .map_err(storage_error)?;
         let mut overdue = OverdueTimerRows::default();
-        for (kind, count, oldest_due_at) in rows {
-            let rows = OverdueTimers {
-                count: u64::try_from(count).unwrap_or_default(),
-                oldest_due_at,
+        for (kind, entity_type, entity_id, arm_id, due_at) in rows {
+            let past_due = OverdueTimerRow {
+                entity_type,
+                entity_id,
+                arm_id,
+                due_at,
             };
             match kind {
-                0 => overdue.state_timers = rows,
-                _ => overdue.scheduled_actions = rows,
+                0 => overdue.state_timers.push(past_due),
+                _ => overdue.scheduled_actions.push(past_due),
             }
         }
         Ok(overdue)

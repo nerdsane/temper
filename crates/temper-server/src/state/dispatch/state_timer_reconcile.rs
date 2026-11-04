@@ -120,20 +120,31 @@ pub(crate) struct Follow<'a> {
 ///   record that took an action its timer does not reset on keeps the
 ///   timer's deadline, and the timer's own task arms it again at that
 ///   deadline, to fire at once;
+/// - `repeating`: it is due with no timer waiting, and its fire starts its own
+///   clock again ([`repeating_or_overdue`]);
 /// - `overdue`: it is due, and its deadline passed with no timer waiting for
 ///   it, as when an actor hydrates or a process boots after it.
 fn elapsed_bucket(
     delay: Duration,
     deadline: DateTime<Utc>,
     woke_for: Option<DateTime<Utc>>,
+    repeats: bool,
 ) -> &'static str {
     if !delay.is_zero() {
         "budgeted"
     } else if woke_for.is_some_and(|woke_for| woke_for <= deadline) {
         "on_time"
     } else {
-        "overdue"
+        repeating_or_overdue(repeats)
     }
+}
+
+/// The bucket of a timer past due with nothing waiting for it. One that repeats
+/// keeps a row behind its own looks when they change nothing, so its row past
+/// due is no lost deadline, only one look to make now: alerting on `overdue`
+/// must not page for it.
+pub(super) fn repeating_or_overdue(repeats: bool) -> &'static str {
+    if repeats { "repeating" } else { "overdue" }
 }
 
 impl ServerState {
@@ -353,7 +364,7 @@ impl ServerState {
             super::state_timeouts::brought_forward_at(&st, current, timer.started_at);
         timer.boot_gate = gate.or_else(|| armed.and_then(|armed| armed.boot_gate));
         let delay = (timer.due_at() - now).to_std().unwrap_or(Duration::ZERO);
-        let bucket = elapsed_bucket(delay, timer.due_at(), woke_for);
+        let bucket = elapsed_bucket(delay, timer.due_at(), woke_for, st.repeats());
         if self.start_armed_timer(timer, reservation).await {
             crate::runtime_metrics::record_state_timeout_armed_on_hydration(
                 tenant.as_str(),

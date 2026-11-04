@@ -19,11 +19,13 @@ use chrono::{DateTime, Utc};
 use temper_runtime::persistence::{PersistenceError, StateTimerRecord};
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
+use temper_spec::automaton::StateTimeout;
 use tokio::sync::Semaphore;
 use tracing::instrument;
 
 use super::state_timeouts::{ArmedTimer, remaining_budget, timer_due_at};
 use super::state_timer_follow::{BootCallers, BootTimers};
+use super::state_timer_reconcile::repeating_or_overdue;
 use super::state_timer_setter::is_state_timer_service;
 use super::state_timer_settled::BootRows;
 use crate::entity_actor::EntityState;
@@ -39,9 +41,8 @@ use crate::storage::{MetadataTimerRows, StateTimerStore};
 /// failed, so those timers did not re-arm. The rest wait their turn.
 const BOOT_FIRES_AT_ONCE: usize = 8;
 
-/// A tenant's declared timeouts: `(entity type, state)` to
-/// `(after_seconds, on_timeout)`.
-type DeclaredTimeouts = BTreeMap<(String, String), (u64, String)>;
+/// A tenant's declared timeouts: `(entity type, state)` to the declaration.
+type DeclaredTimeouts = BTreeMap<(String, String), StateTimeout>;
 
 /// How a re-arm reads a tenant's timer rows.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -296,9 +297,7 @@ impl ServerState {
             for row in rows {
                 let declared = timeouts.get(&(row.entity_type.clone(), row.state.clone()));
                 let timer = match declared {
-                    Some((after_seconds, action)) => {
-                        armed_timer(&tenant, &row, action, *after_seconds)
-                    }
+                    Some(st) => armed_timer(&tenant, &row, &st.on_timeout, st.after_seconds),
                     None => {
                         if let Some(armed_by) = row_armed_by(&row) {
                             let key = (
@@ -347,12 +346,13 @@ impl ServerState {
                 }
                 timer.boot_gate = Some(gate.clone());
                 let delay = remaining_budget(timer.started_at, timer.after_seconds, now);
+                let repeats = declared.is_some_and(StateTimeout::repeats);
                 let label = if delay.is_zero() {
-                    "overdue"
+                    repeating_or_overdue(repeats)
                 } else {
                     "budgeted"
                 };
-                overdue += usize::from(delay.is_zero());
+                overdue += usize::from(delay.is_zero() && !repeats);
                 crate::runtime_metrics::record_state_timeout_armed_on_hydration(
                     tenant.as_str(),
                     &timer.entity_type,
@@ -429,10 +429,7 @@ impl ServerState {
                     continue;
                 };
                 for st in &spec.automaton.state_timeouts {
-                    timeouts.insert(
-                        (entity_type.to_string(), st.state.clone()),
-                        (st.after_seconds, st.on_timeout.clone()),
-                    );
+                    timeouts.insert((entity_type.to_string(), st.state.clone()), st.clone());
                 }
             }
             if !timeouts.is_empty() {

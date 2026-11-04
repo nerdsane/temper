@@ -412,6 +412,15 @@ pub struct StateTimeout {
     pub says: Option<String>,
 }
 
+impl StateTimeout {
+    /// Whether the timer's own fire starts its clock again: it looks every
+    /// `after_seconds` for as long as the record stays in `state`, and a time
+    /// it missed is a look, not a lost deadline.
+    pub fn repeats(&self) -> bool {
+        self.reset_on.contains(&self.on_timeout)
+    }
+}
+
 /// Admission control declaration (ADR-0051).
 ///
 /// Declared as a `[admission]` block inside the top-level entity spec:

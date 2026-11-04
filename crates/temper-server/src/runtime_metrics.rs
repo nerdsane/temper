@@ -269,9 +269,10 @@ fn metrics() -> &'static RuntimeMetrics {
                     "ADR-0056: timers re-armed when an actor hydrated into a state with a \
                      declared [[state_timeout]] but no live in-memory timer, at boot, or by a \
                      timer's own task when its record moved. `elapsed_bucket` tag: overdue \
-                     (its deadline passed with no timer waiting; fired immediately), on_time \
-                     (re-armed by the task that woke for that deadline; fired immediately), \
-                     budgeted (armed with remaining delay).",
+                     (its deadline passed with no timer waiting; fired immediately), repeating \
+                     (a timer whose fire resets it, due with no timer waiting: one look, fired \
+                     immediately), on_time (re-armed by the task that woke for that deadline; \
+                     fired immediately), budgeted (armed with remaining delay).",
                 )
                 .build(),
             undeclared_action_params_total: meter
@@ -841,7 +842,9 @@ pub fn record_timer_fire_withheld(tenant: &str, entity_type: &str, action: &str)
 /// Record a state_timeout re-armed by the hydration hook (ADR-0056), at boot,
 /// or by a timer's own task. `bucket` is `"overdue"` when the timer fires
 /// immediately because its deadline passed with no timer waiting for it,
-/// `"on_time"` when it fires immediately at the deadline its task woke for
+/// `"repeating"` when the same holds for a timer whose fire resets it, which
+/// owes one look and lost no deadline, `"on_time"` when it fires immediately
+/// at the deadline its task woke for
 /// (the record took an action that does not reset the timer), or
 /// `"budgeted"` when armed with remaining delay.
 pub fn record_state_timeout_armed_on_hydration(

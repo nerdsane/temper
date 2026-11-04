@@ -95,6 +95,22 @@ async fn scheduled_action_rows_commit_with_their_events() {
     assert_eq!(arm_ids(&store, "tenant-a").await, ["1.0", "1.1"]);
     assert_eq!(arm_ids(&store, "tenant-b").await, ["1.0"]);
 
+    // Past due: the tenant's rows due by then, not before and not another's.
+    let overdue = |now: &'static str| store.overdue_timer_rows("tenant-a", now);
+    let early = overdue("2026-01-01T00:09:59+00:00").await.unwrap();
+    assert!(early.scheduled_actions.is_empty(), "{early:?}");
+    let late = overdue("2026-01-01T00:10:00+00:00").await.unwrap();
+    let mut late_ids: Vec<&str> = late
+        .scheduled_actions
+        .iter()
+        .map(|row| row.arm_id.as_str())
+        .collect();
+    late_ids.sort();
+    assert_eq!(late_ids, ["1.0", "1.1"]);
+    assert_eq!(late.scheduled_actions[0].entity_id, "job-1");
+    assert_eq!(late.scheduled_actions[0].due_at, armed[0].due_at);
+    assert!(late.state_timers.is_empty(), "{late:?}");
+
     // A refused append writes no row and removes none.
     let refused = store
         .append_with_rows(
