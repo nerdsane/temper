@@ -245,6 +245,7 @@ impl Request<'_> {
                     Results::of(set.iter().any(|member| same(member, &item)))
                 }
                 (Val::Error, _) | (_, Val::Error) => ERROR,
+                (set @ Val::Known(Json::Array(_)), item) => self.within(&item, &set),
                 _ => ANY,
             },
             "if-then-else" => {

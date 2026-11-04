@@ -184,3 +184,36 @@ when { principal has role && principal.role == "b" };
         );
     }
 }
+
+#[test]
+fn a_list_of_people_tells_senders_apart_as_comparing_with_each_does() {
+    // Whoever a list lets start a move is who the same list lets finish it: a
+    // kind that joined them would be allowed the one and refused the other.
+    let policies = SendAnalysis::new(
+        r#"permit(principal, action == Action::"Ban", resource)
+            when { principal is Customer && ["a", "b"].contains(principal.id) };
+           permit(principal, action == Action::"Stop", resource)
+            when { principal is Customer && ["a", "b"].contains(principal.id) };"#,
+    )
+    .expect("the test policy parses");
+    let cause = Cause::reaction(false, Hop::unknown());
+    let question = |action| Question {
+        action,
+        resource_type: "Feed",
+        cause: cause.clone(),
+    };
+    let kinds = policies
+        .outside_kinds(&[question("Ban"), question("Stop")], &|_| Ok(()))
+        .expect("the test policy parses");
+    let none = BTreeMap::new();
+    let may = |kind: &Kind, action| {
+        let asker = Asker::OutsideAs(kind.clone());
+        policies.may(&asker, action, "Feed", &none, Some(&cause))
+    };
+    for kind in &kinds {
+        assert_ne!(may(kind, "Ban"), May::Maybe, "{kind}");
+        assert_eq!(may(kind, "Ban"), may(kind, "Stop"), "{kind}");
+    }
+    assert!(kinds.iter().any(|kind| may(kind, "Ban") == May::Yes));
+    assert!(kinds.iter().any(|kind| may(kind, "Ban") == May::No));
+}

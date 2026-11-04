@@ -107,6 +107,14 @@ impl Tests {
                     }
                 }
             }
+            "contains" => {
+                if let (Some(("Set", Json::Array(members))), Some(of)) = (single(left), side(right))
+                {
+                    for member in members.iter().filter_map(value) {
+                        self.literal(&of, member.clone());
+                    }
+                }
+            }
             "is" if place(left) == Some(Place::Principal) => {
                 self.principal_is_kind(arg["entity_type"].as_str(), reads);
             }
