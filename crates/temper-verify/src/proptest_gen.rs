@@ -9,6 +9,7 @@
 //!   failing inputs are automatically shrunk to a minimal counterexample.
 
 use proptest::test_runner::{Config as ProptestConfig, TestRunner};
+
 use stateright::Model;
 
 use temper_spec::predicate::Truth;
@@ -59,7 +60,7 @@ pub struct PropTestFailure {
 /// Returns `Ok(())` when every invariant holds, or `Err(invariant_name)` for
 /// the first invariant that is violated.
 fn check_invariants(model: &TemperModel, state: &TemperModelState) -> Result<(), String> {
-    if !model.states.contains(&state.status) {
+    if !model.states.iter().any(|s| *s == state.status) {
         return Err("TypeInvariant".into());
     }
     for inv in &model.invariants {
@@ -67,7 +68,7 @@ fn check_invariants(model: &TemperModel, state: &TemperModelState) -> Result<(),
             return Err(inv.name.clone());
         }
     }
-    if model.terminal.contains(&state.status) {
+    if model.terminal.iter().any(|s| *s == state.status) {
         let mut actions = Vec::new();
         model.actions(state, &mut actions);
         if !actions.is_empty() {
@@ -150,7 +151,7 @@ pub fn run_prop_tests_on_model(
             let idx = (rng_state as usize) % actions.len();
 
             let action = actions[idx].clone();
-            action_seq.push(action.name.clone());
+            action_seq.push(action.name.to_string());
             trace.push((state.clone(), Some(action.clone())));
 
             let Some(next) = model.next_state(&state, action.clone()) else {
@@ -313,7 +314,7 @@ fn replay_failure(
             break;
         }
         let action = actions[idx % actions.len()].clone();
-        action_seq.push(action.name.clone());
+        action_seq.push(action.name.to_string());
         trace.push((state.clone(), Some(action.clone())));
 
         let Some(next) = model.next_state(&state, action.clone()) else {
@@ -341,7 +342,7 @@ fn replay_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ResolvedInvariant, ResolvedTransition};
+    use crate::model::{Fields, ResolvedInvariant, ResolvedTransition};
     use std::collections::BTreeMap;
     use temper_spec::predicate::{Expr, parse};
 
@@ -443,9 +444,9 @@ mod tests {
         TemperModel {
             states: vec!["A".to_string(), "B".to_string()],
             transitions: vec![ResolvedTransition {
-                name: "GoB".to_string(),
-                from_states: vec!["A".to_string()],
-                to_state: Some("B".to_string()),
+                name: "GoB".into(),
+                from_states: vec!["A".into()],
+                to_state: Some("B".into()),
                 guard: Expr::always(),
                 effects: vec![],
                 params: BTreeMap::new(),
@@ -462,17 +463,19 @@ mod tests {
             liveness: vec![],
             terminal: vec![],
             var_kinds: BTreeMap::new(),
-            initial_status: "A".to_string(),
-            initial_counters: BTreeMap::new(),
-            initial_booleans: BTreeMap::new(),
-            initial_lists: BTreeMap::new(),
+            initial_status: "A".into(),
+            initial_counters: Fields::new(),
+            initial_booleans: Fields::new(),
+            initial_lists: Fields::new(),
             counter_bounds: BTreeMap::new(),
             default_max_counter: 2,
             list_bounds: BTreeMap::new(),
             list_literals: BTreeMap::new(),
-            initial_strings: BTreeMap::new(),
+            initial_strings: Fields::new(),
             tracked_strings: Default::default(),
             string_literals: BTreeMap::new(),
+            string_classes: BTreeMap::new(),
+            never_blank: std::collections::BTreeSet::new(),
             literals_by_class: false,
             limit: None,
         }

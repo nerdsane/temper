@@ -42,7 +42,7 @@ impl JointModel {
         let mut refused = BTreeSet::new();
         loop {
             let state = explored.state(index);
-            let Some((from, label)) = explored.nodes[index].parent else {
+            let Some((from, _)) = explored.nodes[index].parent else {
                 steps.push(JointStep {
                     action: None,
                     state: render(&state),
@@ -50,7 +50,10 @@ impl JointModel {
                 });
                 break;
             };
-            let text = explored.label(label);
+            let text = explored
+                .label(self, index)
+                .expect("a state with a parent has a move into it");
+            let text = text.as_str();
             let before = explored.state(from as usize);
             let (mv, certainty) = self.step_between(&before, &state, text)?;
             if certainty != Certainty::Sure {

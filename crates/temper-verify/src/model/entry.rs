@@ -21,8 +21,8 @@ use temper_spec::predicate::{Env, Expr, Literal, Operand, Set, Truth, Val, VarKi
 use super::parameters::MoveEnv;
 use super::semantics::{Expansion, ModelEnv, rule_for, successors};
 use super::types::{
-    ModelString, ParamValue, ResolvedEntryRule, ResolvedTransition, TemperModel, TemperModelAction,
-    TemperModelState,
+    Fields, ModelString, ParamValue, ResolvedEntryRule, ResolvedTransition, TemperModel,
+    TemperModelAction, TemperModelState,
 };
 
 /// A related status: `(entity_type, id_field)`.
@@ -74,8 +74,8 @@ pub(crate) fn entry_broken<'m>(
                     Some(EntryViolation {
                         rule,
                         action: TemperModelAction {
-                            name: t.name.clone(),
-                            target_state: t.to_state.clone(),
+                            name: t.name,
+                            target_state: t.to_state,
                             params,
                         },
                         after,
@@ -103,7 +103,7 @@ fn broken_by<'m>(
     model: &'m TemperModel,
     t: &ResolvedTransition,
     state: &TemperModelState,
-    params: &BTreeMap<String, ParamValue>,
+    params: &Fields<ParamValue>,
 ) -> Option<&'m ResolvedEntryRule> {
     model
         .entry_rules
@@ -112,7 +112,8 @@ fn broken_by<'m>(
 }
 
 fn covers(rule: &ResolvedEntryRule, t: &ResolvedTransition, state: &TemperModelState) -> bool {
-    t.to_state.as_ref() == Some(&rule.place) && rule.from.contains(&state.status)
+    t.to_state.is_some_and(|to| to == rule.place)
+        && rule.from.iter().any(|from| *from == state.status)
 }
 
 /// Whether some statuses of the related records that `t`'s guard and
@@ -122,11 +123,11 @@ fn breaks(
     rule: &ResolvedEntryRule,
     t: &ResolvedTransition,
     state: &TemperModelState,
-    params: &BTreeMap<String, ParamValue>,
+    params: &Fields<ParamValue>,
 ) -> bool {
     let exprs = [&t.guard, &rule.assert];
     let refs: BTreeSet<Related> = exprs.iter().flat_map(|expr| expr.cross_refs()).collect();
-    let mut places = BTreeSet::from([ModelString::from(state.status.clone())]);
+    let mut places = BTreeSet::from([ModelString::Literal(state.status)]);
     // Nonliteral operands can name a concrete local string or an equality
     // symbol. Include both, so equality with either is a possible assignment.
     places.extend(
@@ -138,9 +139,10 @@ fn breaks(
                 ParamValue::Str(value) => Some(value),
                 _ => None,
             }))
+            .copied()
             .map(|value| match value {
-                ModelString::BlankSymbol(n) => ModelString::Symbol(*n),
-                other => other.clone(),
+                ModelString::BlankSymbol(n) => ModelString::Symbol(n),
+                other => other,
             }),
     );
     let mut comparisons = 0;
@@ -281,7 +283,7 @@ impl StatusSearch<'_> {
                 if !self.budget.take() {
                     return false;
                 }
-                chosen.push(self.places[next].clone());
+                chosen.push(self.places[next]);
                 if self.choose(index, next + 1, chosen, assigned) {
                     return true;
                 }

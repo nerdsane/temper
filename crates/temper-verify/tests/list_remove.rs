@@ -48,9 +48,7 @@ fn removing_an_initial_role_breaks_a_length_only_invariant() {
 fn revocation_explores_held_symbols_and_a_concrete_absent_value() {
     let model = build_model_from_ioa(ROLES, 2).unwrap();
     let mut state = model.init_states().remove(0);
-    state
-        .lists
-        .insert("roles".into(), vec![ModelString::Symbol(1)]);
+    state.lists.insert("roles", vec![ModelString::Symbol(1)]);
     let choices = successors(&model, &model.transitions[0], &state);
     assert!(
         choices

@@ -87,7 +87,13 @@ impl VerificationCascade {
         let built = model::build_model_from_ioa(&self.ioa_source, self.max_counter).ok()?;
         let silent = (0..built.transitions.len())
             .filter(|&index| built.is_silent(index))
-            .map(|index| built.transitions[index].from_states.clone())
+            .map(|index| {
+                built.transitions[index]
+                    .from_states
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect()
+            })
             .collect();
         let model = as_read(&built);
         let prop_model = as_read(&model::build_model_from_ioa(&self.ioa_source, 2).ok()?);

@@ -98,10 +98,10 @@ permit(principal == Agent::"service:chain", action, resource) when {
             ("C".into(), if same_id { "id1" } else { "id2" }.into()),
         ]);
         let (mut state, _) = model.init_with_ids(&ids);
-        let destination = state.records["C"].strings["Id"].clone();
+        let destination = state.records["C"].strings["Id"];
         std::sync::Arc::make_mut(state.records.get_mut("B").unwrap())
             .strings
-            .insert("destination".into(), destination);
+            .insert("destination", destination);
         // Start and Forward each have one permitted outcome.
         for _ in 0..2 {
             let moves = model.moves(&state);
@@ -209,13 +209,13 @@ permit(principal == Agent::"service:chain", action == Action::"Finish", resource
                 for (entity, id) in &ids {
                     std::sync::Arc::make_mut(state.records.get_mut(entity.as_str()).unwrap())
                         .strings
-                        .insert("Id".into(), crate::model::ModelString::from(id.clone()));
+                        .insert("Id", crate::model::ModelString::from(id.clone()));
                 }
                 for (from, to) in [("A", "B"), ("B", "C")] {
-                    let destination = state.records[to].strings["Id"].clone();
+                    let destination = state.records[to].strings["Id"];
                     std::sync::Arc::make_mut(state.records.get_mut(from).unwrap())
                         .strings
-                        .insert("destination".into(), destination);
+                        .insert("destination", destination);
                 }
                 for _ in 0..2 {
                     let moves = model.moves(&state);

@@ -56,11 +56,12 @@ use temper_spec::automaton::{Automaton, TargetResolver, TriggerKind};
 use super::env::ID;
 use super::model::Classes;
 use super::state::JointState;
-use crate::model::ModelString;
+use crate::model::{Fields, ModelString};
 use table::reread;
 
 mod build;
 pub(super) use build::declared;
+mod compared;
 mod kinds;
 mod standing;
 mod table;
@@ -136,8 +137,8 @@ type Question = (
     String,
     Option<ModelString>,
     Option<ModelString>,
-    BTreeMap<String, ModelString>,
-    BTreeMap<String, bool>,
+    Fields<ModelString>,
+    Fields<bool>,
 );
 
 impl Senders {
@@ -436,7 +437,7 @@ fn symbol(value: &ModelString, literals: &BTreeSet<String>) -> Attr {
             name: value.to_string(),
             unlike: literals.clone(),
         },
-        ModelString::Literal(text) => Attr::Value(Value::String(text.clone())),
+        ModelString::Literal(text) => Attr::Value(Value::String(text.to_string())),
     }
 }
 

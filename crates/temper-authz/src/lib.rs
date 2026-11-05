@@ -19,7 +19,7 @@ pub use context::{
 };
 pub use engine::{
     Asker, Attr, AuthzDecision, AuthzEngine, Cause, Hop, Kind, ListRead, ListReadUniformity, May,
-    Question, RowRule, SendAnalysis, VERIFIED_OPERATOR_WHEN, permitted_resource_types,
+    Question, Read, RowRule, SendAnalysis, VERIFIED_OPERATOR_WHEN, permitted_resource_types,
 };
 pub use error::{AuthzDenial, AuthzError};
 pub use metrics::init_metrics;

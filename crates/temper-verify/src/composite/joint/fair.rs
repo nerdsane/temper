@@ -267,7 +267,7 @@ pub(super) fn fair_check(
                 lasso: lasso(model, explored, &must, &parents, &cycle),
             },
             None => FairOutcome::Incomplete {
-                reason: unsure_reason(explored, &may, &unsure),
+                reason: unsure_reason(model, explored, &may, &unsure),
             },
         };
     }
@@ -296,7 +296,7 @@ pub(super) fn fair_check(
         let people = view(Side::May, true, &may_open);
         people
             .fair_cycle()
-            .map(|cycle| unsure_reason(explored, &people, &cycle))
+            .map(|cycle| unsure_reason(model, explored, &people, &cycle))
     };
     FairOutcome::Holds {
         kept_away,

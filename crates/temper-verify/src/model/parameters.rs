@@ -7,15 +7,17 @@ use temper_spec::predicate::{CmpOp, Env, Expr, Literal, Operand, Set, Val, eval}
 
 use super::assignments::param_assignments_budgeted;
 use super::count_bounds::CountRange;
-use super::heap::{Heap, tree_bytes};
+use super::heap::Heap;
 use super::semantics::{Expansion, ModelEnv, evaluate_guard};
 use super::strings::string_assignments;
-use super::types::{ModelString, ParamValue, ResolvedTransition, TemperModel, TemperModelState};
+use super::types::{
+    Fields, ModelString, ParamValue, ResolvedTransition, TemperModel, TemperModelState,
+};
 
 /// State and parameters shared by guard and entry-rule evaluation.
 pub(super) struct MoveEnv<'a> {
     pub(super) local: ModelEnv<'a>,
-    pub(super) params: &'a BTreeMap<String, ParamValue>,
+    pub(super) params: &'a Fields<ParamValue>,
 }
 
 impl Env for MoveEnv<'_> {
@@ -53,7 +55,7 @@ pub(super) fn inputs_allow(
     model: &TemperModel,
     t: &ResolvedTransition,
     state: &TemperModelState,
-    params: &BTreeMap<String, ParamValue>,
+    params: &Fields<ParamValue>,
 ) -> bool {
     eval(
         &t.guard,
@@ -173,7 +175,7 @@ pub(super) fn any_inputs(
     state: &TemperModelState,
     values: &BTreeSet<ModelString>,
     budget: &Expansion,
-    mut visit: impl FnMut(BTreeMap<String, ParamValue>) -> bool,
+    mut visit: impl FnMut(Fields<ParamValue>) -> bool,
 ) -> bool {
     let strings = string_assignments(model, t, state, values, budget);
     let numbers = param_assignments_budgeted(model, t, budget);
@@ -184,24 +186,13 @@ pub(super) fn any_inputs(
             if !budget.take() {
                 break 'inputs;
             }
-            let nodes = tree_bytes::<String, ParamValue>(params.len() + chosen.len());
-            let entries = params
-                .iter()
-                .map(|(k, v)| k.heap() + v.heap())
-                .sum::<usize>()
-                + chosen
-                    .iter()
-                    .map(|(k, v)| k.heap() + v.heap())
-                    .sum::<usize>();
-            if !budget.hold(nodes + entries) {
+            let mut params = params.clone();
+            if !chosen.is_empty() {
+                params.extend(chosen.iter().map(|(k, v)| (*k, ParamValue::Str(*v))));
+            }
+            if !budget.hold(params.heap()) {
                 break 'inputs;
             }
-            let mut params = params.clone();
-            params.extend(
-                chosen
-                    .iter()
-                    .map(|(k, v)| (k.clone(), ParamValue::Str(v.clone()))),
-            );
             if visit(params) {
                 found = true;
                 break 'inputs;

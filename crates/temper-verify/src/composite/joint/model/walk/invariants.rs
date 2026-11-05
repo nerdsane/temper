@@ -116,7 +116,7 @@ impl JointModel {
         // The first move each invariant's first maybe-break rests on, and
         // the types outside the scope it comes from when it is a reaction
         // from them.
-        let first: Vec<Option<u32>> = maybe
+        let first: Vec<Option<usize>> = maybe
             .iter()
             .map(|found| found.and_then(|index| explored.first_unsure(index)))
             .collect();
@@ -124,9 +124,9 @@ impl JointModel {
             .iter()
             .zip(&first)
             .map(|(broken, first)| match (broken, first) {
-                (None, Some(label)) => explored
-                    .outside_at(*label)
-                    .and_then(|(entity, action)| self.outside_from(entity, action))
+                (None, Some(index)) => explored
+                    .outside_at(self, *index)
+                    .and_then(|(entity, action)| self.outside_from(&entity, &action))
                     .cloned()
                     .unwrap_or_default(),
                 _ => BTreeSet::new(),
@@ -138,14 +138,16 @@ impl JointModel {
             .enumerate()
             .map(|(i, found)| match found {
                 (Some(index), _) => JointOutcome::Broken {
-                    path: explored.path(*index),
+                    path: explored.path(self, *index),
                 },
                 (None, Some(index)) => match self.way_resting_on_moves(&explored, *index, false) {
                     Some(path) => JointOutcome::Broken { path },
                     None => JointOutcome::Incomplete {
                         reason: stopped_first(
                             &explored.stopped,
-                            maybe_broken(first[i].map(|label| explored.label(label))),
+                            maybe_broken(
+                                first[i].and_then(|at| explored.label(self, at)).as_deref(),
+                            ),
                         ),
                     },
                 },

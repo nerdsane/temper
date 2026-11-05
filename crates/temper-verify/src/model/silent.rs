@@ -39,7 +39,7 @@ impl TemperModel {
             && !self
                 .entry_rules
                 .iter()
-                .any(|rule| t.from_states.contains(&rule.place))
+                .any(|rule| t.from_states.iter().any(|from| *from == rule.place))
             && !self.liveness.iter().any(|live| {
                 matches!(&live.kind, LivenessKind::ReachesState { targets, .. } if !targets.is_empty())
             })

@@ -300,7 +300,7 @@ fn walk(model: &TemperModel) -> Option<Walked> {
         graph.steps_from(at, !cut_here.is_empty(), to);
         cut.extend(cut_here);
         if !moves {
-            stuck.insert(state.status.clone());
+            stuck.insert(state.status);
         }
         places.insert(state.status);
     }
@@ -333,9 +333,9 @@ fn walk(model: &TemperModel) -> Option<Walked> {
                 .transitions
                 .iter()
                 .enumerate()
-                .any(|(index, t)| silent[index] && t.from_states.contains(place))
+                .any(|(index, t)| silent[index] && t.from_states.iter().any(|s| *s == **place))
         })
-        .cloned()
+        .map(ToString::to_string)
         .collect();
     Some(Walked {
         dead,
@@ -344,8 +344,8 @@ fn walk(model: &TemperModel) -> Option<Walked> {
         broken,
         unproved_reaches: reaches.unproved,
         reached: Reached {
-            places: places.into_iter().collect(),
-            stuck: stuck.into_iter().collect(),
+            places: places.into_iter().map(|p| p.to_string()).collect(),
+            stuck: stuck.into_iter().map(|p| p.to_string()).collect(),
             left_silently,
         },
     })
@@ -376,12 +376,12 @@ fn render_transition_label(transition: &ResolvedTransition) -> String {
     let from = if transition.from_states.is_empty() {
         "*".to_string()
     } else {
-        transition.from_states.join("|")
+        let names: Vec<&str> = transition.from_states.iter().map(|s| s.as_str()).collect();
+        names.join("|")
     };
     let to = transition
         .to_state
-        .clone()
-        .unwrap_or_else(|| "<same>".to_string());
+        .map_or_else(|| "<same>".to_string(), |to| to.to_string());
     format!("{} [{} -> {}]", transition.name, from, to)
 }
 

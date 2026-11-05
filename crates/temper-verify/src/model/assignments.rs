@@ -4,7 +4,7 @@ use super::count_bounds::{CountRange, count_ranges};
 use super::expansion::Expansion;
 use super::heap::{Heap, block, tree_bytes};
 use super::semantics::MAX_PARAM_ASSIGNMENTS;
-use super::types::{ModelEffect, ParamValue, ResolvedTransition, TemperModel};
+use super::types::{Fields, ModelEffect, ParamValue, ResolvedTransition, TemperModel};
 use std::collections::{BTreeMap, BTreeSet};
 use temper_spec::predicate::{Arg, ParamKind};
 
@@ -44,7 +44,7 @@ pub(super) fn string_literals(
             value: Arg::Param(p),
         } = effect
             && p == name
-            && let Some(literals) = model.list_literals.get(var)
+            && let Some(literals) = model.list_literals.get(var.as_str())
         {
             values.extend(literals.iter().cloned());
         }
@@ -57,10 +57,10 @@ pub(super) fn param_assignments_budgeted(
     model: &TemperModel,
     t: &ResolvedTransition,
     budget: &Expansion,
-) -> Vec<BTreeMap<String, ParamValue>> {
+) -> Vec<Fields<ParamValue>> {
     let ranges = count_ranges(model, t);
     let mut assignments = Vec::new();
-    if !budget.push(&mut assignments, BTreeMap::new()) {
+    if !budget.push(&mut assignments, Fields::new()) {
         return assignments;
     }
     for (name, kind) in &t.params {
@@ -93,7 +93,7 @@ pub(super) fn param_assignments_budgeted(
         let mut more = Vec::new();
         for assignment in assignments {
             for value in &candidates {
-                let Some(next) = budget.with_entry(&assignment, name, value) else {
+                let Some(next) = budget.with_entry(&assignment, name.as_str(), value) else {
                     return Vec::new();
                 };
                 if !budget.reserve(&mut more) {

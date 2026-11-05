@@ -3,7 +3,7 @@
 //! check counts on from it finishes and [`settle`] finds a state there that
 //! cannot reach the condition.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
 use temper_spec::predicate::{Expr, Truth, eval};
 
@@ -14,7 +14,7 @@ use super::super::super::{JointState, LivenessOutcome, StuckCase};
 use super::super::JointModel;
 use super::super::held::Tables;
 use super::super::step::Certainty;
-use super::super::walk::{Edge, Explored, Made, Node};
+use super::super::walk::{Edge, Explored, Made, Node, Via};
 use super::{Budget, Engine, Look, could_not_start, plain, print, reads, seeds};
 
 /// What a confirming walk found.
@@ -39,7 +39,6 @@ impl Engine<'_, '_> {
             edges: Vec::new(),
             stopped: None,
             held_back: false,
-            outside: BTreeMap::new(),
             covered: 0,
             reached: 0,
             held: Held::new(self.bound),
@@ -68,7 +67,7 @@ impl Engine<'_, '_> {
                 let failing = eval(goal, &model.env(owner, &state)) != Truth::True;
                 let (moves, room) =
                     model.within(&mut sub.held, &mut tables, || model.moves(&state))?;
-                for mv in &moves {
+                for (by, mv) in moves.iter().enumerate() {
                     let relied = model.relies(mv);
                     // A reaction from outside the scope is kept too: `settle`
                     // does not call a state stuck when one may lead out of it.
@@ -90,19 +89,24 @@ impl Engine<'_, '_> {
                         held,
                     });
                     let made = (sub.made.len() - 1) as u32;
-                    for next in nexts {
+                    for (outcome, next) in nexts.into_iter().enumerate() {
                         let packed = sub.packer.pack(&next.state);
                         let to = match seen.get(&packed) {
                             Some(&to) => to,
                             None => {
                                 tables.reserve(&mut sub, &mut seen, &mut queue, false, 1, 0)?;
                                 let to = sub.nodes.len() as u32;
-                                let label = sub.packer.id(&next.label);
                                 tables.states += block(size_of::<[usize; 2]>() + 4 * packed.len());
                                 seen.insert(packed.clone(), to);
                                 sub.nodes.push(Node::new(
                                     packed,
-                                    Some((index as u32, label)),
+                                    Some((
+                                        index as u32,
+                                        Via {
+                                            by: by as u32,
+                                            outcome: outcome as u32,
+                                        },
+                                    )),
                                     false,
                                     false,
                                 ));
@@ -162,7 +166,7 @@ impl JointModel {
             return LivenessOutcome::Incomplete { reason: why };
         }
         let mut engine = Engine::new(self, bound, reads(owner, &[goal]), budget.steps);
-        let seeds = seeds(&explored, &mut engine.packer);
+        let seeds = seeds(self, &explored, &mut engine.packer);
         drop(explored);
         let mut stuck: Option<LivenessOutcome> = None;
         // The condition was false where the walk went by a move it cannot be

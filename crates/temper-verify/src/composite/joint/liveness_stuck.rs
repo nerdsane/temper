@@ -44,15 +44,23 @@ pub(super) fn may_reach(explored: &Explored, done: &[bool], failing: &[bool]) ->
 /// Why no state the goal is not sure from is known to be stuck: the first
 /// that no move may lead on from rests on a move the runtime may never make,
 /// or else every one of them has a way on the model cannot decide.
-pub(super) fn unsure_reason(explored: &Explored, good: &[bool], out: &[bool]) -> String {
+pub(super) fn unsure_reason(
+    model: &JointModel,
+    explored: &Explored,
+    good: &[bool],
+    out: &[bool],
+) -> String {
     let count = explored.len();
     let unsure = good.iter().filter(|&&g| !g).count();
     let first = (0..count).find(|&index| !out[index]);
-    match first.and_then(|index| explored.first_unsure(index)) {
+    match first
+        .and_then(|index| explored.first_unsure(index))
+        .and_then(|index| explored.label(model, index))
+    {
         Some(label) => format!(
             "it may never settle, but only on a way through \"{}\", which the runtime may never \
              take: the model cannot decide the Cedar answer, guard or reference behind it",
-            explored.label(label)
+            label
         ),
         None => format!(
             "from {unsure} of {count} joint states the system's moves are not sure to reach the \

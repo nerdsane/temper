@@ -22,7 +22,7 @@ use super::counters::leave_out_unread_counters;
 use super::entry::resolve_entry_rules;
 use super::types::{
     LivenessKind, ModelEffect, ModelString, ResolvedInvariant, ResolvedLiveness,
-    ResolvedTransition, TemperModel,
+    ResolvedTransition, Sym, TemperModel,
 };
 
 /// Build a `TemperModel` from I/O Automaton TOML source.
@@ -109,7 +109,8 @@ pub fn build_model_tracking(
                 var,
                 value: Arg::Lit(Literal::Int(n)),
             } = effect
-                && let (Some(bound), Ok(n)) = (counter_bounds.get_mut(var), usize::try_from(*n))
+                && let (Some(bound), Ok(n)) =
+                    (counter_bounds.get_mut(var.as_str()), usize::try_from(*n))
             {
                 *bound = (*bound).max(n);
             }
@@ -147,7 +148,7 @@ pub fn build_model_tracking(
 
     let mut string_inputs = tracked_strings.clone();
     for t in &transitions {
-        string_inputs.extend(t.string_params.iter().map(|p| p.name.clone()));
+        string_inputs.extend(t.string_params.iter().map(|p| p.name.to_string()));
     }
     TemperModel {
         states,
@@ -157,13 +158,15 @@ pub fn build_model_tracking(
         liveness,
         terminal: automaton.automaton.terminal.clone(),
         var_kinds,
-        initial_status,
-        initial_counters,
-        initial_booleans,
-        initial_lists,
+        initial_status: initial_status.into(),
+        initial_counters: initial_counters.into(),
+        initial_booleans: initial_booleans.into(),
+        initial_lists: initial_lists.into(),
         string_literals: string_literals(automaton, &string_inputs),
+        string_classes: BTreeMap::new(),
+        never_blank: BTreeSet::new(),
         literals_by_class: false,
-        initial_strings,
+        initial_strings: initial_strings.into(),
         tracked_strings,
         counter_bounds,
         default_max_counter: max_counter,
@@ -260,9 +263,9 @@ fn resolve_transitions(
                 .filter(|(name, _)| !string_params.iter().any(|p| &p.name == name))
                 .collect();
             ResolvedTransition {
-                name: a.name,
-                from_states: a.from_states,
-                to_state: a.to_state,
+                name: a.name.into(),
+                from_states: a.from_states.into_iter().map(Sym::from).collect(),
+                to_state: a.to_state.map(Sym::from),
                 guard: if automaton.entry_rules.is_empty() {
                     a.guard
                 } else {
@@ -327,14 +330,38 @@ fn compared_literals<'a>(exprs: impl Iterator<Item = &'a Expr>) -> BTreeMap<Stri
 /// runtime-only effects (dispatch, schedule, spawn) have no model.
 fn convert_effect(effect: ResolvedEffect) -> Option<ModelEffect> {
     Some(match effect {
-        ResolvedEffect::SetCounter { var, value } => ModelEffect::SetCounter { var, value },
-        ResolvedEffect::AddCounter { var, value } => ModelEffect::AddCounter { var, value },
-        ResolvedEffect::SubCounter { var, value } => ModelEffect::SubCounter { var, value },
-        ResolvedEffect::SetBool { var, value } => ModelEffect::SetBool { var, value },
-        ResolvedEffect::SetString { var, value } => ModelEffect::SetString { var, value },
-        ResolvedEffect::ListAppend { var, value } => ModelEffect::ListAppend { var, value },
-        ResolvedEffect::ListRemoveAt { var, index } => ModelEffect::ListRemoveAt { var, index },
-        ResolvedEffect::ListRemove { var, value } => ModelEffect::ListRemove { var, value },
+        ResolvedEffect::SetCounter { var, value } => ModelEffect::SetCounter {
+            var: var.into(),
+            value,
+        },
+        ResolvedEffect::AddCounter { var, value } => ModelEffect::AddCounter {
+            var: var.into(),
+            value,
+        },
+        ResolvedEffect::SubCounter { var, value } => ModelEffect::SubCounter {
+            var: var.into(),
+            value,
+        },
+        ResolvedEffect::SetBool { var, value } => ModelEffect::SetBool {
+            var: var.into(),
+            value,
+        },
+        ResolvedEffect::SetString { var, value } => ModelEffect::SetString {
+            var: var.into(),
+            value: value.into(),
+        },
+        ResolvedEffect::ListAppend { var, value } => ModelEffect::ListAppend {
+            var: var.into(),
+            value,
+        },
+        ResolvedEffect::ListRemoveAt { var, index } => ModelEffect::ListRemoveAt {
+            var: var.into(),
+            index,
+        },
+        ResolvedEffect::ListRemove { var, value } => ModelEffect::ListRemove {
+            var: var.into(),
+            value,
+        },
         ResolvedEffect::Dispatch(_)
         | ResolvedEffect::Schedule { .. }
         | ResolvedEffect::ScheduleAt { .. }
@@ -350,14 +377,14 @@ fn holds_written(
     tracked_strings: &BTreeSet<String>,
 ) -> bool {
     match effect {
-        ModelEffect::SetString { var, .. } => tracked_strings.contains(var),
+        ModelEffect::SetString { var, .. } => tracked_strings.contains(var.as_str()),
         ModelEffect::SetCounter { var, .. }
         | ModelEffect::AddCounter { var, .. }
         | ModelEffect::SubCounter { var, .. }
         | ModelEffect::SetBool { var, .. }
         | ModelEffect::ListAppend { var, .. }
         | ModelEffect::ListRemove { var, .. }
-        | ModelEffect::ListRemoveAt { var, .. } => read.contains(var),
+        | ModelEffect::ListRemoveAt { var, .. } => read.contains(var.as_str()),
     }
 }
 

@@ -171,7 +171,11 @@ fn broken(l1: &LevelResult, name: &str) -> (Vec<String>, bool) {
         .iter()
         .find(|c| c.violated == [name])
         .unwrap_or_else(|| panic!("no path for {name}: {:?}", l1.diagnostics));
-    let places = found.trace.iter().map(|(s, _)| s.status.clone()).collect();
+    let places = found
+        .trace
+        .iter()
+        .map(|(s, _)| s.status.to_string())
+        .collect();
     let (last, _) = found.trace.last().expect("a path has a state");
     let loops = found.trace[..found.trace.len() - 1]
         .iter()

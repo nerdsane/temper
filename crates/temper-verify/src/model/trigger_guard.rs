@@ -15,6 +15,7 @@ use temper_spec::predicate::{CmpOp, Expr, Literal, Operand, ParamKind, Truth, ev
 
 use super::count_bounds::count_ranges;
 use super::expansion::Expansion;
+use super::fields::Fields;
 use super::heap::Heap;
 use super::parameters::{MoveEnv, guard_count_bound};
 use super::semantics::ModelEnv;
@@ -81,9 +82,9 @@ pub(crate) fn params_read(automaton: &Automaton, action: &Action) -> BTreeMap<St
 pub(crate) fn with_after_values(
     model: &TemperModel,
     t: &ResolvedTransition,
-    made: Vec<(BTreeMap<String, ParamValue>, TemperModelState)>,
+    made: Vec<(Fields<ParamValue>, TemperModelState)>,
     budget: &Expansion,
-) -> Vec<(BTreeMap<String, ParamValue>, TemperModelState)> {
+) -> Vec<(Fields<ParamValue>, TemperModelState)> {
     let ranges = count_ranges(model, t);
     let domains: Vec<(&String, Vec<ParamValue>)> = t
         .after_params
@@ -106,7 +107,7 @@ pub(crate) fn with_after_values(
         let mut at = vec![0; domains.len()];
         loop {
             for ((name, values), &i) in domains.iter().zip(&at) {
-                full.insert((*name).clone(), values[i].clone());
+                full.insert(name.as_str(), values[i]);
             }
             if told.insert(after_holds(model, t, &next, &full)) {
                 if !budget.hold(full.heap() + next.heap()) || !budget.reserve(&mut out) {
@@ -152,7 +153,7 @@ pub(crate) fn after_holds(
     model: &TemperModel,
     t: &ResolvedTransition,
     next: &TemperModelState,
-    params: &BTreeMap<String, ParamValue>,
+    params: &Fields<ParamValue>,
 ) -> Vec<u8> {
     let env = MoveEnv {
         local: ModelEnv {

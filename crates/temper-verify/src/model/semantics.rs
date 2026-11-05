@@ -7,7 +7,7 @@ use temper_spec::predicate::{
 };
 
 use super::types::{
-    ModelEffect, ModelString, ParamValue, ResolvedTransition, TemperModel, TemperModelState,
+    Fields, ModelEffect, ModelString, ParamValue, ResolvedTransition, TemperModel, TemperModelState,
 };
 
 use super::assignments::string_literals;
@@ -114,7 +114,7 @@ pub fn successors(
     model: &TemperModel,
     t: &ResolvedTransition,
     state: &TemperModelState,
-) -> Vec<(BTreeMap<String, ParamValue>, TemperModelState)> {
+) -> Vec<(Fields<ParamValue>, TemperModelState)> {
     successors_among(model, t, state, &string_values(std::iter::once(state)))
 }
 
@@ -128,7 +128,7 @@ pub fn successors_among(
     t: &ResolvedTransition,
     state: &TemperModelState,
     values: &BTreeSet<ModelString>,
-) -> Vec<(BTreeMap<String, ParamValue>, TemperModelState)> {
+) -> Vec<(Fields<ParamValue>, TemperModelState)> {
     successors_budgeted(model, t, state, values, &Expansion::for_model(model))
 }
 
@@ -138,8 +138,48 @@ pub(crate) fn successors_budgeted(
     state: &TemperModelState,
     values: &BTreeSet<ModelString>,
     budget: &Expansion,
-) -> Vec<(BTreeMap<String, ParamValue>, TemperModelState)> {
+) -> Vec<(Fields<ParamValue>, TemperModelState)> {
     successors_with(model, t, state, values, budget, |_| {})
+}
+
+/// The inputs [`successors_budgeted`] would make a step of, without the steps.
+/// Only a step that grows a counter or list can go past a bound, so only such
+/// a step needs building to tell; a step whose triggers read values of their
+/// own is built too, so each way those values decide the triggers is kept.
+pub(crate) fn inputs_within_bounds(
+    model: &TemperModel,
+    t: &ResolvedTransition,
+    state: &TemperModelState,
+    values: &BTreeSet<ModelString>,
+    budget: &Expansion,
+) -> Vec<Fields<ParamValue>> {
+    let grows = t.effects.iter().any(|effect| {
+        matches!(
+            effect,
+            ModelEffect::SetCounter { .. }
+                | ModelEffect::AddCounter { .. }
+                | ModelEffect::ListAppend { .. }
+        )
+    });
+    if grows || !t.after_params.is_empty() {
+        return successors_budgeted(model, t, state, values, budget)
+            .into_iter()
+            .map(|(params, _)| params)
+            .collect();
+    }
+    let mut out = Vec::new();
+    any_inputs(model, t, state, values, budget, |params| {
+        if checks_inputs(model, t) && !inputs_allow(model, t, state, &params) {
+            budget.give(params.heap());
+            return false;
+        }
+        if !budget.reserve(&mut out) {
+            return true;
+        }
+        out.push(params);
+        false
+    });
+    out
 }
 
 /// [`successors`], adding to `cut` each counter and list a step it leaves
@@ -150,7 +190,7 @@ pub(crate) fn successors_noting_cuts(
     t: &ResolvedTransition,
     state: &TemperModelState,
     cut: &mut BTreeMap<String, usize>,
-) -> Vec<(BTreeMap<String, ParamValue>, TemperModelState)> {
+) -> Vec<(Fields<ParamValue>, TemperModelState)> {
     for (name, range) in count_ranges(model, t) {
         // A value past the range takes these counters past their bounds:
         // that step is left out, as any other step that goes past is.
@@ -180,7 +220,7 @@ fn successors_with(
     values: &BTreeSet<ModelString>,
     budget: &Expansion,
     mut left_out: impl FnMut(&TemperModelState),
-) -> Vec<(BTreeMap<String, ParamValue>, TemperModelState)> {
+) -> Vec<(Fields<ParamValue>, TemperModelState)> {
     let mut out = Vec::new();
     any_inputs(model, t, state, values, budget, |params| {
         if checks_inputs(model, t) && !inputs_allow(model, t, state, &params) {
@@ -189,13 +229,13 @@ fn successors_with(
             budget.give(bytes);
             return false;
         }
-        let room = step_room(state, t, &params);
+        let room = step_room(state, t);
         if !budget.hold(room) {
             return true;
         }
         let mut next = state.clone();
         if let Some(to) = &t.to_state {
-            next.status = to.clone();
+            next.status = *to;
         }
         apply_effects(&t.effects, &mut next, &t.name, &params);
         apply_string_params(&t.string_params, &mut next, &params);
@@ -244,11 +284,11 @@ pub fn rule_for<'a>(
 pub fn step(
     t: &ResolvedTransition,
     state: &TemperModelState,
-    params: &BTreeMap<String, ParamValue>,
+    params: &Fields<ParamValue>,
 ) -> TemperModelState {
     let mut next = state.clone();
     if let Some(to) = &t.to_state {
-        next.status = to.clone();
+        next.status = *to;
     }
     apply_effects(&t.effects, &mut next, &t.name, params);
     apply_string_params(&t.string_params, &mut next, params);
@@ -323,12 +363,12 @@ fn outgrown<'a>(
     let counters = next.counters.iter().filter_map(move |(var, value)| {
         let bound = counter_bound(model, var);
         let grew = *value > before.counters.get(var).copied().unwrap_or(0);
-        (*value > bound && grew).then(|| (var.clone(), bound))
+        (*value > bound && grew).then(|| (var.to_string(), bound))
     });
     let lists = next.lists.iter().filter_map(move |(var, items)| {
         let bound = list_bound(model, var);
         let grew = items.len() > before.lists.get(var).map_or(0, Vec::len);
-        (items.len() > bound && grew).then(|| (var.clone(), bound))
+        (items.len() > bound && grew).then(|| (var.to_string(), bound))
     });
     counters.chain(lists)
 }
@@ -343,7 +383,7 @@ pub fn apply_effects(
     effects: &[ModelEffect],
     state: &mut TemperModelState,
     action_name: &str,
-    params: &BTreeMap<String, ParamValue>,
+    params: &Fields<ParamValue>,
 ) {
     let count = |arg: &Arg, state: &TemperModelState| -> usize {
         match arg {
@@ -360,15 +400,15 @@ pub fn apply_effects(
         match effect {
             ModelEffect::SetCounter { var, value } => {
                 let value = count(value, state);
-                state.counters.insert(var.clone(), value);
+                state.counters.insert(*var, value);
             }
             ModelEffect::AddCounter { var, value } => {
                 let delta = count(value, state);
-                *state.counters.entry(var.clone()).or_insert(0) += delta;
+                *state.counters.get_or_insert_with(*var, || 0) += delta;
             }
             ModelEffect::SubCounter { var, value } => {
                 let delta = count(value, state);
-                let entry = state.counters.entry(var.clone()).or_insert(0);
+                let entry = state.counters.get_or_insert_with(*var, || 0);
                 *entry = entry.saturating_sub(delta);
             }
             ModelEffect::SetBool { var, value } => {
@@ -378,11 +418,11 @@ pub fn apply_effects(
                     Arg::Param(name) => matches!(params.get(name), Some(ParamValue::Bool(true))),
                     Arg::Lit(_) => false,
                 };
-                state.booleans.insert(var.clone(), value);
+                state.booleans.insert(*var, value);
             }
             ModelEffect::SetString { var, value } => {
                 if let Some(current) = state.strings.get_mut(var) {
-                    *current = ModelString::from(value.clone());
+                    *current = ModelString::Literal(*value);
                 }
             }
             ModelEffect::ListAppend { var, value } => {
@@ -394,20 +434,20 @@ pub fn apply_effects(
                     .into()
                 };
                 let element = match value {
-                    Arg::Lit(Literal::Str(text)) => text.clone().into(),
+                    Arg::Lit(Literal::Str(text)) => text.as_str().into(),
                     Arg::Param(name) => match params.get(name) {
-                        Some(ParamValue::Str(value)) => value.clone(),
+                        Some(ParamValue::Str(value)) => *value,
                         _ => placeholder(),
                     },
                     _ => placeholder(),
                 };
-                state.lists.entry(var.clone()).or_default().push(element);
+                state.lists.get_or_insert_with(*var, Vec::new).push(element);
             }
             ModelEffect::ListRemove { var, value } => {
                 let element = match value {
-                    Arg::Lit(Literal::Str(text)) => Some(text.clone().into()),
+                    Arg::Lit(Literal::Str(text)) => Some(text.as_str().into()),
                     Arg::Param(name) => match params.get(name) {
-                        Some(ParamValue::Str(value)) => Some(value.clone()),
+                        Some(ParamValue::Str(value)) => Some(*value),
                         _ => None,
                     },
                     _ => None,

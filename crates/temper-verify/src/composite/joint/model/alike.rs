@@ -97,7 +97,7 @@ impl JointModel {
         let twin = self.alike.get(index).copied().unwrap_or(index);
         let via = match next.as_mut_slice() {
             [root] => {
-                root.action.clone_from(&self.reactions[twin].source_action);
+                root.action = self.reactions[twin].source_action.as_str().into();
                 twin
             }
             _ => index,

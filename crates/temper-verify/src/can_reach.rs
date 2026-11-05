@@ -56,11 +56,12 @@ pub(crate) fn unproved_rules(model: &TemperModel) -> Vec<String> {
                     && match constraint {
                         ActionConstraint::ParamNonempty { .. } => param.nonempty,
                         ActionConstraint::ParamEqualsField { field, .. } => {
-                            model.tracked_strings.contains(field) && param.equals.contains(field)
+                            model.tracked_strings.contains(field)
+                                && param.equals.iter().any(|f| f == field)
                         }
                         ActionConstraint::ParamNotEqualsField { field, .. } => {
                             model.tracked_strings.contains(field)
-                                && param.not_equals.contains(field)
+                                && param.not_equals.iter().any(|f| f == field)
                         }
                         ActionConstraint::ParamGreaterThanField { .. } => false,
                     }
@@ -197,8 +198,8 @@ pub(crate) fn trace(
                     .map(|(params, _)| params)
                     .expect("the walk took this step");
                 TemperModelAction {
-                    name: transition.name.clone(),
-                    target_state: transition.to_state.clone(),
+                    name: transition.name,
+                    target_state: transition.to_state,
                     params,
                 }
             });

@@ -20,6 +20,8 @@ use super::{InvariantProof, invariant_model};
 /// the model would read through `reads`. That is the whole of each type in
 /// the scope, so a change a cut would leave out walks the proof once more too.
 pub(super) struct Wider<'room> {
+    /// The scope the first walk had.
+    first: BTreeSet<String>,
     scope: BTreeSet<String>,
     app: Arc<BTreeMap<String, Automaton>>,
     policies: Option<SendAnalysis>,
@@ -31,6 +33,7 @@ pub(super) struct Wider<'room> {
 impl fmt::Debug for Wider<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Wider")
+            .field("first", &self.first)
             .field("scope", &self.scope)
             .field("reads", &self.reads)
             .field("records", &self.records)
@@ -82,9 +85,11 @@ impl<'room> Wider<'room> {
         if outside.is_empty() {
             return None;
         }
+        let first = scope.clone();
         let scope: BTreeSet<String> = scope.union(&outside).cloned().collect();
         let reads = reads(app, &scope, policies);
         Some(Self {
+            first,
             scope,
             app: Arc::clone(app),
             policies: policies.cloned(),
@@ -103,6 +108,10 @@ impl<'room> Wider<'room> {
     /// stays not checked, naming the types: a reaction from beyond this
     /// wider model is again unsure. When the
     /// model does not fit in the room, no break walks again.
+    ///
+    /// The sources on the ways the first walk found come first, alone: a
+    /// break there is found without the state of every other source. Only
+    /// what they leave undecided walks with all of them.
     pub(super) fn walk(
         &self,
         proof: &InvariantProof<'_>,
@@ -110,11 +119,39 @@ impl<'room> Wider<'room> {
         results: &mut [JointInvariantResult],
         bound: Bound<'_>,
     ) {
+        let on_the_way: BTreeSet<String> = self
+            .first
+            .iter()
+            .chain(outside.iter().flatten())
+            .cloned()
+            .collect();
+        if on_the_way != self.scope {
+            self.walk_with(&on_the_way, proof, outside, results, bound);
+        }
+        self.walk_with(&self.scope, proof, outside, results, bound);
+    }
+
+    /// Walk `scope`. Only with the whole scope does a walk that finds no
+    /// break say so: with less, a break may yet come from the types left out.
+    fn walk_with(
+        &self,
+        scope: &BTreeSet<String>,
+        proof: &InvariantProof<'_>,
+        outside: &[BTreeSet<String>],
+        results: &mut [JointInvariantResult],
+        bound: Bound<'_>,
+    ) {
+        let undecided = |(found, from): (&JointInvariantResult, &BTreeSet<String>)| {
+            !from.is_empty() && matches!(found.outcome, JointOutcome::Incomplete { .. })
+        };
+        if !results.iter().zip(outside).any(undecided) {
+            return;
+        }
         // Declared first so the model releases its allocations before its room.
         let memory = Construction::new(self.room);
         let Ok(model) = invariant_model(
             &named(&self.app),
-            &self.scope,
+            scope,
             &proof.entity,
             &proof.invariants,
             self.policies.as_ref(),
@@ -134,12 +171,13 @@ impl<'room> Wider<'room> {
             };
             let why = match outcome {
                 JointOutcome::Broken { path } => {
-                    found.scope = self.scope.iter().cloned().collect();
+                    found.scope = scope.iter().cloned().collect();
                     found.states = walk.states;
                     found.in_flight_bound = walk.held_back.then_some(model::MAX_IN_FLIGHT);
                     found.outcome = JointOutcome::Broken { path: path.clone() };
                     continue;
                 }
+                _ if *scope != self.scope => continue,
                 JointOutcome::Incomplete { reason } => {
                     format!("{} joint states walked, not checked: {reason}", walk.states)
                 }

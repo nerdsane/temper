@@ -29,7 +29,7 @@ fn check_entry_rules(model: &TemperModel, state: &TemperModelState) -> bool {
 
 /// Check that the current status is a declared state.
 fn check_status_in_set(model: &TemperModel, state: &TemperModelState) -> bool {
-    model.states.contains(&state.status)
+    model.states.iter().any(|s| *s == state.status)
 }
 
 /// Check that no invariant is false in this state. An invariant over values
@@ -43,7 +43,7 @@ fn check_invariants(model: &TemperModel, state: &TemperModelState) -> bool {
 
 /// Check that no transition is locally enabled from a terminal state.
 fn check_terminal(model: &TemperModel, state: &TemperModelState) -> bool {
-    if !model.terminal.contains(&state.status) {
+    if !model.terminal.iter().any(|s| *s == state.status) {
         return true;
     }
     !model.transitions.iter().any(|t| {
@@ -60,7 +60,7 @@ fn check_terminal(model: &TemperModel, state: &TemperModelState) -> bool {
 fn check_no_deadlock(model: &TemperModel, state: &TemperModelState) -> bool {
     for live in &model.liveness {
         if let LivenessKind::NoDeadlock { ref from } = live.kind
-            && from.contains(&state.status)
+            && from.iter().any(|s| *s == state.status)
         {
             // Must have at least one enabled action
             let mut has_action = false;
@@ -140,7 +140,7 @@ impl Model for TemperModel {
 
     fn init_states(&self) -> Vec<Self::State> {
         vec![TemperModelState {
-            status: self.initial_status.clone(),
+            status: self.initial_status,
             counters: self.initial_counters.clone(),
             booleans: self.initial_booleans.clone(),
             lists: self.initial_lists.clone(),
@@ -165,8 +165,8 @@ impl Model for TemperModel {
             // the exploration bounds.
             for (params, _) in successors(self, t, state) {
                 actions.push(TemperModelAction {
-                    name: t.name.clone(),
-                    target_state: t.to_state.clone(),
+                    name: t.name,
+                    target_state: t.to_state,
                     params,
                 });
             }

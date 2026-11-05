@@ -227,7 +227,7 @@ fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationRes
         let action_idx = rng.next_bound(valid_actions.len());
         let action = valid_actions[action_idx].clone();
 
-        let action_name = action.name.clone();
+        let action_name = action.name;
         sched.send(
             "sim-driver",
             actor_id,
@@ -339,7 +339,7 @@ fn check_liveness_post_simulation(
         for (rule, live) in model.liveness.iter().enumerate() {
             match &live.kind {
                 LivenessKind::NoDeadlock { from } => {
-                    if from.contains(&final_state.status) {
+                    if from.iter().any(|s| *s == final_state.status) {
                         let mut actions = Vec::new();
                         model.actions(final_state, &mut actions);
                         if actions.is_empty() {
@@ -391,10 +391,10 @@ fn check_invariants_on_state(
     violations: &mut Vec<InvariantViolation>,
 ) {
     // TypeInvariant: status must be in valid state set
-    if !model.states.contains(&state_after.status) {
+    if !model.states.iter().any(|s| *s == state_after.status) {
         violations.push(InvariantViolation {
             actor_id: actor_id.to_string(),
-            action: action.name.clone(),
+            action: action.name.to_string(),
             state_before: state_before.clone(),
             state_after: state_after.clone(),
             invariant: "TypeInvariant: status not in valid states".to_string(),
@@ -405,7 +405,7 @@ fn check_invariants_on_state(
     let mut violated = |invariant: String| {
         violations.push(InvariantViolation {
             actor_id: actor_id.to_string(),
-            action: action.name.clone(),
+            action: action.name.to_string(),
             state_before: state_before.clone(),
             state_after: state_after.clone(),
             invariant,
@@ -423,7 +423,7 @@ fn check_invariants_on_state(
         violated(rule.name.clone());
     }
 
-    if model.terminal.contains(&state_after.status) {
+    if model.terminal.iter().any(|s| *s == state_after.status) {
         let mut actions = Vec::new();
         model.actions(state_after, &mut actions);
         if !actions.is_empty() {

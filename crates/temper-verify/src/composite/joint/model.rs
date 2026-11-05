@@ -1,6 +1,9 @@
 //! The joint model: the records in scope, their reactions, the dispatches
 //! and module calls on their way, who may send what, and the walk.
 
+#[macro_use]
+mod labels;
+
 mod alike;
 mod chosen;
 mod classes;
@@ -12,7 +15,6 @@ mod from_outside;
 mod guided;
 mod held;
 mod initial;
-mod labels;
 mod moves;
 mod order;
 mod outside;
@@ -35,8 +37,11 @@ use super::env::{Blind, ID, JointEnv, Records};
 use super::senders::{OUTSIDE, Senders, policy_fields, standing};
 use super::slice::slice;
 use super::state::canonical;
-use crate::model::semantics::{Expansion, rule_for, string_values};
-use crate::model::{ModelString, ParamValue, ResolvedTransition, TemperModel, TemperModelState};
+use crate::model::semantics::{rule_for, string_values};
+use crate::model::{
+    Fields, ModelString, ParamValue, ResolvedTransition, TemperModel, TemperModelState,
+};
+use held::PerThread;
 
 pub(super) use classes::Classes;
 pub use drops::DroppedReaction;
@@ -116,6 +121,8 @@ pub(super) struct JointModel {
     reactions: Vec<Reaction>,
     /// The names of each type's records ([`copies`]).
     copies: BTreeMap<String, Vec<String>>,
+    /// Whether a type has more than one record, so that their order can differ.
+    several_copies: bool,
     /// Each reaction's place among the reactions as the specs say them.
     first_reaction: Vec<usize>,
     /// The reaction each goes out as ([`alike`]); itself, when this is empty.
@@ -325,12 +332,19 @@ impl JointModel {
             .collect();
         // Cedar is told which literals a made-up value may not be.
         let senders = senders.meeting(&classes, &models);
+        // From here on classes only say which made-up values can meet, and
+        // Cedar is one more thing that can compare them.
+        let mut classes = classes;
+        classes.read_policies(&senders.compared(), scope);
+        let mut models = models;
+        classes.number(&mut models);
         Self {
             expansion: PerThread::default(),
             id_literals,
             models,
             chosen_guards: chosen::chosen_guards(by_name, &reactions),
             reactions,
+            several_copies: false,
             copies,
             first_reaction: Vec::new(),
             alike: Vec::new(),
@@ -371,7 +385,7 @@ impl JointModel {
                 if let ParamValue::Str(text) = value
                     && !text.is_empty()
                 {
-                    values.insert(text.clone());
+                    values.insert(*text);
                 }
             }
         }
@@ -415,7 +429,7 @@ impl JointModel {
         t: &ResolvedTransition,
         state: &JointState,
         blind: Blind,
-        params: Option<&BTreeMap<String, ParamValue>>,
+        params: Option<&Fields<ParamValue>>,
     ) -> bool {
         // The rule the runtime takes for this action in the record's status
         // (`rule_for`); another with the same name never fires from there.
@@ -477,24 +491,4 @@ fn deciding(automaton: &Automaton, reactions: &[Reaction], entity: &str) -> BTre
         });
     }
     fields
-}
-
-/// A walk's accounting for what one state's expansion builds, one to a
-/// thread, since a walk's threads each expand their own state.
-#[derive(Default)]
-struct PerThread(thread_local::ThreadLocal<Expansion>);
-
-impl std::ops::Deref for PerThread {
-    type Target = Expansion;
-
-    fn deref(&self) -> &Expansion {
-        self.0.get_or_default()
-    }
-}
-
-/// Only the name, as [`Expansion`]'s own says: it is no part of the model.
-impl std::fmt::Debug for PerThread {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Expansion")
-    }
 }

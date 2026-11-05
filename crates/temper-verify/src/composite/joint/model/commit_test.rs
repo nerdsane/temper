@@ -2,7 +2,9 @@
 //! parameter choice fits. That is an unmodelled outcome, not a refusal.
 
 use super::super::Sending;
+
 use super::*;
+use crate::model::Fields;
 use temper_spec::automaton::parse_automaton;
 
 #[test]
@@ -47,9 +49,9 @@ assert = "total >= 0"
         to: "Total".into(),
         action: "Add".into(),
         target_state: None,
-        params: BTreeMap::from([("amount".into(), ParamValue::Count(1))]),
+        params: Fields::from([("amount", ParamValue::Count(1))]),
         read: true,
-        chain: Vec::new(),
+        chain: std::sync::Arc::new([]),
         via: None,
         by: 0,
         unread_guard: None,
@@ -70,9 +72,7 @@ assert = "total >= 0"
     assert!(outcomes[0].1.contains("beyond exploration bounds"));
 
     // A single large assignment is equally uncertain, even from zero.
-    dispatch
-        .params
-        .insert("amount".into(), ParamValue::Count(100));
+    dispatch.params.insert("amount", ParamValue::Count(100));
     let initial = model.inits().next().expect("an initial state");
     let outcomes = model.deliver(initial.clone(), &dispatch, "add");
     assert_eq!(outcomes[0].0, initial);

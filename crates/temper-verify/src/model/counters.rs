@@ -50,7 +50,7 @@ pub(super) fn leave_out_unread_counters(automaton: &Automaton, model: &mut Tempe
                 ModelEffect::ListRemoveAt { var, index } => (var, index),
                 ModelEffect::SetString { .. } => continue,
             };
-            if (read.contains(var) || !counters.contains(var.as_str()))
+            if (read.contains(var.as_str()) || !counters.contains(var.as_str()))
                 && let Arg::Var(source) = value
             {
                 read.insert(source.clone());
@@ -60,7 +60,7 @@ pub(super) fn leave_out_unread_counters(automaton: &Automaton, model: &mut Tempe
             break;
         }
     }
-    let unread = |name: &String| counters.contains(name.as_str()) && !read.contains(name);
+    let unread = |name: &str| counters.contains(name) && !read.contains(name);
     model.initial_counters.retain(|name, _| !unread(name));
     model.counter_bounds.retain(|name, _| !unread(name));
     for t in &mut model.transitions {

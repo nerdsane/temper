@@ -233,7 +233,7 @@ fn test_simulation_result_contains_final_states() {
     for (id, state) in &result.actor_final_states {
         assert!(id.starts_with("entity-"));
         assert!(
-            model.states.contains(&state.status),
+            model.states.iter().any(|s| *s == state.status),
             "Status '{}' not in spec states {:?}",
             state.status,
             model.states

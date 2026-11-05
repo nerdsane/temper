@@ -60,6 +60,9 @@
 //! every reference finds, with a move's dispatches landing before the next
 //! move from outside, and names each reaction a target refuses.
 
+#[macro_use]
+mod pair;
+
 mod env;
 mod fair;
 mod liveness;
@@ -297,6 +300,10 @@ mod sure_tests;
 #[cfg(test)]
 #[path = "someone_test.rs"]
 mod someone_tests;
+
+#[cfg(test)]
+#[path = "classes_test.rs"]
+mod classes_tests;
 
 #[cfg(test)]
 #[path = "outside_test.rs"]

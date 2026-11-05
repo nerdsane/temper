@@ -22,11 +22,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use temper_spec::automaton::{ActionConstraint, Automaton};
 use temper_spec::predicate::{Arg, Expr, Literal, Name, Truth};
 
-use super::super::{Dispatch, JointState};
+use super::super::JointState;
 use super::Reaction;
-use crate::model::{ModelEffect, ParamValue, TemperModel, TemperModelState};
+use crate::model::{Fields, ModelEffect, ParamValue, Sym, TemperModel, TemperModelState};
+use rustc_hash::FxHashMap;
 
 mod fan;
+mod normal;
+
+pub(super) use normal::values;
 
 /// How many steps behind its family's newest the model tells a count apart;
 /// a count further behind is one value.
@@ -36,25 +40,76 @@ const BEHIND: usize = 1;
 type Field = (String, String);
 /// A parameter: (entity, action, parameter).
 type Param = (String, String, String);
+/// Each (entity, action)'s (parameter, field) pairs, by interned name.
+type Refusals = FxHashMap<(Sym, Sym), Box<[(Sym, Sym)]>>;
 
 /// The families of counts kept as sequence numbers.
 #[derive(Debug, Default)]
 pub(super) struct Order {
-    families: Vec<Family>,
+    pub(super) families: Vec<Family>,
+    /// The families as each state asks of them, by name.
+    numbered: Vec<Numbered>,
     /// Each (entity, action)'s `param_greater_than_field` constraints the
     /// model decides, as (parameter, field).
     compared: BTreeMap<(String, String), Vec<(String, String)>>,
+    /// What can refuse a dispatch whenever it lands: each (entity, action)'s
+    /// (parameter, field) of `compared` whose field is in `rising`.
+    refusals: Refusals,
     /// The fields that never go down: each write adds to them, or takes a
     /// count only when it is greater.
     rising: BTreeSet<Field>,
 }
 
 #[derive(Debug, Default, Clone)]
-struct Family {
+pub(super) struct Family {
     fields: BTreeSet<Field>,
     params: BTreeSet<Param>,
     /// The most a move adds to one of its fields.
     step: usize,
+}
+
+/// What each state asks of a family: where its values are, by interned name.
+#[derive(Debug)]
+struct Numbered {
+    fields: Box<[(Sym, Sym)]>,
+    params: Box<[(Sym, Sym, Sym)]>,
+}
+
+impl Numbered {
+    fn of(family: &Family) -> Self {
+        Self {
+            fields: family
+                .fields
+                .iter()
+                .map(|(entity, field)| (Sym::new(entity), Sym::new(field)))
+                .collect(),
+            params: family
+                .params
+                .iter()
+                .map(|(entity, action, param)| {
+                    (Sym::new(entity), Sym::new(action), Sym::new(param))
+                })
+                .collect(),
+        }
+    }
+}
+
+/// What of `compared` can refuse a dispatch whenever it lands.
+fn refusals(
+    compared: &BTreeMap<(String, String), Vec<(String, String)>>,
+    rising: &BTreeSet<Field>,
+) -> Refusals {
+    compared
+        .iter()
+        .filter_map(|((entity, action), pairs)| {
+            let pairs: Box<[(Sym, Sym)]> = pairs
+                .iter()
+                .filter(|(_, field)| rising.contains(&(entity.clone(), field.clone())))
+                .map(|(param, field)| (Sym::new(param), Sym::new(field)))
+                .collect();
+            (!pairs.is_empty()).then(|| ((Sym::new(entity), Sym::new(action)), pairs))
+        })
+        .collect()
 }
 
 /// What the families are read from: the specs, their models before slicing, the
@@ -134,16 +189,18 @@ impl Order {
                             var,
                             value: Arg::Param(param),
                         } if var == field => compared
-                            .get(&(entity.clone(), t.name.clone()))
+                            .get(&(entity.clone(), t.name.to_string()))
                             .is_some_and(|pairs| pairs.contains(&(param.clone(), field.clone()))),
                         _ => true,
                     })
                 })
             })
             .cloned()
-            .collect();
+            .collect::<BTreeSet<Field>>();
         Self {
+            numbered: families.iter().map(Numbered::of).collect(),
             families,
+            refusals: refusals(&compared, &rising),
             compared,
             rising,
         }
@@ -174,14 +231,17 @@ impl Order {
     /// Whether `entity`'s `action` parameter `param` carries a counter kept
     /// as a sequence number.
     pub(super) fn carries(&self, entity: &str, action: &str, param: &str) -> bool {
-        let key = (entity.to_string(), action.to_string(), param.to_string());
-        self.families.iter().any(|f| f.params.contains(&key))
+        self.families.iter().any(|f| {
+            f.params
+                .iter()
+                .any(|(e, a, p)| e == entity && a == action && p == param)
+        })
     }
 
     /// Whether the model decides this parameter's comparison with this field.
     pub(super) fn decides(&self, entity: &str, action: &str, param: &str, field: &str) -> bool {
         self.compared
-            .get(&(entity.to_string(), action.to_string()))
+            .get(pair!(entity, action))
             .is_some_and(|pairs| pairs.iter().any(|(p, f)| p == param && f == field))
     }
 
@@ -193,10 +253,10 @@ impl Order {
         &self,
         entity: &str,
         action: &str,
-        params: &BTreeMap<String, ParamValue>,
+        params: &Fields<ParamValue>,
         target: &TemperModelState,
     ) -> Truth {
-        let Some(pairs) = self.compared.get(&(entity.to_string(), action.to_string())) else {
+        let Some(pairs) = self.compared.get(pair!(entity, action)) else {
             return Truth::True;
         };
         let mut truth = Truth::True;
@@ -219,10 +279,9 @@ impl Order {
             let ModelEffect::AddCounter { var, .. } = effect else {
                 return true;
             };
-            let key = (entity.to_string(), var.clone());
             self.families
                 .iter()
-                .filter(|family| family.fields.contains(&key))
+                .filter(|family| family.fields.contains(pair!(entity, var)))
                 .all(|family| {
                     let value = state.records[entity]
                         .counters
@@ -233,89 +292,6 @@ impl Order {
                 })
         })
     }
-
-    /// Whether `target` refuses `dispatch` now and whenever it lands: it
-    /// carries a count not greater than a field that never goes down, and
-    /// the model knows that (not both [`BEHIND`] or further behind).
-    fn doomed(&self, dispatch: &Dispatch, target: &TemperModelState) -> bool {
-        let key = (dispatch.to.clone(), dispatch.action.clone());
-        self.compared.get(&key).is_some_and(|pairs| {
-            pairs.iter().any(|(param, field)| {
-                let rising = self.rising.contains(&(dispatch.to.clone(), field.clone()));
-                let held = target.counters.get(field).copied();
-                match (held, dispatch.params.get(param)) {
-                    (Some(held), Some(ParamValue::Count(sent))) => {
-                        rising && *sent <= held && (*sent, held) != (0, 0)
-                    }
-                    _ => false,
-                }
-            })
-        })
-    }
-
-    /// Keep each family's values in `state` as how far behind its newest
-    /// they are: the newest is [`BEHIND`], and 0 is that far behind or more.
-    /// A dispatch its record will refuse whenever it lands (it carries a
-    /// count not greater than a field that never goes down) is first dropped:
-    /// a refused dispatch changes nothing, so it is the same as delivered.
-    pub(super) fn normalize(&self, state: &mut JointState) {
-        let records = &state.records;
-        state
-            .inflight
-            .retain(|dispatch| !self.doomed(dispatch, &records[dispatch.to.as_str()]));
-        for family in &self.families {
-            let newest = values(family, state).last().copied().unwrap_or(0);
-            let keep = |value: usize| BEHIND - (newest - value).min(BEHIND);
-            for (entity, field) in &family.fields {
-                if let Some(record) = state.records.get_mut(entity.as_str())
-                    && let Some(&value) = record.counters.get(field)
-                    && keep(value) != value
-                {
-                    std::sync::Arc::make_mut(record)
-                        .counters
-                        .insert(field.clone(), keep(value));
-                }
-            }
-            for dispatch in &mut state.inflight {
-                for (entity, action, param) in &family.params {
-                    if &dispatch.to == entity
-                        && &dispatch.action == action
-                        && let Some(&ParamValue::Count(value)) = dispatch.params.get(param)
-                        && keep(value) != value
-                    {
-                        std::sync::Arc::make_mut(dispatch)
-                            .params
-                            .insert(param.clone(), ParamValue::Count(keep(value)));
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// The values `family` holds in `state`, in records and in flight.
-fn values(family: &Family, state: &JointState) -> BTreeSet<usize> {
-    let mut values = BTreeSet::new();
-    for (entity, field) in &family.fields {
-        if let Some(value) = state
-            .records
-            .get(entity.as_str())
-            .and_then(|r| r.counters.get(field))
-        {
-            values.insert(*value);
-        }
-    }
-    for dispatch in &state.inflight {
-        for (entity, action, param) in &family.params {
-            if &dispatch.to == entity
-                && &dispatch.action == action
-                && let Some(ParamValue::Count(value)) = dispatch.params.get(param)
-            {
-                values.insert(*value);
-            }
-        }
-    }
-    values
 }
 
 /// `family` with every field and parameter that reaches it, or `None` when
@@ -362,9 +338,11 @@ fn grow(
                             var,
                             value: Arg::Param(param),
                         } if var == &field => {
-                            family
-                                .params
-                                .insert((entity.clone(), t.name.clone(), param.clone()));
+                            family.params.insert((
+                                entity.clone(),
+                                t.name.to_string(),
+                                param.clone(),
+                            ));
                         }
                         ModelEffect::SetCounter { var, .. }
                         | ModelEffect::AddCounter { var, .. }

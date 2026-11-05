@@ -6,9 +6,9 @@ use serde_json::Value as Json;
 use super::super::Attr;
 use super::super::json::same;
 use super::super::profile::{Fact, Profile};
-use super::{Asker, FALSE, Request, Results, TRUE, TRUE_OR_FALSE, Val};
+use super::{Asker, FALSE, Request, Results, TRUE, TRUE_OR_FALSE, Val, made, read};
 
-impl Request<'_> {
+impl<'a> Request<'a> {
     /// The service principal's attributes, as the engine builds them.
     pub(super) fn service_attribute(name: &str, attr: &str) -> Option<Json> {
         let id = format!("service:{name}");
@@ -23,22 +23,25 @@ impl Request<'_> {
 
     /// A service's context: the engine's own keys, then the kernel's. A key
     /// it lacks may still come from the record's fields.
-    pub(super) fn service_context(&self, key: &str) -> Option<Attr> {
+    pub(super) fn service_context<'e>(&self, key: &str) -> Option<Val<'e>>
+    where
+        'a: 'e,
+    {
         let Asker::Service { name, context } = self.asker else {
             return None;
         };
         let id = format!("service:{name}");
         match key {
-            "role" => Some(Attr::Value(Json::String("service".to_string()))),
-            "agentId" => Some(Attr::Value(Json::String(id))),
-            "agentType" => Some(Attr::Value(Json::String(name.clone()))),
-            "agentTypeVerified" => Some(Attr::Value(Json::Bool(false))),
-            _ => context.get(key).cloned(),
+            "role" => Some(made(Json::String("service".to_string()))),
+            "agentId" => Some(made(Json::String(id))),
+            "agentType" => Some(made(Json::String(name.clone()))),
+            "agentTypeVerified" => Some(made(Json::Bool(false))),
+            _ => context.get(key).map(|attr: &'a Attr| self.known(attr)),
         }
     }
 
     /// What is known of the sender when it is someone outside.
-    pub(super) fn outside(&self) -> Option<&Profile> {
+    pub(super) fn outside(&self) -> Option<&'a Profile> {
         match self.asker {
             Asker::Outside | Asker::OutsideAs(_) => Some(self.profile),
             Asker::Service { .. } => None,
@@ -47,17 +50,17 @@ impl Request<'_> {
 
     /// The value of what an outside sender holds, as its profile knows it
     /// (`fact`), or unknown.
-    pub(super) fn fact_value(fact: Option<&Fact>) -> Val {
+    pub(super) fn fact_value<'e>(fact: Option<&'e Fact>) -> Val<'e> {
         match fact {
             Some(Fact::Absent) => Val::Error,
-            Some(Fact::Is(value)) => Val::Known(value.clone()),
+            Some(Fact::Is(value)) => read(value),
             Some(Fact::Other {
                 unlike,
                 like,
                 string,
             }) => Val::Other {
-                unlike: unlike.clone(),
-                like: like.clone(),
+                unlike,
+                like,
                 string: *string,
             },
             None => Val::Unknown,
@@ -67,7 +70,7 @@ impl Request<'_> {
     /// What an outside sender's security context holds under `key`, when
     /// its profile knows: only a key the kernel alone sets, which no record
     /// field fills.
-    pub(super) fn sender_key(&self, key: &str) -> Option<&Fact> {
+    pub(super) fn sender_key(&self, key: &str) -> Option<&'a Fact> {
         self.outside()?.context.get(key)
     }
 }

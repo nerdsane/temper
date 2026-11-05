@@ -2,19 +2,18 @@
 //! from outside, state timers, module answers, dispatches read on the
 //! dispatch path, and dispatches their records take or refuse.
 
-use std::collections::BTreeMap;
+use crate::model::Renames;
 
 use temper_authz::May;
-use temper_spec::predicate::{Truth, eval};
+use temper_spec::predicate::Truth;
 
-use super::super::env::Blind;
 use super::super::senders::{Rule, Senders};
 use super::super::state::canonical;
 use super::super::{Call, Dispatch, JointState};
 use super::commit::add;
 use super::labels::rename_label;
 use super::{Delivery, JointModel, MAX_IN_FLIGHT};
-use crate::model::{ModelString, TemperModelAction};
+use crate::model::TemperModelAction;
 
 #[path = "guard.rs"]
 mod guard;
@@ -50,11 +49,14 @@ impl Certainty {
     }
 }
 
+/// A way a move goes: the state, the move in words, and what the model knows.
+pub(in crate::composite::joint) type Outcome = (JointState, String, Certainty);
+
 /// A state a move leads to.
 pub(in crate::composite::joint) struct Next {
     pub(in crate::composite::joint) state: JointState,
     /// The new names of the values the old state held.
-    pub(in crate::composite::joint) renamed: BTreeMap<ModelString, ModelString>,
+    pub(in crate::composite::joint) renamed: Renames,
     /// The move, named as in the new state.
     pub(in crate::composite::joint) label: String,
     /// What the model knows of the move leading here.
@@ -70,11 +72,27 @@ impl JointModel {
         state: &JointState,
         mv: &Move,
     ) -> (Vec<Next>, bool) {
+        match self.outcomes(state, mv) {
+            Some(outcomes) => self.finished(state, mv, outcomes),
+            None => (Vec::new(), false),
+        }
+    }
+
+    /// What `mv` does to `state`, before what is in flight is looked at as a
+    /// whole. It reads only the records, the timers armed, the values the
+    /// state holds and its sequence numbers, unless it says it read more with
+    /// [`crate::model::semantics::Expansion::note_flight_read`]: a walk
+    /// remembers it by those. None when the expansion's room is used up.
+    pub(in crate::composite::joint) fn outcomes(
+        &self,
+        state: &JointState,
+        mv: &Move,
+    ) -> Option<Vec<Outcome>> {
         if !self.expansion.take() {
-            return (Vec::new(), false);
+            return None;
         }
         use Certainty::{Either, OneOf, Sure, Unsure};
-        let mut outcomes: Vec<(JointState, String, Certainty)> = Vec::new();
+        let mut outcomes: Vec<Outcome> = Vec::new();
         match mv {
             Move::Take(entity, action, by) => {
                 // An outside move the model cannot decide may also be
@@ -87,7 +105,7 @@ impl JointModel {
                     &state.records[entity.as_str()],
                 );
                 if exceeds == Truth::False {
-                    return (Vec::new(), false);
+                    return None;
                 }
                 let known = exceeds == Truth::True
                     && self.truth(entity, action, state) == Truth::True
@@ -101,7 +119,7 @@ impl JointModel {
                         .expansion
                         .push(&mut outcomes, (outcome, text.clone(), certainty))
                     {
-                        return (Vec::new(), false);
+                        return None;
                     };
                 }
             }
@@ -118,27 +136,28 @@ impl JointModel {
                     &mut outcomes,
                     (next, text, Certainty::unless(known, Unsure)),
                 ) {
-                    return (Vec::new(), false);
+                    return None;
                 };
             }
             Move::Reaction(entity, action, by) => {
                 for outcome in self.outside_reaction(state, entity, action, *by) {
                     if !self.expansion.push(&mut outcomes, outcome) {
-                        return (Vec::new(), false);
+                        return None;
                     }
                 }
             }
             Move::Timer(entity, name) => {
                 for outcome in self.fire_timer(state, entity, name) {
                     if !self.expansion.push(&mut outcomes, outcome) {
-                        return (Vec::new(), false);
+                        return None;
                     }
                 }
             }
             Move::Answer(call, action) => {
                 let mut next = state.clone();
                 remove_call(&mut next, call);
-                let text = format!(
+                let text = words!(
+                    self,
                     "{}.{action} (answer from {}, as {})",
                     call.to,
                     call.module,
@@ -153,11 +172,11 @@ impl JointModel {
                         &mut outcomes,
                         (
                             next,
-                            format!("{text} sent"),
+                            words!(self, "{text} sent"),
                             Certainty::unless(known, Unsure),
                         ),
                     ) {
-                        return (Vec::new(), false);
+                        return None;
                     };
                 } else if self.stale(call, &action.name, state)
                     || self.exceeds(
@@ -172,9 +191,9 @@ impl JointModel {
                     // does not exceed the counter it must.
                     if !self.expansion.push(
                         &mut outcomes,
-                        (next, format!("{text} refused by its record"), Sure),
+                        (next, words!(self, "{text} refused by its record"), Sure),
                     ) {
-                        return (Vec::new(), false);
+                        return None;
                     };
                 } else {
                     // The record refuses an answer whose guard or constraints
@@ -190,12 +209,12 @@ impl JointModel {
                         && self.unchecked.meets(&call.to, &action.name)
                         && self.exact(&call.to, &action.name, state);
                     if !known {
-                        let refused = format!("{text} refused by its record");
+                        let refused = words!(self, "{text} refused by its record");
                         if !self
                             .expansion
                             .push(&mut outcomes, (next.clone(), refused, OneOf))
                         {
-                            return (Vec::new(), false);
+                            return None;
                         };
                     }
                     for (outcome, then) in self.commit(next, &call.to, action, &[], call.by) {
@@ -204,7 +223,7 @@ impl JointModel {
                             .expansion
                             .push(&mut outcomes, (outcome, text.clone(), certainty))
                         {
-                            return (Vec::new(), false);
+                            return None;
                         };
                     }
                 }
@@ -212,10 +231,10 @@ impl JointModel {
             Move::Fail(call) => {
                 let mut next = state.clone();
                 remove_call(&mut next, call);
-                let text = format!("{call} fails");
+                let text = words!(self, "{call} fails");
                 for outcome in self.end_call(next, call, text, call.by) {
                     if !self.expansion.push(&mut outcomes, outcome) {
-                        return (Vec::new(), false);
+                        return None;
                     }
                 }
             }
@@ -227,26 +246,26 @@ impl JointModel {
                 // that move, starting a timer's chain.
                 let mut next = state.clone();
                 remove_call(&mut next, call);
-                let text = format!("{call} is lost: the server restarts");
+                let text = words!(self, "{call} is lost: the server restarts");
                 let by = self.senders.timer(Senders::armer(call.by));
                 for outcome in self.end_call(next, call, text, by) {
                     if !self.expansion.push(&mut outcomes, outcome) {
-                        return (Vec::new(), false);
+                        return None;
                     }
                 }
             }
             Move::Silent(call) => {
                 let mut next = state.clone();
                 remove_call(&mut next, call);
-                let text = format!("{call} ends with no answer");
+                let text = words!(self, "{call} ends with no answer");
                 if !self.expansion.push(&mut outcomes, (next, text, Sure)) {
-                    return (Vec::new(), false);
+                    return None;
                 }
             }
             Move::Read(dispatch) if dispatch.unread_guard.is_some() => {
                 for outcome in self.read_trigger_guard(dispatch, state) {
                     if !self.expansion.push(&mut outcomes, outcome) {
-                        return (Vec::new(), false);
+                        return None;
                     }
                 }
             }
@@ -255,7 +274,7 @@ impl JointModel {
                 remove(&mut next, dispatch);
                 let allows = self.read_allows(dispatch, state);
                 if allows != Truth::True {
-                    let refused = format!("{dispatch} refused when read");
+                    let refused = words!(self, "{dispatch} refused when read");
                     let certainty = Certainty::unless(allows == Truth::False, OneOf);
                     let mut stays = next.clone();
                     self.spawn_refused(&mut stays, dispatch);
@@ -263,19 +282,19 @@ impl JointModel {
                         .expansion
                         .push(&mut outcomes, (stays, refused, certainty))
                     {
-                        return (Vec::new(), false);
+                        return None;
                     };
                 }
                 if allows != Truth::False {
                     let mut read = (**dispatch).clone();
                     read.read = true;
                     add(&mut next, read);
-                    let text = format!("{dispatch}: related records read");
+                    let text = words!(self, "{dispatch}: related records read");
                     if !self.expansion.push(
                         &mut outcomes,
                         (next, text, Certainty::unless(allows == Truth::True, OneOf)),
                     ) {
-                        return (Vec::new(), false);
+                        return None;
                     };
                 }
             }
@@ -298,7 +317,8 @@ impl JointModel {
                     May::Yes
                 };
                 if may != May::Yes {
-                    let text = format!(
+                    let text = words!(
+                        self,
                         "{dispatch} refused by Cedar for {}",
                         self.senders.name(dispatch.by)
                     );
@@ -310,28 +330,36 @@ impl JointModel {
                             Certainty::unless(may == May::No, Either),
                         ),
                     ) {
-                        return (Vec::new(), false);
+                        return None;
                     };
                 }
                 if may != May::No {
                     let cedar = Certainty::unless(may == May::Yes, Either);
                     for outcome in self
-                        .deliver(next, dispatch, &dispatch.to_string())
+                        .deliver(next, dispatch, &words!(self, "{dispatch}"))
                         .into_iter()
                         .map(|(s, t, then)| (s, t, cedar.then(then)))
                     {
                         if !self.expansion.push(&mut outcomes, outcome) {
-                            return (Vec::new(), false);
+                            return None;
                         }
                     }
                 }
             }
         }
-        let unsure = match mv {
-            Move::Read(dispatch) | Move::Arrive(dispatch) => self.overtakes(state, dispatch),
-            Move::Answer(call, action) => self.only_a_module_may(&call.to, &action.name),
-            _ => false,
-        };
+        Some(outcomes)
+    }
+
+    /// What `outcomes`, the ways `mv` goes from `state`, come to: each that
+    /// fits what the walk holds in flight, in its one form.
+    pub(in crate::composite::joint) fn finished(
+        &self,
+        state: &JointState,
+        mv: &Move,
+        outcomes: Vec<Outcome>,
+    ) -> (Vec<Next>, bool) {
+        use Certainty::Unsure;
+        let unsure = self.unsure(state, mv);
         let mut held_back = false;
         let mut nexts = Vec::new();
         for (mut outcome, text, certainty) in outcomes {
@@ -345,7 +373,11 @@ impl JointModel {
             self.in_one_order(&mut outcome);
             let renamed = canonical(&mut outcome);
             let next = Next {
-                label: rename_label(&text, mv, &renamed),
+                label: if self.expansion.words() {
+                    rename_label(&text, mv, &renamed)
+                } else {
+                    String::new()
+                },
                 state: outcome,
                 renamed,
                 certainty,
@@ -357,86 +389,14 @@ impl JointModel {
         (nexts, held_back)
     }
 
-    /// Whether the dispatch path lets `dispatch` through: the related
-    /// records its guard reads allow it, for one of the transitions it may
-    /// take. Its own record is read later, by its actor. True when a guard
-    /// holds outright, false when the related records refuse every one, and
-    /// unknown when the model cannot tell.
-    pub(super) fn read_allows(&self, dispatch: &Dispatch, state: &JointState) -> Truth {
-        let full = self.env(&dispatch.to, state);
-        let related = self.env_blind(&dispatch.to, state, Blind::Own);
-        let mut refused = true;
-        for t in self.transitions_for(dispatch) {
-            if eval(&t.guard, &full) == Truth::True {
-                return Truth::True;
-            }
-            refused &= eval(&t.guard, &related) == Truth::False;
+    /// Whether nothing is known of where `mv` leads from `state`, whatever
+    /// its ways say.
+    pub(in crate::composite::joint) fn unsure(&self, state: &JointState, mv: &Move) -> bool {
+        match mv {
+            Move::Read(dispatch) | Move::Arrive(dispatch) => self.overtakes(state, dispatch),
+            Move::Answer(call, action) => self.only_a_module_may(&call.to, &action.name),
+            _ => false,
         }
-        if refused {
-            Truth::False
-        } else {
-            Truth::Unknown
-        }
-    }
-
-    /// Whether the counts kept as sequence numbers stay exact when `entity`
-    /// takes `action` in `state`.
-    pub(super) fn exact(&self, entity: &str, action: &str, state: &JointState) -> bool {
-        self.models[entity]
-            .transitions
-            .iter()
-            .filter(|t| t.name == action)
-            .all(|t| self.order.exact(entity, &t.effects, state))
-    }
-
-    /// Whether a field `action` ties a parameter to has changed since `call`
-    /// started, so its record refuses the module's answer.
-    fn stale(&self, call: &Call, action: &str, state: &JointState) -> bool {
-        let strings = &state.records[call.to.as_str()].strings;
-        self.unchecked
-            .equals
-            .get(&(call.to.clone(), action.to_string()))
-            .is_some_and(|fields| {
-                fields
-                    .iter()
-                    .any(|field| call.asked.get(field) != strings.get(field))
-            })
-    }
-
-    /// Whether the guard of the transition `action` names holds on `state`,
-    /// as far as the model knows.
-    /// Whether all that is open of an outside move in `state` is what Cedar
-    /// answers, or a guard on its own record's fields, which a sender can
-    /// meet either way.
-    pub(super) fn take_rests_on_cedar_or_own_guard(
-        &self,
-        entity: &str,
-        action: &TemperModelAction,
-        state: &JointState,
-    ) -> bool {
-        let guard = match self.truth(entity, action, state) {
-            Truth::True => true,
-            Truth::False => false,
-            Truth::Unknown => !self.action_reads_related(entity, &action.name),
-        };
-        guard
-            && self.exceeds(entity, &action.name, &action.params, &state.records[entity])
-                == Truth::True
-            && self.unchecked.meets(entity, &action.name)
-            && self.exact(entity, &action.name, state)
-    }
-
-    fn truth(&self, entity: &str, action: &TemperModelAction, state: &JointState) -> Truth {
-        let status = &state.records[entity].status;
-        self.models[entity]
-            .transitions
-            .iter()
-            .find(|t| {
-                t.name == action.name
-                    && t.to_state == action.target_state
-                    && (t.from_states.is_empty() || t.from_states.contains(status))
-            })
-            .map_or(Truth::Unknown, |t| eval(&t.guard, &self.env(entity, state)))
     }
 }
 
@@ -444,12 +404,12 @@ impl JointModel {
 /// dispatch path read the related records and they allowed it.
 pub(super) fn sent(entity: &str, action: &TemperModelAction, by: u32) -> Dispatch {
     Dispatch {
-        to: entity.to_string(),
-        action: action.name.clone(),
-        target_state: action.target_state.clone(),
+        to: entity.into(),
+        action: action.name,
+        target_state: action.target_state,
         params: action.params.clone(),
         read: true,
-        chain: Vec::new(),
+        chain: std::sync::Arc::new([]),
         via: None,
         by,
         unread_guard: None,

@@ -9,7 +9,7 @@ use temper_spec::predicate::{
 
 use super::rule_asserts;
 
-use crate::model::types::StringParam;
+use crate::model::types::{StringParam, Sym};
 
 /// The parameters of `action` that write a tracked string variable, or that
 /// a constraint or its guard ties to one (`failed_commit` must equal
@@ -74,7 +74,7 @@ pub(super) fn string_params(
         })
         .map(|name| {
             let mut param = StringParam {
-                name: name.to_string(),
+                name: Sym::new(name),
                 writes: tracked_strings.contains(name),
                 nonempty: false,
                 equals: Vec::new(),
@@ -84,10 +84,10 @@ pub(super) fn string_params(
                 match constraint {
                     ActionConstraint::ParamNonempty { .. } => param.nonempty = true,
                     ActionConstraint::ParamEqualsField { field, .. } => {
-                        param.equals.push(field.clone());
+                        param.equals.push(field.into());
                     }
                     ActionConstraint::ParamNotEqualsField { field, .. } => {
-                        param.not_equals.push(field.clone());
+                        param.not_equals.push(field.into());
                     }
                     _ => {}
                 }

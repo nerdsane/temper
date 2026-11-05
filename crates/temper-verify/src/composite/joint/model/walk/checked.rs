@@ -8,20 +8,24 @@
 //! of the number can only ever lose a state, which [`JointModel::walk_with`]
 //! notices and says.
 
-use std::collections::BTreeMap;
+use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use dashmap::mapref::entry::Entry;
 use stateright::{Model, Property};
+use thread_local::ThreadLocal;
 
 use super::super::super::JointState;
-use super::super::super::pack::Packed;
+use super::super::super::pack::{Packed, parts};
+use super::super::super::state::render;
 use super::super::JointModel;
-use super::super::step::{Certainty, Move};
+use super::super::moves::{Move, dispatch_move};
 use super::levels::deeper;
-use super::shared::{Seen, Shared, Trail, read, state_bytes, write};
-use super::{Edge, Keep, Made, Node};
+use super::making::Target;
+use super::memo::{Holder, Memo, check_step};
+use super::shared::{Seen, Shared, state_bytes, write};
+use super::{Edge, Keep, Made, Node, Via};
 
 /// What a walk sees each state with: the model, its number, the state, and
 /// whether sure moves alone reach it. True stops the walk.
@@ -30,48 +34,46 @@ pub(super) type Visit = Box<dyn Fn(&JointModel, usize, &JointState, bool) -> boo
 /// A state to walk, by number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) struct Walked {
-    at: u32,
+    pub(super) at: u32,
     /// Sure moves alone have come to reach it since it was first walked. It
     /// happens to a state once, so this and the number name one job.
     again: bool,
     /// How many moves from a start it was found.
-    depth: u16,
+    pub(super) depth: u16,
 }
 
 /// One way a move leads, waiting to be added to the trail.
-struct Way {
+pub(super) struct Way {
     /// The move, an index into the batch's `made`.
-    made: u32,
-    to: To,
-    sure: bool,
+    pub(super) made: u32,
+    pub(super) to: To,
+    pub(super) sure: bool,
 }
 
-enum To {
+pub(super) enum To {
     /// A state the walk has, that this way tells it nothing new about.
     Known(u32),
     /// A state to look for again with the trail held: it may be new, or
     /// sure moves alone may now reach it.
     Check {
         packed: Packed,
-        /// The move, a name in the packer.
-        label: u32,
+        /// The way it is reached.
+        via: Via,
         /// Sure moves alone reach it this way.
         surely: bool,
-        /// The move, an index into the state's moves.
-        by: u32,
     },
 }
 
 /// What walking one state found so far.
 #[derive(Default)]
-struct Batch {
-    made: Vec<Made>,
-    ways: Vec<Way>,
+pub(super) struct Batch {
+    pub(super) made: Vec<Made>,
+    pub(super) ways: Vec<Way>,
 }
 
 /// Ways a thread keeps before adding them to the trail, so what it holds
 /// aside stays small next to what the walk holds.
-const BATCH: usize = 4096;
+pub(super) const BATCH: usize = 4096;
 
 pub(super) struct Walker {
     pub(super) model: Arc<JointModel>,
@@ -79,6 +81,22 @@ pub(super) struct Walker {
     pub(super) keep: Keep,
     pub(super) visit: Visit,
     pub(super) starts: u32,
+    /// What each thread remembers of the moves it has made.
+    pub(super) memos: ThreadLocal<RefCell<Memo>>,
+}
+
+/// A state being walked, and what its moves have found.
+pub(super) struct Walking<'a> {
+    pub(super) job: Walked,
+    pub(super) sure: bool,
+    pub(super) state: &'a JointState,
+    /// How many moves of the state came before.
+    pub(super) by: u32,
+    pub(super) batch: Batch,
+    /// What the thread remembers.
+    pub(super) memo: &'a mut Memo,
+    /// The state's moves as remembered, when they are being checked.
+    pub(super) checked_moves: Option<Vec<Move>>,
 }
 
 impl Model for Walker {
@@ -127,103 +145,118 @@ impl Walker {
             return;
         }
         let index = job.at as usize;
-        let (packed, sure) = {
-            let trail = read(&shared.trail);
-            let node = &trail.nodes[index];
-            (node.packed.clone(), node.start())
-        };
-        let state = read(&shared.packer).unpack(&packed);
+        let node = shared.nodes.get(job.at);
+        let (packed, sure) = (&node.packed, node.start());
+        let mut memo = self
+            .memos
+            .get_or_default()
+            .try_borrow_mut()
+            .expect("a thread walks one state at a time");
+        let state = memo.mirror.unpack(packed, &shared.packer);
         if (self.visit)(&self.model, index, &state, sure) {
             shared.stop.store(true, Ordering::Relaxed);
             return;
         }
-        let Some(moves) = self.built(|| self.model.moves(&state)) else {
-            return;
+        let mut walking = Walking {
+            job,
+            sure,
+            state: &state,
+            by: 0,
+            batch: Batch::default(),
+            checked_moves: check_step(memo.steps).then(Vec::new),
+            memo: &mut memo,
         };
-        let edges = self.keep == Keep::Edges;
-        let mut batch = Batch::default();
-        for (by, mv) in moves.iter().enumerate() {
-            if !self.model.expansion.take() {
-                break;
-            }
-            let Some((nexts, held)) = self.built(|| self.model.next(&state, mv)) else {
+        if self.walk_groups(packed, &mut walking, jobs).is_none() {
+            return;
+        }
+        if let Some(remembered) = &walking.checked_moves {
+            let Some(fresh) = self.built(|| self.model.moves(&state)) else {
                 return;
             };
-            if held {
-                shared.held_back.store(true, Ordering::Relaxed);
+            if let Some(stray) = self.model.value_out_of_class(&state) {
+                panic!("{stray} in {}", render(&state));
             }
-            if edges {
-                batch.made.push(Made {
-                    from: job.at,
-                    by_system: mv.by_system(),
-                    relied: self.model.relies(mv),
-                    outside: mv.is_outside_reaction(),
-                    covered: !held
-                        && !nexts.is_empty()
-                        && nexts.iter().all(|n| n.certainty != Certainty::Unsure),
-                    held,
-                });
-            }
-            let made = batch.made.len().saturating_sub(1) as u32;
-            let depth = deeper(job.depth);
-            for next in &nexts {
-                let packed = self.pack(&next.state);
-                let surely = sure && next.certainty == Certainty::Sure;
-                let found = shared.seen.get(&packed).map(|seen| *seen);
-                if let Some(seen) = found {
-                    shared.levels.found_again(seen.depth, depth);
-                }
-                let to = match found {
-                    Some(seen) if self.keep != Keep::Sure || !surely || seen.sure => {
-                        if !edges {
-                            continue;
-                        }
-                        To::Known(seen.at)
-                    }
-                    _ => To::Check {
-                        packed,
-                        label: self.label(&next.label),
-                        surely,
-                        by: by as u32,
-                    },
-                };
-                batch.ways.push(Way {
-                    made,
-                    to,
-                    sure: next.certainty == Certainty::Sure,
-                });
-            }
-            if batch.ways.len() >= BATCH {
-                self.add(job, &mut batch, &moves, jobs);
-            }
+            assert!(
+                *remembered == fresh,
+                "a state's remembered moves differ from its moves: {remembered:?} and {fresh:?} from {}",
+                render(&state)
+            );
         }
-        let states = self.add(job, &mut batch, &moves, jobs);
+        let states = self.add(job, &mut walking.batch, jobs);
         if states >= shared.count_at.load(Ordering::Acquire) {
             shared.wait(|| shared.count_at.load(Ordering::Acquire) > states);
         }
     }
 
-    /// `state` packed, adding what the tables do not hold yet.
-    fn pack(&self, state: &JointState) -> Packed {
-        let known = read(&self.shared.packer).known(state);
-        known.unwrap_or_else(|| write(&self.shared.packer).pack(state))
+    /// Make each of the state's moves: the records', each call's, each
+    /// dispatch's, in the order [`JointModel::moves`] names them. None when
+    /// the walk ended first.
+    fn walk_groups(
+        &self,
+        packed: &[u32],
+        walking: &mut Walking<'_>,
+        jobs: &mut Vec<Walked>,
+    ) -> Option<()> {
+        let model = &*self.model;
+        let state = walking.state;
+        let (held, flying, calls, armed) = parts(packed, state.records.len());
+        let strings = model.values(state);
+        let place = walking.memo.place(model, (held, armed), state, &strings);
+        if model.asked(state) {
+            if walking.memo.move_count(place, Holder::Records).is_none() {
+                let moves = self.built(|| {
+                    let mut out = Vec::new();
+                    model.record_moves(state, &strings, &mut out);
+                    out
+                })?;
+                walking.memo.keep_moves(place, Holder::Records, moves);
+            }
+            self.walk_moves(place, Holder::Records, walking, jobs)?;
+        }
+        for (at, &id) in calls.iter().enumerate() {
+            if at > 0 && calls[at - 1] == id {
+                continue;
+            }
+            let holder = Holder::Call(id);
+            if walking.memo.move_count(place, holder).is_none() {
+                let moves = self.built(|| {
+                    let mut out = Vec::new();
+                    model.call_moves(state, &state.calls[at], &strings, &mut out);
+                    out
+                })?;
+                walking.memo.keep_moves(place, holder, moves);
+            }
+            self.walk_moves(place, holder, walking, jobs)?;
+        }
+        for (at, &id) in flying.iter().enumerate() {
+            if at > 0 && flying[at - 1] == id {
+                continue;
+            }
+            let dispatch = &state.inflight[at];
+            if let Some(checked) = &mut walking.checked_moves {
+                checked.push(dispatch_move(dispatch));
+            }
+            self.walk_one(Target::Dispatch(place, id, dispatch), walking, jobs)?;
+        }
+        Some(())
     }
 
-    /// The name of a move in the packer.
-    fn label(&self, label: &str) -> u32 {
-        let known = read(&self.shared.packer).known_id(label);
-        known.unwrap_or_else(|| write(&self.shared.packer).id(label))
+    /// Count `bytes` more of what the threads remember.
+    pub(super) fn remember(&self, bytes: usize) {
+        self.shared.remembered.fetch_add(bytes, Ordering::Relaxed);
     }
 
     /// Run `build` in the room an expansion may build in, asking the calling
     /// thread for more until it fits. None when the room has no more.
-    fn built<T>(&self, build: impl Fn() -> T) -> Option<T> {
+    pub(super) fn built<T>(&self, build: impl Fn() -> T) -> Option<T> {
         let shared = &*self.shared;
         let expansion = &self.model.expansion;
         loop {
             let room = shared.build_room.load(Ordering::Acquire);
             expansion.allow(room);
+            expansion.name_moves(false);
             let built = build();
+            expansion.name_moves(true);
             let short = expansion.short();
             expansion.allow(usize::MAX);
             if !short {
@@ -242,70 +275,57 @@ impl Walker {
 
     /// Add what walking the state `from` found to the trail, and say how many
     /// states the walk has.
-    fn add(
-        &self,
-        from: Walked,
-        batch: &mut Batch,
-        moves: &[Move],
-        jobs: &mut Vec<Walked>,
-    ) -> usize {
+    pub(super) fn add(&self, from: Walked, batch: &mut Batch, jobs: &mut Vec<Walked>) -> usize {
         let shared = &*self.shared;
         let before = jobs.len();
-        let states = {
-            let mut trail = write(&shared.trail);
-            let trail = &mut *trail;
-            let first_made = trail.made.len() as u32;
+        let mut trail = (self.keep == Keep::Edges).then(|| write(&shared.trail));
+        let first_made = trail.as_mut().map_or(0, |trail| {
+            let first = trail.made.len() as u32;
             trail.made.append(&mut batch.made);
-            for way in batch.ways.drain(..) {
-                let to = match way.to {
-                    To::Known(at) => at,
-                    To::Check {
-                        packed,
-                        label,
-                        surely,
-                        by,
-                    } => self.check(
-                        trail,
-                        packed,
-                        from,
-                        label,
-                        surely,
-                        &moves[by as usize],
-                        jobs,
-                    ),
-                };
-                if self.keep == Keep::Edges {
-                    trail.edges.push(Edge {
-                        made: first_made + way.made,
-                        to,
-                        sure: way.sure,
-                    });
-                }
+            first
+        });
+        let mut new_bytes = 0;
+        for way in batch.ways.drain(..) {
+            let to = match way.to {
+                To::Known(at) => at,
+                To::Check {
+                    packed,
+                    via,
+                    surely,
+                } => self.check(packed, from, via, surely, jobs, &mut new_bytes),
+            };
+            if let Some(trail) = &mut trail {
+                trail.edges.push(Edge {
+                    made: first_made + way.made,
+                    to,
+                    sure: way.sure,
+                });
             }
-            trail.nodes.len()
-        };
+        }
+        drop(trail);
+        if new_bytes > 0 {
+            shared.states.fetch_add(new_bytes, Ordering::Relaxed);
+        }
         let made = jobs.len() - before;
         shared.levels.made(deeper(from.depth), made);
         shared.waiting.fetch_add(made, Ordering::Relaxed);
-        states
+        shared.nodes.len()
     }
 
-    /// The number of the state `packed`, which `mv` (named `label`) leads to
-    /// from the state `from`: a new one when the walk does not have it. A job
-    /// follows when it is new, or when sure moves alone now reach it and it
-    /// does not wait to be walked.
-    #[allow(clippy::too_many_arguments)]
+    /// The number of the state `packed`, which `via` leads to from the state
+    /// `from`: a new one when the walk does not have it. A job follows when
+    /// it is new, or when sure moves alone now reach it and it does not wait
+    /// to be walked.
     fn check(
         &self,
-        trail: &mut Trail,
         packed: Packed,
         from: Walked,
-        label: u32,
+        via: Via,
         surely: bool,
-        mv: &Move,
         jobs: &mut Vec<Walked>,
+        new_bytes: &mut usize,
     ) -> u32 {
-        let parent = (from.at, label);
+        let parent = (from.at, via);
         let depth = deeper(from.depth);
         match self.shared.seen.entry(packed.clone()) {
             Entry::Occupied(mut found) => {
@@ -313,10 +333,8 @@ impl Walker {
                 self.shared.levels.found_again(found.get().depth, depth);
                 if self.keep == Keep::Sure && surely && !found.get().sure {
                     found.get_mut().sure = true;
-                    note_outside(&mut trail.outside, parent.1, mv);
-                    let node = &mut trail.nodes[at as usize];
-                    node.parent = Some(parent);
-                    if node.found_sure() {
+                    self.shared.nodes.change_way(at, parent);
+                    if self.shared.nodes.get(at).found_sure() {
                         jobs.push(Walked {
                             at,
                             again: true,
@@ -327,17 +345,16 @@ impl Walker {
                 at
             }
             Entry::Vacant(free) => {
-                let at = u32::try_from(trail.nodes.len()).expect("fewer than 2^32 states");
-                note_outside(&mut trail.outside, parent.1, mv);
-                trail.states += state_bytes(&packed);
+                *new_bytes += state_bytes(&packed);
+                let at = self
+                    .shared
+                    .nodes
+                    .add(Node::new(packed, Some(parent), surely, true));
                 free.insert(Seen {
                     at,
                     sure: surely,
                     depth,
                 });
-                trail
-                    .nodes
-                    .push(Node::new(packed, Some(parent), surely, true));
                 jobs.push(Walked {
                     at,
                     again: false,
@@ -346,15 +363,5 @@ impl Walker {
                 at
             }
         }
-    }
-}
-
-/// Remember that `label` names `mv`, when it is a reaction from a type
-/// outside the scope.
-fn note_outside(outside: &mut BTreeMap<u32, (String, String)>, label: u32, mv: &Move) {
-    if let Move::Reaction(entity, action, _) = mv {
-        outside
-            .entry(label)
-            .or_insert_with(|| (entity.clone(), action.name.clone()));
     }
 }

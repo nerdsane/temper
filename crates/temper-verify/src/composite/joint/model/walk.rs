@@ -1,6 +1,6 @@
 //! What the walk over joint states finds (`walk/run.rs` walks them).
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use super::super::pack::{Packed, Packer};
@@ -8,11 +8,16 @@ use super::super::room::{Held, MB};
 use super::super::state::render;
 use super::super::{JointOutcome, JointState, JointStep};
 use super::JointModel;
+use super::step::Next;
 
 mod checked;
 mod conditions;
 mod invariants;
 mod levels;
+mod making;
+mod memo;
+mod mirror;
+mod nodes;
 mod run;
 mod shared;
 
@@ -69,12 +74,23 @@ pub(in crate::composite::joint) enum Keep {
     Sure,
 }
 
+/// How a state was reached from the state before it. Words for the move are
+/// made from this when a trace prints it (a move and its outcomes are the same
+/// whenever they are worked out from the same state).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Via {
+    /// The move, an index into the moves of the state before.
+    pub(super) by: u32,
+    /// The state, an index into what the move leads to.
+    pub(super) outcome: u32,
+}
+
 /// A state walked.
 pub(super) struct Node {
     pub(super) packed: Packed,
-    /// The state and move (a name in `packer`) it was first reached by, or
-    /// once sure moves alone reach it, the first sure one.
-    pub(super) parent: Option<(u32, u32)>,
+    /// The state it was first reached from and the way, or once sure moves
+    /// alone reach it, the first sure one.
+    pub(super) parent: Option<(u32, Via)>,
     /// Whether sure moves alone reach it, and whether it waits to be walked.
     /// One word, so a thread starting to walk it and one finding a sure way
     /// to it cannot both miss the other: either the walk starts sure, or the
@@ -88,7 +104,7 @@ const QUEUED: u8 = 2;
 impl Node {
     pub(super) fn new(
         packed: Packed,
-        parent: Option<(u32, u32)>,
+        parent: Option<(u32, Via)>,
         sure: bool,
         queued: bool,
     ) -> Self {
@@ -135,9 +151,6 @@ pub(in crate::composite::joint) struct Explored<'a> {
     pub(in crate::composite::joint) stopped: Option<String>,
     /// Whether a move was held back for [`super::MAX_IN_FLIGHT`].
     pub(in crate::composite::joint) held_back: bool,
-    /// The moves (names in `packer`) that are reactions from a type outside
-    /// the scope, with the type and action each one sends.
-    pub(super) outside: BTreeMap<u32, (String, String)>,
     /// How many moves from a start it covered: it walked every state that near.
     pub(in crate::composite::joint) covered: usize,
     /// How many moves it was working at when it ended.
@@ -171,12 +184,16 @@ impl Explored<'_> {
     }
 
     /// The moves from the start to the state walked `index`th.
-    pub(in crate::composite::joint) fn path(&self, mut index: usize) -> Vec<JointStep> {
+    pub(in crate::composite::joint) fn path(
+        &self,
+        model: &JointModel,
+        mut index: usize,
+    ) -> Vec<JointStep> {
         let mut steps = Vec::new();
         loop {
             let parent = self.nodes[index].parent;
             steps.push(JointStep {
-                action: parent.map(|(_, label)| self.packer.name(label).to_string()),
+                action: self.label(model, index),
                 state: render(&self.state(index)),
                 unsure: false,
             });
@@ -219,38 +236,64 @@ impl Explored<'_> {
     /// The first move on the way to the state walked `index`th that the
     /// walk cannot be sure the runtime makes, when there is one: the move
     /// into the first state on it that sure moves alone do not reach. It is
-    /// a name in the walk's packer ([`Self::label`]).
-    pub(in crate::composite::joint) fn first_unsure(&self, mut index: usize) -> Option<u32> {
+    /// named by the state it leads to ([`Self::label`]).
+    pub(in crate::composite::joint) fn first_unsure(&self, mut index: usize) -> Option<usize> {
         let mut first = None;
-        while let Some((from, label)) = self.nodes[index].parent {
+        while let Some((from, _)) = self.nodes[index].parent {
             if !self.nodes[index].sure() && self.nodes[from as usize].sure() {
-                first = Some(label);
+                first = Some(index);
             }
             index = from as usize;
         }
         first
     }
 
-    /// The move a name in the walk's packer stands for, in words.
-    pub(in crate::composite::joint) fn label(&self, label: u32) -> &str {
-        self.packer.name(label)
+    /// The move the walk reached the state walked `index`th by, and what it
+    /// made of it, worked out again. None for a starting state.
+    fn way_into(&self, model: &JointModel, index: usize) -> Option<(super::Move, Next)> {
+        let (from, via) = self.nodes[index].parent?;
+        let before = self.state(from as usize);
+        let (mv, next) = model.expansion.outside_the_count(|| {
+            let mut moves = model.moves(&before);
+            let mv = moves.swap_remove(via.by as usize);
+            let next = model.next(&before, &mv).0.swap_remove(via.outcome as usize);
+            (mv, next)
+        });
+        assert!(
+            next.state == self.state(index),
+            "a move leads where it led when the walk made it"
+        );
+        Some((mv, next))
     }
 
-    /// The type and action the move `label` sends, when it is a reaction
-    /// from a type outside the scope.
-    pub(in crate::composite::joint) fn outside_at(&self, label: u32) -> Option<(&str, &str)> {
-        self.outside
-            .get(&label)
-            .map(|(entity, action)| (entity.as_str(), action.as_str()))
+    /// The move the walk reached the state walked `index`th by, in words.
+    /// None for a starting state.
+    pub(in crate::composite::joint) fn label(
+        &self,
+        model: &JointModel,
+        index: usize,
+    ) -> Option<String> {
+        self.way_into(model, index).map(|(_, next)| next.label)
+    }
+
+    /// The type and action the move into the state walked `index`th sends,
+    /// when it is a reaction from a type outside the scope.
+    pub(in crate::composite::joint) fn outside_at(
+        &self,
+        model: &JointModel,
+        index: usize,
+    ) -> Option<(String, String)> {
+        match self.way_into(model, index)?.0 {
+            super::Move::Reaction(entity, action, _) => Some((entity, action.name.to_string())),
+            _ => None,
+        }
     }
 }
 
 impl JointModel {
     /// Whether `mv` sends an action outside code is relied on to send.
     pub(in crate::composite::joint) fn relies(&self, mv: &super::Move) -> bool {
-        mv.outside_action().is_some_and(|(entity, action)| {
-            self.relies_on
-                .contains(&(entity.to_string(), action.to_string()))
-        })
+        mv.outside_action()
+            .is_some_and(|(entity, action)| self.relies_on.contains(pair!(entity, action)))
     }
 }

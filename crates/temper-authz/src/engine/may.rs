@@ -16,6 +16,7 @@
 //! of the record's attributes passes them, and those are unknown no longer.
 
 mod cause;
+mod compared;
 mod json;
 mod kinds;
 mod profile;
@@ -37,6 +38,7 @@ use serde_json::Value as Json;
 use super::platform_policy::merge_system_platform_policy;
 use crate::error::AuthzError;
 pub use cause::{Cause, Hop};
+pub use compared::Read;
 pub use kinds::Question;
 pub use profile::Kind;
 use profile::UNKNOWN;
@@ -291,6 +293,16 @@ impl SendAnalysis {
         self.policies
             .iter()
             .any(|(_, policy)| cause::tells_timer_chains(&policy["conditions"]))
+    }
+
+    /// What each comparison in the policies reads of a record and the context
+    /// ([`compared`]).
+    pub fn compared(&self) -> Vec<Vec<Read>> {
+        let mut found = Vec::new();
+        for (_, policy) in &self.policies {
+            compared::comparisons(&policy["conditions"], &mut found);
+        }
+        found
     }
 
     /// Whether a policy on `action` of a `resource_type` record can tell which

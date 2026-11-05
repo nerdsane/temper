@@ -162,9 +162,9 @@ impl JointModel {
             source_entity: reaction.from.clone(),
             source_action: reaction.source_action.clone(),
             trigger_name: reaction.trigger.clone(),
-            target_entity: dispatch.to.clone(),
-            target_action: dispatch.action.clone(),
-            target_state: state.records[dispatch.to.as_str()].status.clone(),
+            target_entity: dispatch.to.to_string(),
+            target_action: dispatch.action.to_string(),
+            target_state: state.records[dispatch.to.as_str()].status.to_string(),
         })
     }
 }

@@ -4,7 +4,7 @@ use super::*;
 
 impl JointModel {
     /// The records as they start, without their ids.
-    pub(super) fn blank(&self) -> BTreeMap<std::sync::Arc<str>, std::sync::Arc<TemperModelState>> {
+    pub(super) fn blank(&self) -> Fields<std::sync::Arc<TemperModelState>> {
         self.models
             .iter()
             .map(|(entity, model)| {
@@ -12,7 +12,7 @@ impl JointModel {
                     .into_iter()
                     .next()
                     .expect("a model has one initial state");
-                (entity.as_str().into(), std::sync::Arc::new(init))
+                (entity.as_str(), std::sync::Arc::new(init))
             })
             .collect()
     }
@@ -23,32 +23,31 @@ impl JointModel {
     pub(in crate::composite::joint) fn init_with_ids(
         &self,
         ids: &BTreeMap<String, String>,
-    ) -> (JointState, BTreeMap<String, ModelString>) {
-        let mut names: BTreeMap<String, ModelString> = BTreeMap::new();
+    ) -> (JointState, BTreeMap<(usize, String), ModelString>) {
+        let mut names: BTreeMap<(usize, String), ModelString> = BTreeMap::new();
         let mut records = self.blank();
-        for (entity, record) in &mut records {
+        for (entity, record) in records.iter_mut() {
             let name = ids
-                .get(&**entity)
+                .get(entity.as_str())
                 .cloned()
                 .unwrap_or_else(|| format!("{entity}#id"));
-            let next = ModelString::Symbol(names.len() + 1);
-            let value = names.entry(name).or_insert(next).clone();
-            std::sync::Arc::make_mut(record)
-                .strings
-                .insert(ID.to_string(), value);
+            let class = self.class_of(entity.as_str(), ID);
+            let next = ModelString::in_class(class, names.len() + 1, false);
+            let value = *names.entry((class, name)).or_insert(next);
+            std::sync::Arc::make_mut(record).strings.insert(ID, value);
         }
         let mut state = JointState {
             records,
             inflight: Vec::new(),
             calls: Vec::new(),
-            armed: BTreeMap::new(),
+            armed: Fields::new(),
         };
         self.arm_at_start(&mut state);
         self.order.normalize(&mut state);
         let renamed = canonical(&mut state);
         for value in names.values_mut() {
             if let Some(new) = renamed.get(value) {
-                *value = new.clone();
+                *value = *new;
             }
         }
         (state, names)
@@ -59,7 +58,7 @@ impl JointModel {
     pub(super) fn arm_at_start(&self, state: &mut JointState) {
         for (entity, record) in &state.records {
             if self.timeout(entity, &record.status).is_some() {
-                state.armed.insert(entity.clone(), OUTSIDE);
+                state.armed.insert(*entity, OUTSIDE);
             }
         }
     }
@@ -74,7 +73,7 @@ impl JointModel {
                 records: blank,
                 inflight: Vec::new(),
                 calls: Vec::new(),
-                armed: BTreeMap::new(),
+                armed: Fields::new(),
             }));
         }
         // Every type's id literals, in one order; each record may take only
@@ -95,6 +94,17 @@ impl JointModel {
             .into_iter()
             .map(|l| ModelString::from(l.as_str()))
             .collect();
+        let classes: Vec<(usize, bool)> = blank
+            .keys()
+            .map(|entity| {
+                let class = self.class_of(entity.as_str(), ID);
+                let read = self
+                    .models
+                    .get(entity.as_str())
+                    .is_none_or(|model| model.blank_read(class));
+                (class, read)
+            })
+            .collect();
         // Two records of a type never share an id.
         let types: Vec<String> = blank
             .keys()
@@ -109,19 +119,17 @@ impl JointModel {
                         .zip(&types)
                         .all(|(block, entity)| seen.insert((*block, entity)))
                 })
-                .flat_map(move |blocks| id_values(blocks, literals.clone()))
+                .flat_map(move |blocks| id_values(blocks, literals.clone(), classes.clone()))
                 .map(move |ids| {
                     let mut records = blank.clone();
                     for (record, id) in records.values_mut().zip(ids) {
-                        std::sync::Arc::make_mut(record)
-                            .strings
-                            .insert(ID.to_string(), id);
+                        std::sync::Arc::make_mut(record).strings.insert(ID, id);
                     }
                     let mut state = JointState {
                         records,
                         inflight: Vec::new(),
                         calls: Vec::new(),
-                        armed: BTreeMap::new(),
+                        armed: Fields::new(),
                     };
                     self.arm_at_start(&mut state);
                     self.order.normalize(&mut state);
@@ -135,15 +143,28 @@ impl JointModel {
 
 /// Each fresh ID equality class may be nonblank or whitespace-only. Equal
 /// IDs share that choice; literal classes retain their concrete values.
+/// `classes` is the class of made-up values each id takes, and whether
+/// anything reads a blank value in it: where nothing does, no id is blank.
 fn id_values(
     blocks: Vec<usize>,
     literals: Vec<ModelString>,
+    classes: Vec<(usize, bool)>,
 ) -> impl Iterator<Item = Vec<ModelString>> {
     let symbols = blocks
         .iter()
         .max()
         .map_or(0, |last| (last + 1).saturating_sub(literals.len()));
     let mut blank = vec![false; symbols];
+    // The ids that may be blank, as a block of equal ids may if any of them
+    // may.
+    let free: Vec<usize> = (0..symbols)
+        .filter(|&symbol| {
+            blocks
+                .iter()
+                .zip(&classes)
+                .any(|(&block, &(_, read))| read && block == symbol + literals.len())
+        })
+        .collect();
     let mut done = false;
     std::iter::from_fn(move || {
         if done {
@@ -151,20 +172,19 @@ fn id_values(
         }
         let ids = blocks
             .iter()
-            .map(|&block| {
+            .zip(&classes)
+            .map(|(&block, &(class, read))| {
                 literals.get(block).cloned().unwrap_or_else(|| {
                     let symbol = block - literals.len();
-                    if blank[symbol] {
-                        ModelString::BlankSymbol(symbol + 1)
-                    } else {
-                        ModelString::Symbol(symbol + 1)
-                    }
+                    ModelString::in_class(class, symbol + 1, read && blank[symbol])
                 })
             })
             .collect();
-        if let Some(index) = blank.iter().rposition(|is_blank| !is_blank) {
-            blank[index] = true;
-            blank[index + 1..].fill(false);
+        if let Some(at) = free.iter().rposition(|&symbol| !blank[symbol]) {
+            blank[free[at]] = true;
+            free[at + 1..]
+                .iter()
+                .for_each(|&symbol| blank[symbol] = false);
         } else {
             done = true;
         }
@@ -224,11 +244,11 @@ mod tests {
     fn equal_ids_share_blankness_and_distinct_ids_choose_it_independently() {
         use ModelString::{BlankSymbol as B, Symbol as S};
         assert_eq!(
-            id_values(vec![0, 0], vec![]).collect::<Vec<_>>(),
+            id_values(vec![0, 0], vec![], vec![(0, true); 2]).collect::<Vec<_>>(),
             vec![vec![S(1), S(1)], vec![B(1), B(1)]],
         );
         assert_eq!(
-            id_values(vec![0, 1], vec![]).collect::<Vec<_>>(),
+            id_values(vec![0, 1], vec![], vec![(0, true); 2]).collect::<Vec<_>>(),
             vec![
                 vec![S(1), S(2)],
                 vec![S(1), B(2)],
@@ -242,25 +262,17 @@ mod tests {
     fn literal_ids_keep_their_values_alongside_both_symbol_kinds() {
         let literals = vec![ModelString::from("known"), ModelString::from(" ")];
         assert_eq!(
-            id_values(vec![0, 1, 2], literals.clone()).collect::<Vec<_>>(),
+            id_values(vec![0, 1, 2], literals.clone(), vec![(0, true); 3]).collect::<Vec<_>>(),
             vec![
-                vec![
-                    literals[0].clone(),
-                    literals[1].clone(),
-                    ModelString::Symbol(1)
-                ],
-                vec![
-                    literals[0].clone(),
-                    literals[1].clone(),
-                    ModelString::BlankSymbol(1)
-                ],
+                vec![literals[0], literals[1], ModelString::Symbol(1)],
+                vec![literals[0], literals[1], ModelString::BlankSymbol(1)],
             ],
         );
         assert_eq!(
-            id_values(vec![0, 1], literals.clone()).collect::<Vec<_>>(),
+            id_values(vec![0, 1], literals.clone(), vec![(0, true); 2]).collect::<Vec<_>>(),
             vec![literals],
         );
-        assert_eq!(id_values(vec![], vec![]).count(), 1);
+        assert_eq!(id_values(vec![], vec![], vec![(0, true); 1]).count(), 1);
     }
 
     #[test]

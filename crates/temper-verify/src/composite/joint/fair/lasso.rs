@@ -179,7 +179,12 @@ fn path(view: &View, members: &BTreeSet<u32>, from: u32, to: u32) -> Vec<u32> {
 
 /// Why a fair cycle that may exist is not known to: the moves it rests on that
 /// the model cannot decide, or the first such move on the way to it.
-pub(super) fn unsure_reason(explored: &Explored, view: &View, component: &[u32]) -> String {
+pub(super) fn unsure_reason(
+    model: &JointModel,
+    explored: &Explored,
+    view: &View,
+    component: &[u32],
+) -> String {
     let mut unsure: BTreeSet<String> = BTreeSet::new();
     for &state in component {
         for &row in view.graph.rows_of(state) {
@@ -196,7 +201,8 @@ pub(super) fn unsure_reason(explored: &Explored, view: &View, component: &[u32])
     let root = component[0] as usize;
     let on_the_way = explored
         .first_unsure(root)
-        .map(|label| format!(" The way there goes through \"{}\".", explored.label(label)))
+        .and_then(|index| explored.label(model, index))
+        .map(|label| format!(" The way there goes through \"{label}\"."))
         .unwrap_or_default();
     let listed: Vec<String> = unsure.iter().take(6).cloned().collect();
     let more = unsure.len() - listed.len();

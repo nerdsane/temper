@@ -288,16 +288,16 @@ fn changes(read: &BTreeMap<String, BTreeSet<String>>, from: &JointState, to: &Jo
 /// action or module.
 fn kind(mv: &Move) -> (u8, String, String) {
     match mv {
-        Move::Take(entity, action, _) => (0, entity.clone(), action.name.clone()),
-        Move::Send(entity, action, _) => (1, entity.clone(), action.name.clone()),
+        Move::Take(entity, action, _) => (0, entity.to_string(), action.name.to_string()),
+        Move::Send(entity, action, _) => (1, entity.to_string(), action.name.to_string()),
         Move::Timer(entity, action) => (2, entity.clone(), action.clone()),
-        Move::Answer(call, action) => (3, call.to.clone(), action.name.clone()),
-        Move::Fail(call) => (4, call.to.clone(), call.module.clone()),
-        Move::Lost(call) => (5, call.to.clone(), call.module.clone()),
-        Move::Read(dispatch) => (6, dispatch.to.clone(), dispatch.action.clone()),
-        Move::Arrive(dispatch) => (7, dispatch.to.clone(), dispatch.action.clone()),
-        Move::Reaction(entity, action, _) => (8, entity.clone(), action.name.clone()),
-        Move::Silent(call) => (9, call.to.clone(), call.module.clone()),
+        Move::Answer(call, action) => (3, call.to.to_string(), action.name.to_string()),
+        Move::Fail(call) => (4, call.to.to_string(), call.module.to_string()),
+        Move::Lost(call) => (5, call.to.to_string(), call.module.to_string()),
+        Move::Read(dispatch) => (6, dispatch.to.to_string(), dispatch.action.to_string()),
+        Move::Arrive(dispatch) => (7, dispatch.to.to_string(), dispatch.action.to_string()),
+        Move::Reaction(entity, action, _) => (8, entity.to_string(), action.name.to_string()),
+        Move::Silent(call) => (9, call.to.to_string(), call.module.to_string()),
     }
 }
 
@@ -625,7 +625,7 @@ impl<'m, 'a> Engine<'m, 'a> {
 /// The breadth-first walk's states guided walks start from, each with the
 /// path to it, repacked in `packer`: its first few starting states, and its
 /// deepest states, one per set of record statuses, deepest first.
-fn seeds(explored: &Explored<'_>, packer: &mut Packer) -> Vec<Vec<Step>> {
+fn seeds(model: &JointModel, explored: &Explored<'_>, packer: &mut Packer) -> Vec<Vec<Step>> {
     let count = explored.len();
     let mut chosen: Vec<usize> = Vec::new();
     let mut kinds = BTreeSet::new();
@@ -649,7 +649,7 @@ fn seeds(explored: &Explored<'_>, packer: &mut Packer) -> Vec<Vec<Step>> {
             loop {
                 let node = &explored.nodes[index];
                 let (parent, sure) = (node.parent, node.sure());
-                let label = parent.map(|(_, label)| packer.id(explored.packer.name(label)));
+                let label = explored.label(model, index).map(|label| packer.id(&label));
                 path.push((label, packer.pack(&explored.state(index)), sure));
                 match parent {
                     Some((from, _)) => index = from as usize,
@@ -712,7 +712,7 @@ impl JointModel {
             return (outcomes, Stats::default());
         }
         let mut engine = Engine::new(self, bound, reads(owner, invariants), budget.steps);
-        let seeds = seeds(&explored, &mut engine.packer);
+        let seeds = seeds(self, &explored, &mut engine.packer);
         // The breadth-first walk's memory goes back to the room first.
         drop(explored);
         let mut broken: Vec<Option<Vec<JointStep>>> = vec![None; invariants.len()];

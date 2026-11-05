@@ -1,3 +1,4 @@
+use crate::model::Fields;
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::super::super::room::block;
@@ -19,7 +20,7 @@ fn move_capacity_counts_against_the_room() {
                 TemperModelAction {
                     name: "Go".into(),
                     target_state: None,
-                    params: BTreeMap::new(),
+                    params: Fields::new(),
                 },
                 0,
             ),
@@ -87,7 +88,7 @@ fn module_calls_count_before_inflight_pruning_and_stay_charged() {
     let action = TemperModelAction {
         name: "Go".into(),
         target_state: Some("Done".into()),
-        params: BTreeMap::new(),
+        params: Fields::new(),
     };
     model.expansion.allow(64 << 10);
     model.next(&state, &Move::Take("Ask".into(), action, OUTSIDE));

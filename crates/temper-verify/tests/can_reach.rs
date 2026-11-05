@@ -101,13 +101,13 @@ fn broken(l1: &LevelResult, name: &str) -> (Vec<String>, String, usize) {
     let moves = found
         .trace
         .iter()
-        .filter_map(|(_, action)| action.as_ref().map(|a| a.name.clone()))
+        .filter_map(|(_, action)| action.as_ref().map(|a| a.name.to_string()))
         .collect();
     let (last, action) = found.trace.last().unwrap();
     assert!(action.is_none(), "the path ends at the record");
     (
         moves,
-        last.status.clone(),
+        last.status.to_string(),
         last.counters.get("makers").copied().unwrap_or_default(),
     )
 }
@@ -335,7 +335,7 @@ params = [{ name = "token", type = "string" }]
     assert_ne!(last.strings["token"], "ok".into());
     assert_eq!(
         action.params["token"],
-        temper_verify::ParamValue::Str(last.strings["token"].clone())
+        temper_verify::ParamValue::Str(last.strings["token"])
     );
 }
 

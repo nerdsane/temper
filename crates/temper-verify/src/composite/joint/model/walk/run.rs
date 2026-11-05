@@ -1,6 +1,5 @@
 //! Running a walk: its starts, the checker's threads, and what they found.
 
-use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::Duration;
@@ -14,7 +13,8 @@ use super::super::super::room::{Bound, Held, bytes, grow, map_bytes};
 use super::super::JointModel;
 use super::checked::Walker;
 use super::levels::Levels;
-use super::shared::{Seen, Shared, Trail, lock, read, state_bytes};
+use super::nodes::Nodes;
+use super::shared::{Seen, Shared, Trail, lock, state_bytes};
 use super::{Explored, Keep, Node};
 
 /// The room an expansion is first given; it doubles until what the
@@ -46,7 +46,6 @@ impl JointModel {
             edges: Vec::new(),
             stopped: None,
             held_back: false,
-            outside: BTreeMap::new(),
             covered: 0,
             reached: 0,
             held: Held::new(bound),
@@ -72,7 +71,7 @@ impl JointModel {
             return explored;
         }
         let threads = bound.room.threads().max(1);
-        let seen = DashMap::new();
+        let seen = DashMap::with_hasher(rustc_hash::FxBuildHasher);
         let mut states = 0;
         // One start per way the records' ids can be equal: many records start
         // in millions of ways, so the starts take their memory from the room
@@ -111,13 +110,12 @@ impl JointModel {
         }
         let starts = explored.nodes.len() as u32;
         let shared = Arc::new(Shared {
+            nodes: Nodes::new(std::mem::take(&mut explored.nodes)),
             trail: RwLock::new(Trail {
-                nodes: std::mem::take(&mut explored.nodes),
                 made: Vec::new(),
                 edges: Vec::new(),
-                outside: BTreeMap::new(),
-                states,
             }),
+            states: AtomicUsize::new(states),
             packer: RwLock::new(std::mem::take(&mut explored.packer)),
             seen,
             stop: AtomicBool::new(false),
@@ -125,6 +123,7 @@ impl JointModel {
             build_room: AtomicUsize::new(BUILD_ROOM),
             wanted: AtomicUsize::new(0),
             waiting: AtomicUsize::new(starts as usize),
+            remembered: AtomicUsize::new(0),
             levels: Levels::new(starts as usize),
             count_at: AtomicUsize::new(0),
             over: AtomicBool::new(false),
@@ -140,6 +139,7 @@ impl JointModel {
                 keep,
                 visit: Box::new(visit),
                 starts,
+                memos: Default::default(),
             },
             &shared,
             &mut explored.held,
@@ -152,13 +152,12 @@ impl JointModel {
         explored.reached = shared.levels.reached();
         explored.held.reached(explored.reached);
         let trail = shared.trail.into_inner().expect("a walk thread panicked");
-        explored.nodes = trail.nodes;
+        explored.nodes = shared.nodes.into_nodes();
         explored.made = trail.made;
         explored.edges = trail.edges;
-        explored.outside = trail.outside;
         explored.packer = shared.packer.into_inner().expect("a walk thread panicked");
         explored.held_back = shared.held_back.load(Ordering::Relaxed);
-        let tables = trail.states
+        let tables = shared.states.into_inner()
             + explored.packer.bytes()
             + bytes(&explored.nodes)
             + bytes(&explored.made)
@@ -209,7 +208,7 @@ impl JointModel {
                 shared.answers.notify_all();
             }
             drop(gate);
-            held.walked(read(&shared.trail).nodes.len());
+            held.walked(shared.nodes.len());
         }
         {
             let _gate = lock(&shared.gate);

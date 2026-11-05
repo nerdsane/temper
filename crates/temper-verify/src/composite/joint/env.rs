@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use temper_spec::predicate::{Env, Val, VarKind};
 
 use super::JointState;
-use crate::model::{ParamValue, TemperModel, TemperModelState};
+use crate::model::{Fields, ParamValue, TemperModel, TemperModelState};
 
 /// The key under which each record keeps its own id among its strings.
 pub(super) const ID: &str = "Id";
@@ -124,7 +124,7 @@ pub(super) struct JointEnv<'a> {
     /// model holds of its type reads as unknown, not as no record.
     pub(super) unheld_unknown: bool,
     /// The values the dispatch being decided carries, read by `params.x`.
-    pub(super) params: Option<&'a BTreeMap<String, ParamValue>>,
+    pub(super) params: Option<&'a Fields<ParamValue>>,
     /// The names of each type's records.
     pub(super) copies: &'a BTreeMap<String, Vec<String>>,
 }
@@ -182,7 +182,10 @@ impl JointEnv<'_> {
 
 impl Env for JointEnv<'_> {
     fn param(&self, name: &str) -> Val<'_> {
-        match self.params.and_then(|params| params.get(name)) {
+        match self
+            .params
+            .and_then(|params: &Fields<ParamValue>| params.get(name))
+        {
             Some(ParamValue::Count(n)) => Val::Num(*n as f64),
             Some(ParamValue::Bool(value)) => Val::Bool(*value),
             Some(ParamValue::Str(value)) => value.val(),

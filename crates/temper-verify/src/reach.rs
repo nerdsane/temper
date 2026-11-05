@@ -89,7 +89,7 @@ impl Graph {
     pub(crate) fn path(&self, model: &TemperModel, at: usize) -> Vec<String> {
         self.path_to(at)
             .into_iter()
-            .filter_map(|(_, t)| Some(model.transitions[t?].name.clone()))
+            .filter_map(|(_, t)| Some(model.transitions[t?].name.to_string()))
             .collect()
     }
 }

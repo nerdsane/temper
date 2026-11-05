@@ -1,6 +1,7 @@
 //! One policy evaluated for a kind of sender: each condition as the set of
 //! results it can have, given what the question leaves unknown.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value as Json;
@@ -9,6 +10,7 @@ use super::json::{entity_parts, like, same, single};
 use super::profile::{Fact, Profile, UNKNOWN};
 use sender::fact_equal;
 
+mod attribute;
 mod residual;
 mod sender;
 use super::{Asker, Attr, Cause};
@@ -67,11 +69,12 @@ impl Results {
     }
 }
 
-/// What an expression evaluates to.
+/// What an expression evaluates to: most of it is read from a policy or from
+/// what the caller knows, and is not copied.
 #[derive(Debug, Clone)]
-enum Val {
+enum Val<'e> {
     /// A value known here, in Cedar's JSON form.
-    Known(Json),
+    Known(Cow<'e, Json>),
     /// The request's principal, action, resource or context.
     Principal,
     Action,
@@ -81,14 +84,14 @@ enum Val {
     ResourceId,
     /// A string known only by which others it equals ([`Attr::Same`]).
     Same {
-        name: String,
-        unlike: BTreeSet<String>,
+        name: &'e str,
+        unlike: &'e BTreeSet<String>,
     },
     /// Some value of an outside sender's that is none of `unlike`, matching
     /// the `like` patterns marked ([`Fact::Other`]).
     Other {
-        unlike: Vec<Json>,
-        like: BTreeMap<String, bool>,
+        unlike: &'e [Json],
+        like: &'e BTreeMap<String, bool>,
         string: Option<bool>,
     },
     /// Any value, or an error.
@@ -109,7 +112,24 @@ pub(super) struct Request<'a> {
     pub(super) cause: Option<&'a Cause>,
 }
 
-impl Request<'_> {
+/// A value that is known, read from where it already is.
+fn read(value: &Json) -> Val<'_> {
+    Val::Known(Cow::Borrowed(value))
+}
+
+/// A value that is known, made here.
+fn made<'e>(value: Json) -> Val<'e> {
+    Val::Known(Cow::Owned(value))
+}
+
+/// The attributes of a record value; an entity holds none here.
+fn record_of(value: &Json) -> Option<&serde_json::Map<String, Json>> {
+    value
+        .as_object()
+        .filter(|record| !record.contains_key("__entity"))
+}
+
+impl<'a> Request<'a> {
     /// Whether `policy` applies: its scope and every condition.
     pub(super) fn applies(&self, policy: &Json) -> Results {
         let Some(object) = policy.as_object() else {
@@ -138,7 +158,7 @@ impl Request<'_> {
     fn principal_scope(&self, scope: &Json) -> Results {
         match (scope["op"].as_str(), scope.get("in")) {
             (Some("All"), _) => TRUE,
-            (Some("=="), _) => self.equal(&Val::Principal, &Val::Known(scope["entity"].clone())),
+            (Some("=="), _) => self.equal(&Val::Principal, &read(&scope["entity"])),
             (Some("is"), None) => self.principal_is(scope["entity_type"].as_str()),
             _ => ANY,
         }
@@ -223,11 +243,23 @@ impl Request<'_> {
                 Val::Error => ERROR,
                 _ => ANY,
             },
-            "in" => self.within(&self.value(&arg["left"]), &self.value(&arg["right"])),
+            "in" => {
+                let left = self.value(&arg["left"]);
+                match single(&arg["right"]) {
+                    Some(("Set", list)) => match self.members(list) {
+                        Ok(members) => {
+                            self.within_members(&left, members.iter().map(AsRef::as_ref))
+                        }
+                        Err(val) => self.within(&left, &val),
+                    },
+                    _ => self.within(&left, &self.value(&arg["right"])),
+                }
+            }
             "like" => match self.value(&arg["left"]) {
-                Val::Known(Json::String(text)) => match arg["pattern"].as_array() {
-                    Some(pattern) => Results::of(like(&text, pattern)),
-                    None => ANY,
+                Val::Known(value) => match (value.as_str(), arg["pattern"].as_array()) {
+                    (Some(text), Some(pattern)) => Results::of(like(text, pattern)),
+                    (Some(_), None) => ANY,
+                    (None, _) => ERROR,
                 },
                 Val::Other {
                     string: Some(false),
@@ -237,15 +269,20 @@ impl Request<'_> {
                     Some(matches) => Results::of(*matches),
                     None => ANY,
                 },
-                Val::Known(_) | Val::Error => ERROR,
+                Val::Error => ERROR,
                 _ => ANY,
             },
             "contains" => match (self.value(&arg["left"]), self.value(&arg["right"])) {
-                (Val::Known(Json::Array(set)), Val::Known(item)) => {
-                    Results::of(set.iter().any(|member| same(member, &item)))
-                }
+                (Val::Known(set), Val::Known(item)) if set.is_array() => Results::of(
+                    set.as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|member| same(member, &item)),
+                ),
                 (Val::Error, _) | (_, Val::Error) => ERROR,
-                (set @ Val::Known(Json::Array(_)), item) => self.within(&item, &set),
+                (set @ Val::Known(_), item) if matches!(&set, Val::Known(json) if json.is_array()) => {
+                    self.within(&item, &set)
+                }
                 _ => ANY,
             },
             "if-then-else" => {
@@ -265,9 +302,8 @@ impl Request<'_> {
 
     fn as_bool(&self, value: &Val) -> Results {
         match value {
-            Val::Known(Json::Bool(known)) => Results::of(*known),
-            Val::Known(_)
-            | Val::Principal
+            Val::Known(known) => known.as_bool().map_or(ERROR, Results::of),
+            Val::Principal
             | Val::Action
             | Val::Resource
             | Val::Context
@@ -279,12 +315,15 @@ impl Request<'_> {
     }
 
     /// The value of an expression.
-    fn value(&self, expr: &Json) -> Val {
+    fn value<'e>(&self, expr: &'e Json) -> Val<'e>
+    where
+        'a: 'e,
+    {
         let Some((op, arg)) = single(expr) else {
             return Val::Unknown;
         };
         match op {
-            "Value" => Val::Known(arg.clone()),
+            "Value" => read(arg),
             "Var" => match arg.as_str() {
                 Some("principal") => Val::Principal,
                 Some("action") => Val::Action,
@@ -292,17 +331,12 @@ impl Request<'_> {
                 Some("context") => Val::Context,
                 _ => Val::Unknown,
             },
-            "Set" => {
-                let mut members = Vec::new();
-                for member in arg.as_array().into_iter().flatten() {
-                    match self.value(member) {
-                        Val::Known(value) => members.push(value),
-                        Val::Error => return Val::Error,
-                        _ => return Val::Unknown,
-                    }
-                }
-                Val::Known(Json::Array(members))
-            }
+            "Set" => match self.members(arg) {
+                Ok(members) => made(Json::Array(
+                    members.into_iter().map(Cow::into_owned).collect(),
+                )),
+                Err(val) => val,
+            },
             "." => self.attribute(
                 &self.value(&arg["left"]),
                 arg["attr"].as_str().unwrap_or(""),
@@ -311,9 +345,9 @@ impl Request<'_> {
             | "if-then-else" => {
                 let truth = self.truth(expr);
                 if truth == TRUE {
-                    Val::Known(Json::Bool(true))
+                    made(Json::Bool(true))
                 } else if truth == FALSE {
-                    Val::Known(Json::Bool(false))
+                    made(Json::Bool(false))
                 } else if truth == ERROR {
                     Val::Error
                 } else {
@@ -324,97 +358,23 @@ impl Request<'_> {
         }
     }
 
-    /// A cause key's value, when the caller knows the cause: only the
-    /// kernel sets these, so one the cause lacks is an error to read.
-    fn cause_key(&self, of: &Val, key: &str) -> Option<Option<&Attr>> {
-        match of {
-            Val::Context => self.cause?.get(key),
-            _ => None,
+    /// A set expression's members, or what it is when one is not known.
+    fn members<'e>(&self, list: &'e Json) -> Result<Vec<Cow<'e, Json>>, Val<'e>>
+    where
+        'a: 'e,
+    {
+        let mut members = Vec::new();
+        for member in list.as_array().into_iter().flatten() {
+            match self.value(member) {
+                Val::Known(value) => members.push(value),
+                Val::Error => return Err(Val::Error),
+                _ => return Err(Val::Unknown),
+            }
         }
+        Ok(members)
     }
 
-    fn attribute(&self, of: &Val, attr: &str) -> Val {
-        if let Some(value) = self.cause_key(of, attr) {
-            return value.map_or(Val::Error, |a| self.known(a.clone()));
-        }
-        match (of, self.asker) {
-            (Val::Principal, Asker::Service { name, .. }) => {
-                Self::service_attribute(name, attr).map_or(Val::Error, Val::Known)
-            }
-            (Val::Context, Asker::Service { .. }) => self
-                .service_context(attr)
-                .map_or(Val::Unknown, |a| self.known(a)),
-            (Val::Principal, _) => Self::fact_value(self.outside().and_then(|p| p.attrs.get(attr))),
-            (Val::Context, _) if self.sender_key(attr).is_some() => {
-                Self::fact_value(self.sender_key(attr))
-            }
-            // The kernel puts the record's id in its attributes under both
-            // names (`build_authz_resource_attrs`).
-            (Val::Resource, _) if matches!(attr, "id" | "Id") => self.known(Attr::ResourceId),
-            (Val::Resource, _) => self
-                .record
-                .get(attr)
-                .cloned()
-                .map_or(Val::Unknown, |a| self.known(a)),
-            (Val::Known(Json::Object(record)), _) if !record.contains_key("__entity") => {
-                record.get(attr).cloned().map_or(Val::Error, Val::Known)
-            }
-            (Val::Known(_) | Val::Action | Val::Error | Val::Same { .. }, _) => Val::Error,
-            _ => Val::Unknown,
-        }
-    }
-
-    /// The value of an attribute the kernel sets or the caller knows; the
-    /// record's id is the caller's when it knows it.
-    fn known(&self, attr: Attr) -> Val {
-        match attr {
-            Attr::Value(value) => Val::Known(value),
-            Attr::ResourceId => match self.record.get("id") {
-                Some(Attr::Value(value)) => Val::Known(value.clone()),
-                Some(Attr::Same { name, unlike }) => Val::Same {
-                    name: name.clone(),
-                    unlike: unlike.clone(),
-                },
-                _ => Val::ResourceId,
-            },
-            Attr::Same { name, unlike } => Val::Same { name, unlike },
-            Attr::Unknown => Val::Unknown,
-        }
-    }
-
-    fn has(&self, of: &Val, attr: &str) -> Results {
-        if let Some(value) = self.cause_key(of, attr) {
-            return Results::of(value.is_some());
-        }
-        match (of, self.asker) {
-            (Val::Principal, Asker::Service { name, .. }) => {
-                Results::of(Self::service_attribute(name, attr).is_some())
-            }
-            (Val::Context, Asker::Service { .. }) => match self.service_context(attr) {
-                Some(_) => TRUE,
-                None => TRUE_OR_FALSE,
-            },
-            (Val::Principal, _) => match self.outside().and_then(|p| p.attrs.get(attr)) {
-                Some(fact) => Results::of(*fact != Fact::Absent),
-                None => TRUE_OR_FALSE,
-            },
-            (Val::Context, _) if self.sender_key(attr).is_some() => {
-                Results::of(self.sender_key(attr) != Some(&Fact::Absent))
-            }
-            (Val::Other { .. }, _) => ANY,
-            (Val::Known(Json::Object(record)), _) if !record.contains_key("__entity") => {
-                Results::of(record.contains_key(attr))
-            }
-            (Val::Action, _) => FALSE,
-            (Val::Resource, _) if matches!(attr, "id" | "Id") => TRUE,
-            (Val::Resource, _) if self.record.contains_key(attr) => TRUE,
-            (Val::Known(_) | Val::Error | Val::ResourceId | Val::Same { .. }, _) => ERROR,
-            (Val::Unknown, _) => ANY,
-            _ => TRUE_OR_FALSE,
-        }
-    }
-
-    fn equal(&self, left: &Val, right: &Val) -> Results {
+    fn equal(&self, left: &Val<'_>, right: &Val<'_>) -> Results {
         match (left, right) {
             (Val::Error, _) | (_, Val::Error) => ERROR,
             (Val::Known(a), Val::Known(b)) => Results::of(same(a, b)),
@@ -428,19 +388,19 @@ impl Request<'_> {
             }
             (Val::Other { .. }, _) | (_, Val::Other { .. }) => ANY,
             (Val::ResourceId, Val::ResourceId) => TRUE,
-            (Val::ResourceId, Val::Known(Json::String(_)))
-            | (Val::Known(Json::String(_)), Val::ResourceId) => TRUE_OR_FALSE,
-            (Val::ResourceId, Val::Known(_)) | (Val::Known(_), Val::ResourceId) => FALSE,
-            (Val::Same { name: a, .. }, Val::Same { name: b, .. }) => Results::of(a == b),
-            (Val::Same { unlike, .. }, Val::Known(Json::String(text)))
-            | (Val::Known(Json::String(text)), Val::Same { unlike, .. }) => {
-                if text.is_empty() || unlike.contains(text) {
-                    FALSE
-                } else {
+            (Val::ResourceId, Val::Known(value)) | (Val::Known(value), Val::ResourceId) => {
+                if value.is_string() {
                     TRUE_OR_FALSE
+                } else {
+                    FALSE
                 }
             }
-            (Val::Same { .. }, Val::Known(_)) | (Val::Known(_), Val::Same { .. }) => FALSE,
+            (Val::Same { name: a, .. }, Val::Same { name: b, .. }) => Results::of(a == b),
+            (Val::Same { unlike, .. }, Val::Known(value))
+            | (Val::Known(value), Val::Same { unlike, .. }) => match value.as_str() {
+                Some(text) if !text.is_empty() && !unlike.contains(text) => TRUE_OR_FALSE,
+                _ => FALSE,
+            },
             (Val::Principal, Val::Known(entity)) | (Val::Known(entity), Val::Principal) => {
                 match (self.asker, entity_parts(entity)) {
                     (Asker::Service { name, .. }, Some((kind, id))) => {
@@ -477,12 +437,11 @@ impl Request<'_> {
 
     /// `left in right`: an action in a list of actions, or an entity in
     /// itself (records and the kernel's principals have no parents).
-    fn within(&self, left: &Val, right: &Val) -> Results {
+    fn within(&self, left: &Val<'_>, right: &Val<'_>) -> Results {
         match right {
-            Val::Known(Json::Array(set)) => set
-                .iter()
-                .map(|member| self.equal(left, &Val::Known(member.clone())))
-                .fold(FALSE, |sofar, next| sofar.or_else(|| next)),
+            Val::Known(set) if set.is_array() => {
+                self.within_members(left, set.as_array().into_iter().flatten())
+            }
             Val::Known(entity) if entity_parts(entity).is_some() => match left {
                 Val::Principal if self.outside().is_some() => TRUE_OR_FALSE,
                 Val::Other { .. } => ANY,
@@ -491,5 +450,16 @@ impl Request<'_> {
             Val::Error => ERROR,
             _ => ANY,
         }
+    }
+
+    /// `left in` a set of these `members`.
+    fn within_members<'m>(
+        &self,
+        left: &Val<'_>,
+        members: impl Iterator<Item = &'m Json>,
+    ) -> Results {
+        members
+            .map(|member| self.equal(left, &read(member)))
+            .fold(FALSE, |sofar, next| sofar.or_else(|| next))
     }
 }

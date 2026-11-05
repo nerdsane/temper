@@ -22,7 +22,7 @@ pub(super) fn make_counter_vars(model: &TemperModel, solver: &Solver) -> Vec<(St
             let bound = i64::try_from(counter_bound(model, name)).unwrap_or(i64::MAX);
             solver.assert(var.ge(&zero));
             solver.assert(var.le(Int::from_i64(bound)));
-            (name.clone(), var)
+            (name.to_string(), var)
         })
         .collect()
 }
@@ -34,7 +34,7 @@ pub(super) fn make_bool_vars(model: &TemperModel) -> Vec<(String, Bool)> {
         .keys()
         .map(|name| {
             let var = Bool::new_const(var_name("", "bool", name));
-            (name.clone(), var)
+            (name.to_string(), var)
         })
         .collect()
 }
@@ -88,7 +88,7 @@ pub(super) fn make_list_vars(
         solver.assert(len_var.le(&max_val));
 
         let held: BTreeMap<String, Bool> = looked_for
-            .get(name)
+            .get(name.as_str())
             .into_iter()
             .flatten()
             .map(|value| {
@@ -102,8 +102,8 @@ pub(super) fn make_list_vars(
             let count = Int::add(&counted.iter().collect::<Vec<_>>());
             solver.assert(count.le(&len_var));
         }
-        len_vars.insert(name.clone(), len_var);
-        holds.insert(name.clone(), held);
+        len_vars.insert(name.to_string(), len_var);
+        holds.insert(name.to_string(), held);
     }
 
     ListSymbolicVars { len_vars, holds }
@@ -134,7 +134,7 @@ pub(super) fn make_status_var(model: &TemperModel, solver: &Solver) -> Int {
 /// Encode `status ∈ states` as a disjunction over symbolic status index.
 pub(super) fn encode_state_membership(
     status_var: &Int,
-    states: &[String],
+    states: &[impl AsRef<str>],
     model: &TemperModel,
 ) -> Bool {
     let disjuncts: Vec<Bool> = states
@@ -143,7 +143,7 @@ pub(super) fn encode_state_membership(
             model
                 .states
                 .iter()
-                .position(|s| s == state)
+                .position(|s| s == state.as_ref())
                 .map(|idx| status_var.eq(Int::from_i64(idx as i64)))
         })
         .collect();

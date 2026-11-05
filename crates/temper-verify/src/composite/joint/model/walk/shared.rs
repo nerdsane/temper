@@ -6,7 +6,6 @@
 //! most a step, and one thread stops where it stopped the last time: the same
 //! specs in the same room give the same walk.
 
-use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
@@ -15,7 +14,8 @@ use dashmap::DashMap;
 use super::super::super::pack::{Packed, Packer};
 use super::super::super::room::{Held, List, MB, block, bytes, grow, map_bytes};
 use super::levels::Levels;
-use super::{Edge, Made, Node};
+use super::nodes::Nodes;
+use super::{Edge, Made};
 
 /// What Stateright's checker holds, as a walk counts it: an entry in its
 /// map of 64-bit hashes for each job it was given, about half full.
@@ -34,22 +34,20 @@ pub(super) struct Seen {
     pub(super) depth: u16,
 }
 
-/// What the threads add to as they find it, in one go for each state.
+/// The moves a walk keeps, which a thread adds in one go for each state.
 pub(super) struct Trail {
-    pub(super) nodes: Vec<Node>,
     pub(super) made: Vec<Made>,
     pub(super) edges: Vec<Edge>,
-    pub(super) outside: BTreeMap<u32, (String, String)>,
-    /// Bytes the packed states take.
-    pub(super) states: usize,
 }
 
-/// What the threads share. A new state is added to `seen` only with `trail`
-/// held, so the numbers run in order with no gaps.
+/// What the threads share.
 pub(super) struct Shared {
+    pub(super) nodes: Nodes,
     pub(super) trail: RwLock<Trail>,
+    /// Bytes the packed states take.
+    pub(super) states: AtomicUsize,
     pub(super) packer: RwLock<Packer>,
-    pub(super) seen: DashMap<Packed, Seen>,
+    pub(super) seen: DashMap<Packed, Seen, rustc_hash::FxBuildHasher>,
     /// The walk is over: a visit said so, or the room said no.
     pub(super) stop: AtomicBool,
     pub(super) held_back: AtomicBool,
@@ -59,6 +57,8 @@ pub(super) struct Shared {
     pub(super) wanted: AtomicUsize,
     /// Jobs given to the checker and not yet taken.
     pub(super) waiting: AtomicUsize,
+    /// Bytes what the threads remember of moves they made takes.
+    pub(super) remembered: AtomicUsize,
     /// What the walk has covered, by how many moves from a start.
     pub(super) levels: Levels,
     /// How many states the walk may have before it is counted again.
@@ -143,11 +143,10 @@ impl Shared {
         }
         let behind = {
             let trail = read(&self.trail);
-            nears_its_end(&trail.nodes) || nears_its_end(&trail.made) || nears_its_end(&trail.edges)
+            nears_its_end(&trail.made) || nears_its_end(&trail.edges)
         };
         if behind {
             let mut trail = write(&self.trail);
-            stay_ahead(&mut trail.nodes, held)?;
             stay_ahead(&mut trail.made, held)?;
             stay_ahead(&mut trail.edges, held)?;
         }
@@ -157,9 +156,8 @@ impl Shared {
         let building = 2 * threads * self.build_room.load(Ordering::Acquire);
         let tables = self.tables();
         held.set(tables + building + decided + states * CHECKER_PER_STATE + waiting * job)?;
-        let states = read(&self.trail).nodes.len();
         self.count_at
-            .fetch_max(next_count(states), Ordering::AcqRel);
+            .fetch_max(next_count(self.nodes.len()), Ordering::AcqRel);
         held.covered(self.levels.covered());
         held.reached(self.levels.reached());
         Ok(())
@@ -168,9 +166,10 @@ impl Shared {
     /// The bytes the tables take that stay after the walk, and `seen`.
     fn tables(&self) -> usize {
         let trail = read(&self.trail);
-        trail.states
+        self.states.load(Ordering::Relaxed)
+            + self.remembered.load(Ordering::Relaxed)
             + read(&self.packer).bytes()
-            + bytes(&trail.nodes)
+            + self.nodes.bytes()
             + bytes(&trail.made)
             + bytes(&trail.edges)
             + map_bytes::<Packed, Seen>(self.seen.capacity())

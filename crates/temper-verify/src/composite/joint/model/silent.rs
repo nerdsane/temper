@@ -29,7 +29,7 @@ impl JointModel {
         for (entity, model) in &mut self.models {
             let mut kept = Vec::new();
             for (index, t) in model.transitions.iter().enumerate() {
-                if !silent.contains(&(entity.clone(), t.name.clone())) {
+                if !silent.contains(&(entity.clone(), t.name.to_string())) {
                     kept.push(index);
                 }
             }
@@ -43,7 +43,7 @@ impl JointModel {
             }
             model
                 .transitions
-                .retain(|t| !silent.contains(&(entity.clone(), t.name.clone())));
+                .retain(|t| !silent.contains(&(entity.clone(), t.name.to_string())));
         }
         self.senders.forget(&silent);
         let named = self.named();
@@ -68,7 +68,7 @@ impl JointModel {
                 e == entity && specs.iter().any(|s| s.on_success.is_empty())
             });
             for t in &model.transitions {
-                let key = (entity.clone(), t.name.clone());
+                let key = (entity.clone(), t.name.to_string());
                 let Some(action) = by_name[entity.as_str()]
                     .actions
                     .iter()
@@ -100,7 +100,9 @@ impl JointModel {
                     && !self.kernel.chooses(entity, &t.name)
                     && !self.kernel.calls_on.contains_key(&key)
                     && !self.kernel.timers.get(entity).is_some_and(|timers| {
-                        timers.iter().any(|timer| timer.reset_on.contains(&t.name))
+                        timers
+                            .iter()
+                            .any(|timer| timer.reset_on.iter().any(|on| *on == t.name))
                     })
                     && !self.reactions.iter().any(|r| {
                         (&r.from == entity && r.source_action == t.name)

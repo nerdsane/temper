@@ -1,6 +1,8 @@
 //! Regression cases carried from the former synchronous composite model.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
+
+use crate::model::Fields;
 
 use temper_spec::automaton::{Automaton, parse_automaton};
 
@@ -34,9 +36,8 @@ fn run(model: &JointModel, entity: &str, name: &str) -> JointState {
             .iter()
             .find(|t| t.name == name)
             .unwrap()
-            .to_state
-            .clone(),
-        params: BTreeMap::new(),
+            .to_state,
+        params: Fields::new(),
     };
     let mut state = model
         .commit(initial, entity, &action, &[], OUTSIDE)

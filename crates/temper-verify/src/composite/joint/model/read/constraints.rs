@@ -44,17 +44,13 @@ impl Unchecked {
     /// Whether the model decides every constraint of `entity`'s `action`,
     /// sent as a dispatch or a request.
     pub(in crate::composite::joint::model) fn decides(&self, entity: &str, action: &str) -> bool {
-        !self
-            .taken
-            .contains(&(entity.to_string(), action.to_string()))
+        !self.taken.contains(pair!(entity, action))
     }
 
     /// Whether a sender choosing the parameters of `entity`'s `action` can
     /// meet its constraints, as far as the model knows.
     pub(in crate::composite::joint::model) fn meets(&self, entity: &str, action: &str) -> bool {
-        !self
-            .chosen
-            .contains(&(entity.to_string(), action.to_string()))
+        !self.chosen.contains(pair!(entity, action))
     }
 
     /// The count parameters of `entity`'s `action` that must equal one of
@@ -65,7 +61,7 @@ impl Unchecked {
         action: &str,
     ) -> &[(String, String)] {
         self.counts
-            .get(&(entity.to_string(), action.to_string()))
+            .get(pair!(entity, action))
             .map_or(&[], Vec::as_slice)
     }
 
@@ -77,7 +73,7 @@ impl Unchecked {
         action: &str,
     ) -> &[(String, String)] {
         self.greater
-            .get(&(entity.to_string(), action.to_string()))
+            .get(pair!(entity, action))
             .map_or(&[], Vec::as_slice)
     }
 
@@ -89,7 +85,7 @@ impl Unchecked {
         action: &str,
     ) -> &[String] {
         self.nonempty
-            .get(&(entity.to_string(), action.to_string()))
+            .get(pair!(entity, action))
             .map_or(&[], Vec::as_slice)
     }
 

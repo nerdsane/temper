@@ -15,6 +15,12 @@ pub(crate) struct Expansion {
     room: std::cell::Cell<usize>,
     /// The expansion needed more than `room` and stopped short.
     short: std::cell::Cell<bool>,
+    /// Moves are named in words. A walk turns this off while it expands
+    /// states, since nearly every move it makes leads somewhere it has been.
+    words: std::cell::Cell<bool>,
+    /// What was built read what is in flight, beyond what a walk remembers a
+    /// move by, so it holds for this state alone.
+    read_flight: std::cell::Cell<bool>,
 }
 /// Only the name: the allowance is a walk's own accounting, not part of the
 /// model, so a model's digest (`JointProof::digest`) leaves it out.
@@ -32,6 +38,8 @@ impl Default for Expansion {
             exhausted: std::cell::Cell::new(false),
             room: std::cell::Cell::new(usize::MAX),
             short: std::cell::Cell::new(false),
+            words: std::cell::Cell::new(true),
+            read_flight: std::cell::Cell::new(false),
         }
     }
 }
@@ -49,6 +57,46 @@ impl Expansion {
             .set(time.and_then(|t| std::time::Instant::now().checked_add(t)));
         self.exhausted.set(false);
         self.allow(usize::MAX);
+    }
+
+    /// Whether moves are named in words on this thread.
+    pub(crate) fn words(&self) -> bool {
+        self.words.get()
+    }
+
+    /// Name moves in words on this thread, or not.
+    pub(crate) fn name_moves(&self, words: bool) {
+        self.words.set(words);
+    }
+
+    /// What is being built read what is in flight.
+    pub(crate) fn note_flight_read(&self) {
+        self.read_flight.set(true);
+    }
+
+    /// Whether what was built since the last asking read what is in flight.
+    pub(crate) fn flight_was_read(&self) -> bool {
+        self.read_flight.replace(false)
+    }
+
+    /// Run `build` with no bound and moves named in words, leaving the
+    /// expansion's own count, clock and room as they were: naming a move a
+    /// walk already made is no work of the walk's.
+    pub(crate) fn outside_the_count<T>(&self, build: impl FnOnce() -> T) -> T {
+        let remaining = self.remaining.replace(usize::MAX);
+        let until = self.until.replace(None);
+        let exhausted = self.exhausted.replace(false);
+        let room = self.room.replace(usize::MAX);
+        let short = self.short.replace(false);
+        let words = self.words.replace(true);
+        let built = build();
+        self.remaining.set(remaining);
+        self.until.set(until);
+        self.exhausted.set(exhausted);
+        self.room.set(room);
+        self.short.set(short);
+        self.words.set(words);
+        built
     }
 
     /// Let what the expansion builds from now on take `bytes`.
@@ -93,21 +141,22 @@ impl Expansion {
         true
     }
 
-    /// Charge a cloned map and its added entry before cloning either.
-    pub(crate) fn with_entry<K: Ord + Clone + Heap, V: Clone + Heap>(
+    /// Charge a copied list and its added entry before copying it.
+    pub(crate) fn with_entry<V: Clone + Heap>(
         &self,
-        map: &std::collections::BTreeMap<K, V>,
-        key: &K,
+        map: &super::fields::Fields<V>,
+        key: impl Into<super::fields::Sym>,
         value: &V,
-    ) -> Option<std::collections::BTreeMap<K, V>> {
-        use super::heap::tree_bytes;
-        let nodes = tree_bytes::<K, V>(map.len() + 1);
-        let entries = map.iter().map(|(k, v)| k.heap() + v.heap()).sum::<usize>();
-        if !self.hold(nodes + entries + key.heap() + value.heap()) {
+    ) -> Option<super::fields::Fields<V>> {
+        let bytes = block(
+            (map.len() + 1) * (size_of::<super::fields::Sym>() + size_of::<V>())
+                + 4 * size_of::<usize>(),
+        );
+        if !self.hold(bytes + value.heap()) {
             return None;
         }
         let mut next = map.clone();
-        next.insert(key.clone(), value.clone());
+        next.insert(key, value.clone());
         Some(next)
     }
 

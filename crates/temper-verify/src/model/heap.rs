@@ -82,6 +82,32 @@ impl<T: Heap> Heap for Vec<T> {
     }
 }
 
+impl Heap for super::fields::Sym {
+    fn heap(&self) -> usize {
+        0
+    }
+}
+
+/// A list shared with others counts as [`std::sync::Arc`] does.
+impl<V: Heap> Heap for super::fields::Fields<V> {
+    fn heap(&self) -> usize {
+        self.held(|entries| {
+            block(4 * size_of::<usize>())
+                + block(entries.capacity() * size_of::<(super::fields::Sym, V)>())
+                + entries.iter().map(|(_, value)| value.heap()).sum::<usize>()
+        })
+    }
+}
+
+impl<T> Heap for std::sync::Arc<[T]> {
+    fn heap(&self) -> usize {
+        match std::sync::Arc::strong_count(self) {
+            1 => block(2 * size_of::<usize>() + self.len() * size_of::<T>()),
+            _ => 0,
+        }
+    }
+}
+
 impl<K: Heap, V: Heap> Heap for std::collections::BTreeMap<K, V> {
     fn heap(&self) -> usize {
         tree_bytes::<K, V>(self.len())
@@ -91,10 +117,7 @@ impl<K: Heap, V: Heap> Heap for std::collections::BTreeMap<K, V> {
 
 impl Heap for crate::model::ModelString {
     fn heap(&self) -> usize {
-        match self {
-            Self::Literal(text) => text.heap(),
-            _ => 0,
-        }
+        0
     }
 }
 
@@ -141,47 +164,28 @@ impl<A: Heap, B: Heap, C: Heap> Heap for (A, B, C) {
     }
 }
 
-/// Room for copying a record and applying one transition, including new map
-/// nodes, list growth overlap, and the temporary canonical-name map. Charge
-/// before cloning; return the unused estimate after the effects are applied.
+/// Room for copying a record and applying one transition: what it writes is
+/// copied whole, one list for each kind of field. Charge before cloning;
+/// return the unused estimate after the effects are applied.
 pub(super) fn step_room(
     state: &super::types::TemperModelState,
     t: &super::types::ResolvedTransition,
-    params: &std::collections::BTreeMap<String, super::types::ParamValue>,
 ) -> usize {
-    use super::types::{ModelEffect, ModelString};
-    use temper_spec::predicate::{Arg, Literal};
+    use super::fields::Sym;
+    use super::types::ModelString;
     let additions = t.effects.len() + t.string_params.len();
-    let mut room = state.heap()
-        + t.to_state.heap()
-        + tree_bytes::<String, usize>(state.counters.len() + additions)
-        + tree_bytes::<String, bool>(state.booleans.len() + additions)
-        + tree_bytes::<String, Vec<ModelString>>(state.lists.len() + additions)
-        + tree_bytes::<String, ModelString>(state.strings.len() + additions);
-    for effect in &t.effects {
-        match effect {
-            ModelEffect::SetCounter { var, .. }
-            | ModelEffect::AddCounter { var, .. }
-            | ModelEffect::SubCounter { var, .. }
-            | ModelEffect::SetBool { var, .. }
-            | ModelEffect::ListRemoveAt { var, .. } => room += var.heap(),
-            ModelEffect::SetString { var, value } => room += var.heap() + value.heap(),
-            ModelEffect::ListAppend { var, value } | ModelEffect::ListRemove { var, value } => {
-                let element = match value {
-                    Arg::Lit(Literal::Str(s)) => s.heap(),
-                    Arg::Param(p) => params.get(p).map_or(0, Heap::heap),
-                    _ => 0,
-                }
-                .max(block(t.name.len() + 21));
-                let len = state.lists.get(var).map_or(0, Vec::len) + additions;
-                room += var.heap() + element + block(2 * len.max(4) * size_of::<ModelString>());
-            }
-        }
-    }
-    for param in &t.string_params {
-        room += param.name.heap() + params.get(&param.name).map_or(0, Heap::heap);
-    }
-    let values =
-        state.strings.len() + state.lists.values().map(Vec::len).sum::<usize>() + additions;
-    room + tree_bytes::<ModelString, ModelString>(values)
+    // A push doubles a full list, and starts an empty one at four.
+    let list = |len: usize| block(len.max(4) * size_of::<ModelString>());
+    let entries = |len: usize, entry: usize| block((len + additions) * (size_of::<Sym>() + entry));
+    entries(state.counters.len(), size_of::<usize>())
+        + entries(state.booleans.len(), size_of::<bool>())
+        + entries(state.lists.len(), size_of::<Vec<ModelString>>())
+        + entries(state.strings.len(), size_of::<ModelString>())
+        + state
+            .lists
+            .values()
+            .map(|items| list((items.len() + additions) * 2))
+            .sum::<usize>()
+        // An effect can start a list the record doesn't hold yet.
+        + additions * list(additions * 2)
 }

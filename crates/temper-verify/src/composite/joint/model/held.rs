@@ -9,6 +9,7 @@ use super::super::room::{Heap, Held, bytes, grow, grow_map, map_bytes};
 use super::JointModel;
 use super::step::{Certainty, Move, Next};
 use super::walk::Explored;
+use crate::model::semantics::Expansion;
 
 impl Heap for Certainty {
     fn heap(&self) -> usize {
@@ -184,3 +185,23 @@ impl JointModel {
 #[cfg(test)]
 #[path = "held_test.rs"]
 mod tests;
+
+/// A walk's accounting for what one state's expansion builds, one to a
+/// thread, since a walk's threads each expand their own state.
+#[derive(Default)]
+pub(super) struct PerThread(thread_local::ThreadLocal<Expansion>);
+
+impl std::ops::Deref for PerThread {
+    type Target = Expansion;
+
+    fn deref(&self) -> &Expansion {
+        self.0.get_or_default()
+    }
+}
+
+/// Only the name, as [`Expansion`]'s own says: it is no part of the model.
+impl std::fmt::Debug for PerThread {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Expansion")
+    }
+}

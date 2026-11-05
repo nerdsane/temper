@@ -290,7 +290,7 @@ fn open_moves(model: &TemperModel, state: &TemperModelState) -> Vec<String> {
         .transitions
         .iter()
         .filter(|transition| model.transition_enabled(transition, state))
-        .map(|transition| transition.name.clone())
+        .map(|transition| transition.name.to_string())
         .collect();
     names.dedup();
     names

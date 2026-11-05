@@ -150,9 +150,12 @@ fn check_guard_satisfiability(model: &TemperModel) -> Vec<(String, bool)> {
 
             // Check that at least one from_state exists in the state space
             if !t.from_states.is_empty() {
-                let has_valid_from = t.from_states.iter().any(|s| model.states.contains(s));
+                let has_valid_from = t
+                    .from_states
+                    .iter()
+                    .any(|s| model.states.iter().any(|known| known == s));
                 if !has_valid_from {
-                    return (t.name.clone(), false);
+                    return (t.name.to_string(), false);
                 }
             }
 
@@ -179,7 +182,7 @@ fn check_guard_satisfiability(model: &TemperModel) -> Vec<(String, bool)> {
             solver.assert(encode(&t.guard, &symbols, model));
 
             let sat = matches!(solver.check(), SatResult::Sat);
-            (t.name.clone(), sat)
+            (t.name.to_string(), sat)
         })
         .collect()
 }
@@ -233,7 +236,7 @@ fn check_invariant_induction(model: &TemperModel) -> (Vec<(String, bool)>, NotPr
             for index in broken_by(model, t, &candidates) {
                 not_proved
                     .entry(index)
-                    .or_insert_with(|| NotProved::BrokenBy(t.name.clone()));
+                    .or_insert_with(|| NotProved::BrokenBy(t.name.to_string()));
                 dropped.insert(index);
             }
         }
@@ -245,10 +248,10 @@ fn check_invariant_induction(model: &TemperModel) -> (Vec<(String, bool)>, NotPr
 
     let mut results = vec![(
         "TypeInvariant".to_string(),
-        model
-            .transitions
-            .iter()
-            .all(|t| t.to_state.as_ref().is_none_or(|s| model.states.contains(s))),
+        model.transitions.iter().all(|t| {
+            t.to_state
+                .is_none_or(|s| model.states.iter().any(|known| *known == s))
+        }),
     )];
     results.extend(
         model
@@ -261,7 +264,7 @@ fn check_invariant_induction(model: &TemperModel) -> (Vec<(String, bool)>, NotPr
         let closed = !model
             .transitions
             .iter()
-            .any(|t| t.from_states.contains(state) || t.from_states.is_empty());
+            .any(|t| t.from_states.iter().any(|s| *s == *state) || t.from_states.is_empty());
         results.push((format!("Terminal({state})"), closed));
     }
     let not_proved = not_proved
@@ -287,14 +290,14 @@ fn broken_by(model: &TemperModel, t: &ResolvedTransition, candidates: &[usize]) 
     for name in model.initial_counters.keys() {
         let pre = Int::new_const(var_name("pre:", "counter", name));
         solver.assert(pre.ge(&zero));
-        pre_counters.insert(name.clone(), pre);
+        pre_counters.insert(name.to_string(), pre);
     }
     let pre_bools: BTreeMap<String, Bool> = model
         .initial_booleans
         .keys()
         .map(|name| {
             (
-                name.clone(),
+                name.to_string(),
                 Bool::new_const(var_name("pre:", "bool", name)),
             )
         })
@@ -326,18 +329,18 @@ fn broken_by(model: &TemperModel, t: &ResolvedTransition, candidates: &[usize]) 
         match effect {
             ModelEffect::SetCounter { var, value } => {
                 let value = count(value, &post_counters);
-                post_counters.insert(var.clone(), value);
+                post_counters.insert(var.to_string(), value);
             }
             ModelEffect::AddCounter { var, value } => {
                 let delta = count(value, &post_counters);
-                if let Some(post) = post_counters.get_mut(var) {
+                if let Some(post) = post_counters.get_mut(var.as_str()) {
                     *post = Int::add(&[&*post, &delta]);
                 }
             }
             ModelEffect::SubCounter { var, value } => {
                 // L1 and the runtime stop at 0: max(counter - delta, 0).
                 let delta = count(value, &post_counters);
-                if let Some(post) = post_counters.get_mut(var) {
+                if let Some(post) = post_counters.get_mut(var.as_str()) {
                     let dec = Int::sub(&[&*post, &delta]);
                     *post = post.gt(&delta).ite(&dec, &zero);
                 }
@@ -352,18 +355,18 @@ fn broken_by(model: &TemperModel, t: &ResolvedTransition, candidates: &[usize]) 
                     Arg::Param(name) => Bool::new_const(var_name("", "param", name)),
                     Arg::Lit(_) => Bool::from_bool(false),
                 };
-                post_bools.insert(var.clone(), value);
+                post_bools.insert(var.to_string(), value);
             }
             ModelEffect::SetString { var, value } => {
                 post_strings.insert(
-                    var.clone(),
+                    var.to_string(),
                     string_literal(value, model).expect("effect literal is in the model"),
                 );
             }
             ModelEffect::ListAppend { var, .. }
             | ModelEffect::ListRemove { var, .. }
             | ModelEffect::ListRemoveAt { var, .. } => {
-                changed_lists.insert(var.clone());
+                changed_lists.insert(var.to_string());
             }
         }
     }
@@ -375,17 +378,17 @@ fn broken_by(model: &TemperModel, t: &ResolvedTransition, candidates: &[usize]) 
             solver.assert(value.eq(Int::from_i64(0)).not());
         }
         for field in &param.equals {
-            if let Some(field) = pre_strings.get(field) {
+            if let Some(field) = pre_strings.get(field.as_str()) {
                 solver.assert(value.eq(field));
             }
         }
         for field in &param.not_equals {
-            if let Some(field) = pre_strings.get(field) {
+            if let Some(field) = pre_strings.get(field.as_str()) {
                 solver.assert(value.eq(field).not());
             }
         }
         if param.writes {
-            post_strings.insert(param.name.clone(), value);
+            post_strings.insert(param.name.to_string(), value);
         }
     }
     let changed = make_list_vars(model, &solver, "post:");

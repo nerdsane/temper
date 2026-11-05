@@ -70,15 +70,12 @@ pub fn extract_paths(model: &TemperModel, config: &PathExtractionConfig) -> Path
 
     for transition in &model.transitions {
         for from_status in &transition.from_states {
-            let to_status = transition
-                .to_state
-                .clone()
-                .unwrap_or_else(|| from_status.clone());
+            let to_status = transition.to_state.unwrap_or(*from_status).to_string();
             adjacency
-                .entry(from_status.clone())
+                .entry(from_status.to_string())
                 .or_default()
-                .push((transition.name.clone(), to_status));
-            all_from_states.insert(from_status.clone());
+                .push((transition.name.to_string(), to_status));
+            all_from_states.insert(from_status.to_string());
         }
     }
 
@@ -91,7 +88,7 @@ pub fn extract_paths(model: &TemperModel, config: &PathExtractionConfig) -> Path
         .collect();
 
     // Step 3: BFS from initial_status with parent tracking.
-    let initial = &model.initial_status;
+    let initial = &model.initial_status.to_string();
     // parent map: state -> (parent_state, action_name)
     let mut parent: BTreeMap<String, (String, String)> = BTreeMap::new();
     let mut visited: BTreeSet<String> = BTreeSet::new();

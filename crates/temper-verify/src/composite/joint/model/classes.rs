@@ -32,10 +32,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use temper_spec::automaton::{Automaton, Initial, TargetResolver, TriggerKind};
+use temper_spec::automaton::{ActionConstraint, Automaton, Initial, TargetResolver, TriggerKind};
 use temper_spec::predicate::{Arg, CmpOp, Effect, Expr, Literal, Operand, Set};
 
 use crate::model::TemperModel;
+
+mod numbers;
 
 /// What in a record a value sits in.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -64,6 +66,11 @@ type Term = (String, Slot);
 pub(in crate::composite::joint) struct Classes {
     parent: BTreeMap<Term, Term>,
     held: BTreeMap<Term, BTreeSet<String>>,
+    /// The parameters a `param_nonempty` constraint refuses a blank value in.
+    reads_blank: BTreeSet<Term>,
+    /// Terms read other than against a record's id, or that a record's id can
+    /// come from ([`Self::number`]).
+    apart: BTreeSet<Term>,
     /// The literals each read that names some of them names.
     reads: Vec<(Term, BTreeSet<String>)>,
     /// Terms whose value itself is read: their classes keep every literal.
@@ -107,7 +114,7 @@ impl Classes {
         for (entity, model) in models {
             let parameters = model.transitions.iter().flat_map(|t| &t.string_params);
             let names: BTreeSet<String> = parameters
-                .map(|param| param.name.clone())
+                .map(|param| param.name.to_string())
                 .chain(model.tracked_strings.iter().cloned())
                 .collect();
             for name in names {
@@ -192,8 +199,11 @@ impl Classes {
         for action in &a.actions {
             self.visit(entity, &action.guard);
             for constraint in &action.constraints {
+                if matches!(constraint, ActionConstraint::ParamNonempty { .. }) {
+                    self.reads_blank.insert(term(constraint.param()));
+                }
                 if let Some(field) = constraint.field() {
-                    self.link(&term(constraint.param()), &term(field));
+                    self.compared(&term(constraint.param()), &term(field));
                     self.exact.push(term(field));
                 }
             }
@@ -203,6 +213,7 @@ impl Classes {
                     Effect::Append { list, value } | Effect::Remove { list, value } => {
                         self.exact.push(term(list));
                         self.copy(&term(list), entity, value);
+                        self.apart.insert(term(list));
                     }
                     Effect::Spawn {
                         entity_type,
@@ -247,10 +258,14 @@ impl Classes {
                     self.copy(&target(param), entity, arg);
                 }
                 match &trigger.resolve_target {
-                    Some(
-                        TargetResolver::Field { id_field }
-                        | TargetResolver::CreateIfMissing { id_field },
-                    ) => self.link(&term(id_field), &target("Id")),
+                    Some(TargetResolver::Field { id_field }) => {
+                        self.link(&term(id_field), &target("Id"));
+                    }
+                    // The field's value can become a record's id.
+                    Some(TargetResolver::CreateIfMissing { id_field }) => {
+                        self.link(&term(id_field), &target("Id"));
+                        self.apart.insert(term(id_field));
+                    }
                     Some(TargetResolver::SameId) => self.link(&term("Id"), &target("Id")),
                     Some(TargetResolver::Static { entity_id }) => {
                         self.hold(&target("Id"), entity_id);
@@ -266,7 +281,12 @@ impl Classes {
         match value {
             Arg::Lit(Literal::Str(text)) => self.hold(into, text),
             Arg::Var(name) | Arg::Param(name) => {
-                self.link(into, &(entity.to_string(), Slot::named(name)));
+                let from = (entity.to_string(), Slot::named(name));
+                self.link(into, &from);
+                // A value that can become a record's id.
+                if into.1 == Slot::Id && from.1 != Slot::Id {
+                    self.apart.insert(from);
+                }
             }
             Arg::Lit(_) => {}
         }
@@ -313,7 +333,11 @@ impl Classes {
                 match (self.term(owner, lhs), self.term(owner, rhs), lhs, rhs) {
                     (Some(a), Some(b), _, _) => {
                         self.exact.push(a.clone());
-                        self.link(&a, &b);
+                        self.compared(&a, &b);
+                        // An order reads more than whether they are equal.
+                        if !matches!(op, CmpOp::Eq | CmpOp::Ne) {
+                            self.apart.insert(a);
+                        }
                     }
                     (Some(t), None, _, Operand::Lit(Literal::Str(text)))
                     | (None, Some(t), Operand::Lit(Literal::Str(text)), _) => {
@@ -342,7 +366,7 @@ impl Classes {
                     }
                     (Some(t), Set::Var(list), _) => {
                         self.exact.push(t.clone());
-                        self.link(&t, &(owner.to_string(), Slot::named(list)));
+                        self.compared(&t, &(owner.to_string(), Slot::named(list)));
                     }
                     (None, Set::Var(list), Operand::Lit(Literal::Str(text))) => {
                         let list = (owner.to_string(), Slot::named(list));
@@ -353,6 +377,14 @@ impl Classes {
                 }
             }
             Expr::Const(_) | Expr::Empty(_) | Expr::Var(_) => {}
+        }
+    }
+
+    /// Something tells whether the values of `a` and `b` are equal.
+    fn compared(&mut self, a: &Term, b: &Term) {
+        self.link(a, b);
+        if a.1 != Slot::Id && b.1 != Slot::Id {
+            self.apart.insert(a.clone());
         }
     }
 
@@ -385,5 +417,14 @@ impl Classes {
         let moved = self.held.remove(&a).unwrap_or_default();
         self.held.entry(b.clone()).or_default().extend(moved);
         self.parent.insert(a, b);
+    }
+}
+
+impl super::JointModel {
+    /// The class of made-up values `entity`'s string field or parameter takes.
+    pub(in crate::composite::joint) fn class_of(&self, entity: &str, field: &str) -> usize {
+        self.models
+            .get(entity)
+            .map_or(0, |model| model.string_class(field))
     }
 }

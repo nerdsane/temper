@@ -184,7 +184,7 @@ impl Senders {
         let booleans = record
             .booleans
             .iter()
-            .map(|(field, value)| (field.clone(), Attr::Value(Value::Bool(*value))));
+            .map(|(field, value)| (field.to_string(), Attr::Value(Value::Bool(*value))));
         strings.chain(booleans).collect()
     }
 
@@ -230,7 +230,7 @@ pub(super) fn literals<'a>(values: impl IntoIterator<Item = &'a ModelString>) ->
     values
         .into_iter()
         .filter_map(|value| match value {
-            ModelString::Literal(text) if !text.is_empty() => Some(text.clone()),
+            ModelString::Literal(text) if !text.is_empty() => Some(text.to_string()),
             _ => None,
         })
         .collect()

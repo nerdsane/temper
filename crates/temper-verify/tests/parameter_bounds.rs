@@ -164,7 +164,7 @@ fn one_parameter_covers_every_counter_its_effects_use() {
         let mut initial = model.init_states().remove(0);
         initial
             .counters
-            .insert("x".into(), if op == "-=" { 65 } else { 0 });
+            .insert("x", if op == "-=" { 65 } else { 0 });
         let choices = successors(&model, &model.transitions[0], &initial);
         assert!(
             choices

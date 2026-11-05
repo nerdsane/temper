@@ -289,19 +289,18 @@ pub fn prop_test_diagnostics(result: &PropTestResult) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::TemperModelState;
+    use crate::model::{Fields, TemperModelState};
     use crate::simulation::InvariantViolation;
-    use std::collections::BTreeMap;
 
     fn state(status: &str, count: usize) -> TemperModelState {
-        let mut counters = BTreeMap::new();
-        counters.insert("entry_count".to_string(), count);
+        let mut counters = Fields::new();
+        counters.insert("entry_count", count);
         TemperModelState {
-            status: status.to_string(),
+            status: status.into(),
             counters,
-            booleans: BTreeMap::new(),
-            lists: BTreeMap::new(),
-            strings: BTreeMap::new(),
+            booleans: Fields::new(),
+            lists: Fields::new(),
+            strings: Fields::new(),
         }
     }
 
@@ -388,9 +387,9 @@ mod tests {
                 (
                     state("Running", index),
                     Some(TemperModelAction {
-                        name: format!("Action{index}"),
+                        name: format!("Action{index}").into(),
                         target_state: None,
-                        params: BTreeMap::new(),
+                        params: Fields::new(),
                     }),
                 )
             })

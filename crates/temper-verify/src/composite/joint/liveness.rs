@@ -346,7 +346,7 @@ pub(super) fn settle(
         let Some((index, path)) = on_a_way else {
             return (
                 LivenessOutcome::Incomplete {
-                    reason: unsure_reason(explored, &good, &out),
+                    reason: unsure_reason(model, explored, &good, &out),
                 },
                 met,
             );
@@ -369,7 +369,11 @@ pub(super) fn settle(
         .copied()
         .filter(|&index| {
             let state = explored.state(index);
-            let statuses: Vec<String> = state.records.values().map(|r| r.status.clone()).collect();
+            let statuses: Vec<String> = state
+                .records
+                .values()
+                .map(|r| r.status.to_string())
+                .collect();
             state.settled() && seen.insert(statuses)
         })
         .collect();

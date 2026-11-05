@@ -3,6 +3,7 @@
 //! Contains the state, action, transition, invariant, liveness, and model struct
 //! definitions used by the Stateright model checker.
 
+pub use super::fields::{FieldKey, Fields, Sym};
 pub use super::string::ModelString;
 
 use std::collections::BTreeMap;
@@ -22,22 +23,22 @@ use temper_spec::predicate::{Arg, Expr, ParamKind};
 #[derive(Clone, Debug, Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TemperModelState {
     /// Current status value (mirrors the specification's `status` variable).
-    pub status: String,
+    pub status: Sym,
     /// Named counter variables (e.g. `items`, `quantity`).
-    pub counters: BTreeMap<String, usize>,
+    pub counters: Fields<usize>,
     /// Named boolean variables (e.g. `has_address`, `payment_captured`).
-    pub booleans: BTreeMap<String, bool>,
+    pub booleans: Fields<bool>,
     /// Named list variables (e.g. `tags`, `labels`). Elements retain equality
     /// symbols, so reused inputs alias and independent inputs can differ.
-    pub lists: BTreeMap<String, Vec<ModelString>>,
+    pub lists: Fields<Vec<ModelString>>,
     /// The string variables guards or rules read or effects write, as symbols: `''`, a literal
     /// the spec compares the variable with, or `#n`, a value that is equal
     /// only to itself. The verifier tracks which strings are equal, not what
     /// they say, so `#n` are renumbered in order of first use after every
     /// step ([`super::semantics::canonical_strings`]). Empty for a spec whose
     /// guards, rules and effects use no string.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub strings: BTreeMap<String, ModelString>,
+    #[serde(default, skip_serializing_if = "Fields::is_empty")]
+    pub strings: Fields<ModelString>,
 }
 
 impl fmt::Display for TemperModelState {
@@ -56,7 +57,7 @@ impl fmt::Display for TemperModelState {
                 .booleans
                 .iter()
                 .filter(|(_, v)| **v)
-                .map(|(k, _)| k.clone())
+                .map(|(k, _)| k.to_string())
                 .collect();
             if !pairs.is_empty() {
                 write!(f, "[{}]", pairs.join(","))?;
@@ -84,7 +85,7 @@ impl fmt::Display for TemperModelState {
 
 /// The value the model chose for an action parameter in one step.
 #[derive(
-    Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+    Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
 pub enum ParamValue {
     /// A non-negative integer.
@@ -112,12 +113,12 @@ impl fmt::Display for ParamValue {
 #[derive(Clone, Debug, Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TemperModelAction {
     /// The transition name (e.g. "SubmitOrder", "CancelOrder").
-    pub name: String,
+    pub name: Sym,
     /// The target status after taking this action (if deterministic).
-    pub target_state: Option<String>,
+    pub target_state: Option<Sym>,
     /// The values chosen for the parameters the transition's effects read.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub params: BTreeMap<String, ParamValue>,
+    #[serde(default, skip_serializing_if = "Fields::is_empty")]
+    pub params: Fields<ParamValue>,
 }
 
 impl fmt::Display for TemperModelAction {
@@ -147,21 +148,21 @@ impl fmt::Display for TemperModelAction {
 #[derive(Clone, Debug)]
 pub enum ModelEffect {
     /// `var = value` on a counter.
-    SetCounter { var: String, value: Arg },
+    SetCounter { var: Sym, value: Arg },
     /// `var += value` on a counter.
-    AddCounter { var: String, value: Arg },
+    AddCounter { var: Sym, value: Arg },
     /// `var -= value` on a counter (saturating).
-    SubCounter { var: String, value: Arg },
+    SubCounter { var: Sym, value: Arg },
     /// `var = value` on a bool.
-    SetBool { var: String, value: Arg },
+    SetBool { var: Sym, value: Arg },
     /// `var = 'literal'` on a string, including the empty string.
-    SetString { var: String, value: String },
+    SetString { var: Sym, value: Sym },
     /// `append(var, value)`.
-    ListAppend { var: String, value: Arg },
+    ListAppend { var: Sym, value: Arg },
     /// `remove_at(var, index)`; out of range is a no-op.
-    ListRemoveAt { var: String, index: Arg },
+    ListRemoveAt { var: Sym, index: Arg },
     /// `remove(var, value)`: every element equal to `value`; none is a no-op.
-    ListRemove { var: String, value: Arg },
+    ListRemove { var: Sym, value: Arg },
 }
 
 /// A resolved transition used internally by the model, pre-computed from a
@@ -169,11 +170,11 @@ pub enum ModelEffect {
 #[derive(Clone, Debug)]
 pub struct ResolvedTransition {
     /// The action name.
-    pub name: String,
+    pub name: Sym,
     /// States from which this transition can fire.
-    pub from_states: Vec<String>,
+    pub from_states: Vec<Sym>,
     /// The target state (if deterministic).
-    pub to_state: Option<String>,
+    pub to_state: Option<Sym>,
     /// Precondition beyond `from_states`.
     pub guard: Expr,
     /// Effects applied when the transition fires.
@@ -204,16 +205,16 @@ pub struct ResolvedTransition {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StringParam {
     /// The parameter.
-    pub name: String,
+    pub name: Sym,
     /// Whether it writes the tracked string variable of its name. One that
     /// does not is modelled only so its constraints are decided.
     pub writes: bool,
     /// `param_nonempty`: never empty or whitespace-only.
     pub nonempty: bool,
     /// `param_equals_field`: equal to the value of every one of these variables.
-    pub equals: Vec<String>,
+    pub equals: Vec<Sym>,
     /// `param_not_equals_field`: never the value of these variables.
-    pub not_equals: Vec<String>,
+    pub not_equals: Vec<Sym>,
 }
 
 /// A safety invariant: `assert` must not be false in any reachable state.
@@ -300,15 +301,15 @@ pub struct TemperModel {
     /// Declared state variable types, for evaluating guards and invariants.
     pub var_kinds: BTreeMap<String, temper_spec::predicate::VarKind>,
     /// The initial status (first state from Init, typically "Draft").
-    pub(crate) initial_status: String,
+    pub(crate) initial_status: Sym,
     /// Initial counter values from [[state]] declarations.
-    pub(crate) initial_counters: BTreeMap<String, usize>,
+    pub(crate) initial_counters: Fields<usize>,
     /// Initial boolean values from [[state]] declarations.
-    pub(crate) initial_booleans: BTreeMap<String, bool>,
+    pub(crate) initial_booleans: Fields<bool>,
     /// Initial list values from [[state]] declarations.
-    pub(crate) initial_lists: BTreeMap<String, Vec<ModelString>>,
+    pub(crate) initial_lists: Fields<Vec<ModelString>>,
     /// Initial values of the tracked string variables.
-    pub(crate) initial_strings: BTreeMap<String, ModelString>,
+    pub(crate) initial_strings: Fields<ModelString>,
     /// The string variables the verifier tracks: those guards/invariants read
     /// or effects write, and those whose value reaches one through a
     /// constraint or a reaction.
@@ -316,6 +317,12 @@ pub struct TemperModel {
     /// Concrete initial, predicate and effect literals for tracked string inputs,
     /// including literals tied to them indirectly through related statuses.
     pub(crate) string_literals: BTreeMap<String, BTreeSet<String>>,
+    /// The class of made-up values each string field and parameter takes,
+    /// in a walk that numbers them by class. A field left out takes class 0.
+    pub(crate) string_classes: BTreeMap<String, usize>,
+    /// The classes nothing reads a blank value in: no `param_nonempty` on a
+    /// parameter of theirs, so a blank made-up value is just a made-up value.
+    pub(crate) never_blank: BTreeSet<usize>,
     /// Whether `string_literals` is all a parameter can meet: a literal held
     /// elsewhere is a value like any made-up one to whatever reads it.
     pub(crate) literals_by_class: bool,
@@ -399,6 +406,8 @@ impl fmt::Debug for TemperModel {
             initial_strings,
             tracked_strings,
             string_literals,
+            string_classes: _,
+            never_blank: _,
             literals_by_class,
             counter_bounds,
             default_max_counter,
@@ -431,6 +440,16 @@ impl fmt::Debug for TemperModel {
 }
 
 impl TemperModel {
+    /// The class of made-up values a string field or parameter takes.
+    pub(crate) fn string_class(&self, name: &str) -> usize {
+        self.string_classes.get(name).copied().unwrap_or(0)
+    }
+
+    /// Whether anything tells a blank made-up value of `class` from another.
+    pub(crate) fn blank_read(&self, class: usize) -> bool {
+        !self.never_blank.contains(&class)
+    }
+
     /// Whether the model holds a value for the counter, boolean or list
     /// `field`: some rule reads it.
     pub fn holds(&self, field: &str) -> bool {

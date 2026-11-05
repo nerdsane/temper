@@ -104,7 +104,7 @@ fn breaking_move(result: &CascadeResult, rule: &str) -> (String, String) {
         panic!("the path ends without its move: {:?}", found.trace);
     };
     assert_eq!(before.status, "Waiting");
-    (action.name.clone(), after.status.clone())
+    (action.name.to_string(), after.status.to_string())
 }
 
 /// Swap and make keeps the one barista per cup, so no invariant breaks, but

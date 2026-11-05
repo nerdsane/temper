@@ -1,4 +1,5 @@
 use super::*;
+use crate::model::Fields;
 use stateright::Model;
 
 const ORDER_IOA: &str = include_str!("../../../../test-fixtures/specs/order.ioa.toml");
@@ -30,11 +31,11 @@ fn test_build_model_initial_state_is_draft() {
 fn test_draft_actions_include_add_item() {
     let model = build_order_model();
     let state = super::super::types::TemperModelState {
-        status: "Draft".to_string(),
-        counters: BTreeMap::from([("items".to_string(), 0)]),
-        booleans: BTreeMap::from([("has_address".to_string(), false)]),
-        lists: BTreeMap::new(),
-        strings: BTreeMap::new(),
+        status: "Draft".into(),
+        counters: Fields::from([("items".to_string(), 0)]),
+        booleans: Fields::from([("has_address".to_string(), false)]),
+        lists: Fields::new(),
+        strings: Fields::new(),
     };
     let mut actions = Vec::new();
     model.actions(&state, &mut actions);
@@ -49,11 +50,11 @@ fn test_draft_actions_include_add_item() {
 fn test_submitted_does_not_allow_add_item() {
     let model = build_order_model();
     let state = super::super::types::TemperModelState {
-        status: "Submitted".to_string(),
-        counters: BTreeMap::from([("items".to_string(), 1)]),
-        booleans: BTreeMap::from([("has_address".to_string(), true)]),
-        lists: BTreeMap::new(),
-        strings: BTreeMap::new(),
+        status: "Submitted".into(),
+        counters: Fields::from([("items".to_string(), 1)]),
+        booleans: Fields::from([("has_address".to_string(), true)]),
+        lists: Fields::new(),
+        strings: Fields::new(),
     };
     let mut actions = Vec::new();
     model.actions(&state, &mut actions);
@@ -68,16 +69,16 @@ fn test_submitted_does_not_allow_add_item() {
 fn test_draft_to_submitted_transition() {
     let model = build_order_model();
     let state = super::super::types::TemperModelState {
-        status: "Draft".to_string(),
-        counters: BTreeMap::from([("items".to_string(), 1)]),
-        booleans: BTreeMap::from([("has_address".to_string(), false)]),
-        lists: BTreeMap::new(),
-        strings: BTreeMap::new(),
+        status: "Draft".into(),
+        counters: Fields::from([("items".to_string(), 1)]),
+        booleans: Fields::from([("has_address".to_string(), false)]),
+        lists: Fields::new(),
+        strings: Fields::new(),
     };
     let action = super::super::types::TemperModelAction {
-        name: "SubmitOrder".to_string(),
-        target_state: Some("Submitted".to_string()),
-        params: BTreeMap::new(),
+        name: "SubmitOrder".into(),
+        target_state: Some("Submitted".into()),
+        params: Fields::new(),
     };
     let next = model.next_state(&state, action);
     assert!(next.is_some());
@@ -90,16 +91,16 @@ fn test_draft_to_submitted_transition() {
 fn test_add_item_increments_count() {
     let model = build_order_model();
     let state = super::super::types::TemperModelState {
-        status: "Draft".to_string(),
-        counters: BTreeMap::from([("items".to_string(), 0)]),
-        booleans: BTreeMap::from([("has_address".to_string(), false)]),
-        lists: BTreeMap::new(),
-        strings: BTreeMap::new(),
+        status: "Draft".into(),
+        counters: Fields::from([("items".to_string(), 0)]),
+        booleans: Fields::from([("has_address".to_string(), false)]),
+        lists: Fields::new(),
+        strings: Fields::new(),
     };
     let action = super::super::types::TemperModelAction {
-        name: "AddItem".to_string(),
+        name: "AddItem".into(),
         target_state: None,
-        params: BTreeMap::new(),
+        params: Fields::new(),
     };
     let next = model.next_state(&state, action).unwrap();
     assert_eq!(*next.counters.get("items").unwrap(), 1);
