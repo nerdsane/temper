@@ -323,6 +323,19 @@ pub async fn start_registry_cache_recovery_of(
             restored += 1;
             continue;
         }
+        // A pushed version came through the install route and has no registry:
+        // only whoever pushed it can send it again.
+        if pushed {
+            tracing::warn!(
+                recovery = "genesis_cache",
+                result = "missing",
+                tenant = %tenant,
+                app = %app_name,
+                app_ref = %record.app_ref,
+                "Installed pushed app's files are not on disk; its install record is kept, and it serves its stored specs until its version is pushed again"
+            );
+            continue;
+        }
         let registry = match recorded_registry(&record.registry_url) {
             Ok(registry) => registry,
             Err(error) => {
