@@ -70,7 +70,7 @@ kind = "same_id"
 "#;
 
 /// Notes come only from reactions, and Cedar refuses a guest everything on a
-/// note: nothing the model holds says a guest's chain gets here.
+/// note and on a push, so no guest's chain adds one.
 const FROM_REACTIONS: &str = r#"
 permit(principal, action in [Action::"Add", Action::"Address"], resource is Note)
 when { context has via && context.via != "request" };
@@ -148,15 +148,12 @@ fn check(specs: &[&str], policies: Option<&str>) -> JointLivenessResult {
 }
 
 #[test]
-fn a_rest_only_a_reaction_from_outside_the_scope_leads_to_is_not_checked() {
-    // The refused Address follows an Add that only Push's reaction sends,
-    // with a sender the model made up. Whether the runtime gets there is
-    // not known, so it is not a broken rule.
+fn a_reaction_from_outside_the_scope_runs_as_whoever_may_start_its_chain() {
+    // Only Push's reaction adds a note, and it runs as whoever sent Send:
+    // Cedar refuses Address only to a guest, who may not Send, so every
+    // added note is addressed.
     let result = check(&[NOTE, PUSH], Some(FROM_REACTIONS));
-    let LivenessOutcome::Incomplete { reason } = &result.outcome else {
-        panic!("{result}");
-    };
-    assert!(reason.contains("a reaction from Push"), "{result}");
+    assert!(result.holds(), "{result}");
 }
 
 #[test]

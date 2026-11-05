@@ -3,9 +3,9 @@
 //! may be no sender the model knows. Cedar may answer either way for it, and
 //! for a reaction that inherits it.
 
-use temper_authz::May;
+use temper_authz::{Asker, May};
 
-use super::Senders;
+use super::{Senders, base};
 
 impl Senders {
     /// The number of the sender the model does not know; the one after it
@@ -31,5 +31,40 @@ impl Senders {
         } else {
             format!("sender {by}")
         }
+    }
+
+    /// Whether Cedar lets the outside sender `by` request `action` on an
+    /// `entity` record of any type, in scope or not: the table answers for
+    /// the types it was read for, the policies for the rest.
+    pub(in crate::composite::joint) fn request_anywhere(
+        &self,
+        by: u32,
+        entity: &str,
+        action: &str,
+    ) -> May {
+        let entity = base(entity);
+        let Some(requests) = &self.requests else {
+            return May::Yes;
+        };
+        if requests
+            .get(entity)
+            .is_some_and(|actions| actions.contains_key(action))
+        {
+            return self.request_as(by, entity, action);
+        }
+        match (&self.policies, self.askers.get(by as usize / 2)) {
+            (Some(policies), Some(asker)) => {
+                policies.may_request(asker, action, entity, &|_| Ok(()))
+            }
+            _ => May::Maybe,
+        }
+    }
+
+    /// The sender a reaction declaring `service` runs as when `invoker`
+    /// sent its source, in `invoker`'s chain: the model does not know a
+    /// service it read no policies for.
+    pub(in crate::composite::joint) fn declared_as(&self, service: &Asker, invoker: u32) -> u32 {
+        let at = self.askers.iter().position(|a| a == service);
+        at.map_or(self.unknown(), |at| at as u32 * 2) + invoker % 2
     }
 }

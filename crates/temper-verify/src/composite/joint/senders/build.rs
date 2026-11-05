@@ -24,7 +24,9 @@ impl Senders {
     /// each send. A request to one of `roots` starts a chain that runs as
     /// its sender through the `inheriting` moves (entity, action): those
     /// are what the kinds of outside sender are told apart on, with whether
-    /// each may read a record of a `standing` type as its timer asks.
+    /// each may read a record of a `standing` type as its timer asks. A
+    /// kind that may send a move outside `entities` that sets off a chain
+    /// reaching one of `roots` is kept too.
     pub(in crate::composite::joint) fn new<'a>(
         by_name: &BTreeMap<&str, &Automaton>,
         entities: impl IntoIterator<Item = &'a String> + Clone,
@@ -35,12 +37,15 @@ impl Senders {
         reserve: Option<&dyn Fn(usize) -> Result<(), String>>,
     ) -> Self {
         let unlimited = |_: usize| Ok(());
+        let scope: BTreeSet<String> = entities.clone().into_iter().cloned().collect();
+        let starts = super::super::model::starts(by_name, &scope, roots);
         let kinds = policies
             .map(|policies| {
                 kinds::outside(
                     by_name,
                     policies,
                     roots,
+                    &starts,
                     inheriting,
                     standing,
                     reserve.unwrap_or(&unlimited),

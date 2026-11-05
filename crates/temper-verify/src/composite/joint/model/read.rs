@@ -412,3 +412,33 @@ fn literals_in(entity: &str, expr: &Expr, out: &mut BTreeMap<(String, String), B
         _ => {}
     }
 }
+
+/// The fields of an `entity` record that decide whether a move happens
+/// without being a guard: those a constraint compares a parameter with, and
+/// those the guard of a trigger it fires reads. A cut keeps them, so a
+/// record refusing a dispatch for a stale count, or a reaction it does not
+/// send, stays decided.
+pub(super) fn deciding(
+    automaton: &Automaton,
+    reactions: &[Reaction],
+    entity: &str,
+) -> BTreeSet<String> {
+    let mut fields: BTreeSet<String> = automaton
+        .actions
+        .iter()
+        .flat_map(|action| &action.constraints)
+        .filter_map(|constraint| constraint.field().map(str::to_string))
+        .collect();
+    for guard in reactions
+        .iter()
+        .filter(|r| r.from == entity)
+        .filter_map(|r| r.guard.as_ref())
+    {
+        guard.for_each_name(&mut |name| {
+            if let Name::Var(var) = name {
+                fields.insert(var.to_string());
+            }
+        });
+    }
+    fields
+}

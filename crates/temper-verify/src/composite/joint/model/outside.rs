@@ -45,7 +45,7 @@ impl JointModel {
     /// question `asked`, in every chain, on every hop. An answer that depends
     /// on the request is decided again from the sender's own facts, so such a
     /// sender stands only for itself.
-    fn way(
+    pub(super) fn way(
         &self,
         by: u32,
         may: May,
@@ -72,7 +72,11 @@ impl JointModel {
     /// `action` to an `entity` record, on anything that follows it: reactions
     /// that run as their sender, and those of the module answers and timers
     /// it sets off, which run as them too.
-    fn asked_after<'a>(&'a self, entity: &'a str, action: &'a str) -> BTreeSet<(&'a str, &'a str)> {
+    pub(super) fn asked_after<'a>(
+        &'a self,
+        entity: &'a str,
+        action: &'a str,
+    ) -> BTreeSet<(&'a str, &'a str)> {
         let mut asked = BTreeSet::new();
         let mut seen = BTreeSet::from([(entity, action)]);
         let mut open = vec![(entity, action)];

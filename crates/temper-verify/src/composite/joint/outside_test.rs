@@ -145,6 +145,14 @@ kind = "same_id"
 const POLICIES: &str =
     r#"permit(principal, action in [Action::"Start", Action::"Poke"], resource);"#;
 
+/// As [`POLICIES`], and a member's reaction may send `Done`: Cedar may let
+/// Push's reaction through or not, as its sender is a member or not.
+const MEMBERS_DONE: &str = r#"
+permit(principal, action in [Action::"Start", Action::"Poke"], resource);
+permit(principal, action == Action::"Done", resource)
+when { principal has role && principal.role == "member" && context has via && context.via != "request" };
+"#;
+
 #[test]
 fn an_invariant_a_reaction_from_outside_the_scope_breaks_is_broken() {
     // Push's reaction takes Done while the box is still empty. The rule
@@ -174,7 +182,7 @@ fn an_invariant_a_reaction_from_outside_the_scope_breaks_is_broken() {
 #[test]
 fn an_invariant_that_holds_through_a_reaction_from_outside_the_scope_holds() {
     let rule = "[[invariant]]\nname = \"rule\"\nassert = \"status == 'Done' => Box[Id].status != 'Full'\"\n";
-    let result = invariant(&[&ask(false, rule), BOX, &push(false)], POLICIES);
+    let result = invariant(&[&ask(false, rule), BOX, &push(false)], MEMBERS_DONE);
     assert!(result.holds(), "{result}");
 }
 
@@ -297,7 +305,7 @@ fn a_stuck_state_only_a_reaction_from_outside_the_scope_reaches_never_settles_if
     // it made up, and nothing leads on from Done. The verdict rests on it.
     let rule =
         "[[liveness]]\nname = \"rule\"\neventually = \"status == 'Done' => status == 'Idle'\"\n";
-    let result = liveness(&[&ask(false, rule), &push(false)], POLICIES);
+    let result = liveness(&[&ask(false, rule), &push(false)], MEMBERS_DONE);
     let text = result.to_string();
     assert!(
         matches!(result.outcome, LivenessOutcome::Stuck { .. }),
@@ -314,7 +322,7 @@ fn a_stuck_state_only_a_reaction_from_outside_the_scope_may_leave_is_not_checked
     // Asked is left only by Push's reaction, which the walk cannot tell
     // comes: it is neither stuck nor known to settle.
     let rule = "[[liveness]]\nname = \"rule\"\neventually = \"status != 'Asked'\"\n";
-    let result = liveness(&[&ask(false, rule), &push(false)], POLICIES);
+    let result = liveness(&[&ask(false, rule), &push(false)], MEMBERS_DONE);
     let text = result.to_string();
     assert!(
         matches!(result.outcome, LivenessOutcome::Incomplete { .. }),
@@ -322,6 +330,19 @@ fn a_stuck_state_only_a_reaction_from_outside_the_scope_may_leave_is_not_checked
     );
     assert!(
         text.contains("Ask.Done (from Asked) by a reaction from Push"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_stuck_state_only_a_reaction_cedar_refuses_everyone_may_leave_never_settles() {
+    // Nobody may send Done, so Push's reaction, whoever pokes, is refused:
+    // Asked is never left.
+    let rule = "[[liveness]]\nname = \"rule\"\neventually = \"status != 'Asked'\"\n";
+    let result = liveness(&[&ask(false, rule), &push(false)], POLICIES);
+    let text = result.to_string();
+    assert!(
+        matches!(result.outcome, LivenessOutcome::Stuck { .. }),
         "{text}"
     );
 }

@@ -47,12 +47,12 @@ pub(super) use classes::Classes;
 pub use drops::DroppedReaction;
 pub(crate) use drops::dropped_reactions;
 pub(super) use fair_key::{FairKey, MoveKind};
-pub(super) use from_outside::reads_beyond;
 use from_outside::{Outside, outside_reactions};
+pub(super) use from_outside::{reads_beyond, starts};
 pub use guided::{Candidate, Guide, GuidedSearch, STEPS as GUIDED_STEPS, guided_search, plain};
 use order::{Order, Specs};
 pub(super) use read::Timeout;
-use read::{Kernel, Reaction, Unchecked, named_literals, tracked, unchecked_constraints};
+use read::{Kernel, Reaction, Unchecked, deciding, named_literals, tracked, unchecked_constraints};
 pub(super) use step::{Certainty, Move};
 pub(super) use walk::{Edge, Explored, Made};
 pub(super) use walk::{Keep, Walk};
@@ -274,7 +274,7 @@ impl JointModel {
         );
         classes.narrow(&mut models, |field| senders.reads_field(field));
         // A reaction from outside the scope chooses its parameters, as requests do.
-        let outside = outside_reactions(by_name, scope);
+        let outside = outside_reactions(by_name, scope, Some((&senders, &sending.relies_on)));
         let chosen = |entity: &str, action: &str| {
             let key = (entity.to_string(), action.to_string());
             sending.relies_on.contains(&key)
@@ -468,30 +468,4 @@ impl JointModel {
             params: None,
         }
     }
-}
-
-/// The fields of an `entity` record that decide whether a move happens
-/// without being a guard: those a constraint compares a parameter with, and
-/// those the guard of a trigger it fires reads. A cut keeps them, so a
-/// record refusing a dispatch for a stale count, or a reaction it does not
-/// send, stays decided.
-fn deciding(automaton: &Automaton, reactions: &[Reaction], entity: &str) -> BTreeSet<String> {
-    let mut fields: BTreeSet<String> = automaton
-        .actions
-        .iter()
-        .flat_map(|action| &action.constraints)
-        .filter_map(|constraint| constraint.field().map(str::to_string))
-        .collect();
-    for guard in reactions
-        .iter()
-        .filter(|r| r.from == entity)
-        .filter_map(|r| r.guard.as_ref())
-    {
-        guard.for_each_name(&mut |name| {
-            if let Name::Var(var) = name {
-                fields.insert(var.to_string());
-            }
-        });
-    }
-    fields
 }
