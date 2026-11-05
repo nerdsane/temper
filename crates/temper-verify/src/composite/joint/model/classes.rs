@@ -26,9 +26,11 @@
 //! effect's copying tells nothing, and neither does `empty`. So two literals
 //! named by exactly the same reads give every guard, rule and liveness goal
 //! the same answer, and the walk offers one of them
-//! ([`Classes::one_of_each_kind`]). A class whose value itself is read keeps
-//! all its literals: it holds an id, which finds a record, or a status, or a
-//! list, which counts what it holds, or two of its terms are compared.
+//! ([`Classes::one_of_each_kind`]). A literal no read names is answered as a
+//! made-up value is, which the walk offers already, so it offers none. A
+//! class whose value itself is read keeps all its literals: it holds an id,
+//! which finds a record, or a status, or a list, which counts what it holds,
+//! or two of its terms are compared.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -157,7 +159,7 @@ impl Classes {
         literals
             .filter(|literal| {
                 let kind: Vec<bool> = reads.iter().map(|named| named.contains(*literal)).collect();
-                literal.is_empty() || kinds.insert(kind)
+                literal.is_empty() || (kind.contains(&true) && kinds.insert(kind))
             })
             .cloned()
             .collect()

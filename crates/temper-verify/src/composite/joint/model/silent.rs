@@ -2,11 +2,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use temper_spec::automaton::Automaton;
+use temper_authz::May;
+use temper_spec::automaton::{Automaton, TargetResolver};
 use temper_spec::predicate::{Arg, Expr, Name, VarKind};
 
-use super::JointModel;
-use super::read::reactions_into;
+use super::read::{Reaction, reactions_into};
+use super::{Delivery, JointModel};
 
 impl JointModel {
     /// This model without its silent moves, and without the kinds of string
@@ -158,5 +159,79 @@ impl JointModel {
             }
         }
         named
+    }
+}
+
+impl JointModel {
+    /// Whether `reaction`, sent as `by`, changes nothing wherever it lands,
+    /// so it needn't wait in flight: the walk reaches the same records as if
+    /// it had landed at once, and whether it fires splits no way. Cedar refuses it to its sender whatever
+    /// the records hold, or its move, taken or refused, writes nothing the
+    /// model holds and sets nothing off. A reaction that makes its record
+    /// is never one, and the drop check, which names the landings a target
+    /// refuses, keeps each in flight.
+    pub(super) fn lands_as_nothing(&self, reaction: &Reaction, by: u32) -> bool {
+        if reaction.spawn.is_some()
+            || matches!(
+                reaction.resolve,
+                Some(TargetResolver::Create | TargetResolver::CreateIfMissing { .. })
+            )
+        {
+            return false;
+        }
+        if self.senders.may(by, &reaction.to, &reaction.target_action) == May::No {
+            return true;
+        }
+        self.delivery == Delivery::Any
+            && self
+                .idle
+                .get_or_init(|| self.idle_moves())
+                .contains(&(reaction.to.clone(), reaction.target_action.clone()))
+    }
+
+    /// The moves (entity, action) that change nothing the model holds,
+    /// taken or refused: each of its transitions stays in its place and
+    /// writes nothing tracked, no reaction, module call or kernel choice
+    /// starts from it, it resets no state timer, and a child it spawns
+    /// outside the scope has its id stored in no tracked field.
+    fn idle_moves(&self) -> BTreeSet<(String, String)> {
+        let mut idle = BTreeSet::new();
+        for (entity, model) in &self.models {
+            let names: BTreeSet<String> = model
+                .transitions
+                .iter()
+                .map(|t| t.name.to_string())
+                .collect();
+            for name in names {
+                let key = (entity.clone(), name);
+                let quiet = model
+                    .transitions
+                    .iter()
+                    .filter(|t| *t.name == *key.1)
+                    .all(|t| {
+                        let stays = t.to_state.is_none()
+                            || t.from_states
+                                .iter()
+                                .all(|from| Some(from) == t.to_state.as_ref());
+                        stays && t.effects.is_empty() && t.string_params.iter().all(|p| !p.writes)
+                    });
+                let starts_nothing = !self.kernel.chooses(entity, &key.1)
+                    && !self.kernel.calls_on.contains_key(&key)
+                    && !self.kernel.timers.get(entity).is_some_and(|timers| {
+                        timers.iter().any(|timer| timer.reset_on.contains(&key.1))
+                    })
+                    && !self
+                        .reactions
+                        .iter()
+                        .any(|r| &r.from == entity && r.source_action == key.1)
+                    && self.outside_spawns.get(&key).is_none_or(|fields| {
+                        fields.iter().all(|f| !model.tracked_strings.contains(f))
+                    });
+                if quiet && starts_nothing {
+                    idle.insert(key);
+                }
+            }
+        }
+        idle
     }
 }

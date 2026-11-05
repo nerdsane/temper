@@ -310,6 +310,10 @@ mod classes_tests;
 mod outside_tests;
 
 #[cfg(test)]
+#[path = "idle_test.rs"]
+mod idle_tests;
+
+#[cfg(test)]
 #[path = "outside_count_test.rs"]
 mod outside_count_tests;
 

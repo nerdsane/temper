@@ -168,6 +168,8 @@ pub(super) struct JointModel {
     /// Each type's statuses from which its record can send nothing more,
     /// made on first use.
     settled: std::sync::OnceLock<BTreeMap<String, BTreeSet<String>>>,
+    /// The moves (entity, action) whose landing changes nothing, made on first use.
+    idle: std::sync::OnceLock<BTreeSet<(String, String)>>,
 }
 
 impl JointModel {
@@ -364,6 +366,7 @@ impl JointModel {
             outside_spawns: spawn::outside_spawns(by_name, scope),
             first: std::sync::OnceLock::new(),
             settled: std::sync::OnceLock::new(),
+            idle: std::sync::OnceLock::new(),
         }
     }
 
