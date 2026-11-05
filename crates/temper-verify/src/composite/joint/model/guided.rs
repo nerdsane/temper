@@ -176,7 +176,7 @@ pub(in crate::composite::joint) struct Stats {
     /// The kinds of move walks left untaken because what they build did
     /// not fit, in words.
     pub(in crate::composite::joint) too_big: Vec<String>,
-    /// A move was held back for [`super::JointModel::in_flight`].
+    /// A move was held back for [`super::MAX_IN_FLIGHT`].
     pub(in crate::composite::joint) held_back: bool,
 }
 

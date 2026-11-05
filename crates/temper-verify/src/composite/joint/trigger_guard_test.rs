@@ -300,9 +300,9 @@ assert = "status == 'Went' => B[Id].status != 'Full'"
 
 #[test]
 fn undecided_trigger_guards_build_only_the_ways_the_walk_keeps() {
-    // Sixteen undecided guards go 2^16 ways, and all but those with as many
-    // ticks in flight as the walk holds are held back: building only those
-    // fits a small room, which bounds how many it holds.
+    // Sixteen undecided guards go 2^16 ways, and all but those with at most
+    // three ticks in flight are held back: building only those fits a small
+    // room.
     let automatons = parsed(&[&ticks(16), BOX, SWITCH]);
     let refs: Vec<&Automaton> = automatons.iter().collect();
     let policies = r#"permit(principal, action in [Action::"Go", Action::"Turn"], resource);
@@ -317,10 +317,7 @@ permit(principal, action, resource) when { context has via && context.via != "re
     assert_eq!(results.len(), 1);
     let result = results.remove(0);
     assert!(result.holds(), "{result}");
-    assert!(
-        result.in_flight_bound.is_some_and(|held| held >= 3),
-        "{result}"
-    );
+    assert_eq!(result.in_flight_bound, Some(3), "{result}");
 }
 
 /// `Go` notes `A` when the other `A` it points at is still idle. The walk

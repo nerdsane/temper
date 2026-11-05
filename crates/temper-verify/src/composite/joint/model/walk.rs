@@ -27,10 +27,8 @@ pub(in crate::composite::joint) struct Walk {
     pub(in crate::composite::joint) states: usize,
     /// One per invariant.
     pub(in crate::composite::joint) outcomes: Vec<JointOutcome>,
-    /// Whether a move was held back for [`super::JointModel::in_flight`].
+    /// Whether a move was held back for [`super::MAX_IN_FLIGHT`].
     pub(in crate::composite::joint) held_back: bool,
-    /// Whether it stopped before seeing every state.
-    pub(in crate::composite::joint) stopped: bool,
     /// One per invariant: when it is false only where the walk went by a
     /// reaction from types outside the scope, those types, else none.
     pub(in crate::composite::joint) outside: Vec<BTreeSet<String>>,
@@ -151,7 +149,7 @@ pub(in crate::composite::joint) struct Explored<'a> {
     pub(in crate::composite::joint) edges: Vec<Edge>,
     /// Why the walk stopped before seeing every state.
     pub(in crate::composite::joint) stopped: Option<String>,
-    /// Whether a move was held back for [`super::JointModel::in_flight`].
+    /// Whether a move was held back for [`super::MAX_IN_FLIGHT`].
     pub(in crate::composite::joint) held_back: bool,
     /// How many moves from a start it covered: it walked every state that near.
     pub(in crate::composite::joint) covered: usize,

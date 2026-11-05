@@ -60,19 +60,19 @@ pub(super) use walk::{Keep, Walk};
 /// Counter ceiling for the joint models, as for the composite plans.
 const JOINT_MAX_COUNTER: usize = 3;
 
-/// Dispatches and module calls in flight at once, as a proof's first walk
-/// holds them. The runtime has no such bound: a person can keep sending
-/// moves whose reactions have not landed, so without one the walk never
-/// ends. A walk that held a move back walks again with twice as many while
-/// it fits its room (`proof/grow.rs`), and says how many it proved.
-pub(super) const FIRST_IN_FLIGHT: usize = 3;
+/// Dispatches and module calls in flight at once. The runtime has no such
+/// bound: each request, reaction and module call is its own task. The model
+/// needs one to stay finite; three lets a late dispatch land after two later
+/// ones. A walk that held a move back for it says so, and then proves only
+/// up to this many.
+pub(super) const MAX_IN_FLIGHT: usize = 3;
 
 /// When a dispatch lands, against moves from outside.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Delivery {
     /// Whenever: other dispatches and moves from outside can come first, as
     /// in the runtime, where each request and each reaction is its own task.
-    /// At most [`JointModel::in_flight`] at once.
+    /// At most [`MAX_IN_FLIGHT`] at once.
     Any,
     /// Before the next move from outside: the dispatches a move sends all
     /// land, in any order, before anything else is asked. That is what the
@@ -170,8 +170,6 @@ pub(super) struct JointModel {
     settled: std::sync::OnceLock<BTreeMap<String, BTreeSet<String>>>,
     /// The moves (entity, action) whose landing changes nothing, made on first use.
     idle: std::sync::OnceLock<BTreeSet<(String, String)>>,
-    /// How many may be in flight at once in this walk ([`FIRST_IN_FLIGHT`]).
-    in_flight: std::sync::atomic::AtomicUsize,
 }
 
 impl JointModel {
@@ -369,7 +367,6 @@ impl JointModel {
             first: std::sync::OnceLock::new(),
             settled: std::sync::OnceLock::new(),
             idle: std::sync::OnceLock::new(),
-            in_flight: FIRST_IN_FLIGHT.into(),
         }
     }
 
