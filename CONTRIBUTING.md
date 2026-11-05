@@ -81,6 +81,8 @@ Significant changes require an ADR. Create `docs/adrs/NNNN-short-title.md` follo
 
 Not required for bug fixes, single-file refactors, documentation changes, or test additions.
 
+A documentation-only change lands on `main` like any other change.
+
 ## License
 
 By contributing, you agree that your contributions will be dual-licensed under the MIT and Apache 2.0 licenses.
