@@ -16,6 +16,11 @@ use super::step::Certainty;
 use super::{Delivery, JointModel};
 use crate::model::{Fields, ParamValue, Sym};
 
+/// What a reaction carries for a string its target requires not blank but
+/// does not hold, whatever nonblank value the source held; a blank one it
+/// carries as empty.
+const NOT_BLANK: &str = "(not blank)";
+
 /// Who made a move, as what follows it reads.
 #[derive(Clone, Copy)]
 pub(super) struct Sent<'a> {
@@ -427,7 +432,8 @@ impl JointModel {
     }
 
     /// The string parameters `reaction` passes that its target action gives
-    /// a value or requires not empty, the counts kept as sequence numbers, and the
+    /// a value or requires not empty (one it only requires so as
+    /// [`NOT_BLANK`] when it is), the counts kept as sequence numbers, and the
     /// counts its target reads (in an effect, or compared with a counter)
     /// from a counter `source` holds as a value, read from `source` as it
     /// holds them.
@@ -464,9 +470,8 @@ impl JointModel {
                     let count = source_state.counters.get(field).copied()?;
                     return Some((param.as_str(), ParamValue::Count(count)));
                 }
-                if !target.models_string(&reaction.target_action, param)
-                    && !nonempty.contains(param)
-                {
+                let modeled = target.models_string(&reaction.target_action, param);
+                if !modeled && !nonempty.contains(param) {
                     return None;
                 }
                 let value = match arg {
@@ -475,6 +480,13 @@ impl JointModel {
                     Arg::Lit(Literal::Null) => Some("".into()),
                     _ => None,
                 }?;
+                // A string its target does not hold is read only for being
+                // blank: every blank value lands the same, and every other.
+                let value = match (modeled, value.is_blank()) {
+                    (true, _) => value,
+                    (false, true) => "".into(),
+                    (false, false) => NOT_BLANK.into(),
+                };
                 Some((param.as_str(), ParamValue::Str(value)))
             })
             .collect()
