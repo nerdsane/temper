@@ -59,21 +59,6 @@ pub(super) async fn refuse_unready_tenant(
     ))
 }
 
-/// Refuse a spec with a lint installs refuse before an install or upgrade writes.
-/// Boot replay skips this gate; registry loading warns and keeps the stored spec.
-pub(super) fn spec_refusals(app: &str, specs: &[(String, String)]) -> Result<(), String> {
-    for (entity, source) in specs {
-        let automaton = temper_spec::automaton::parse_automaton(source)
-            .map_err(|e| format!("os-app '{app}' spec {entity} failed to parse: {e}"))?;
-        if let Some(finding) =
-            temper_spec::automaton::lint_install_refusals(&automaton, entity).first()
-        {
-            return Err(format!("os-app '{app}' spec {entity}: {}", finding.message));
-        }
-    }
-    Ok(())
-}
-
 /// Parse the bundle's cross-invariants, if it has any, so a bundle whose
 /// cross-invariants would not load is refused with this error.
 pub(super) fn parse_cross_invariants(source: Option<&str>, app_name: &str) -> Result<(), String> {

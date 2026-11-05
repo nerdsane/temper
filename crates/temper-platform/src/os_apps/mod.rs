@@ -695,7 +695,7 @@ async fn install_once(
         )
     })?;
     if plan.specs && origin == InstallOrigin::Request {
-        install_checks::spec_refusals(app_name, &bundle.specs)?;
+        spec_findings::refusals(state, tenant, app_name, &bundle.specs)?;
         spec_findings::log(tenant, app_name, &bundle.specs, bundle.csdl.as_deref());
     }
     if origin == InstallOrigin::Replay {

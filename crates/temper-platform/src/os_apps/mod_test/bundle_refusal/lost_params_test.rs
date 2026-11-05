@@ -1,5 +1,5 @@
-//! A lost action param is refused before an install writes, and a stored spec
-//! that has one still restores.
+//! A lost action param is refused before an install writes, unless the tenant
+//! already runs that spec, and a stored spec that has one still restores.
 
 use super::*;
 use temper_server::platform_store::PlatformStore;
@@ -46,6 +46,33 @@ async fn a_lost_param_is_refused_before_install_writes() {
     fx.install("lost-tenant", &app)
         .await
         .expect("a param the action stores installs");
+}
+
+/// A tenant that already runs the spec, as one an older kernel installed,
+/// installs it again: refusing it would change nothing it runs and refuse
+/// every install whose closure holds the app. A change to it is refused.
+#[tokio::test]
+async fn a_lost_param_the_tenant_already_runs_installs_again_and_a_change_is_refused() {
+    let fx = Fixture::new("lost-params-runs").await;
+    let app = format!("lost-params-runs-{}", uuid::Uuid::new_v4().simple());
+    fx.write_app(&app, ORDER_CSDL, None);
+    let source_path = fx.apps_root.join(&app).join("specs/order.ioa.toml");
+    fs::write(&source_path, LOST).unwrap();
+    fx.state.registry.write().unwrap().register_tenant(
+        "runs-tenant",
+        temper_spec::csdl::parse_csdl(ORDER_CSDL).unwrap(),
+        ORDER_CSDL.to_string(),
+        &[("Order", LOST)],
+    );
+    fx.install("runs-tenant", &app)
+        .await
+        .expect("a spec the tenant already runs installs again");
+
+    fs::write(&source_path, format!("{LOST}\n# changed\n")).unwrap();
+    let error = fx.install("runs-tenant", &app).await.unwrap_err();
+    for name in ["Mark", "urgent = params.urgent"] {
+        assert!(error.contains(name), "{error}");
+    }
 }
 
 #[tokio::test]
