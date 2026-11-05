@@ -173,7 +173,7 @@ impl<'room> Wider<'room> {
                 JointOutcome::Broken { path } => {
                     found.scope = scope.iter().cloned().collect();
                     found.states = walk.states;
-                    found.in_flight_bound = walk.held_back.then_some(model::MAX_IN_FLIGHT);
+                    found.in_flight_bound = walk.held_back.then_some(model.in_flight());
                     found.outcome = JointOutcome::Broken { path: path.clone() };
                     continue;
                 }

@@ -10,7 +10,7 @@ use super::super::super::env::Blind;
 use super::super::super::{Call, Dispatch, JointState};
 use super::super::JointModel;
 use super::super::commit::add;
-use super::{Certainty, MAX_IN_FLIGHT, remove};
+use super::{Certainty, remove};
 use crate::model::TemperModelAction;
 
 impl JointModel {
@@ -64,8 +64,19 @@ impl JointModel {
         eval(guard, &env)
     }
 
+    /// How many things in flight the next walk holds at most.
+    pub(in crate::composite::joint) fn in_flight(&self) -> usize {
+        self.in_flight.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Let the next walk hold at most `most` in flight.
+    pub(in crate::composite::joint) fn hold(&self, most: usize) {
+        self.in_flight
+            .store(most, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Whether `state` holds no more in flight than the walk keeps: at most
-    /// [`MAX_IN_FLIGHT`] things the runtime is working on at once. A
+    /// [`Self::in_flight`] things the runtime is working on at once. A
     /// dispatch or call it has sent is one. A commit whose reactions wait
     /// for their guards to be read is one too, however many wait: the
     /// runtime reads them one trigger at a time for that commit
@@ -73,7 +84,8 @@ impl JointModel {
     /// waiting reactions count as the most copies of any one of them.
     pub(in crate::composite::joint) fn fits<'a>(&'a self, state: &'a JointState) -> bool {
         // A commit's waiting reactions count at most one each.
-        if state.calls.len() + state.inflight.len() <= MAX_IN_FLIGHT {
+        let most = self.in_flight();
+        if state.calls.len() + state.inflight.len() <= most {
             return true;
         }
         let waiting = |dispatch: &'a Arc<Dispatch>| match (
@@ -114,7 +126,7 @@ impl JointModel {
                 .max()
                 .unwrap_or(0);
         }
-        busy <= MAX_IN_FLIGHT
+        busy <= most
     }
 
     /// Whether reading or landing `dispatch` now may come before an earlier

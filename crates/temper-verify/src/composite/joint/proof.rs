@@ -14,6 +14,7 @@ use super::model::{self, JointModel, Sending};
 use super::room::{Bound, Construction, MB, Room};
 use super::{JointInvariantResult, JointLivenessResult, JointOutcome, LivenessOutcome};
 
+mod grow;
 mod widen;
 use widen::Wider;
 
@@ -125,14 +126,14 @@ impl InvariantProof<'_> {
             }
         };
         let exprs: Vec<&Expr> = self.invariants.iter().map(|inv| &inv.assert).collect();
-        let walk = model.walk(&self.entity, &exprs, bound);
+        let walk = grow::grown_walk(model, || model.walk(&self.entity, &exprs, bound));
         let mut results: Vec<JointInvariantResult> = self
             .invariants
             .iter()
             .zip(walk.outcomes)
             .map(|(inv, outcome)| {
                 let mut found = result(inv, walk.states, outcome);
-                found.in_flight_bound = walk.held_back.then_some(model::MAX_IN_FLIGHT);
+                found.in_flight_bound = walk.held_back.then_some(model.in_flight());
                 found
             })
             .collect();
@@ -337,9 +338,25 @@ impl LivenessProof<'_> {
                 return result;
             }
         };
-        let mut explored = model.walk_with(bound, model::Keep::Edges, |_, _, _, _| false);
+        let walk = || model.walk_with(bound, model::Keep::Edges, |_, _, _, _| false);
+        let mut explored = walk();
+        // As for invariants ([`grow::grown_walk`]); one walk's tables are given back
+        // before the next is made, and one that does not fit is walked again
+        // with the last bound that did.
+        while explored.held_back && explored.stopped.is_none() {
+            drop(explored);
+            let fitted = model.in_flight();
+            model.hold(fitted * 2);
+            explored = walk();
+            if explored.stopped.is_some() {
+                drop(explored);
+                model.hold(fitted);
+                explored = walk();
+                break;
+            }
+        }
         result.states = explored.len();
-        result.in_flight_bound = explored.held_back.then_some(model::MAX_IN_FLIGHT);
+        result.in_flight_bound = explored.held_back.then_some(model.in_flight());
         let settling = settle_bytes(&explored);
         // Past where the walk stops, phase two (`model/guided.rs`).
         if let Some(reason) = explored.stopped.clone() {

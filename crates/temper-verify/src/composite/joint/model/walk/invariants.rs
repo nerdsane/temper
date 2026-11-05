@@ -69,6 +69,7 @@ impl JointModel {
             return Walk {
                 states: 0,
                 held_back: false,
+                stopped: false,
                 outside: vec![BTreeSet::new(); invariants.len()],
                 outcomes: invariants
                     .iter()
@@ -168,12 +169,14 @@ impl JointModel {
             })
             .collect();
         let (states, held_back) = (explored.len(), explored.held_back);
+        let stopped = explored.stopped.is_some();
         // Past where it stopped, phase two (`guided.rs`).
         let outcomes = self.guided_invariants(owner, invariants, outcomes, explored, bound);
         Walk {
             states,
             outcomes,
             held_back,
+            stopped,
             outside,
         }
     }
