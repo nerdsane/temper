@@ -175,7 +175,8 @@ impl JointModel {
 
     /// Put `entity`'s record, after it took `action` from `by`, into
     /// `state`. Its state timer is armed by `by` when the record entered a
-    /// state with one, or `action` resets it (`arm_state_timeouts_if_needed`).
+    /// state with one, or `action` resets it (`arm_state_timeouts_if_needed`),
+    /// with what `by` had at stake on the record (`Stake`).
     pub(super) fn place(
         &self,
         state: &mut JointState,
@@ -188,7 +189,11 @@ impl JointModel {
         let timeout = self.timeout(entity, &moved.status);
         match timeout {
             Some(timeout) if entered || timeout.reset_on.iter().any(|a| a == action) => {
-                state.armed.insert(entity.into(), self.armer(entity, by));
+                // The setter's standing is asked of the record before the move.
+                let stake = self.senders.stake(by, entity, &state.records[entity]);
+                state
+                    .armed
+                    .insert(entity.into(), stake.arm(self.armer(entity, by)));
             }
             Some(_) => {}
             None => {

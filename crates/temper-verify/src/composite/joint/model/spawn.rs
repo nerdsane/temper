@@ -299,9 +299,10 @@ impl JointModel {
                 self.take_back_id(state, &reaction.from, spawn);
             }
         } else if self.timeout(child, &record.status).is_some() {
+            let stake = self.senders.stake(dispatch.by, child, record);
             state
                 .armed
-                .insert(child.into(), self.armer(child, dispatch.by));
+                .insert(child.into(), stake.arm(self.armer(child, dispatch.by)));
         }
     }
 

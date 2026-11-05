@@ -44,6 +44,7 @@ context.triggerSourceEntityId == resource.id
         Some(&policy),
         &BTreeSet::new(),
         &none,
+        &BTreeSet::new(),
         None,
     );
     let principal = declared(&a.actions[0].triggers[0], "A", "Start").unwrap();
@@ -97,6 +98,7 @@ when { principal has role && principal.role == "visitor" && context.rule == "Not
         Some(&policy),
         &BTreeSet::from(["Note".to_string()]),
         &BTreeSet::from([("Note".to_string(), "Address".to_string())]),
+        &BTreeSet::new(),
         None,
     );
     let cause = Cause::reaction(
@@ -169,6 +171,7 @@ to = "Ready"
         &entities,
         Some(&policies),
         &none,
+        &BTreeSet::new(),
         &BTreeSet::new(),
         Some(&reserve),
     );

@@ -55,7 +55,6 @@ use temper_spec::automaton::{Automaton, TargetResolver, TriggerKind};
 
 use super::env::ID;
 use super::model::Classes;
-use super::room::Heap;
 use super::state::JointState;
 use crate::model::ModelString;
 use table::reread;
@@ -63,7 +62,9 @@ use table::reread;
 mod build;
 pub(super) use build::declared;
 mod kinds;
+mod standing;
 mod table;
+pub(super) use standing::{Stake, policy_fields, standing};
 #[path = "senders_unknown.rs"]
 mod unknown;
 
@@ -321,22 +322,14 @@ impl Senders {
         {
             return *may;
         }
-        // A value the model made up is none of the literals it holds that
-        // its field can meet; any other it may be.
-        let literals: BTreeSet<String> = source_id
-            .into_iter()
-            .chain(service_source_id)
-            .chain(target.strings.values())
-            .filter_map(|value| match value {
-                ModelString::Literal(text) if !text.is_empty() => Some(text.clone()),
-                _ => None,
-            })
-            .collect();
-        let none = BTreeSet::new();
+        let literals = standing::literals(
+            source_id
+                .into_iter()
+                .chain(service_source_id)
+                .chain(target.strings.values()),
+        );
         let symbol = |value: &ModelString, entity: &str, field: &str| {
-            let key = (base(entity).to_string(), field.to_string());
-            let meets = self.meets.get(&key).unwrap_or(&none);
-            symbol(value, &literals.intersection(meets).cloned().collect())
+            self.symbol_in(value, entity, field, &literals)
         };
         let mut asker = asker.clone();
         if let (Asker::Service { context, .. }, Some(id), Some(source)) =
@@ -352,31 +345,9 @@ impl Senders {
             entity_id: source_id.map_or(Attr::Unknown, |id| symbol(id, rule.from, ID)),
         };
         let cause = Cause::reaction(by % 2 == 1, hop);
-        let strings = target.strings.iter().map(|(field, value)| {
-            let value = symbol(value, entity, field);
-            let field = if field == ID { "id" } else { field.as_str() };
-            (field.to_string(), value)
-        });
-        let booleans = target
-            .booleans
-            .iter()
-            .map(|(field, value)| (field.clone(), Attr::Value(Value::Bool(*value))));
-        let record = strings.chain(booleans).collect();
+        let record = self.record_attrs(entity, target, &literals);
         let may = policies.may(&asker, action, entity, &record, Some(&cause));
-        let entry = super::room::map_bytes::<Question, May>(1)
-            + question.1.heap()
-            + question.2.heap()
-            + question.3.heap()
-            + question.4.heap()
-            + question.5.heap()
-            + question.6.heap()
-            + question.7.heap();
-        self.decided_bytes.fetch_add(entry, Ordering::Relaxed);
-        self.decided
-            .write()
-            .expect("a walk thread panicked")
-            .insert(question, may);
-        may
+        self.remember(question, may)
     }
 
     /// Whether a policy on `entity`'s `action` can read which move set a

@@ -74,6 +74,16 @@ pub(super) fn room<'a>(
         .ok_or_else(overflow)
 }
 
+/// Room for the `read` row each of the `standing` types adds to the
+/// reactions' table: a key, a tree node and an answer for each sender in
+/// either chain.
+pub(super) fn read_room(standing: &BTreeSet<String>, askers: usize) -> usize {
+    let row = tree_bytes::<String, Vec<May>>(1)
+        + 2 * super::standing::READ.to_string().heap()
+        + block(2 * askers * size_of::<May>());
+    standing.len() * row
+}
+
 fn overflow() -> String {
     "sender table size overflows addressable memory".to_string()
 }

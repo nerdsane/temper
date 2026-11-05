@@ -1,5 +1,6 @@
 //! Construct senders and reserve their answer tables before allocation.
 
+use super::standing::READ;
 use super::table::each;
 use super::*;
 
@@ -22,13 +23,15 @@ impl Senders {
     /// The senders of the moves among `entities`, and what `policies` lets
     /// each send. A request to one of `roots` starts a chain that runs as
     /// its sender through the `inheriting` moves (entity, action): those
-    /// are what the kinds of outside sender are told apart on.
+    /// are what the kinds of outside sender are told apart on, with whether
+    /// each may read a record of a `standing` type as its timer asks.
     pub(in crate::composite::joint) fn new<'a>(
         by_name: &BTreeMap<&str, &Automaton>,
         entities: impl IntoIterator<Item = &'a String> + Clone,
         policies: Option<&SendAnalysis>,
         roots: &BTreeSet<String>,
         inheriting: &BTreeSet<(String, String)>,
+        standing: &BTreeSet<String>,
         reserve: Option<&dyn Fn(usize) -> Result<(), String>>,
     ) -> Self {
         let unlimited = |_: usize| Ok(());
@@ -39,6 +42,7 @@ impl Senders {
                     policies,
                     roots,
                     inheriting,
+                    standing,
                     reserve.unwrap_or(&unlimited),
                 )
             })
@@ -104,6 +108,10 @@ impl Senders {
                 .sum();
             let room = table::room(by_name, entities.clone(), kind_count + 1, askers.len())
                 .and_then(|room| {
+                    room.checked_add(table::read_room(standing, askers.len()))
+                        .ok_or_else(|| "sender table size overflows addressable memory".to_string())
+                })
+                .and_then(|room| {
                     profiles
                         .checked_add(room)
                         .ok_or_else(|| "sender table size overflows addressable memory".to_string())
@@ -137,7 +145,7 @@ impl Senders {
             requests
         });
         let may = policies.map(|policies| {
-            each(by_name, entities.clone(), &|entity, action| {
+            let mut may = each(by_name, entities.clone(), &|entity, action| {
                 let mut answers = Vec::with_capacity(askers.len() * 2);
                 for asker in &askers {
                     let answer = |timed| {
@@ -158,7 +166,21 @@ impl Senders {
                     answers.extend([request_chain, timer_chain]);
                 }
                 answers
-            })
+            });
+            let cause = Cause::timer_fire();
+            for entity in standing {
+                let answers = askers
+                    .iter()
+                    .flat_map(|asker| {
+                        let answer = policies.may(asker, READ, entity, &none, Some(&cause));
+                        [answer, answer]
+                    })
+                    .collect();
+                if let Some(actions) = may.get_mut(entity) {
+                    actions.insert(READ.to_string(), answers);
+                }
+            }
+            may
         });
         let reread = reread(policies, &askers, may.as_ref());
         let names = askers.iter().map(asker_name).collect();

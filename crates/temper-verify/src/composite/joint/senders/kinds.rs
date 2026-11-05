@@ -7,7 +7,8 @@ use temper_spec::automaton::Automaton;
 
 /// The kinds of outside sender `policies` tell apart on what a chain from
 /// outside asks: a request to one of `roots`, and the `inheriting` moves
-/// as reactions, in either chain. Kinds that may request nothing there send
+/// as reactions, in either chain, and whether each may read a record of a
+/// `standing` type as its timer asks. Kinds that may request nothing there send
 /// nothing, and are left out. None when the policies tell no two apart
 /// on those reactions.
 pub(super) fn outside(
@@ -15,6 +16,7 @@ pub(super) fn outside(
     policies: &SendAnalysis,
     roots: &BTreeSet<String>,
     inheriting: &BTreeSet<(String, String)>,
+    standing: &BTreeSet<String>,
     reserve: &dyn Fn(usize) -> Result<(), String>,
 ) -> Result<Option<Vec<Kind>>, String> {
     let mut requests = Vec::new();
@@ -41,6 +43,13 @@ pub(super) fn outside(
                 cause: Cause::reaction(timed, Hop::unknown()),
             });
         }
+    }
+    for entity in standing {
+        questions.push(Question {
+            action: super::standing::READ,
+            resource_type: entity,
+            cause: Cause::timer_fire(),
+        });
     }
     if requests.is_empty() {
         return Ok(None);

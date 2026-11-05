@@ -73,6 +73,17 @@ impl Cause {
         Self(keys)
     }
 
+    /// A timer's fire itself, as the kernel asks about its setter's standing
+    /// on the record (`timer_standing.rs`): `via` "timer" at `depth` 0, no
+    /// reaction, and who armed it, which is not known here.
+    pub fn timer_fire() -> Self {
+        Self(BTreeMap::from([
+            (platform_keys::VIA, text("timer")),
+            (platform_keys::DEPTH, Attr::Value(Json::from(0))),
+            (platform_keys::ARMED_BY, Attr::Unknown),
+        ]))
+    }
+
     /// What the check holds under `key`: None for a key the kernel does not
     /// set from the cause, `Some(None)` for a cause key this check lacks.
     pub(super) fn get(&self, key: &str) -> Option<Option<&Attr>> {
