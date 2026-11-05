@@ -96,7 +96,7 @@ pub(super) fn guard_with_constraints(action: &Action) -> Expr {
 /// Unrelated state and independent comparisons cannot widen this range.
 pub(super) fn guard_count_bound(
     model: &TemperModel,
-    t: &ResolvedTransition,
+    guard: &Expr,
     param: &str,
     effect_ranges: &BTreeMap<&str, CountRange>,
 ) -> usize {
@@ -151,7 +151,7 @@ pub(super) fn guard_count_bound(
     let mut bound = 0;
     loop {
         let previous = params.len();
-        inspect(&t.guard, model, &mut params, &mut bound);
+        inspect(guard, model, &mut params, &mut bound);
         if params.len() == previous {
             let effects = params
                 .iter()

@@ -2,7 +2,7 @@
 //! nothing reads already are. The joint check slices its own models
 //! (`composite::joint::slice`).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use temper_spec::predicate::{Arg, Name, VarKind};
 
@@ -78,11 +78,19 @@ pub(super) fn leave_out_unread_counters(automaton: &Automaton, model: &mut Tempe
         // Entry rules choose guard and constraint inputs too, even when
         // their only effect writes a counter that was left out.
         let guard_params = t.guard.params_read();
-        t.params.retain(|name, _| {
+        let kept = |name: &String| {
             effect_params.contains_key(name)
                 || (!model.entry_rules.is_empty()
                     && (guard_params.contains(name)
                         || t.string_params.iter().any(|param| &param.name == name)))
-        });
+        };
+        // What follows the move still reads the values it carried.
+        let after = t.after.params_read();
+        let (params, left): (BTreeMap<_, _>, BTreeMap<_, _>) = std::mem::take(&mut t.params)
+            .into_iter()
+            .partition(|(name, _)| kept(name));
+        t.params = params;
+        t.after_params
+            .extend(left.into_iter().filter(|(name, _)| after.contains(name)));
     }
 }

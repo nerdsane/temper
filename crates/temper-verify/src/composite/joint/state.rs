@@ -97,7 +97,7 @@ pub struct Dispatch {
 impl Dispatch {
     /// The values it carries: its parameters and its unread source's fields.
     pub(super) fn values(&self) -> impl Iterator<Item = &ParamValue> {
-        let committed = self.unread_guard.iter().flat_map(|c| c.fields.values());
+        let committed = self.unread_guard.iter().flat_map(Committed::values);
         self.params.values().chain(committed)
     }
 }
@@ -111,9 +111,22 @@ pub struct Committed {
     pub status: Option<String>,
     /// The fields the guard reads, by name.
     pub fields: BTreeMap<String, ParamValue>,
+    /// The values of the source's move the guard reads by name, as the
+    /// runtime copies them into the source's fields.
+    pub params: BTreeMap<String, ParamValue>,
 }
 
 impl Committed {
+    /// The values it holds: its fields and the move's values.
+    pub(super) fn values(&self) -> impl Iterator<Item = &ParamValue> {
+        self.fields.values().chain(self.params.values())
+    }
+
+    /// The values it holds, to rename.
+    pub(super) fn values_mut(&mut self) -> impl Iterator<Item = &mut ParamValue> {
+        self.fields.values_mut().chain(self.params.values_mut())
+    }
+
     /// The source record as the guard reads it.
     pub(super) fn record(&self) -> TemperModelState {
         let mut record = TemperModelState {
@@ -192,11 +205,12 @@ pub(super) fn canonical(state: &mut JointState) -> BTreeMap<ModelString, ModelSt
                     .iter()
                     .flat_map(|d| strings(d.params.values())),
             )
-            .chain(state.inflight.iter().flat_map(|d| {
-                d.unread_guard
+            .chain(
+                state
+                    .inflight
                     .iter()
-                    .flat_map(|c| strings(c.fields.values()))
-            }))
+                    .flat_map(|d| d.unread_guard.iter().flat_map(|c| strings(c.values()))),
+            )
             .chain(state.calls.iter().flat_map(|c| c.asked.values())),
     );
     let moved = |value: &ModelString| renamed.get(value).is_some_and(|name| name != value);
@@ -229,7 +243,7 @@ pub(super) fn canonical(state: &mut JointState) -> BTreeMap<ModelString, ModelSt
                 let dispatch = Arc::make_mut(dispatch);
                 dispatch.params.values_mut().for_each(rewrite_param);
                 if let Some(committed) = &mut dispatch.unread_guard {
-                    committed.fields.values_mut().for_each(rewrite_param);
+                    committed.values_mut().for_each(rewrite_param);
                 }
             }
         }

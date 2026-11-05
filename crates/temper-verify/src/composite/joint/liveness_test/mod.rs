@@ -461,6 +461,7 @@ fn oversized_parameter_expansion_is_incomplete() {
     assert!(results[0].holds(), "{}", results[0]);
 }
 
+mod answer_choice;
 mod cause;
 mod cycles;
 mod empty_ending;

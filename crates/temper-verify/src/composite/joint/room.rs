@@ -288,7 +288,7 @@ impl Heap for super::Dispatch {
             + self
                 .unread_guard
                 .as_ref()
-                .map_or(0, |c| c.status.heap() + c.fields.heap())
+                .map_or(0, |c| c.status.heap() + c.fields.heap() + c.params.heap())
     }
 }
 

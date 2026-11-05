@@ -61,7 +61,15 @@ pub(super) fn slice(mut model: TemperModel, read: BTreeSet<String>) -> TemperMod
     model.liveness.clear();
     for t in &mut model.transitions {
         t.effects.retain(|e| !dropped.contains(effect_var(e)));
-        t.params = effect_params(&t.effects);
+        // What follows the move still reads the values it carried.
+        let effect = effect_params(&t.effects);
+        let after = t.after.params_read();
+        for (name, kind) in &t.params {
+            if !effect.contains_key(name) && after.contains(name) {
+                t.after_params.insert(name.clone(), *kind);
+            }
+        }
+        t.params = effect;
     }
     model
 }

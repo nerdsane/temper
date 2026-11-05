@@ -218,7 +218,11 @@ fn successors_with(
         }
         false
     });
-    out
+    if t.after_params.is_empty() {
+        out
+    } else {
+        super::trigger_guard::with_after_values(model, t, out, budget)
+    }
 }
 
 /// The transition the runtime takes for action `name` in `status`: the first

@@ -57,6 +57,7 @@ impl JointModel {
         let own = committed.record();
         let mut env = self.env(&reaction.from, state);
         env.own = Some(&own);
+        env.params = Some(&committed.params);
         env.unheld_unknown = true;
         eval(guard, &env)
     }

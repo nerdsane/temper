@@ -218,6 +218,14 @@ fn resolve_transitions(
                 .filter(|effect| holds_written(effect, read, tracked_strings))
                 .collect();
             let mut params = effect_params(&effects);
+            let read = super::trigger_guard::params_read(automaton, action);
+            let beside_related = super::trigger_guard::read_beside_related(automaton, action);
+            for (name, kind) in read
+                .iter()
+                .filter(|(name, _)| beside_related.contains(*name))
+            {
+                params.entry(name.clone()).or_insert(*kind);
+            }
             if !automaton.entry_rules.is_empty() {
                 // A guard-only input still determines whether entry is legal.
                 let reads = action.guard.params_read();
@@ -245,6 +253,12 @@ fn resolve_transitions(
                 }
             }
             let string_params = string_params(action, tracked_strings, &params);
+            // What follows the move reads the values it carried.
+            let after_params = read
+                .into_iter()
+                .filter(|(name, _)| !params.contains_key(name))
+                .filter(|(name, _)| !string_params.iter().any(|p| &p.name == name))
+                .collect();
             ResolvedTransition {
                 name: a.name,
                 from_states: a.from_states,
@@ -258,6 +272,8 @@ fn resolve_transitions(
                 params,
                 string_params,
                 constraints: action.constraints.clone(),
+                after: super::trigger_guard::after(automaton, action),
+                after_params,
             }
         })
         .collect()

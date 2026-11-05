@@ -451,6 +451,8 @@ mod tests {
                 params: BTreeMap::new(),
                 string_params: vec![],
                 constraints: vec![],
+                after: Expr::always(),
+                after_params: BTreeMap::new(),
             }],
             invariants: vec![ResolvedInvariant {
                 name: "OnlyA".to_string(),

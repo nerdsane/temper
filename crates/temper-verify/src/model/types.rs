@@ -190,6 +190,13 @@ pub struct ResolvedTransition {
     /// Original input constraints. Route proofs must identify any that
     /// string parameter exploration does not enforce.
     pub constraints: Vec<temper_spec::automaton::ActionConstraint>,
+    /// What follows the move reads of the values it carried: its triggers'
+    /// guards as the model reads them, each guard one part.
+    pub after: Expr,
+    /// The values of the move only [`Self::after`] reads, by kind. They
+    /// change nothing the move writes, so a move takes one set of them for
+    /// each way they decide its triggers' guards.
+    pub after_params: BTreeMap<String, ParamKind>,
 }
 
 /// A string parameter of an action, with what the action's constraints allow

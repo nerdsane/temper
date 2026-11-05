@@ -320,7 +320,9 @@ fn reactions_in(by_name: &BTreeMap<&str, &Automaton>, scope: &BTreeSet<String>) 
                     source_action: action.name.clone(),
                     to: to.clone(),
                     target_action: target_action.clone(),
-                    guard: trigger.guard.clone(),
+                    guard: trigger.guard.as_ref().map(|guard| {
+                        crate::model::trigger_guard::as_read(by_name[from.as_str()], action, guard)
+                    }),
                     args: trigger.args.clone(),
                     resolve: trigger.resolve_target.clone(),
                     principal: senders::declared(trigger, from, &action.name),

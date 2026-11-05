@@ -228,7 +228,7 @@ pub(super) fn count_ranges<'a>(
             .into_iter()
             .filter(|p| ranges.contains_key(p.as_str()))
             .map(|p| {
-                let bound = super::parameters::guard_count_bound(model, t, &p, &ranges);
+                let bound = super::parameters::guard_count_bound(model, &t.guard, &p, &ranges);
                 (p, bound)
             })
             .collect();

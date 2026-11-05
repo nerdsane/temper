@@ -24,6 +24,7 @@ mod silent;
 mod stateright_impl;
 mod string;
 mod strings;
+pub(crate) mod trigger_guard;
 pub mod types;
 
 pub use builder::{build_model_from_automaton, build_model_from_ioa, build_model_tracking};
