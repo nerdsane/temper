@@ -37,7 +37,10 @@ impl Part {
 /// The policies that read alike whatever the sender: for each question, the
 /// class of each candidate. A question's asker, record and cause are all a
 /// policy reads besides the sender, its action and its resource type, so the
-/// same condition on many actions is read once for each kind.
+/// same condition on many actions is read once for each kind. A policy is
+/// read as the question leaves it to someone unknown: a part the question
+/// decides, such as `action in [...]`, is its result, and the action or
+/// resource type is part of the class only while a part left open reads it.
 pub(super) struct Classes {
     pub(super) of: Vec<Vec<usize>>,
     pub(super) count: usize,
@@ -61,7 +64,14 @@ impl Classes {
                     .iter()
                     .map(|&at| {
                         let (effect, policy) = &policies[at];
-                        let conditions = policy["conditions"].to_string();
+                        // Knowing more of the sender keeps what is decided
+                        // and reads what is open alike for every question
+                        // that leaves the same: no part the question
+                        // decides is read again.
+                        let conditions = request.residual(policy, &|_| false).map_or_else(
+                            || policy["conditions"].to_string(),
+                            |left| left.to_string(),
+                        );
                         let action = if conditions.contains(r#"{"Var":"action"}"#) {
                             question.action
                         } else {

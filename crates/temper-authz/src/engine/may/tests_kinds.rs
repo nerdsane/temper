@@ -217,3 +217,48 @@ fn a_list_of_people_tells_senders_apart_as_comparing_with_each_does() {
     assert!(kinds.iter().any(|kind| may(kind, "Ban") == May::Yes));
     assert!(kinds.iter().any(|kind| may(kind, "Ban") == May::No));
 }
+
+fn kinds_of(policies: &str, actions: &[&str]) -> Vec<Kind> {
+    let analysis = SendAnalysis::new(policies).expect("policies parse");
+    let questions: Vec<Question<'_>> = actions
+        .iter()
+        .map(|action| Question {
+            action,
+            resource_type: "Note",
+            cause: Cause::request(),
+        })
+        .collect();
+    analysis
+        .outside_kinds(&questions, &|_| Ok(()))
+        .expect("fits")
+}
+
+#[test]
+fn a_policy_the_actions_leave_alike_is_read_once_and_tells_the_same_kinds() {
+    // The forbid reads the action, but leaves Add and Edit alike: members,
+    // and the rest, as Add alone says.
+    let policies = r#"
+permit(principal, action, resource is Note)
+when { principal has role && principal.role == "member" };
+forbid(principal, action, resource is Note)
+unless { action in [Action::"Add", Action::"Edit"] || (context has via && context.via != "request") };
+"#;
+    let alone = kinds_of(policies, &["Add"]);
+    assert_eq!(alone.len(), 2, "members, and the rest");
+    assert_eq!(kinds_of(policies, &["Add", "Edit"]), alone);
+}
+
+#[test]
+fn a_policy_two_actions_leave_differently_still_tells_their_senders_apart() {
+    // Members may Add and helpers may Edit: the same condition text, left
+    // open for one action and decided for the other.
+    let policies = r#"
+permit(principal, action, resource is Note)
+when { principal has role && ((principal.role == "member" && action == Action::"Add") || (principal.role == "helper" && action == Action::"Edit")) };
+"#;
+    assert_eq!(
+        kinds_of(policies, &["Add", "Edit"]).len(),
+        3,
+        "members, helpers, and the rest"
+    );
+}

@@ -182,7 +182,30 @@ impl SendAnalysis {
         let memory = Memory::new(&tests, &self.policies, &candidates, reserve);
         memory.reserve(4, 0)?;
         let forms = Forms::default();
-        let classes = Classes::read(&self.policies, questions, &candidates);
+        let mut classes = Classes::read(&self.policies, questions, &candidates);
+        // Questions that leave every candidate in the same class answer
+        // alike for every kind and leave the same parts open: one of them
+        // stands for the rest.
+        let mut held = HashSet::new();
+        let stands: Vec<bool> = classes
+            .of
+            .iter()
+            .map(|of| held.insert(of.clone()))
+            .collect();
+        let kept = |at: &usize| stands[*at];
+        let questions: Vec<Question<'_>> = (0..questions.len())
+            .filter(kept)
+            .map(|at| questions[at].clone())
+            .collect();
+        let questions = &questions[..];
+        let candidates: Vec<Vec<usize>> = (0..candidates.len())
+            .filter(kept)
+            .map(|at| candidates[at].clone())
+            .collect();
+        classes.of = (0..classes.of.len())
+            .filter(kept)
+            .map(|at| classes.of[at].clone())
+            .collect();
         let read = |profile: Profile, parent: Option<&Node>| {
             let mut answers = Vec::with_capacity(questions.len());
             let mut form = Vec::with_capacity(questions.len() + 1);
