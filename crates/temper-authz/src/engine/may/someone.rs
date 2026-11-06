@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use super::profile::{self, Profile};
-use super::{Asker, Cause, Kind, May, Question, SendAnalysis};
+use super::{Answered, Asker, Cause, Kind, May, Question, SendAnalysis};
 
 impl SendAnalysis {
     /// Whether a request of `action` on a `resource_type` record is one the
@@ -99,5 +99,34 @@ impl SendAnalysis {
             held.insert(key, found);
         }
         found
+    }
+
+    /// Note each request among `questions` that no outside sender may surely
+    /// make: no one of `kinds` answers yes. Every outside principal is of one
+    /// kind, and a kind answers yes only when all its senders may. A split on
+    /// more questions tells senders apart at least as finely as one on that
+    /// request alone, so when it finds no such sender, neither would that
+    /// split ([`SendAnalysis::may_request`]). Where it finds one, the split
+    /// alone may leave it open, so that answer is left to the split: what
+    /// `may_request` answers never depends on which partitions ran first.
+    pub(super) fn note_someone(&self, questions: &[Question<'_>], kinds: &[Answered]) {
+        let Ok(mut someone) = self.someone.lock() else {
+            return;
+        };
+        let request = Cause::request();
+        for (at, question) in questions.iter().enumerate() {
+            if question.cause != request {
+                continue;
+            }
+            if kinds.iter().any(|kind| kind.answers[at] == May::Yes) {
+                continue;
+            }
+            someone
+                .entry((
+                    question.action.to_string(),
+                    question.resource_type.to_string(),
+                ))
+                .or_insert(false);
+        }
     }
 }

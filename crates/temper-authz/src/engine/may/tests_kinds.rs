@@ -370,3 +370,75 @@ permit(principal, action == Action::"Z", resource) when {{ context.role == "memb
     );
     assert_eq!(kinds, kinds_of(asked, &["A"]));
 }
+
+#[test]
+fn whether_someone_may_make_a_request_is_what_a_split_on_it_alone_finds() {
+    // Members surely may Add; only some "x" senders may Pong, and only when
+    // the record is open, so no sender surely may.
+    let policies = r#"
+permit(principal, action == Action::"Add", resource is Note)
+when { principal has role && principal.role == "member" };
+permit(principal, action == Action::"Pong", resource is Note)
+when { principal has role && principal.role == "x" && resource.open == true };
+"#;
+    let questions = ["Pong", "Add"].map(|action| Question {
+        action,
+        resource_type: "Note",
+        cause: Cause::request(),
+    });
+    let unlimited = |_: usize| Ok(());
+    let alone = SendAnalysis::new(policies).expect("the policies parse");
+    let told = SendAnalysis::new(policies).expect("the policies parse");
+    told.outside_kinds(&questions, &unlimited)
+        .expect("nothing limits the room");
+    for question in &questions {
+        let action = question.action;
+        assert_eq!(
+            told.may_request(&Asker::Outside, action, "Note", &unlimited),
+            alone.may_request(&Asker::Outside, action, "Note", &unlimited),
+            "{action}"
+        );
+    }
+    assert_eq!(
+        told.may_request(&Asker::Outside, "Add", "Note", &unlimited),
+        May::Yes
+    );
+    assert_eq!(
+        told.may_request(&Asker::Outside, "Pong", "Note", &unlimited),
+        May::Maybe
+    );
+}
+
+#[test]
+fn whether_someone_may_make_a_request_does_not_depend_on_which_split_ran_first() {
+    // Asked with B, the split tells apart senders whose role and alt are
+    // both "x", who surely may A; asked with C, or alone, it leaves A open.
+    let policies = r#"
+permit(principal, action == Action::"A", resource is Note)
+when { principal has role && principal has alt && principal.role == principal.alt };
+permit(principal, action == Action::"B", resource is Note)
+when { principal has role && principal.role == "x" && principal has alt && principal.alt == "x" };
+permit(principal, action == Action::"C", resource is Note)
+when { principal has team && principal.team == "t" };
+"#;
+    let ask = |actions: [&'static str; 2]| {
+        actions.map(|action| Question {
+            action,
+            resource_type: "Note",
+            cause: Cause::request(),
+        })
+    };
+    let unlimited = |_: usize| Ok(());
+    let answer = |splits: &[[&'static str; 2]]| {
+        let analysis = SendAnalysis::new(policies).expect("the policies parse");
+        for split in splits {
+            analysis
+                .outside_kinds(&ask(*split), &unlimited)
+                .expect("nothing limits the room");
+        }
+        analysis.may_request(&Asker::Outside, "A", "Note", &unlimited)
+    };
+    let alone = answer(&[]);
+    assert_eq!(answer(&[["A", "C"], ["A", "B"]]), alone);
+    assert_eq!(answer(&[["A", "B"], ["A", "C"]]), alone);
+}

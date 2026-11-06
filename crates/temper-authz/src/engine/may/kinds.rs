@@ -153,6 +153,7 @@ impl SendAnalysis {
         }
         drop(held);
         let kinds = self.partition(questions, reserve)?;
+        self.note_someone(questions, &kinds);
         let mut held = self
             .kinds
             .lock()
