@@ -374,7 +374,7 @@ fn broken_by(model: &TemperModel, t: &ResolvedTransition, candidates: &[usize]) 
     // when a move both assigns a literal and supplies the field as a param.
     for param in &t.string_params {
         let value = Int::new_const(var_name("", "string-param", &param.name));
-        if param.nonempty {
+        if param.nonempty || param.caller {
             solver.assert(value.eq(Int::from_i64(0)).not());
         }
         for field in &param.equals {

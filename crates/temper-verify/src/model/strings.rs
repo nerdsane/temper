@@ -96,6 +96,9 @@ fn string_candidates(
     if param.nonempty {
         candidates.retain(|candidate| !candidate.is_blank());
     }
+    if param.caller {
+        candidates.retain(|candidate| !candidate.is_empty());
+    }
     for var in &param.not_equals {
         if let Some(value) = tracked(var) {
             candidates.remove(&value);

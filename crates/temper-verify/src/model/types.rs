@@ -211,6 +211,9 @@ pub struct StringParam {
     pub writes: bool,
     /// `param_nonempty`: never empty or whitespace-only.
     pub nonempty: bool,
+    /// Bound to `authenticated_subject`: the kernel writes the caller's id,
+    /// which it never lets be empty (it may still be whitespace-only).
+    pub caller: bool,
     /// `param_equals_field`: equal to the value of every one of these variables.
     pub equals: Vec<Sym>,
     /// `param_not_equals_field`: never the value of these variables.
