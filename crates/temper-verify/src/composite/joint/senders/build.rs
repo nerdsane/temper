@@ -60,13 +60,22 @@ impl Senders {
         };
         let outside: Vec<u32> = match &kinds {
             None => vec![OUTSIDE],
-            Some(kinds) => (1..=kinds.len()).map(|at| at as u32 * 2).collect(),
+            Some(found) => (1..=found.kinds.len()).map(|at| at as u32 * 2).collect(),
         };
-        let kinds = kinds.unwrap_or_default();
-        let kind_count = kinds.len();
+        let mut found = kinds.unwrap_or_else(|| kinds::Outside {
+            kinds: Vec::new(),
+            requests: HashMap::new(),
+            reactions: HashMap::new(),
+            reads: HashMap::new(),
+        });
+        let kind_count = found.kinds.len();
         let mut askers = Vec::with_capacity(kind_count + 1);
         askers.push(Asker::Outside);
-        askers.extend(kinds.into_iter().map(Asker::OutsideAs));
+        askers.extend(
+            std::mem::take(&mut found.kinds)
+                .into_iter()
+                .map(Asker::OutsideAs),
+        );
         for entity in entities.clone() {
             for action in &by_name[entity.as_str()].actions {
                 for trigger in &action.triggers {
@@ -110,7 +119,8 @@ impl Senders {
                     Asker::OutsideAs(kind) => kind.bytes(),
                     _ => 0,
                 })
-                .sum();
+                .sum::<usize>()
+                + found.bytes();
             let room = table::room(by_name, entities.clone(), kind_count + 1, askers.len())
                 .and_then(|room| {
                     room.checked_add(table::read_room(standing, askers.len()))
@@ -140,10 +150,18 @@ impl Senders {
                 reserve.unwrap_or(&unlimited)(total)
             };
             let requests = each(by_name, entities.clone(), &|entity, action| {
-                askers[..=kind_count]
-                    .iter()
-                    .map(|asker| policies.may_request(asker, action, entity, &beside_tables))
-                    .collect()
+                let key = (entity.to_string(), action.to_string());
+                let anyone = policies.may_request(&askers[0], action, entity, &beside_tables);
+                match found.requests.get(&key) {
+                    Some(kinds) => std::iter::once(anyone)
+                        .chain(kinds.iter().copied())
+                        .collect(),
+                    None => std::iter::once(anyone)
+                        .chain(askers[1..=kind_count].iter().map(|asker| {
+                            policies.may_request(asker, action, entity, &beside_tables)
+                        }))
+                        .collect(),
+                }
             });
             // Hand back what the last look took, which `tables` already holds.
             let _ = beside_tables(0);
@@ -152,7 +170,16 @@ impl Senders {
         let may = policies.map(|policies| {
             let mut may = each(by_name, entities.clone(), &|entity, action| {
                 let mut answers = Vec::with_capacity(askers.len() * 2);
-                for asker in &askers {
+                let known = found
+                    .reactions
+                    .get(&(entity.to_string(), action.to_string()));
+                for (by, asker) in askers.iter().enumerate() {
+                    if let Some(known) = known
+                        && (1..=kind_count).contains(&by)
+                    {
+                        answers.extend(known[by - 1]);
+                        continue;
+                    }
                     let answer = |timed| {
                         policies.may(
                             asker,
@@ -174,10 +201,15 @@ impl Senders {
             });
             let cause = Cause::timer_fire();
             for entity in standing {
+                let known = found.reads.get(entity);
                 let answers = askers
                     .iter()
-                    .flat_map(|asker| {
-                        let answer = policies.may(asker, READ, entity, &none, Some(&cause));
+                    .enumerate()
+                    .flat_map(|(by, asker)| {
+                        let answer = match known {
+                            Some(known) if (1..=kind_count).contains(&by) => known[by - 1],
+                            _ => policies.may(asker, READ, entity, &none, Some(&cause)),
+                        };
                         [answer, answer]
                     })
                     .collect();

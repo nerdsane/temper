@@ -39,7 +39,7 @@ use super::platform_policy::merge_system_platform_policy;
 use crate::error::AuthzError;
 pub use cause::{Cause, Hop};
 pub use compared::Read;
-pub use kinds::Question;
+pub use kinds::{Answered, Question};
 pub use profile::Kind;
 use profile::UNKNOWN;
 use request::{Request, Results, TRUE};
@@ -137,7 +137,7 @@ pub struct SendAnalysis {
     policies: Vec<(Effect, Json)>,
     /// The kinds found for each set of questions: the proofs of one app ask
     /// the same ones again ([`SendAnalysis::outside_kinds`]).
-    kinds: Arc<Mutex<HashMap<String, Vec<Kind>>>>,
+    kinds: Arc<Mutex<HashMap<String, Vec<Answered>>>>,
     /// The policies whose action and resource scopes fit each (action,
     /// resource type): a proof asks about every action of every type for
     /// every sender, and most policies name one type's actions.

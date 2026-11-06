@@ -188,3 +188,87 @@ to = "Ready"
     drop(memory);
     assert_eq!(room.held(), 0, "failed construction releases its room");
 }
+
+#[test]
+fn each_table_cell_the_partition_hands_on_is_what_cedar_answers() {
+    // Members may Ping in a timer's chain and helpers in a request's,
+    // guests may Pong, and helpers may read a Note as its timer fires: each
+    // kind's row, chain and read must be its own.
+    let note = parse_automaton(
+        r#"
+[automaton]
+name = "Note"
+states = ["Unmade", "Posted"]
+initial = "Unmade"
+[[action]]
+name = "Add"
+kind = "input"
+from = ["Unmade"]
+to = "Posted"
+[[action]]
+name = "Ping"
+kind = "input"
+from = ["Posted"]
+to = "Posted"
+[[action]]
+name = "Pong"
+kind = "input"
+from = ["Posted"]
+to = "Posted"
+"#,
+    )
+    .expect("the automaton parses");
+    let policy = SendAnalysis::new(
+        r#"
+permit(principal, action == Action::"Add", resource is Note)
+when { principal has role && principal.role in ["member", "helper", "guest"] };
+permit(principal, action == Action::"Ping", resource is Note)
+when { principal has role && principal.role == "member" && context.via == "timer" };
+permit(principal, action == Action::"Ping", resource is Note)
+when { principal has role && principal.role == "helper" && context.via == "reaction" };
+permit(principal, action == Action::"Pong", resource is Note)
+when { principal has role && principal.role == "guest" };
+permit(principal, action == Action::"read", resource is Note)
+when { principal has role && principal.role == "helper" };
+"#,
+    )
+    .expect("the policies parse");
+    let note_only = BTreeSet::from(["Note".to_string()]);
+    let senders = Senders::new(
+        &BTreeMap::from([("Note", &note)]),
+        &["Note".to_string()],
+        Some(&policy),
+        &note_only,
+        &BTreeSet::from([
+            ("Note".to_string(), "Ping".to_string()),
+            ("Note".to_string(), "Pong".to_string()),
+        ]),
+        &note_only,
+        None,
+    );
+    assert!(senders.timer_chains);
+    assert!(senders.outside().len() >= 3, "{:?}", senders.askers);
+    let none = BTreeMap::new();
+    let unlimited = |_: usize| Ok(());
+    let requests = senders.requests.as_ref().expect("policies give tables");
+    for (action, row) in &requests["Note"] {
+        for (by, answer) in row.iter().enumerate() {
+            let asker = &senders.askers[by];
+            let cedar = policy.may_request(asker, action, "Note", &unlimited);
+            assert_eq!(*answer, cedar, "request {action} by {asker:?}");
+        }
+    }
+    let may = senders.may.as_ref().expect("policies give tables");
+    for (action, row) in &may["Note"] {
+        for (at, answer) in row.iter().enumerate() {
+            let asker = &senders.askers[at / 2];
+            let cause = if action == "read" {
+                Cause::timer_fire()
+            } else {
+                Cause::reaction(at % 2 == 1, Hop::unknown())
+            };
+            let cedar = policy.may(asker, action, "Note", &none, Some(&cause));
+            assert_eq!(*answer, cedar, "{action} at {at} by {asker:?}");
+        }
+    }
+}

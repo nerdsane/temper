@@ -29,7 +29,7 @@ mod platform_policy;
 
 pub use list_read::{ListRead, RowRule};
 pub use list_uniformity::ListReadUniformity;
-pub use may::{Asker, Attr, Cause, Hop, Kind, May, Question, Read, SendAnalysis};
+pub use may::{Answered, Asker, Attr, Cause, Hop, Kind, May, Question, Read, SendAnalysis};
 pub use permit_reach::permitted_resource_types;
 pub use platform_policy::VERIFIED_OPERATOR_WHEN;
 use platform_policy::{

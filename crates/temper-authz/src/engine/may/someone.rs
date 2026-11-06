@@ -93,11 +93,7 @@ impl SendAnalysis {
         let Ok(kinds) = self.partition(std::slice::from_ref(&question), reserve) else {
             return false;
         };
-        let none = BTreeMap::new();
-        let found = kinds.into_iter().any(|kind| {
-            let asker = Asker::OutsideAs(kind);
-            self.may(&asker, action, resource_type, &none, Some(&question.cause)) == May::Yes
-        });
+        let found = kinds.iter().any(|kind| kind.answers[0] == May::Yes);
         if let Ok(mut held) = self.someone.lock() {
             held.insert(key, found);
         }

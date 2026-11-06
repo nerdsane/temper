@@ -115,7 +115,12 @@ when { principal has role && principal.role like "guest*" };
             cause: Cause::reaction(false, Hop::unknown()),
         },
     ];
-    let kinds = analysis.outside_kinds(&questions, &|_| Ok(())).unwrap();
+    let kinds = analysis
+        .outside_kinds(&questions, &|_| Ok(()))
+        .unwrap()
+        .into_iter()
+        .map(|found| found.kind)
+        .collect::<Vec<Kind>>();
     let answers = |kind: &Kind| -> Vec<May> {
         let asker = Asker::OutsideAs(kind.clone());
         questions
@@ -195,7 +200,12 @@ when { principal.flag like "y*" };
             cause: Cause::request(),
         })
         .collect();
-    let kinds = analysis.outside_kinds(&questions, &|_| Ok(())).unwrap();
+    let kinds = analysis
+        .outside_kinds(&questions, &|_| Ok(()))
+        .unwrap()
+        .into_iter()
+        .map(|found| found.kind)
+        .collect::<Vec<Kind>>();
     let answers: Vec<Vec<May>> = kinds
         .iter()
         .map(|kind| {
@@ -282,6 +292,7 @@ when { (principal has role) == (principal has agent_type) && context.via != "req
         .outside_kinds(&questions, &|_| Ok(()))
         .unwrap()
         .into_iter()
+        .map(|found| found.kind)
         .map(|kind| {
             questions
                 .iter()
@@ -407,13 +418,19 @@ fn questions_everyone_has_one_answer_to_leave_the_kinds_as_they_are() {
     let unlimited = |_: usize| Ok(());
     let alone = analysis
         .outside_kinds(&[question("Add")], &unlimited)
-        .expect("fits");
+        .expect("fits")
+        .into_iter()
+        .map(|found| found.kind)
+        .collect::<Vec<Kind>>();
     let among = analysis
         .outside_kinds(
             &[question("Delete"), question("Archive"), question("Add")],
             &unlimited,
         )
-        .expect("fits");
+        .expect("fits")
+        .into_iter()
+        .map(|found| found.kind)
+        .collect::<Vec<Kind>>();
     assert_eq!(alone.len(), 2, "members, and the rest");
     assert_eq!(among, alone);
 }

@@ -39,6 +39,21 @@ pub struct Question<'a> {
     pub cause: Cause,
 }
 
+/// A kind of outside sender and its answer to each question it was told
+/// apart on, in their order: what [`SendAnalysis::may`] answers for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Answered {
+    pub kind: Kind,
+    pub answers: Vec<May>,
+}
+
+impl Answered {
+    /// The bytes it retains, its kind's and its answers'.
+    pub fn bytes(&self) -> usize {
+        self.kind.bytes() + self.answers.capacity() * size_of::<May>()
+    }
+}
+
 /// A kind of outside sender being told apart: what it is known to be, each
 /// question's answer for it, and the tests some open answer turns on.
 struct Node {
@@ -113,23 +128,24 @@ struct Tests {
 
 impl SendAnalysis {
     /// The kinds of outside sender these policies tell apart on
-    /// `questions`: together they are every outside principal, and every
-    /// question has one answer for all of a kind's. `reserve` accounts for
+    /// `questions`, each with its answers to them: together they are every
+    /// outside principal, and every question has one answer for all of a
+    /// kind's. `reserve` accounts for
     /// the live construction's bytes before growth; denial aborts the
     /// partition rather than returning an incomplete set of senders.
     pub fn outside_kinds(
         &self,
         questions: &[Question<'_>],
         reserve: &dyn Fn(usize) -> Result<(), String>,
-    ) -> Result<Vec<Kind>, String> {
+    ) -> Result<Vec<Answered>, String> {
         let key = format!("{questions:?}");
-        let found = |kinds: &HashMap<String, Vec<Kind>>| kinds.get(&key).cloned();
+        let found = |kinds: &HashMap<String, Vec<Answered>>| kinds.get(&key).cloned();
         let held = self
             .kinds
             .lock()
             .map_err(|_| "a partition panicked".to_string())?;
         if let Some(kinds) = found(&held) {
-            reserve(kinds.iter().map(Kind::bytes).sum())?;
+            reserve(kinds.iter().map(Answered::bytes).sum())?;
             return Ok(kinds);
         }
         drop(held);
@@ -146,7 +162,7 @@ impl SendAnalysis {
         &self,
         questions: &[Question<'_>],
         reserve: &dyn Fn(usize) -> Result<(), String>,
-    ) -> Result<Vec<Kind>, String> {
+    ) -> Result<Vec<Answered>, String> {
         reserve(memory::tests_room(&self.policies, questions.len()))?;
         let mut tests = Tests::read(&self.policies);
         let none = BTreeMap::new();
@@ -166,32 +182,40 @@ impl SendAnalysis {
         // A question someone unknown has a definite answer to has it for
         // every kind: it adds the same answer to every node and reads
         // nothing, so it never splits one, and the nodes ask only the rest.
-        let (questions, candidates): (Vec<Question<'_>>, Vec<Vec<usize>>) = questions
+        let unknown: Vec<May> = questions
             .iter()
-            .zip(candidates)
-            .filter(|(question, candidates)| {
+            .zip(&candidates)
+            .map(|(question, candidates)| {
                 let request = ask(&anyone, &UNKNOWN, question, &none);
-                let applies = candidates
-                    .iter()
-                    .map(|&at| (self.policies[at].0, request.applies(&self.policies[at].1)));
-                decide(applies) == May::Maybe
+                decide(
+                    candidates
+                        .iter()
+                        .map(|&at| (self.policies[at].0, request.applies(&self.policies[at].1))),
+                )
             })
-            .map(|(question, candidates)| (question.clone(), candidates))
-            .unzip();
+            .collect();
+        let maybe: Vec<usize> = (0..questions.len())
+            .filter(|&at| unknown[at] == May::Maybe)
+            .collect();
+        let questions: Vec<Question<'_>> = maybe.iter().map(|&at| questions[at].clone()).collect();
         let questions = &questions[..];
+        let candidates: Vec<Vec<usize>> = maybe.iter().map(|&at| candidates[at].clone()).collect();
         let memory = Memory::new(&tests, &self.policies, &candidates, reserve);
         memory.reserve(4, 0)?;
         let forms = Forms::default();
         let mut classes = Classes::read(&self.policies, questions, &candidates);
         // Questions that leave every candidate in the same class answer
         // alike for every kind and leave the same parts open: one of them
-        // stands for the rest.
-        let mut held = HashSet::new();
-        let stands: Vec<bool> = classes
-            .of
-            .iter()
-            .map(|of| held.insert(of.clone()))
-            .collect();
+        // stands for the rest, and its answer is theirs.
+        let mut held = HashMap::new();
+        let mut stands = Vec::with_capacity(classes.of.len());
+        let mut answered_by = Vec::with_capacity(classes.of.len());
+        for of in &classes.of {
+            let count = held.len();
+            let by = *held.entry(of.clone()).or_insert(count);
+            stands.push(by == count);
+            answered_by.push(by);
+        }
         let kept = |at: &usize| stands[*at];
         let questions: Vec<Question<'_>> = (0..questions.len())
             .filter(kept)
@@ -326,9 +350,28 @@ impl SendAnalysis {
                 None => kinds.push((answers, vec![profile])),
             }
         }
+        memory.reserve(
+            4 * (kinds.len() + memory.branches + 1),
+            forms.bytes()
+                + seen.len() * memory.form
+                + kinds.len() * (size_of::<Answered>() + unknown.len() * size_of::<May>()),
+        )?;
+        // Each question's answer: someone unknown's when it is definite, else
+        // that of the question that stood for it.
+        let mut by_question: Vec<Option<usize>> = vec![None; unknown.len()];
+        for (&at, &by) in maybe.iter().zip(&answered_by) {
+            by_question[at] = Some(by);
+        }
         Ok(kinds
             .into_iter()
-            .map(|(_, profiles)| Kind(profiles))
+            .map(|(answers, profiles)| Answered {
+                kind: Kind(profiles),
+                answers: by_question
+                    .iter()
+                    .zip(&unknown)
+                    .map(|(by, &known)| by.map_or(known, |by| answers[by]))
+                    .collect(),
+            })
             .collect())
     }
 }

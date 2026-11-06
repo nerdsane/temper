@@ -120,7 +120,14 @@ fn every_sender_is_of_a_kind_that_answers_as_it_does() {
         .outside_kinds(&questions, &|_| Ok(()))
         .expect("nothing limits the room")
         .into_iter()
-        .map(|kind| answers(&Asker::OutsideAs(kind)))
+        .map(|found| {
+            let own = answers(&Asker::OutsideAs(found.kind));
+            assert_eq!(
+                own, found.answers,
+                "the partition's answers are the kind's own"
+            );
+            own
+        })
         .collect();
     assert!(!kinds.is_empty());
     let mut seen = 0;
@@ -169,7 +176,14 @@ when { principal has role && principal.role == "b" };
         .outside_kinds(&questions, &|_| Ok(()))
         .expect("nothing limits the room")
         .into_iter()
-        .map(|kind| answers(&Asker::OutsideAs(kind)))
+        .map(|found| {
+            let own = answers(&Asker::OutsideAs(found.kind));
+            assert_eq!(
+                own, found.answers,
+                "the partition's answers are the kind's own"
+            );
+            own
+        })
         .collect();
     for (kind, role) in [("Agent", "a"), ("Agent", "b"), ("Customer", "b")] {
         let mut sender = Profile {
@@ -204,7 +218,10 @@ fn a_list_of_people_tells_senders_apart_as_comparing_with_each_does() {
     };
     let kinds = policies
         .outside_kinds(&[question("Ban"), question("Stop")], &|_| Ok(()))
-        .expect("the test policy parses");
+        .expect("the test policy parses")
+        .into_iter()
+        .map(|found| found.kind)
+        .collect::<Vec<Kind>>();
     let none = BTreeMap::new();
     let may = |kind: &Kind, action| {
         let asker = Asker::OutsideAs(kind.clone());
@@ -231,6 +248,9 @@ fn kinds_of(policies: &str, actions: &[&str]) -> Vec<Kind> {
     analysis
         .outside_kinds(&questions, &|_| Ok(()))
         .expect("fits")
+        .into_iter()
+        .map(|found| found.kind)
+        .collect::<Vec<Kind>>()
 }
 
 #[test]
@@ -261,4 +281,43 @@ when { principal has role && ((principal.role == "member" && action == Action::"
         3,
         "members, helpers, and the rest"
     );
+}
+
+#[test]
+fn each_kind_carries_its_own_answer_to_every_question() {
+    // Members may Add and Edit alike, helpers may Look, everyone may Open,
+    // and nobody may Drop: answers asked of a leaf, answers one question
+    // stands in for, and answers someone unknown already has.
+    let analysis = SendAnalysis::new(
+        r#"
+permit(principal, action in [Action::"Add", Action::"Edit"], resource is Note)
+when { principal has role && principal.role == "member" };
+permit(principal, action == Action::"Look", resource is Note)
+when { principal has role && principal.role == "helper" };
+permit(principal, action == Action::"Open", resource is Note);
+"#,
+    )
+    .expect("the policies parse");
+    let questions = ["Drop", "Add", "Look", "Open", "Edit"].map(|action| Question {
+        action,
+        resource_type: "Note",
+        cause: Cause::request(),
+    });
+    let none = BTreeMap::new();
+    let found = analysis
+        .outside_kinds(&questions, &|_| Ok(()))
+        .expect("nothing limits the room");
+    let mut seen = Vec::new();
+    for Answered { kind, answers } in found {
+        let asker = Asker::OutsideAs(kind.clone());
+        let own: Vec<May> = questions
+            .iter()
+            .map(|q| analysis.may(&asker, q.action, q.resource_type, &none, Some(&q.cause)))
+            .collect();
+        assert_eq!(answers, own, "{kind}");
+        seen.push(answers);
+    }
+    seen.sort_by_key(|answers| format!("{answers:?}"));
+    seen.dedup();
+    assert_eq!(seen.len(), 3, "members, helpers, and the rest: {seen:?}");
 }
