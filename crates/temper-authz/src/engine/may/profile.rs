@@ -72,7 +72,9 @@ impl Kind {
     /// move with `cause` as all its senders would: the examples when its
     /// split asked that, or that with more of the cause known (senders with
     /// one form have one residual, whatever fills it in), else the others
-    /// too.
+    /// too. The others come right after the first example: they differ from
+    /// the examples where the split did not look, so an answer that is not
+    /// one for all its senders shows soonest.
     pub(super) fn profiles(
         &self,
         action: &str,
@@ -86,7 +88,8 @@ impl Kind {
                 .is_some_and(|causes| causes.iter().any(|asked| cause.within(asked)))
         });
         let others: &[Profile] = if asked { &[] } else { &self.others };
-        self.examples.iter().chain(others)
+        let (first, rest) = self.examples.split_at(self.examples.len().min(1));
+        first.iter().chain(others).chain(rest)
     }
 
     /// Every profile it holds.

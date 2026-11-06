@@ -137,10 +137,17 @@ pub(super) fn reread(
     if let (Some(policies), Some(may)) = (policies, may) {
         for (entity, actions) in may {
             for (action, answers) in actions {
+                // Every outside kind finds the same policies: they read no
+                // profile, only who is outside.
+                let mut outside_read = false;
                 for (by, answer) in answers.iter().enumerate() {
-                    if *answer == May::Maybe {
-                        reread.extend(policies.applicable(&askers[by / 2], action, entity));
+                    let asker = &askers[by / 2];
+                    let outside = !matches!(asker, Asker::Service { .. });
+                    if *answer != May::Maybe || (outside && outside_read) {
+                        continue;
                     }
+                    outside_read |= outside;
+                    reread.extend(policies.applicable(asker, action, entity));
                 }
             }
         }

@@ -205,11 +205,14 @@ impl SendAnalysis {
                 (*effect, request.applies(policy))
             }))
         });
-        let first = answers.next().unwrap_or(May::No);
-        answers.fold(
-            first,
-            |sofar, next| if sofar == next { sofar } else { May::Maybe },
-        )
+        let Some(first) = answers.next() else {
+            return May::No;
+        };
+        // Once one answer is Maybe or two differ, the rest cannot change it.
+        if first == May::Maybe || answers.any(|answer| answer != first) {
+            return May::Maybe;
+        }
+        first
     }
 
     /// The policies whose action and resource scopes fit `action` on a
@@ -242,7 +245,8 @@ impl SendAnalysis {
     /// The policies that may apply when `asker` sends `action` to a
     /// `resource_type` record whatever it holds, as text in a fixed order.
     /// [`Self::may`] asked again with some of the record known reads no
-    /// other: knowing more only rules policies out.
+    /// other: knowing more only rules policies out. It reads nothing a kind
+    /// knows of its senders, so every outside asker finds the same.
     pub fn applicable(&self, asker: &Asker, action: &str, resource_type: &str) -> Vec<String> {
         let record = BTreeMap::new();
         let request = Request {
@@ -254,8 +258,9 @@ impl SendAnalysis {
             cause: None,
         };
         let mut applicable: Vec<String> = self
-            .policies
+            .scoped(action, resource_type)
             .iter()
+            .map(|&at| &self.policies[at])
             .filter(|(_, policy)| request.applies(policy).can(TRUE))
             .map(|(effect, policy)| format!("{effect:?} {policy}"))
             .collect();
