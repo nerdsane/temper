@@ -27,6 +27,8 @@ mod who;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_alike;
+#[cfg(test)]
 mod tests_kinds;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -41,7 +43,7 @@ pub use cause::{Cause, Hop};
 pub use compared::Read;
 pub use kinds::{Answered, Question};
 pub use profile::Kind;
-use profile::UNKNOWN;
+use profile::{Profile, UNKNOWN};
 use request::{Request, Results, TRUE};
 
 /// A kind of sender.
@@ -183,13 +185,13 @@ impl SendAnalysis {
         record: &BTreeMap<String, Attr>,
         cause: Option<&Cause>,
     ) -> May {
-        let profiles = match asker {
-            Asker::OutsideAs(kind) => &kind.0[..],
-            _ => std::slice::from_ref(&UNKNOWN),
+        let profiles: Vec<&Profile> = match asker {
+            Asker::OutsideAs(kind) => kind.profiles(action, resource_type, cause).collect(),
+            _ => vec![&UNKNOWN],
         };
         // A kind may be any of its profiles.
         let scoped = self.scoped(action, resource_type);
-        let mut answers = profiles.iter().map(|profile| {
+        let mut answers = profiles.into_iter().map(|profile| {
             let request = Request {
                 asker,
                 profile,

@@ -33,8 +33,8 @@ impl SendAnalysis {
         }
         let surely = match asker {
             Asker::Service { .. } => false,
-            Asker::OutsideAs(kind) => kind.0.iter().any(|profile| {
-                let one = Asker::OutsideAs(Kind(vec![profile.clone()]));
+            Asker::OutsideAs(kind) => kind.every().any(|profile| {
+                let one = Asker::OutsideAs(Kind::of(profile.clone()));
                 self.may(&one, action, resource_type, &none, Some(&request)) == May::Yes
             }),
             Asker::Outside => self.someone(action, resource_type, reserve),
@@ -53,10 +53,9 @@ impl SendAnalysis {
         let none = BTreeMap::new();
         let request = Cause::request();
         let allowed: Vec<Profile> = kind
-            .0
-            .iter()
+            .every()
             .filter(|profile| {
-                let one = Asker::OutsideAs(Kind(vec![(*profile).clone()]));
+                let one = Asker::OutsideAs(Kind::of((*profile).clone()));
                 self.may(&one, action, resource_type, &none, Some(&request)) == May::Yes
             })
             .cloned()
@@ -64,7 +63,9 @@ impl SendAnalysis {
         let typed = |profile: &&Profile| matches!(profile.kind, Some(profile::Fact::Is(_)));
         let known: Vec<Profile> = allowed.iter().filter(typed).cloned().collect();
         let names = if known.is_empty() { allowed } else { known };
-        (!names.is_empty()).then_some(Kind(names))
+        let mut names = names.into_iter();
+        let first = Kind::of(names.next()?);
+        Some(names.fold(first, |kind, profile| kind.join(Kind::of(profile))))
     }
 
     /// Whether some outside sender is allowed a request of `action` on a

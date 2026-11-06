@@ -30,7 +30,7 @@ permit(principal, action == Action::"Other", resource is Elsewhere)
 when { principal.id == "hook-two" };
 "#;
 
-fn is(value: &str) -> Fact {
+pub(super) fn is(value: &str) -> Fact {
     Fact::Is(Json::from(value))
 }
 
@@ -132,7 +132,7 @@ fn every_sender_is_of_a_kind_that_answers_as_it_does() {
     assert!(!kinds.is_empty());
     let mut seen = 0;
     for sender in senders() {
-        let own = answers(&Asker::OutsideAs(Kind(vec![sender.clone()])));
+        let own = answers(&Asker::OutsideAs(Kind::of(sender.clone())));
         seen += 1;
         // Exactly: a kind that answers Maybe to everything would cover every
         // sender and tell the walk nothing.
@@ -191,7 +191,7 @@ when { principal has role && principal.role == "b" };
             ..Profile::default()
         };
         sender.attrs.insert("role".to_string(), is(role));
-        let own = answers(&Asker::OutsideAs(Kind(vec![sender])));
+        let own = answers(&Asker::OutsideAs(Kind::of(sender)));
         assert!(
             kinds.contains(&own),
             "no kind answers as {kind} {role}: {own:?}"
@@ -235,7 +235,15 @@ fn a_list_of_people_tells_senders_apart_as_comparing_with_each_does() {
     assert!(kinds.iter().any(|kind| may(kind, "Ban") == May::No));
 }
 
-fn kinds_of(policies: &str, actions: &[&str]) -> Vec<Kind> {
+/// The senders each kind describes, whatever its split asked.
+pub(super) fn described(kinds: &[Kind]) -> Vec<(Vec<Profile>, Vec<Profile>)> {
+    kinds
+        .iter()
+        .map(|kind| (kind.examples.clone(), kind.others.clone()))
+        .collect()
+}
+
+pub(super) fn kinds_of(policies: &str, actions: &[&str]) -> Vec<Kind> {
     let analysis = SendAnalysis::new(policies).expect("policies parse");
     let questions: Vec<Question<'_>> = actions
         .iter()
@@ -265,7 +273,10 @@ unless { action in [Action::"Add", Action::"Edit"] || (context has via && contex
 "#;
     let alone = kinds_of(policies, &["Add"]);
     assert_eq!(alone.len(), 2, "members, and the rest");
-    assert_eq!(kinds_of(policies, &["Add", "Edit"]), alone);
+    assert_eq!(
+        described(&kinds_of(policies, &["Add", "Edit"])),
+        described(&alone)
+    );
 }
 
 #[test]
@@ -342,7 +353,7 @@ permit(principal, action == Action::"Z", resource) when {{ context.role == "memb
     let none = BTreeMap::new();
     let cause = Cause::request();
     let own = analysis.may(
-        &Asker::OutsideAs(Kind(vec![sender])),
+        &Asker::OutsideAs(Kind::of(sender)),
         "A",
         "Note",
         &none,

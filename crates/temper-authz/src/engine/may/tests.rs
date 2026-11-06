@@ -432,7 +432,10 @@ fn questions_everyone_has_one_answer_to_leave_the_kinds_as_they_are() {
         .map(|found| found.kind)
         .collect::<Vec<Kind>>();
     assert_eq!(alone.len(), 2, "members, and the rest");
-    assert_eq!(among, alone);
+    assert_eq!(
+        super::tests_kinds::described(&among),
+        super::tests_kinds::described(&alone)
+    );
 }
 
 #[test]

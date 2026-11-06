@@ -114,10 +114,38 @@ impl<'a> Memory<'a> {
     }
 }
 
+/// The bytes the questions a split asked hold: each name, and each cause
+/// with its keys at a map entry's worth apiece.
+pub(super) fn asked_heap(asked: &super::Asked) -> usize {
+    let entry = 2 * size_of::<(String, usize)>() + 4 * size_of::<usize>();
+    asked
+        .iter()
+        .map(|(action, types)| {
+            entry
+                + action.capacity()
+                + types
+                    .iter()
+                    .map(|(name, causes)| {
+                        entry
+                            + name.capacity()
+                            + causes.capacity() * size_of::<Cause>()
+                            + causes
+                                .iter()
+                                .map(|cause| cause.keys() * entry)
+                                .sum::<usize>()
+                    })
+                    .sum::<usize>()
+        })
+        .sum()
+}
+
 impl Kind {
     /// The bytes this kind retains in its profiles, including their containers.
     pub fn bytes(&self) -> usize {
-        self.0.capacity() * size_of::<Profile>() + self.0.iter().map(profile_heap).sum::<usize>()
+        // The questions asked are shared by the kinds of one split, which
+        // reserves them once.
+        (self.examples.capacity() + self.others.capacity()) * size_of::<Profile>()
+            + self.every().map(profile_heap).sum::<usize>()
     }
 }
 
@@ -140,7 +168,7 @@ fn profile_heap(profile: &Profile) -> usize {
             .sum::<usize>()
 }
 
-fn fact_heap(fact: &Fact) -> usize {
+pub(super) fn fact_heap(fact: &Fact) -> usize {
     match fact {
         Fact::Absent => 0,
         Fact::Is(value) => json_heap(value),

@@ -11,21 +11,24 @@
 //! and alike. Every outside principal is of one kind, so asking each
 //! question for each kind misses no sender.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 
 use cedar_policy::Effect;
 use serde_json::Value as Json;
 
 use super::json::{entity_parts, single};
-use super::profile::{Fact, Kind, Profile, UNKNOWN};
+use super::profile::{Asked, Fact, Kind, Profile, UNKNOWN};
 use super::request::{Request, TRUE};
 use super::{Asker, Cause, May, SendAnalysis, decide};
 use crate::platform_keys;
 
+mod alike;
 mod forms;
 mod memory;
 mod split;
 mod tests_of;
+use alike::Alike;
 use forms::{Classes, Forms, Part, reads_of, reads_whole_sender};
 use memory::Memory;
 
@@ -164,6 +167,7 @@ impl SendAnalysis {
         reserve: &dyn Fn(usize) -> Result<(), String>,
     ) -> Result<Vec<Answered>, String> {
         reserve(memory::tests_room(&self.policies, questions.len()))?;
+        let asked = Arc::new(asked(questions));
         let mut tests = Tests::read(&self.policies);
         let none = BTreeMap::new();
         let anyone = Asker::Outside;
@@ -300,60 +304,101 @@ impl SendAnalysis {
         // Split a kind on the first test some part still open reads. Senders
         // with one form answer alike from here on, however the rest comes to
         // be known, so the first stands for the others: without this, the
-        // tests no policy reads together multiply the kinds out.
-        let mut leaves: Vec<Node> = Vec::new();
-        let mut seen = HashSet::new();
+        // tests no policy reads together multiply the kinds out. What the
+        // others hold is kept ([`Alike`]), so a kind still describes them
+        // when asked what its split did not ask.
+        let mut leaves: Vec<(usize, Node)> = Vec::new();
+        let mut seen = HashMap::new();
         let first = read(Profile::default(), None);
-        seen.insert(first.form.clone());
-        let mut open = vec![first];
-        while let Some(node) = open.pop() {
+        let mut alike = Alike::new();
+        seen.insert(first.form.clone(), Alike::ROOT);
+        let mut open = vec![(Alike::ROOT, first)];
+        while let Some((at, node)) = open.pop() {
             // Include vector spare capacity, reallocation overlap, children,
             // and the result being assembled before allocating.
             memory.reserve(
                 4 * (open.len() + leaves.len() + memory.branches + 1),
-                forms.bytes() + seen.len() * memory.form,
+                forms.bytes() + seen.len() * memory.form + 2 * alike.bytes(),
             )?;
             let Some(test) = node.undecided.first() else {
-                leaves.push(node);
+                leaves.push((at, node));
                 continue;
             };
-            let mut children: Vec<Node> = Vec::new();
+            let mut children: Vec<(Node, Vec<Profile>)> = Vec::new();
             let split = tests.split(&node.profile, test);
             for child in split.into_iter().map(|profile| read(profile, Some(&node))) {
-                match children.iter_mut().find(|known| known.form == child.form) {
-                    // An example that stands for any value says nothing of
-                    // the kind.
-                    Some(first) if test.any(&child.profile) => {
-                        first.profile.stand_ins.insert(test.name());
+                match children
+                    .iter_mut()
+                    .find(|(known, _)| known.form == child.form)
+                {
+                    Some((first, others)) => {
+                        // An example that stands for any value says nothing
+                        // of the kind.
+                        if test.any(&child.profile) {
+                            first.profile.stand_ins.insert(test.name());
+                        }
+                        others.push(child.profile);
                     }
-                    Some(_) => {}
-                    None => children.push(child),
+                    None => children.push((child, Vec::new())),
                 }
             }
-            open.extend(
-                children
-                    .into_iter()
-                    .filter(|child| seen.insert(child.form.clone())),
-            );
+            for (child, others) in children {
+                let like = match seen.get(&child.form) {
+                    Some(&like) => {
+                        alike.drop(at, test, &child.profile, like);
+                        like
+                    }
+                    None => {
+                        let id = alike.node(at, test, &child.profile);
+                        seen.insert(child.form.clone(), id);
+                        open.push((id, child));
+                        id
+                    }
+                };
+                for other in others {
+                    alike.drop(at, test, &other, like);
+                }
+            }
         }
-        let mut kinds: Vec<(Vec<May>, Vec<Profile>)> = Vec::new();
-        for Node {
-            answers, profile, ..
-        } in leaves
-        {
+        // Each leaf's others are at most a node's worth.
+        memory.reserve(
+            4 * (leaves.len() + memory.branches + 1) + leaves.len(),
+            forms.bytes() + seen.len() * memory.form + alike.bytes(),
+        )?;
+        let others = alike.others(&|bytes| {
+            memory.reserve(
+                4 * (leaves.len() + memory.branches + 1) + leaves.len(),
+                forms.bytes() + seen.len() * memory.form + bytes,
+            )
+        })?;
+        let mut kinds: Vec<(Vec<May>, Kind)> = Vec::new();
+        let mut held = 0;
+        for (at, node) in leaves {
+            let others = alike.profile(&node.profile, &others[at]);
+            let kind = Kind {
+                examples: vec![node.profile],
+                others: others.into_iter().collect(),
+                asked: Arc::clone(&asked),
+            };
+            held += 1 + kind.others.len();
+            let answers = node.answers;
             // A Maybe may resolve differently once a rule or record is known.
             match kinds
                 .iter_mut()
                 .find(|(known, _)| !answers.contains(&May::Maybe) && *known == answers)
             {
-                Some((_, kind)) => kind.push(profile),
-                None => kinds.push((answers, vec![profile])),
+                Some((_, same)) => {
+                    *same = std::mem::replace(same, Kind::of(Profile::default())).join(kind)
+                }
+                None => kinds.push((answers, kind)),
             }
         }
+        std::mem::drop((alike, others));
         memory.reserve(
-            4 * (kinds.len() + memory.branches + 1),
+            4 * (kinds.len() + memory.branches + 1) + held,
             forms.bytes()
                 + seen.len() * memory.form
+                + memory::asked_heap(&asked)
                 + kinds.len() * (size_of::<Answered>() + unknown.len() * size_of::<May>()),
         )?;
         // Each question's answer: someone unknown's when it is definite, else
@@ -364,8 +409,8 @@ impl SendAnalysis {
         }
         Ok(kinds
             .into_iter()
-            .map(|(answers, profiles)| Answered {
-                kind: Kind(profiles),
+            .map(|(answers, kind)| Answered {
+                kind,
                 answers: by_question
                     .iter()
                     .zip(&unknown)
@@ -434,4 +479,20 @@ fn facts(profile: &Profile, place: Place) -> &BTreeMap<String, Fact> {
         Place::Principal => &profile.attrs,
         Place::Context => &profile.context,
     }
+}
+
+/// The questions a split asks, by action and resource type.
+fn asked(questions: &[Question<'_>]) -> Asked {
+    let mut asked = Asked::new();
+    for question in questions {
+        let causes = asked
+            .entry(question.action.to_string())
+            .or_default()
+            .entry(question.resource_type.to_string())
+            .or_default();
+        if !causes.contains(&question.cause) {
+            causes.push(question.cause.clone());
+        }
+    }
+    asked
 }

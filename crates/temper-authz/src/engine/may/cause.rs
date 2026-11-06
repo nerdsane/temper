@@ -84,6 +84,23 @@ impl Cause {
         ]))
     }
 
+    /// How many keys it names, known or not.
+    pub(super) fn keys(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether this is `wider` with some keys it leaves unknown known.
+    pub(super) fn within(&self, wider: &Cause) -> bool {
+        self.0.len() == wider.0.len()
+            && self
+                .0
+                .iter()
+                .zip(&wider.0)
+                .all(|((key, attr), (wide, wider))| {
+                    key == wide && (attr == wider || *wider == Attr::Unknown)
+                })
+    }
+
     /// What the check holds under `key`: None for a key the kernel does not
     /// set from the cause, `Some(None)` for a cause key this check lacks.
     pub(super) fn get(&self, key: &str) -> Option<Option<&Attr>> {

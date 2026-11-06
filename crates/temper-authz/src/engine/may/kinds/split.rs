@@ -103,7 +103,7 @@ impl Tests {
     }
 }
 
-fn facts_mut(profile: &mut Profile, place: Place) -> &mut BTreeMap<String, Fact> {
+pub(super) fn facts_mut(profile: &mut Profile, place: Place) -> &mut BTreeMap<String, Fact> {
     match place {
         Place::Principal => &mut profile.attrs,
         Place::Context => &mut profile.context,

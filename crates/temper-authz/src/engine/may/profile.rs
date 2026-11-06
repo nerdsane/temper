@@ -12,23 +12,86 @@
 //! ([`SendAnalysis::outside_kinds`](super::SendAnalysis::outside_kinds)),
 //! so each question about one sender is answered for one kind.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
+use std::sync::Arc;
 
 use serde_json::Value as Json;
+
+use super::Cause;
 
 /// A kind of outside sender: the principals any of its profiles
 /// describes. A question about it is answered for each, and where they
 /// differ it may go either way.
+///
+/// Its examples answer each question its split asked as all its senders
+/// do. Others it holds differ from them only where no asked question
+/// looks, so a question its split did not ask reads those too ([`Self::profiles`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Kind(pub(super) Vec<Profile>);
+pub struct Kind {
+    pub(super) examples: Vec<Profile>,
+    /// Profiles wide enough for the senders the examples stand for.
+    pub(super) others: Vec<Profile>,
+    /// The questions its split asked: action, then resource type, then
+    /// each cause it was asked with.
+    pub(super) asked: Arc<Asked>,
+}
+
+/// The questions a split asked, by action and resource type.
+pub(super) type Asked = HashMap<String, HashMap<String, Vec<Cause>>>;
 
 impl Kind {
+    /// The kind of the one sender `profile` describes.
+    pub(super) fn of(profile: Profile) -> Kind {
+        Kind {
+            examples: vec![profile],
+            others: Vec::new(),
+            asked: Arc::default(),
+        }
+    }
+
     /// The senders of either kind.
     #[must_use]
     pub fn join(mut self, other: Kind) -> Kind {
-        self.0.extend(other.0);
+        self.examples.extend(other.examples);
+        self.others.extend(other.others);
+        if self.asked != other.asked {
+            // Only what both splits asked is asked of the senders of both.
+            let asked = Arc::make_mut(&mut self.asked);
+            for (action, types) in asked.iter_mut() {
+                for (resource_type, causes) in types.iter_mut() {
+                    let theirs = other.asked.get(action).and_then(|t| t.get(resource_type));
+                    causes.retain(|cause| theirs.is_some_and(|theirs| theirs.contains(cause)));
+                }
+            }
+        }
         self
+    }
+
+    /// The profiles that answer `action` on a `resource_type` record for a
+    /// move with `cause` as all its senders would: the examples when its
+    /// split asked that, or that with more of the cause known (senders with
+    /// one form have one residual, whatever fills it in), else the others
+    /// too.
+    pub(super) fn profiles(
+        &self,
+        action: &str,
+        resource_type: &str,
+        cause: Option<&Cause>,
+    ) -> impl Iterator<Item = &Profile> {
+        let asked = cause.is_some_and(|cause| {
+            self.asked
+                .get(action)
+                .and_then(|types| types.get(resource_type))
+                .is_some_and(|causes| causes.iter().any(|asked| cause.within(asked)))
+        });
+        let others: &[Profile] = if asked { &[] } else { &self.others };
+        self.examples.iter().chain(others)
+    }
+
+    /// Every profile it holds.
+    pub(super) fn every(&self) -> impl Iterator<Item = &Profile> {
+        self.examples.iter().chain(&self.others)
     }
 }
 
@@ -79,7 +142,7 @@ impl fmt::Display for Kind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // The plainest example.
         let example = self
-            .0
+            .examples
             .iter()
             .map(ToString::to_string)
             .min_by_key(String::len);
