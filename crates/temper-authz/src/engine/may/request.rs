@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value as Json;
 
-use super::json::{entity_parts, like, same, single};
+use super::json::{at, entity_parts, field, like, same, single};
 use super::profile::{Fact, Profile, UNKNOWN};
 use sender::fact_equal;
 
@@ -23,7 +23,7 @@ pub(super) const TRUE: Results = Results(1);
 const FALSE: Results = Results(2);
 const ERROR: Results = Results(4);
 const TRUE_OR_FALSE: Results = Results(3);
-const ANY: Results = Results(7);
+pub(super) const ANY: Results = Results(7);
 
 impl Results {
     pub(super) fn can(self, other: Results) -> bool {
@@ -55,6 +55,23 @@ impl Results {
         let mut out = Results(self.0 & (FALSE.0 | ERROR.0));
         if self.can(TRUE) {
             out = out.or(right());
+        }
+        out
+    }
+
+    /// `if self then then() else otherwise()`: each branch only when the
+    /// test can take it.
+    fn choose(
+        self,
+        then: impl FnOnce() -> Results,
+        otherwise: impl FnOnce() -> Results,
+    ) -> Results {
+        let mut out = Results(self.0 & ERROR.0);
+        if self.can(TRUE) {
+            out = out.or(then());
+        }
+        if self.can(FALSE) {
+            out = out.or(otherwise());
         }
         out
     }
@@ -145,8 +162,8 @@ impl<'a> Request<'a> {
             .map_or(&[][..], Vec::as_slice);
         conditions.iter().fold(scope, |sofar, condition| {
             sofar.and_then(|| {
-                let body = self.truth(&condition["body"]);
-                match condition["kind"].as_str() {
+                let body = self.truth(at(condition, "body"));
+                match at(condition, "kind").as_str() {
                     Some("when") => body,
                     Some("unless") => body.not(),
                     _ => ANY,
@@ -156,19 +173,19 @@ impl<'a> Request<'a> {
     }
 
     fn principal_scope(&self, scope: &Json) -> Results {
-        match (scope["op"].as_str(), scope.get("in")) {
+        match (at(scope, "op").as_str(), field(scope, "in")) {
             (Some("All"), _) => TRUE,
-            (Some("=="), _) => self.equal(&Val::Principal, &read(&scope["entity"])),
-            (Some("is"), None) => self.principal_is(scope["entity_type"].as_str()),
+            (Some("=="), _) => self.equal(&Val::Principal, &read(at(scope, "entity"))),
+            (Some("is"), None) => self.principal_is(at(scope, "entity_type").as_str()),
             _ => ANY,
         }
     }
 
     fn action_scope(&self, scope: &Json) -> Results {
-        match scope["op"].as_str() {
+        match at(scope, "op").as_str() {
             Some("All") => TRUE,
-            Some("==") => Results::of(self.is_action(&scope["entity"])),
-            Some("in") => match (scope.get("entities"), scope.get("entity")) {
+            Some("==") => Results::of(self.is_action(at(scope, "entity"))),
+            Some("in") => match (field(scope, "entities"), field(scope, "entity")) {
                 (Some(Json::Array(list)), _) => {
                     Results::of(list.iter().any(|entity| self.is_action(entity)))
                 }
@@ -180,13 +197,13 @@ impl<'a> Request<'a> {
     }
 
     fn resource_scope(&self, scope: &Json) -> Results {
-        match scope["op"].as_str() {
+        match at(scope, "op").as_str() {
             Some("All") => TRUE,
-            Some("is") if scope.get("in").is_none() => {
-                Results::of(scope["entity_type"].as_str() == Some(self.resource_type))
+            Some("is") if field(scope, "in").is_none() => {
+                Results::of(at(scope, "entity_type").as_str() == Some(self.resource_type))
             }
             // A record has no parents, so `in` holds only of the record itself.
-            Some("==" | "in") => match entity_parts(&scope["entity"]) {
+            Some("==" | "in") => match entity_parts(at(scope, "entity")) {
                 Some((kind, _)) if kind != self.resource_type => FALSE,
                 _ => TRUE_OR_FALSE,
             },
@@ -216,47 +233,47 @@ impl<'a> Request<'a> {
         };
         match op {
             "&&" => self
-                .truth(&arg["left"])
-                .and_then(|| self.truth(&arg["right"])),
+                .truth(at(arg, "left"))
+                .and_then(|| self.truth(at(arg, "right"))),
             "||" => self
-                .truth(&arg["left"])
-                .or_else(|| self.truth(&arg["right"])),
-            "!" => self.truth(&arg["arg"]).not(),
-            "==" => self.equal(&self.value(&arg["left"]), &self.value(&arg["right"])),
+                .truth(at(arg, "left"))
+                .or_else(|| self.truth(at(arg, "right"))),
+            "!" => self.truth(at(arg, "arg")).not(),
+            "==" => self.equal(&self.value(at(arg, "left")), &self.value(at(arg, "right"))),
             "!=" => self
-                .equal(&self.value(&arg["left"]), &self.value(&arg["right"]))
+                .equal(&self.value(at(arg, "left")), &self.value(at(arg, "right")))
                 .not(),
             "has" => self.has(
-                &self.value(&arg["left"]),
-                arg["attr"].as_str().unwrap_or(""),
+                &self.value(at(arg, "left")),
+                at(arg, "attr").as_str().unwrap_or(""),
             ),
-            "is" if arg.get("in").is_none() => match self.value(&arg["left"]) {
-                Val::Principal => self.principal_is(arg["entity_type"].as_str()),
+            "is" if field(arg, "in").is_none() => match self.value(at(arg, "left")) {
+                Val::Principal => self.principal_is(at(arg, "entity_type").as_str()),
                 Val::Resource => {
-                    Results::of(arg["entity_type"].as_str() == Some(self.resource_type))
+                    Results::of(at(arg, "entity_type").as_str() == Some(self.resource_type))
                 }
-                Val::Action => Results::of(arg["entity_type"].as_str() == Some("Action")),
+                Val::Action => Results::of(at(arg, "entity_type").as_str() == Some("Action")),
                 Val::Known(value) => match entity_parts(&value) {
-                    Some((kind, _)) => Results::of(Some(kind) == arg["entity_type"].as_str()),
+                    Some((kind, _)) => Results::of(Some(kind) == at(arg, "entity_type").as_str()),
                     None => ERROR,
                 },
                 Val::Error => ERROR,
                 _ => ANY,
             },
             "in" => {
-                let left = self.value(&arg["left"]);
-                match single(&arg["right"]) {
+                let left = self.value(at(arg, "left"));
+                match single(at(arg, "right")) {
                     Some(("Set", list)) => match self.members(list) {
                         Ok(members) => {
                             self.within_members(&left, members.iter().map(AsRef::as_ref))
                         }
                         Err(val) => self.within(&left, &val),
                     },
-                    _ => self.within(&left, &self.value(&arg["right"])),
+                    _ => self.within(&left, &self.value(at(arg, "right"))),
                 }
             }
-            "like" => match self.value(&arg["left"]) {
-                Val::Known(value) => match (value.as_str(), arg["pattern"].as_array()) {
+            "like" => match self.value(at(arg, "left")) {
+                Val::Known(value) => match (value.as_str(), at(arg, "pattern").as_array()) {
                     (Some(text), Some(pattern)) => Results::of(like(text, pattern)),
                     (Some(_), None) => ANY,
                     (None, _) => ERROR,
@@ -265,14 +282,14 @@ impl<'a> Request<'a> {
                     string: Some(false),
                     ..
                 } => ERROR,
-                Val::Other { like, .. } => match like.get(&arg["pattern"].to_string()) {
+                Val::Other { like, .. } => match like.get(&at(arg, "pattern").to_string()) {
                     Some(matches) => Results::of(*matches),
                     None => ANY,
                 },
                 Val::Error => ERROR,
                 _ => ANY,
             },
-            "contains" => match (self.value(&arg["left"]), self.value(&arg["right"])) {
+            "contains" => match (self.value(at(arg, "left")), self.value(at(arg, "right"))) {
                 (Val::Known(set), Val::Known(item)) if set.is_array() => Results::of(
                     set.as_array()
                         .into_iter()
@@ -285,17 +302,10 @@ impl<'a> Request<'a> {
                 }
                 _ => ANY,
             },
-            "if-then-else" => {
-                let test = self.truth(&arg["if"]);
-                let mut out = Results(test.0 & ERROR.0);
-                if test.can(TRUE) {
-                    out = out.or(self.truth(&arg["then"]));
-                }
-                if test.can(FALSE) {
-                    out = out.or(self.truth(&arg["else"]));
-                }
-                out
-            }
+            "if-then-else" => self.truth(at(arg, "if")).choose(
+                || self.truth(at(arg, "then")),
+                || self.truth(at(arg, "else")),
+            ),
             _ => self.as_bool(&self.value(expr)),
         }
     }
@@ -338,8 +348,8 @@ impl<'a> Request<'a> {
                 Err(val) => val,
             },
             "." => self.attribute(
-                &self.value(&arg["left"]),
-                arg["attr"].as_str().unwrap_or(""),
+                &self.value(at(arg, "left")),
+                at(arg, "attr").as_str().unwrap_or(""),
             ),
             "&&" | "||" | "!" | "==" | "!=" | "has" | "is" | "in" | "like" | "contains"
             | "if-then-else" => {

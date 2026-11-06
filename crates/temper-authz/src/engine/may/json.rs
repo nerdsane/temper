@@ -2,6 +2,21 @@
 
 use serde_json::Value as Json;
 
+/// `value[key]`: Null when `value` is not an object or lacks `key`. Read by
+/// a scan, since a policy's nodes hold a few keys each, which a scan finds
+/// sooner than hashing the key.
+pub(super) fn at<'v>(value: &'v Json, key: &str) -> &'v Json {
+    field(value, key).unwrap_or(&Json::Null)
+}
+
+/// `value.get(key)`, read by a scan as [`at`] is.
+pub(super) fn field<'v>(value: &'v Json, key: &str) -> Option<&'v Json> {
+    value
+        .as_object()?
+        .iter()
+        .find_map(|(name, item)| (name == key).then_some(item))
+}
+
 /// The one key and value of a JSON expression node.
 pub(super) fn single(expr: &Json) -> Option<(&str, &Json)> {
     let object = expr.as_object()?;
@@ -13,8 +28,11 @@ pub(super) fn single(expr: &Json) -> Option<(&str, &Json)> {
 
 /// An entity's type and id, from `{"__entity": {...}}` or `{"type", "id"}`.
 pub(super) fn entity_parts(value: &Json) -> Option<(&str, &str)> {
-    let entity = value.get("__entity").unwrap_or(value);
-    Some((entity.get("type")?.as_str()?, entity.get("id")?.as_str()?))
+    let entity = field(value, "__entity").unwrap_or(value);
+    Some((
+        field(entity, "type")?.as_str()?,
+        field(entity, "id")?.as_str()?,
+    ))
 }
 
 pub(super) fn same(a: &Json, b: &Json) -> bool {

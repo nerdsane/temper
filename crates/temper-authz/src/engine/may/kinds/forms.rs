@@ -68,10 +68,9 @@ impl Classes {
                         // and reads what is open alike for every question
                         // that leaves the same: no part the question
                         // decides is read again.
-                        let conditions = request.residual(policy, &|_| false).map_or_else(
-                            || policy["conditions"].to_string(),
-                            |left| left.to_string(),
-                        );
+                        let conditions = request
+                            .residual(policy, &|_| false)
+                            .unwrap_or_else(|| policy["conditions"].to_string());
                         let action = if conditions.contains(r#"{"Var":"action"}"#) {
                             question.action
                         } else {

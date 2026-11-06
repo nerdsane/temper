@@ -281,7 +281,8 @@ impl SendAnalysis {
                         let note = std::cell::RefCell::new(note);
                         let residual = request.residual(policy, &|expr| (note.borrow_mut())(expr));
                         reads.extend(tests.scopes[at].iter().cloned());
-                        forms.text(&format!("{effect:?}{}", residual.unwrap_or(Json::Null)))
+                        let residual = residual.as_deref().unwrap_or("null");
+                        forms.text(&format!("{effect:?}{residual}"))
                     });
                     left.push(text);
                 }
