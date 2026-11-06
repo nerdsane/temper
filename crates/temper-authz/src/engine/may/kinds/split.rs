@@ -16,8 +16,10 @@ impl Tests {
         };
         match test {
             Test::Kind => {
+                // The other values stand for every type no asked policy
+                // names, so they exclude only the types an asked one does.
                 let unlike: Vec<Json> = self
-                    .kinds
+                    .asked_kinds
                     .iter()
                     .map(|kind| Json::from(kind.as_str()))
                     .collect();
@@ -47,7 +49,10 @@ impl Tests {
             }
             Test::Named(place, name) => {
                 let of = (*place, name.clone());
-                let literals = self.literals.get(&of).cloned().unwrap_or_default();
+                // As for types: a literal only an unasked policy compares is
+                // one of the other values, or a sender holding it would be
+                // of no kind.
+                let literals = self.asked_literals.get(&of).cloned().unwrap_or_default();
                 // A principal always has its id; the engine sets both names.
                 let always =
                     *place == Place::Principal && matches!(name.as_str(), "id" | "accountId");

@@ -321,3 +321,41 @@ permit(principal, action == Action::"Open", resource is Note);
     seen.dedup();
     assert_eq!(seen.len(), 3, "members, helpers, and the rest: {seen:?}");
 }
+
+#[test]
+fn a_value_only_an_unasked_policy_names_leaves_no_sender_without_a_kind() {
+    // Z names context.role "member", but only A is asked: a sender whose
+    // role and context.role are both "member" may still send A.
+    let asked = r#"
+permit(principal, action == Action::"A", resource)
+when { principal.role == context.role && principal.role == "member" };
+"#;
+    let with_unasked = format!(
+        r#"{asked}
+permit(principal, action == Action::"Z", resource) when {{ context.role == "member" }};
+"#
+    );
+    let mut sender = Profile::default();
+    sender.attrs.insert("role".to_string(), is("member"));
+    sender.context.insert("role".to_string(), is("member"));
+    let analysis = SendAnalysis::new(&with_unasked).expect("the policies parse");
+    let none = BTreeMap::new();
+    let cause = Cause::request();
+    let own = analysis.may(
+        &Asker::OutsideAs(Kind(vec![sender])),
+        "A",
+        "Note",
+        &none,
+        Some(&cause),
+    );
+    assert_eq!(own, May::Yes);
+    let kinds = kinds_of(&with_unasked, &["A"]);
+    assert!(
+        kinds.iter().any(|kind| {
+            let asker = Asker::OutsideAs(kind.clone());
+            analysis.may(&asker, "A", "Note", &none, Some(&cause)) != May::No
+        }),
+        "every kind refuses A: {kinds:?}"
+    );
+    assert_eq!(kinds, kinds_of(asked, &["A"]));
+}
