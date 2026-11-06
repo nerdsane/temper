@@ -176,11 +176,16 @@ pub(super) fn step_room(
     let additions = t.effects.len() + t.string_params.len();
     // A push doubles a full list, and starts an empty one at four.
     let list = |len: usize| block(len.max(4) * size_of::<ModelString>());
-    let entries = |len: usize, entry: usize| block((len + additions) * (size_of::<Sym>() + entry));
-    entries(state.counters.len(), size_of::<usize>())
-        + entries(state.booleans.len(), size_of::<bool>())
-        + entries(state.lists.len(), size_of::<Vec<ModelString>>())
-        + entries(state.strings.len(), size_of::<ModelString>())
+    // As [`Fields`](super::fields::Fields) holds them: one shared list, its
+    // entries padded as pairs. Copied, it holds just its entries, and a new
+    // name doubles it, starting at four.
+    let entries = |len: usize, pair: usize| {
+        block(4 * size_of::<usize>()) + block((2 * (len + additions)).max(4) * pair)
+    };
+    entries(state.counters.len(), size_of::<(Sym, usize)>())
+        + entries(state.booleans.len(), size_of::<(Sym, bool)>())
+        + entries(state.lists.len(), size_of::<(Sym, Vec<ModelString>)>())
+        + entries(state.strings.len(), size_of::<(Sym, ModelString)>())
         + state
             .lists
             .values()

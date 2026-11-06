@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use super::super::pack::{Packed, Packer};
-use super::super::room::{Held, MB};
+use super::super::room::{Held, MB, bytes, grow};
 use super::super::state::render;
 use super::super::{JointOutcome, JointState, JointStep};
 use super::JointModel;
@@ -138,6 +138,15 @@ impl Node {
     }
 }
 
+/// The states sure moves reach near a start ([`Explored::near_sure`]).
+pub(in crate::composite::joint) struct NearSure {
+    /// For each state, the state sure moves come to it from, a start naming
+    /// itself; none past the depth asked for.
+    pub(in crate::composite::joint) parents: Vec<Option<u32>>,
+    /// The states with one, nearest first, and how many moves from a start.
+    pub(in crate::composite::joint) near: Vec<(u32, u32)>,
+}
+
 /// What a walk saw, and the memory it holds for it.
 pub(in crate::composite::joint) struct Explored<'a> {
     /// Each state walked.
@@ -231,6 +240,88 @@ impl Explored<'_> {
             }
         }
         parents
+    }
+
+    /// For each state sure moves alone reach from a start within `depth`
+    /// moves, the state they come to it from, a start naming itself; and
+    /// those states as a breadth-first walk of sure moves reaches them, each
+    /// with how many moves from a start it is. Each move's states are taken
+    /// in the order of `key` on them, and a state's way comes from the first
+    /// of them with one, so the walk and its ways are the same whatever
+    /// order the threads walked the states in. It gives back what the walk's
+    /// moves held and keeps only its sure ways, sorted where they lie, so a
+    /// walk that stopped for room has room for it; the walk keeps no moves
+    /// or ways after, and the room gets back what they took.
+    pub(in crate::composite::joint) fn near_sure(
+        &mut self,
+        depth: usize,
+        key: impl Fn(&JointState) -> u64,
+    ) -> Result<NearSure, String> {
+        let count = self.nodes.len();
+        let made = std::mem::take(&mut self.made);
+        let mut ways = std::mem::take(&mut self.edges);
+        ways.retain(|way| way.sure);
+        // Each way now names the state it leaves in place of its move.
+        for way in &mut ways {
+            way.made = made[way.made as usize].from;
+        }
+        self.held.give_back(bytes(&made));
+        drop(made);
+        ways.sort_unstable_by_key(|way| way.made);
+        let table = (count + 1) * size_of::<u32>() + count * size_of::<Option<u32>>();
+        self.held.add(table)?;
+        let mut first = vec![0u32; count + 1];
+        for way in &ways {
+            first[way.made as usize + 1] += 1;
+        }
+        for at in 0..count {
+            first[at + 1] += first[at];
+        }
+        let mut parents: Vec<Option<u32>> = vec![None; count];
+        let mut near: Vec<(u32, u32)> = Vec::new();
+        let mut level: Vec<u32> = Vec::new();
+        for (index, node) in self.nodes.iter().enumerate() {
+            if node.parent.is_none() {
+                grow(&mut level, 1, &mut self.held)?;
+                level.push(index as u32);
+            }
+        }
+        for moves in 0..=depth as u32 {
+            let keys = level.len() * size_of::<(u64, usize)>();
+            self.held.add(keys)?;
+            level.sort_by_cached_key(|&index| key(&self.state(index as usize)));
+            self.held.sub(keys);
+            for &index in &level {
+                if moves == 0 {
+                    parents[index as usize] = Some(index);
+                }
+                grow(&mut near, 1, &mut self.held)?;
+                near.push((index, moves));
+            }
+            if moves as usize == depth {
+                break;
+            }
+            let mut next = Vec::new();
+            for &index in &level {
+                let at = index as usize;
+                for way in &ways[first[at] as usize..first[at + 1] as usize] {
+                    if parents[way.to as usize].is_none() {
+                        parents[way.to as usize] = Some(index);
+                        grow(&mut next, 1, &mut self.held)?;
+                        next.push(way.to);
+                    }
+                }
+            }
+            self.held.sub(bytes(&level));
+            level = next;
+        }
+        self.held
+            .sub(bytes(&level) + (count + 1) * size_of::<u32>());
+        self.held.give_back(bytes(&ways));
+        drop(first);
+        drop(ways);
+        self.held.release();
+        Ok(NearSure { parents, near })
     }
 
     /// The first move on the way to the state walked `index`th that the

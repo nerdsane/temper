@@ -197,6 +197,23 @@ pub(super) fn render(state: &JointState) -> String {
     text
 }
 
+/// All a state holds, in words: what [`render`] shows, with each list's
+/// entries and who armed each timer. Names read as text, so two runs give
+/// one state the same words.
+pub(super) fn whole(state: &JointState) -> String {
+    let mut text = render(state);
+    for (entity, record) in state.records.iter() {
+        for (name, list) in record.lists.iter() {
+            let entries: Vec<String> = list.iter().map(ToString::to_string).collect();
+            text.push_str(&format!(" | {entity}.{name}=[{}]", entries.join(", ")));
+        }
+    }
+    for (entity, by) in state.armed.iter() {
+        text.push_str(&format!(" | {entity} armed by {by}"));
+    }
+    text
+}
+
 /// Renumber new strings over the whole joint state, records first, then
 /// the dispatches in flight; returns each value's new name. What a renaming
 /// leaves as it was stays shared with the states that hold it.

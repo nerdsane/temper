@@ -77,31 +77,39 @@ pub(in crate::composite::joint) fn sure_path(
     parents: &[Option<u32>],
     mut index: usize,
 ) -> Vec<JointStep> {
-    let mut steps = Vec::new();
-    loop {
-        let state = explored.state(index);
-        let parent = parents[index].filter(|&from| from as usize != index);
-        let action = parent.map(|from| {
-            let before = explored.state(from as usize);
+    let mut states = vec![explored.state(index)];
+    while let Some(from) = parents[index].filter(|&from| from as usize != index) {
+        index = from as usize;
+        states.push(explored.state(index));
+    }
+    states.reverse();
+    sure_steps(model, &states)
+}
+
+/// `states`, from a start, each reached from the one before by a sure move:
+/// the moves, in words.
+pub(in crate::composite::joint) fn sure_steps(
+    model: &JointModel,
+    states: &[JointState],
+) -> Vec<JointStep> {
+    let mut steps: Vec<JointStep> = Vec::with_capacity(states.len());
+    for (at, state) in states.iter().enumerate() {
+        let action = at.checked_sub(1).map(|before| {
+            let before = &states[before];
             model
-                .moves(&before)
+                .moves(before)
                 .iter()
-                .flat_map(|mv| model.next(&before, mv).0)
-                .find(|next| next.certainty == Certainty::Sure && next.state == state)
+                .flat_map(|mv| model.next(before, mv).0)
+                .find(|next| next.certainty == Certainty::Sure && next.state == *state)
                 .map(|next| next.label)
                 .unwrap_or_default()
         });
         steps.push(JointStep {
             action,
-            state: render(&state),
+            state: render(state),
             unsure: false,
         });
-        match parent {
-            Some(from) => index = from as usize,
-            None => break,
-        }
     }
-    steps.reverse();
     steps
 }
 

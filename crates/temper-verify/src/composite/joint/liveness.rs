@@ -62,9 +62,9 @@ use super::room::Bound;
 
 #[path = "liveness_stuck.rs"]
 mod stuck;
-pub(super) use stuck::sure_path;
 use stuck::{may_reach, unsure_reason};
 use stuck::{outside_moves, system_moves};
+pub(super) use stuck::{sure_path, sure_steps};
 
 /// What the joint check found for one `eventually` property.
 #[derive(Debug, Clone)]
