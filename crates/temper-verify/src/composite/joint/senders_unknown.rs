@@ -3,7 +3,9 @@
 //! may be no sender the model knows. Cedar may answer either way for it, and
 //! for a reaction that inherits it.
 
-use temper_authz::{Asker, May};
+use std::collections::BTreeMap;
+
+use temper_authz::{Asker, Cause, May};
 
 use super::{Senders, base};
 
@@ -33,30 +35,33 @@ impl Senders {
         }
     }
 
-    /// Whether Cedar lets the outside sender `by` request `action` on an
+    /// Whether Cedar may let the outside sender `by` request `action` on an
     /// `entity` record of any type, in scope or not: the table answers for
-    /// the types it was read for, the policies for the rest.
-    pub(in crate::composite::joint) fn request_anywhere(
+    /// the types it was read for, the policies for the rest. Only whether
+    /// the answer is no is asked, so the policies are not asked further
+    /// whether one of the kind's senders is surely let.
+    pub(in crate::composite::joint) fn may_request_anywhere(
         &self,
         by: u32,
         entity: &str,
         action: &str,
-    ) -> May {
+    ) -> bool {
         let entity = base(entity);
         let Some(requests) = &self.requests else {
-            return May::Yes;
+            return true;
         };
         if requests
             .get(entity)
             .is_some_and(|actions| actions.contains_key(action))
         {
-            return self.request_as(by, entity, action);
+            return self.request_as(by, entity, action) != May::No;
         }
         match (&self.policies, self.askers.get(by as usize / 2)) {
             (Some(policies), Some(asker)) => {
-                policies.may_request(asker, action, entity, &|_| Ok(()))
+                let request = Cause::request();
+                policies.may(asker, action, entity, &BTreeMap::new(), Some(&request)) != May::No
             }
-            _ => May::Maybe,
+            _ => true,
         }
     }
 

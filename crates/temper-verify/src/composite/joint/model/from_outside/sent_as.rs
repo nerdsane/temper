@@ -1,14 +1,14 @@
 //! Who a reaction from a type outside the scope runs as: whoever may send
 //! the move that set it off. The model holds no record of that move, so
-//! this reads the whole app once: who may send each move as a request, and
-//! how reactions, spawns, module answers and timers carry a sender on, as
-//! [`Senders`] says the kernel does. A service the policies were not read
+//! this reads the moves of the app a chain into the scope can start from:
+//! who may send each as a request, and how reactions, spawns, module
+//! answers and timers carry a sender on, as [`Senders`] says the kernel
+//! does. A move no chain into the scope passes through sends it no one. A service the policies were not read
 //! for, and a move nothing reads as sent, stay with the sender the model
 //! does not know, which Cedar may answer either way for.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use temper_authz::May;
 use temper_spec::automaton::{Action, ActionTrigger, Automaton, TargetResolver, TriggerKind};
 
 use super::super::super::senders::{OUTSIDE, Senders, declared};
@@ -39,21 +39,27 @@ pub(super) fn sent_as(
 ) -> BTreeMap<(String, String), SentAs> {
     let all = by_name.keys().map(|name| name.to_string()).collect();
     let kernel = Kernel::read(by_name, &all);
+    let reaches = reaching(by_name, scope, &kernel);
     let mut sent = ByMove::new();
     for (entity, automaton) in by_name {
         for action in &automaton.actions {
             let key = (entity.to_string(), action.name.clone());
+            if !reaches.contains(&key) {
+                continue;
+            }
             let relied = relies_on.contains(&key);
-            let may = senders.outside().iter().copied().filter(|&by| {
-                relied || senders.request_anywhere(by, entity, &action.name) != May::No
-            });
+            let may = senders
+                .outside()
+                .iter()
+                .copied()
+                .filter(|&by| relied || senders.may_request_anywhere(by, entity, &action.name));
             sent.entry(key).or_default().extend(may);
         }
         // A record that starts in a state with a timer has it armed by no
         // one the model knows of: someone outside.
         for timeout in &kernel.timers[*entity] {
-            if timeout.state == automaton.automaton.initial {
-                let key = (entity.to_string(), timeout.action.clone());
+            let key = (entity.to_string(), timeout.action.clone());
+            if timeout.state == automaton.automaton.initial && reaches.contains(&key) {
                 sent.entry(key).or_default().insert(senders.timer(OUTSIDE));
             }
         }
@@ -63,7 +69,10 @@ pub(super) fn sent_as(
         for (entity, automaton) in by_name {
             for action in &automaton.actions {
                 let key = (entity.to_string(), action.name.clone());
-                let from: Vec<u32> = sent[&key].iter().copied().collect();
+                let Some(from) = sent.get(&key).filter(|_| reaches.contains(&key)) else {
+                    continue;
+                };
+                let from: Vec<u32> = from.iter().copied().collect();
                 for by in from {
                     for (to, next, _) in carried(automaton, entity, action, &kernel, senders, by) {
                         grew |= sent.entry(to).or_default().insert(next);
@@ -79,7 +88,9 @@ pub(super) fn sent_as(
     let mut into: BTreeMap<(String, String), SentAs> = BTreeMap::new();
     for (entity, automaton) in by_name.iter().filter(|(name, _)| !scope.contains(**name)) {
         for action in &automaton.actions {
-            let from = &sent[&(entity.to_string(), action.name.clone())];
+            let Some(from) = sent.get(&(entity.to_string(), action.name.clone())) else {
+                continue;
+            };
             let starts: Vec<u32> = if from.is_empty() {
                 unknown.to_vec()
             } else {
@@ -197,17 +208,51 @@ fn carried<'a>(
     })
 }
 
+/// The moves of types outside `scope` that set off a move in it, and every
+/// move that sets one of those off, through any number of links: all that
+/// whom a reaction into the scope runs as depends on.
+fn reaching(
+    by_name: &BTreeMap<&str, &Automaton>,
+    scope: &BTreeSet<String>,
+    kernel: &Kernel,
+) -> BTreeSet<(String, String)> {
+    let earlier = earlier(by_name, kernel);
+    let mut reaches: BTreeSet<(String, String)> = earlier
+        .iter()
+        .filter(|((to, _), _)| scope.contains(to))
+        .flat_map(|(_, from)| from.iter())
+        .filter(|(entity, _)| !scope.contains(entity))
+        .cloned()
+        .collect();
+    let mut next: Vec<(String, String)> = reaches.iter().cloned().collect();
+    while let Some(key) = next.pop() {
+        for before in earlier.get(&key).into_iter().flatten() {
+            if reaches.insert(before.clone()) {
+                next.push(before.clone());
+            }
+        }
+    }
+    reaches
+}
+
 /// What can set off each move (entity, action) of the app, through any
 /// link: a reaction, a spawn, a module's answer or a timer.
 pub(super) fn set_off_by(
     by_name: &BTreeMap<&str, &Automaton>,
 ) -> BTreeMap<(String, String), BTreeSet<(String, String)>> {
     let all = by_name.keys().map(|name| name.to_string()).collect();
-    let kernel = Kernel::read(by_name, &all);
+    earlier(by_name, &Kernel::read(by_name, &all))
+}
+
+/// [`set_off_by`] with the app's kernel read.
+fn earlier(
+    by_name: &BTreeMap<&str, &Automaton>,
+    kernel: &Kernel,
+) -> BTreeMap<(String, String), BTreeSet<(String, String)>> {
     let mut earlier: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
     for (entity, automaton) in by_name {
         for action in &automaton.actions {
-            for (to, _) in links(automaton, entity, action, &kernel) {
+            for (to, _) in links(automaton, entity, action, kernel) {
                 earlier
                     .entry(to)
                     .or_default()
