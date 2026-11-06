@@ -93,7 +93,8 @@ pub(super) fn parse_cross_invariants(source: Option<&str>, app_name: &str) -> Re
 /// meanwhile. Each walk's verdict is kept by the digest of its model and by
 /// the digest of the specs and Cedar (see [`proofs`]), so a rule whose cut
 /// model the install leaves as it was is not walked again, nor one whose
-/// specs a new kernel starts with. A walk still running comes back as the
+/// specs a new kernel starts with. A walk that did not fit is kept by its
+/// model only while this process runs. A walk still running comes back as the
 /// walk to wait for: the install waits for it without its lock and starts
 /// again, finding the verdict in `attempt`.
 pub(super) async fn prove(
@@ -191,8 +192,8 @@ pub(super) async fn prove(
 /// Walk one proof: the results that held, those it could not prove, those
 /// broken, and whether the walk fit in its memory. A walk that did not
 /// finish says nothing of the specs: it may fit when the host has more room,
-/// so its verdict is not kept. A rule that checks nothing as written is a
-/// verdict on the specs.
+/// so its verdict is kept only while this process runs. A rule that checks
+/// nothing as written is a verdict on the specs.
 fn walk(proof: &JointProof, bound: Bound<'_>) -> Walked {
     let (mut held, mut unproved, mut broken) = (Vec::new(), Vec::new(), Vec::new());
     let mut fit = true;

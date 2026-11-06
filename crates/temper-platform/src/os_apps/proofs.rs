@@ -18,8 +18,13 @@
 //! old one's TERM) reads it instead of walking again, whatever checker made
 //! it: those specs already run. A refusal is kept only while this process runs,
 //! so a later checker decides it again. A walk that did not fit in its
-//! memory says nothing of the specs: the install that waited for it reads it
-//! throughout its retries ([`Attempt`]), and the next install walks again.
+//! memory says nothing of the specs, since another host or more room may fit
+//! it, so it is not kept in the blob table either. Walking it again here
+//! would fill the host for as long again, so this process keeps it like a
+//! refusal: an install of the same model reads it until the process starts
+//! again, even when other walks or processes held the room it ran out of. A walk that stopped without a verdict
+//! (it panicked) is kept only for the install that waited for it
+//! ([`Attempt`]), and the next install walks again.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
@@ -91,7 +96,7 @@ pub(super) fn digest(
 }
 
 /// The verdicts one install has waited for, by digest, kept across its
-/// retries: a walk that did not fit is kept nowhere else, and the retry must
+/// retries: a walk that stopped is kept nowhere else, and the retry must
 /// read it rather than walk again. A later install walks again.
 #[derive(Default)]
 pub(super) struct Attempt(BTreeMap<String, Verdict>);
@@ -125,8 +130,8 @@ impl Wait {
     }
 }
 
-/// Verdicts about specs this process reached, and walks
-/// running now, by digest.
+/// Verdicts of the walks this process ended, and walks running now, by
+/// digest.
 #[derive(Default)]
 struct Proofs {
     reached: BTreeMap<String, Verdict>,
@@ -190,7 +195,7 @@ pub(super) async fn proof(
         }
     }
     let digest = keys.model;
-    // A walk that did not fit is kept only in the install that waited for it.
+    // A walk that stopped is kept only in the install that waited for it.
     if stored.is_none()
         && let Some(verdict) = attempt.0.get(&digest)
     {
@@ -251,14 +256,15 @@ async fn run(
         Arc::clone(&progress),
     ));
     let walking = Arc::clone(&progress);
-    let walked = tokio::task::spawn_blocking(move || {
+    let ended_walk = tokio::task::spawn_blocking(move || {
         walk(Bound {
             room: &HOST_ROOM,
             progress: &walking,
         })
     })
-    .await
-    .unwrap_or_else(|error| Walked {
+    .await;
+    let stopped = ended_walk.is_err();
+    let walked = ended_walk.unwrap_or_else(|error| Walked {
         verdict: Verdict {
             held: Vec::new(),
             unproved: Vec::new(),
@@ -303,7 +309,7 @@ async fn run(
     .await;
     let mut proofs = proofs().lock().unwrap_or_else(PoisonError::into_inner);
     proofs.running.remove(&digest);
-    if walked.fit {
+    if !stopped {
         proofs.reached.insert(digest, walked.verdict.clone());
     }
     drop(proofs);

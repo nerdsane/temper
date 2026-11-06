@@ -16,7 +16,7 @@ fn no_room() -> Walked {
 }
 
 #[tokio::test]
-async fn every_waiter_reads_a_walk_that_did_not_fit_and_a_later_install_walks_again() {
+async fn every_waiter_and_every_later_install_read_a_walk_that_did_not_fit() {
     let state = PlatformState::new(None);
     let (release, blocked) = std::sync::mpsc::channel();
     let keys = || Keys {
@@ -75,30 +75,108 @@ async fn every_waiter_reads_a_walk_that_did_not_fit_and_a_later_install_walks_ag
         assert_eq!(verdict.unproved, vec!["no room".to_string()]);
         assert_eq!(verdict.refused, None);
     }
-    // A walk that did not fit says nothing of the specs: a later install
-    // walks again.
-    let mut three = Attempt::default();
+    // A later install of the same model reads it too: walking again would
+    // only fill the host again for as long.
     let later = proof(
         &state,
         "default",
         "test",
         "test".into(),
         keys(),
-        &three,
-        |_| Walked {
-            verdict: Verdict {
-                held: vec![],
-                unproved: vec![],
-                refused: None,
-            },
-            fit: true,
-        },
+        &Attempt::default(),
+        |_| panic!("a later install reads the walk that did not fit"),
     )
     .await;
-    let Proof::Running(later) = later else {
-        panic!("later install must retry")
+    let Proof::Done(verdict) = later else {
+        panic!("expected the verdict of the walk that did not fit")
     };
-    assert_eq!(later.ended(&mut three).await, Ok(()));
+    assert_eq!(verdict.unproved, vec!["no room".to_string()]);
+}
+
+/// Walk `walked` under new keys and wait for it; answer the model key and
+/// what a later install of that model gets.
+async fn walked_then_later(
+    state: &PlatformState,
+    walked: impl FnOnce(Bound<'_>) -> Walked + Send + 'static,
+) -> (Keys, Proof) {
+    let keys = unique_keys();
+    let mut attempt = Attempt::default();
+    let started = proof(
+        state,
+        "default",
+        "test",
+        "test".into(),
+        unique_twin(&keys),
+        &attempt,
+        walked,
+    )
+    .await;
+    let Proof::Running(wait) = started else {
+        panic!("keys nothing is kept under must walk")
+    };
+    let _ = wait.ended(&mut attempt).await;
+    let later = proof(
+        state,
+        "default",
+        "test",
+        "test".into(),
+        unique_twin(&keys),
+        &Attempt::default(),
+        |_| no_room(),
+    )
+    .await;
+    (keys, later)
+}
+
+/// The same keys again.
+fn unique_twin(keys: &Keys) -> Keys {
+    Keys {
+        model: keys.model.clone(),
+        source: keys.source.clone(),
+    }
+}
+
+/// A walk that found a rule broken and ran out of room before the rest is
+/// a refusal: a break does not depend on room, so a later install reads it.
+#[tokio::test]
+async fn a_walk_that_broke_a_rule_and_did_not_fit_is_read_not_walked_again() {
+    let state = PlatformState::new(None);
+    let (_, later) = walked_then_later(&state, |_| Walked {
+        verdict: Verdict {
+            held: vec![],
+            unproved: vec!["no room".into()],
+            refused: Some("broken".into()),
+        },
+        fit: false,
+    })
+    .await;
+    let Proof::Done(verdict) = later else {
+        panic!("a later install reads the refusal")
+    };
+    assert_eq!(verdict.refused, Some("broken".to_string()));
+}
+
+/// A walk that stopped (it panicked) has no verdict: a later install walks
+/// again.
+#[tokio::test]
+async fn a_walk_that_stopped_is_walked_again_by_a_later_install() {
+    let state = PlatformState::new(None);
+    let (_, later) = walked_then_later(&state, |_| panic!("the walk stops")).await;
+    assert!(
+        matches!(later, Proof::Running(_)),
+        "a later install walks again"
+    );
+}
+
+/// A walk that did not fit says nothing of the specs on another host or
+/// with more room: it is kept under neither key in the blob table.
+#[tokio::test]
+async fn a_walk_that_did_not_fit_is_not_kept_in_the_store() {
+    let state = with_store().await;
+    let (keys, later) = walked_then_later(&state, |_| no_room()).await;
+    assert!(matches!(later, Proof::Done(_)));
+    assert_eq!(kept(&state, &keys.model).await, None);
+    assert_eq!(kept(&state, &keys.source).await, None);
 }
 
 /// A platform state with its own file database, where verdicts are kept.
