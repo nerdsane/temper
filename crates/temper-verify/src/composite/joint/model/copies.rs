@@ -71,6 +71,7 @@ impl JointModel {
         if records <= 1 {
             return self;
         }
+        self.several_take_again();
         self.copies = self
             .models
             .keys()

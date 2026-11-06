@@ -16,6 +16,7 @@ mod guided;
 mod held;
 mod initial;
 mod moves;
+mod once;
 mod order;
 mod outside;
 mod react;
@@ -170,6 +171,9 @@ pub(super) struct JointModel {
     settled: std::sync::OnceLock<BTreeMap<String, BTreeSet<String>>>,
     /// The moves (entity, action) whose landing changes nothing, made on first use.
     idle: std::sync::OnceLock<BTreeSet<(String, String)>>,
+    /// The actions a record takes only once, by entity, of which one copy
+    /// in flight is enough (`once.rs`). None for the drop check's model.
+    taken_once: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl JointModel {
@@ -224,7 +228,9 @@ impl JointModel {
                     .extend(literals);
             }
         }
-        Self::compose(by_name, scope, (models, reactions), &read, sending, cut)
+        let mut model = Self::compose(by_name, scope, (models, reactions), &read, sending, cut);
+        model.taken_once = once::taken_once(&model.models, &model.reactions);
+        model
     }
 
     /// The model of `models` and `reactions` over `scope`, one record per
@@ -367,6 +373,7 @@ impl JointModel {
             first: std::sync::OnceLock::new(),
             settled: std::sync::OnceLock::new(),
             idle: std::sync::OnceLock::new(),
+            taken_once: BTreeMap::new(),
         }
     }
 

@@ -448,6 +448,7 @@ impl JointModel {
         tables: &RwLock<Packer>,
     ) -> bool {
         let state = &mut memo.scratch;
+        self.one_copy(state);
         if self.delivery != Delivery::BeforeNextRequest && !self.fits(state) {
             return false;
         }

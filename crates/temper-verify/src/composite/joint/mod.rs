@@ -318,6 +318,10 @@ mod idle_tests;
 mod blank_tests;
 
 #[cfg(test)]
+#[path = "once_test.rs"]
+mod once_tests;
+
+#[cfg(test)]
 #[path = "outside_count_test.rs"]
 mod outside_count_tests;
 

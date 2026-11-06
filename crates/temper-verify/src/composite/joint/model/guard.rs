@@ -72,6 +72,13 @@ impl JointModel {
     /// (`temper-server` `trigger::dispatcher`). Copies of one commit's
     /// waiting reactions count as the most copies of any one of them.
     pub(in crate::composite::joint) fn fits<'a>(&'a self, state: &'a JointState) -> bool {
+        // A second copy of a dispatch taken once is dropped as it is sent
+        // (`once.rs`), and counts as nothing.
+        if self.holds_a_second_copy(state) {
+            let mut one = state.clone();
+            self.one_copy(&mut one);
+            return self.fits(&one);
+        }
         // A commit's waiting reactions count at most one each.
         if state.calls.len() + state.inflight.len() <= MAX_IN_FLIGHT {
             return true;

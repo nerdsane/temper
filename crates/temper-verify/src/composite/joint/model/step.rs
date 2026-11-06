@@ -364,6 +364,7 @@ impl JointModel {
         let mut nexts = Vec::new();
         for (mut outcome, text, certainty) in outcomes {
             let certainty = if unsure { Unsure } else { certainty };
+            self.one_copy(&mut outcome);
             let fits = self.delivery == Delivery::BeforeNextRequest || self.fits(&outcome);
             held_back |= !fits;
             if !fits {
