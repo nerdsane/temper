@@ -2,14 +2,17 @@
 //!
 //! The walk goes both ways on a request Cedar's answer to which depends on who
 //! asks, as TLA+ would, on a request's guard on its own record's fields, and on a reaction
-//! from a type it doesn't hold. A verdict on a way through only those says which
-//! it rests on: it holds if the runtime can make those moves.
+//! from a type it doesn't hold. It also goes both ways on a move whose
+//! parameter the kernel binds to the caller when only some senders of its kind
+//! name one. A verdict on a way through only those says which it rests on: it
+//! holds if the runtime can make those moves.
 //!
 //! Every other way the model cannot be sure of says nothing, because the step
 //! may be one the runtime never makes: Cedar's answer on a record's field alone,
 //! which some caller can't bring about, a guard on another record the walk
 //! doesn't hold, a trigger's guard, a module's answer nothing names, a spawn the
-//! model holds too few records for.
+//! model holds too few records for, the kernel refusing such a move for a
+//! sender who names no caller (the anonymous caller of a public endpoint).
 //! So do two more kinds. One that needs one sender's one request to be allowed
 //! and refused needs Cedar to answer two ways. One through a reaction from
 //! outside that carries values takes any value the model likes, where the
@@ -58,20 +61,24 @@ impl JointModel {
             let (mv, certainty) = self.step_between(&before, &state, text)?;
             if certainty != Certainty::Sure {
                 match &mv {
-                    Move::Arrive(dispatch)
-                        if certainty == Certainty::Either
-                            && self.senders.turns_on_who_asks(
-                                dispatch.by,
-                                &dispatch.to,
-                                &dispatch.action,
-                            ) =>
-                    {
-                        let answers = if text.contains(" refused by Cedar") {
-                            &mut refused
-                        } else {
-                            &mut allowed
-                        };
-                        answers.insert(asking(&dispatch.to, &dispatch.action, dispatch.by));
+                    Move::Arrive(dispatch) if certainty == Certainty::Either => {
+                        let cedar = self.senders.turns_on_who_asks(
+                            dispatch.by,
+                            &dispatch.to,
+                            &dispatch.action,
+                        );
+                        if cedar {
+                            let answers = if text.contains(" refused by Cedar") {
+                                &mut refused
+                            } else {
+                                &mut allowed
+                            };
+                            answers.insert(asking(&dispatch.to, &dispatch.action, dispatch.by));
+                        } else if self.binds_surely(&dispatch.to, &dispatch.action, dispatch.by)
+                            || text.contains(" refused by")
+                        {
+                            return None;
+                        }
                     }
                     Move::Take(entity, action, by)
                         if self.take_rests_on_cedar_or_own_guard(entity, action, &before)
@@ -127,7 +134,7 @@ impl JointModel {
         by: u32,
     ) -> bool {
         let chain = self.outside_chain(entity, &action.name);
-        self.commit(before.clone(), entity, action, &chain, by)
+        self.commit(before.clone(), entity, action, &chain, by, None)
             .iter()
             .all(|(_, then)| *then <= Certainty::Either)
     }

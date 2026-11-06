@@ -2,7 +2,7 @@ use crate::model::Fields;
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::super::super::room::block;
-use super::super::react::Sent;
+use super::super::caller::Sent;
 use super::*;
 use crate::model::TemperModelAction;
 
@@ -105,6 +105,7 @@ fn module_calls_count_before_inflight_pruning_and_stay_charged() {
         by: OUTSIDE,
         params: &params,
         request: false,
+        caller: None,
     };
     let outcomes = model.after_commit(state, "Ask", "Go", sent);
     assert!(!model.expansion.short());

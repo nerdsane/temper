@@ -25,6 +25,7 @@ use z3::ast::{Bool, Int};
 use z3::{SatResult, Solver};
 
 use stateright::Model;
+use temper_spec::automaton::ParameterSource;
 use temper_spec::predicate::{Arg, Expr, Literal, Truth};
 
 mod encoding;
@@ -374,7 +375,7 @@ fn broken_by(model: &TemperModel, t: &ResolvedTransition, candidates: &[usize]) 
     // when a move both assigns a literal and supplies the field as a param.
     for param in &t.string_params {
         let value = Int::new_const(var_name("", "string-param", &param.name));
-        if param.nonempty || param.caller {
+        if param.nonempty || param.source == Some(ParameterSource::AuthenticatedSubject) {
             solver.assert(value.eq(Int::from_i64(0)).not());
         }
         for field in &param.equals {

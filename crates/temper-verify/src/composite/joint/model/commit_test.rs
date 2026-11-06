@@ -54,6 +54,7 @@ assert = "total >= 0"
         chain: std::sync::Arc::new([]),
         via: None,
         by: 0,
+        caller: Some(Fields::new()),
         unread_guard: None,
     };
     for expected in 1..=super::super::JOINT_MAX_COUNTER {

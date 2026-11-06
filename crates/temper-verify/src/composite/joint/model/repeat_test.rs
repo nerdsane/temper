@@ -40,7 +40,7 @@ fn run(model: &JointModel, entity: &str, name: &str) -> JointState {
         params: Fields::new(),
     };
     let mut state = model
-        .commit(initial, entity, &action, &[], OUTSIDE)
+        .commit(initial, entity, &action, &[], OUTSIDE, None)
         .into_iter()
         .max_by_key(|(s, _)| s.inflight.len())
         .unwrap()

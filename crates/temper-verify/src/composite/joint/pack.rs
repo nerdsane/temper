@@ -314,6 +314,7 @@ mod tests {
                 on_success: std::sync::Arc::new([]),
                 on_failure: None,
                 by: 0,
+                caller: None,
                 asked: Fields::from([
                     ("literal", ModelString::from("#1")),
                     ("fresh", ModelString::Symbol(1)),

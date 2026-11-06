@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use serde_json::Value as Json;
 
-use super::Cause;
+use super::{Cause, May};
 
 /// A kind of outside sender: the principals any of its profiles
 /// describes. A question about it is answered for each, and where they
@@ -95,6 +95,69 @@ impl Kind {
     /// Every profile it holds.
     pub(super) fn every(&self) -> impl Iterator<Item = &Profile> {
         self.examples.iter().chain(&self.others)
+    }
+
+    /// Whether its senders name a caller, as the kernel reads one
+    /// (`names_a_caller`): `Yes` when each does, `No` when none does, `Maybe`
+    /// when some may and some may not. A sender outside resolves to a
+    /// principal with an id that is never `System`, and no credential may
+    /// claim role "service" (the identity resolver refuses it), so one names
+    /// no caller only as the anonymous Customer a public endpoint runs as.
+    #[must_use]
+    pub fn names_a_caller(&self) -> May {
+        let (mut may, mut may_not) = (false, false);
+        for profile in self.every() {
+            let anonymous = profile.anonymous();
+            may |= anonymous != Some(true);
+            may_not |= anonymous != Some(false);
+        }
+        match (may, may_not) {
+            (true, false) => May::Yes,
+            (false, true) => May::No,
+            _ => May::Maybe,
+        }
+    }
+}
+
+impl Profile {
+    /// Whether it is the anonymous Customer: `None` when that is left open.
+    fn anonymous(&self) -> Option<bool> {
+        let kind = self.fact("kind", self.kind.as_ref());
+        let id = self.fact("id", self.attrs.get("id"));
+        if !(may_hold(kind, "Customer") && may_hold(id, "anonymous")) {
+            return Some(false);
+        }
+        let surely = |fact: Option<&Fact>, value: &str| matches!(fact, Some(Fact::Is(Json::String(held))) if held == value);
+        (surely(kind, "Customer") && surely(id, "anonymous")).then_some(true)
+    }
+
+    /// What it holds under `name`, when that is a rule and not an example
+    /// standing for others.
+    fn fact<'a>(&self, name: &str, fact: Option<&'a Fact>) -> Option<&'a Fact> {
+        fact.filter(|_| !self.stand_ins.contains(name))
+    }
+}
+
+/// Whether a sender holding `fact` (`None`: unknown) may hold the string
+/// `value` there.
+fn may_hold(fact: Option<&Fact>, value: &str) -> bool {
+    match fact {
+        None => true,
+        Some(Fact::Absent) => false,
+        Some(Fact::Is(held)) => held.as_str() == Some(value),
+        Some(Fact::Other {
+            unlike,
+            like,
+            string,
+        }) => {
+            *string != Some(false)
+                && !unlike.iter().any(|other| other.as_str() == Some(value))
+                && like.iter().all(|(pattern, matches)| {
+                    serde_json::from_str::<Vec<Json>>(pattern).map_or(true, |elements| {
+                        super::json::like(value, &elements) == *matches
+                    })
+                })
+        }
     }
 }
 

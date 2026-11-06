@@ -451,6 +451,7 @@ mod tests {
                 effects: vec![],
                 params: BTreeMap::new(),
                 string_params: vec![],
+                bound: vec![],
                 constraints: vec![],
                 after: Expr::always(),
                 after_params: BTreeMap::new(),

@@ -13,7 +13,7 @@ use crate::model::{
 
 #[path = "state_rename.rs"]
 mod rename;
-use rename::{rename_on_their_way, rename_records};
+use rename::{all_on_their_way, rename_on_their_way, rename_records, strings_on_their_way};
 
 /// The records in scope, one per type, and the dispatches and module calls
 /// on their way. A move changes one record or two and the rest stay as they
@@ -57,6 +57,9 @@ pub struct Call {
     /// Who its answer runs as, by sender number: whoever sent the move
     /// that called the module.
     pub by: u32,
+    /// What the kernel has bound in the chain that called it
+    /// ([`Dispatch::caller`]): its answer is in that chain.
+    pub caller: Option<Fields<ParamValue>>,
     /// The tracked fields its answers are tied to, as the record held them
     /// when the call started: the module answers about that record.
     pub asked: Fields<ModelString>,
@@ -94,6 +97,11 @@ pub struct Dispatch {
     pub via: Option<usize>,
     /// Who sends it, by sender number; Cedar decides it as them.
     pub by: u32,
+    /// What the kernel has bound in this chain so far, by source
+    /// ([`crate::model::source_key`]): every move of one chain binds the same
+    /// caller's. `None` when the model does not know: a timer's fire, or a
+    /// reaction from outside the scope.
+    pub caller: Option<Fields<ParamValue>>,
     /// For a reaction whose trigger's guard reads a related record in
     /// scope: its source as it committed, until the guard is read. The
     /// runtime reads the related records after the source commits, one
@@ -102,10 +110,12 @@ pub struct Dispatch {
 }
 
 impl Dispatch {
-    /// The values it carries: its parameters and its unread source's fields.
+    /// The values it carries: its parameters, its unread source's fields
+    /// and what its chain has bound.
     pub(super) fn values(&self) -> impl Iterator<Item = &ParamValue> {
         let committed = self.unread_guard.iter().flat_map(Committed::values);
-        self.params.values().chain(committed)
+        let caller = self.caller.iter().flat_map(|caller| caller.values());
+        self.params.values().chain(committed).chain(caller)
     }
 }
 
@@ -248,46 +258,6 @@ fn record_strings(records: &Fields<Arc<TemperModelState>>) -> impl Iterator<Item
     records
         .values()
         .flat_map(|s| s.strings.values().chain(s.lists.values().flatten()))
-}
-
-/// The strings of what is on its way, in the order they are numbered.
-fn strings_on_their_way(state: &JointState) -> impl Iterator<Item = &ModelString> {
-    state
-        .inflight
-        .iter()
-        .flat_map(|d| strings(d.params.values()))
-        .chain(
-            state
-                .inflight
-                .iter()
-                .flat_map(|d| d.unread_guard.iter().flat_map(|c| strings(c.values()))),
-        )
-        .chain(state.calls.iter().flat_map(|c| c.asked.values()))
-}
-
-/// Whether `holds` holds of each string [`strings_on_their_way`] gives, asked
-/// in that order, with no iterator to build for the many states that hold few.
-fn all_on_their_way(state: &JointState, mut holds: impl FnMut(&ModelString) -> bool) -> bool {
-    let mut param = |value: &ParamValue| match value {
-        ParamValue::Str(text) => holds(text),
-        _ => true,
-    };
-    for dispatch in &state.inflight {
-        if !dispatch.params.values().all(&mut param) {
-            return false;
-        }
-    }
-    for dispatch in &state.inflight {
-        if let Some(committed) = &dispatch.unread_guard
-            && !committed.values().all(&mut param)
-        {
-            return false;
-        }
-    }
-    state
-        .calls
-        .iter()
-        .all(|call| call.asked.values().all(&mut holds))
 }
 
 /// What renumbering comes to for a list of records, which is the same whatever

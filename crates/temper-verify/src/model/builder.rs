@@ -277,6 +277,12 @@ fn resolve_transitions(
                 constraints: action.constraints.clone(),
                 after: super::trigger_guard::after(automaton, action),
                 after_params,
+                bound: action
+                    .params
+                    .iter()
+                    .filter(|param| param.source().is_some())
+                    .map(|param| Sym::new(param.name()))
+                    .collect(),
             }
         })
         .collect()

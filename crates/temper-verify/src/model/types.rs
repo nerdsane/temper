@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use std::collections::BTreeSet;
 
+use temper_spec::automaton::ParameterSource;
 use temper_spec::predicate::{Arg, Expr, ParamKind};
 
 /// The state tracked by the Temper model during verification.
@@ -198,6 +199,10 @@ pub struct ResolvedTransition {
     /// change nothing the move writes, so a move takes one set of them for
     /// each way they decide its triggers' guards.
     pub after_params: BTreeMap<String, ParamKind>,
+    /// The parameters the kernel binds (`source`), whether or not the model
+    /// tracks them: no one may send one, and the kernel refuses the move
+    /// when its caller names no one.
+    pub bound: Vec<Sym>,
 }
 
 /// A string parameter of an action, with what the action's constraints allow
@@ -211,13 +216,24 @@ pub struct StringParam {
     pub writes: bool,
     /// `param_nonempty`: never empty or whitespace-only.
     pub nonempty: bool,
-    /// Bound to `authenticated_subject`: the kernel writes the caller's id,
-    /// which it never lets be empty (it may still be whitespace-only).
-    pub caller: bool,
+    /// Where the kernel takes it from, when the kernel binds it: for
+    /// `authenticated_subject`, the caller's id, which it never lets be empty
+    /// (it may still be whitespace-only); for `authenticated_agent_label`,
+    /// any value, the empty one included.
+    pub source: Option<ParameterSource>,
     /// `param_equals_field`: equal to the value of every one of these variables.
     pub equals: Vec<Sym>,
     /// `param_not_equals_field`: never the value of these variables.
     pub not_equals: Vec<Sym>,
+}
+
+/// The key a value the kernel binds goes under in a chain: its source's name.
+#[must_use]
+pub fn source_key(source: ParameterSource) -> Sym {
+    Sym::new(match source {
+        ParameterSource::AuthenticatedSubject => "authenticated_subject",
+        ParameterSource::AuthenticatedAgentLabel => "authenticated_agent_label",
+    })
 }
 
 /// A safety invariant: `assert` must not be false in any reachable state.

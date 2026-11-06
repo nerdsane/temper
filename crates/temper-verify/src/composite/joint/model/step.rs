@@ -13,7 +13,7 @@ use super::super::{Call, Dispatch, JointState};
 use super::commit::add;
 use super::labels::rename_label;
 use super::{Delivery, JointModel, MAX_IN_FLIGHT};
-use crate::model::TemperModelAction;
+use crate::model::{Fields, ParamValue, TemperModelAction};
 
 #[path = "guard.rs"]
 mod guard;
@@ -104,7 +104,11 @@ impl JointModel {
                     &action.params,
                     &state.records[entity.as_str()],
                 );
-                if exceeds == Truth::False {
+                // The kernel refuses a sender who names no caller a move it
+                // binds a parameter of.
+                let unnamed = !self.binds_surely(entity, &action.name, *by)
+                    && self.senders.names_a_caller(*by) == May::No;
+                if exceeds == Truth::False || unnamed {
                     return None;
                 }
                 let known = exceeds == Truth::True
@@ -130,7 +134,8 @@ impl JointModel {
                 let known = self.outside_may(*by, entity, &action.name) == May::Yes
                     && self.truth(entity, action, state) == Truth::True;
                 let mut next = state.clone();
-                add(&mut next, sent(entity, action, *by));
+                let caller = self.bound_values(entity, &action.name, &action.params);
+                add(&mut next, sent(entity, action, *by, Some(caller)));
                 let text = self.request_label(entity, action, *by, " sent");
                 if !self.expansion.push(
                     &mut outcomes,
@@ -167,7 +172,10 @@ impl JointModel {
                     // The dispatch path reads its guard now, and may refuse
                     // it when the model cannot decide the guard.
                     let known = self.truth(&call.to, action, state) == Truth::True;
-                    add(&mut next, sent(&call.to, action, call.by));
+                    add(
+                        &mut next,
+                        sent(&call.to, action, call.by, call.caller.clone()),
+                    );
                     if !self.expansion.push(
                         &mut outcomes,
                         (
@@ -207,7 +215,9 @@ impl JointModel {
                             &state.records[call.to.as_str()],
                         ) == Truth::True
                         && self.unchecked.meets(&call.to, &action.name)
-                        && self.exact(&call.to, &action.name, state);
+                        && self.exact(&call.to, &action.name, state)
+                        && self.binds_surely(&call.to, &action.name, call.by)
+                        && (call.caller.is_some() || !self.binds(&call.to, &action.name));
                     if !known {
                         let refused = words!(self, "{text} refused by its record");
                         if !self
@@ -217,7 +227,16 @@ impl JointModel {
                             return None;
                         };
                     }
-                    for (outcome, then) in self.commit(next, &call.to, action, &[], call.by) {
+                    // What the answer binds, its chain binds from here on.
+                    let caller = call.caller.as_ref().map(|caller| {
+                        let mut caller = caller.clone();
+                        let bound = self.bound_values(&call.to, &action.name, &action.params);
+                        caller.extend(bound.iter().map(|(source, value)| (*source, *value)));
+                        caller
+                    });
+                    for (outcome, then) in
+                        self.commit(next, &call.to, action, &[], call.by, caller.as_ref())
+                    {
                         let certainty = Certainty::unless(known, OneOf).then(then);
                         if !self
                             .expansion
@@ -403,7 +422,12 @@ impl JointModel {
 
 /// The dispatch an outside sender, or a module's answer, makes after the
 /// dispatch path read the related records and they allowed it.
-pub(super) fn sent(entity: &str, action: &TemperModelAction, by: u32) -> Dispatch {
+pub(super) fn sent(
+    entity: &str,
+    action: &TemperModelAction,
+    by: u32,
+    caller: Option<Fields<ParamValue>>,
+) -> Dispatch {
     Dispatch {
         to: entity.into(),
         action: action.name,
@@ -413,6 +437,7 @@ pub(super) fn sent(entity: &str, action: &TemperModelAction, by: u32) -> Dispatc
         chain: std::sync::Arc::new([]),
         via: None,
         by,
+        caller,
         unread_guard: None,
     }
 }

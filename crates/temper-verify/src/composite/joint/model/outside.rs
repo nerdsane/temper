@@ -65,6 +65,14 @@ impl JointModel {
                 }
             }
         }
+        // Whether the kernel binds for this sender or refuses it.
+        if self
+            .models
+            .values()
+            .any(|model| model.transitions.iter().any(|t| !t.bound.is_empty()))
+        {
+            answers.push(self.senders.names_a_caller(by));
+        }
         (may, answers, itself)
     }
 

@@ -297,6 +297,7 @@ impl Heap for super::Dispatch {
             + self.target_state.heap()
             + self.params.heap()
             + self.chain.heap()
+            + self.caller.as_ref().map_or(0, Heap::heap)
             + self
                 .unread_guard
                 .as_ref()
@@ -311,6 +312,7 @@ impl Heap for super::Call {
             + self.on_success.heap()
             + self.on_failure.heap()
             + self.asked.heap()
+            + self.caller.as_ref().map_or(0, Heap::heap)
     }
 }
 

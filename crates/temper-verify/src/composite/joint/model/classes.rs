@@ -37,7 +37,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use temper_spec::automaton::{ActionConstraint, Automaton, Initial, TargetResolver, TriggerKind};
 use temper_spec::predicate::{Arg, CmpOp, Effect, Expr, Literal, Operand, Set};
 
-use crate::model::TemperModel;
+use crate::model::{TemperModel, source_key};
 
 mod numbers;
 
@@ -200,6 +200,14 @@ impl Classes {
         }
         for action in &a.actions {
             self.visit(entity, &action.guard);
+            // The kernel writes one caller's id (or label) into every
+            // parameter bound to it, so their values meet.
+            for param in &action.params {
+                if let Some(source) = param.source() {
+                    let caller = (String::new(), Slot::Field(source_key(source).to_string()));
+                    self.link(&term(param.name()), &caller);
+                }
+            }
             for constraint in &action.constraints {
                 if matches!(constraint, ActionConstraint::ParamNonempty { .. }) {
                     self.reads_blank.insert(term(constraint.param()));

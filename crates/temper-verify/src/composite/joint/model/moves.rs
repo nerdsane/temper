@@ -2,9 +2,10 @@
 
 use super::super::env::Blind;
 use super::super::{Call, Dispatch, JointState};
+use super::commit::constraints_hold;
 use super::{Delivery, JointModel};
 use crate::model::semantics::inputs_within_bounds;
-use crate::model::{ModelString, ParamValue, TemperModelAction};
+use crate::model::{ModelString, ParamValue, TemperModelAction, source_key};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -231,6 +232,19 @@ impl JointModel {
                 for param in &t.string_params {
                     if let Some(value) = param.equals.iter().find_map(|f| call.asked.get(f)) {
                         params.insert(param.name, ParamValue::Str(*value));
+                    }
+                }
+                // The answer runs as its call's sender: the kernel binds what
+                // the chain bound, which the constraints then read.
+                if let Some(caller) = &call.caller {
+                    for param in &t.string_params {
+                        let bound = param.source.and_then(|s| caller.get(&source_key(s)));
+                        if let Some(value) = bound {
+                            params.insert(param.name, *value);
+                        }
+                    }
+                    if !constraints_hold(&t.string_params, local, &params) {
+                        continue;
                     }
                 }
                 if !seen.insert(params.clone()) {

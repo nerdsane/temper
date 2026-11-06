@@ -21,6 +21,7 @@ use super::super::env::{Blind, ID, ONE_ID, Records};
 use super::super::state::ReactionStep;
 use super::super::{Dispatch, JointState};
 use super::JointModel;
+use super::caller::Sent;
 use super::commit::add;
 use super::read::Reaction;
 use super::step::Certainty;
@@ -172,10 +173,9 @@ impl JointModel {
         state: JointState,
         source: &str,
         (index, reaction, spawn): (usize, &Reaction, &Spawn),
-        chain: &[ReactionStep],
-        by: u32,
-        params: &Fields<ParamValue>,
+        sent: Sent<'_>,
     ) -> Vec<(JointState, Certainty)> {
+        let (chain, by, params, caller) = (sent.chain, sent.by, sent.params, sent.caller);
         self.expansion.note_flight_read();
         let child = reaction.to.as_str();
         // A record that makes another of its own type: the model holds one
@@ -232,6 +232,7 @@ impl JointModel {
                     read: !self.action_reads_related(child, &reaction.target_action),
                     chain: next_chain.as_slice().into(),
                     via: Some(index),
+                    caller: caller.cloned(),
                     unread_guard: None,
                     by: self.senders.reaction(None, by, false),
                 },

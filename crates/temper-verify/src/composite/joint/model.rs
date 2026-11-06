@@ -5,6 +5,7 @@
 mod labels;
 
 mod alike;
+mod caller;
 mod chosen;
 mod classes;
 mod commit;
@@ -269,6 +270,21 @@ impl JointModel {
         // A timer whose setter's standing can be lost fires as its setter.
         let standing = standing(by_name, scope, sending.policies);
         sender_matters.extend(standing.iter().cloned());
+        // A module's answer runs as its call's sender, and one that binds a
+        // parameter reads whether that sender names a caller.
+        let answers_bind = |entity: &String| {
+            models
+                .get(entity)
+                .is_some_and(|model| model.transitions.iter().any(|t| !t.bound.is_empty()))
+        };
+        sender_matters.extend(
+            kernel
+                .calls_on
+                .keys()
+                .map(|(entity, _)| entity)
+                .filter(|entity| answers_bind(entity))
+                .cloned(),
+        );
         let senders = Senders::new(
             by_name,
             scope,
@@ -401,6 +417,11 @@ impl JointModel {
         }
         for call in &state.calls {
             values.extend(call.asked.values().filter(|v| !v.is_empty()).cloned());
+            let callers = call.caller.iter().flat_map(|caller| caller.iter());
+            values.extend(callers.filter_map(|(_, value)| match value {
+                ParamValue::Str(text) if !text.is_empty() => Some(*text),
+                _ => None,
+            }));
         }
         values
     }

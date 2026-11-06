@@ -410,6 +410,17 @@ impl Senders {
         OUTSIDE | (by % 2)
     }
 
+    /// Whether sender `by` names a caller, as the kernel reads one when it
+    /// binds a parameter (`names_a_caller`): a service never does, and an
+    /// outside sender as its kind tells ([`temper_authz::Kind::names_a_caller`]).
+    pub(super) fn names_a_caller(&self, by: u32) -> May {
+        match self.askers.get(by as usize / 2) {
+            Some(Asker::Service { .. }) => May::No,
+            Some(Asker::OutsideAs(kind)) => kind.names_a_caller(),
+            Some(Asker::Outside) | None => May::Maybe,
+        }
+    }
+
     /// Who sender `by` is, in words.
     pub(super) fn name(&self, by: u32) -> String {
         match self.names.get(by as usize / 2) {

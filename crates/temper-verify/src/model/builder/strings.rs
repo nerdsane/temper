@@ -2,9 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use temper_spec::automaton::{
-    ActionConstraint, ActionParam, Automaton, Initial, ParameterSource, VarType,
-};
+use temper_spec::automaton::{ActionConstraint, ActionParam, Automaton, Initial, VarType};
 use temper_spec::predicate::{
     Arg, CmpOp, Effect, Expr, Literal, Name, Operand, ParamKind, Set, VarKind,
 };
@@ -79,10 +77,11 @@ pub(super) fn string_params(
                 name: Sym::new(name),
                 writes: tracked_strings.contains(name),
                 nonempty: false,
-                caller: action.params.iter().any(|param| {
-                    param.name() == name
-                        && param.source() == Some(ParameterSource::AuthenticatedSubject)
-                }),
+                source: action
+                    .params
+                    .iter()
+                    .find(|param| param.name() == name)
+                    .and_then(|param| param.source()),
                 equals: Vec::new(),
                 not_equals: Vec::new(),
             };

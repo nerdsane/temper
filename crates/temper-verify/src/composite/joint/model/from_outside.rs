@@ -246,12 +246,12 @@ impl JointModel {
         let chain = self.outside_chain(entity, &action.name);
         if self.action_reads_related(entity, &action.name) {
             let mut next = state.clone();
-            let mut dispatch = sent(entity, action, by);
+            let mut dispatch = sent(entity, action, by, None);
             dispatch.chain = chain.into();
             add(&mut next, dispatch);
             return vec![(next, words!(self, "{text} sent"), Certainty::Unsure)];
         }
-        self.commit(state.clone(), entity, action, &chain, by)
+        self.commit(state.clone(), entity, action, &chain, by, None)
             .into_iter()
             .map(|(outcome, then)| (outcome, text.clone(), Certainty::Unsure.then(then)))
             .collect()

@@ -9,6 +9,7 @@ use super::super::room::Heap;
 use super::super::senders::Senders;
 use super::super::state::ReactionStep;
 use super::super::{Call, Committed, Dispatch, JointState};
+use super::caller::Sent;
 use super::commit::add;
 use super::copies::base;
 use super::read::Reaction;
@@ -20,17 +21,6 @@ use crate::model::{Fields, ParamValue, Sym};
 /// does not hold, whatever nonblank value the source held; a blank one it
 /// carries as empty.
 const NOT_BLANK: &str = "(not blank)";
-
-/// Who made a move, as what follows it reads.
-#[derive(Clone, Copy)]
-pub(super) struct Sent<'a> {
-    /// The chain it came in; empty when it starts one.
-    pub(super) chain: &'a [ReactionStep],
-    pub(super) by: u32,
-    pub(super) params: &'a Fields<ParamValue>,
-    /// Whether it is a request, whose sender chose all its parameters.
-    pub(super) request: bool,
-}
 
 impl JointModel {
     /// What follows `source.action` committing, `sent` by someone: its
@@ -101,7 +91,8 @@ impl JointModel {
                         )
                         + asked_entries()
                             .map(|(k, v)| k.heap() + v.heap())
-                            .sum::<usize>();
+                            .sum::<usize>()
+                        + sent.caller.map_or(0, Heap::heap);
                 if !self.expansion.hold(call_heap) || !self.expansion.reserve(&mut outcome.calls) {
                     return Vec::new();
                 }
@@ -111,6 +102,7 @@ impl JointModel {
                     on_success: spec.on_success.iter().map(Sym::from).collect(),
                     on_failure: spec.on_failure.as_ref().map(Sym::from),
                     by: answer_as,
+                    caller: sent.caller.cloned(),
                     asked: asked_entries()
                         .map(|(field, value)| (field.clone(), *value))
                         .collect(),
@@ -190,7 +182,7 @@ impl JointModel {
                 };
                 if let Some(spawn) = &reaction.spawn {
                     let made = (index, reaction, spawn);
-                    for (next, then) in self.spawn(state, source, made, chain, by, params) {
+                    for (next, then) in self.spawn(state, source, made, sent) {
                         if !self.keep(&mut after, next, known.then(then)) {
                             return Vec::new();
                         }
@@ -300,6 +292,7 @@ impl JointModel {
                     read: !self.action_reads_related(&reaction.to, &reaction.target_action),
                     chain: chain.into(),
                     via: Some(via),
+                    caller: sent.caller.cloned(),
                     unread_guard,
                     by: self.senders.reaction(
                         reaction.principal.as_ref(),

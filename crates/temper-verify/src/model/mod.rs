@@ -38,5 +38,5 @@ pub(crate) use types::ExploreLimit;
 pub use types::{
     LivenessKind, ModelEffect, ModelString, ParamValue, ResolvedEntryRule, ResolvedInvariant,
     ResolvedLiveness, ResolvedTransition, StringParam, TemperModel, TemperModelAction,
-    TemperModelState,
+    TemperModelState, source_key,
 };
