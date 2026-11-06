@@ -163,6 +163,22 @@ impl SendAnalysis {
             })
             .collect();
         tests.ask(&self.policies, &candidates);
+        // A question someone unknown has a definite answer to has it for
+        // every kind: it adds the same answer to every node and reads
+        // nothing, so it never splits one, and the nodes ask only the rest.
+        let (questions, candidates): (Vec<Question<'_>>, Vec<Vec<usize>>) = questions
+            .iter()
+            .zip(candidates)
+            .filter(|(question, candidates)| {
+                let request = ask(&anyone, &UNKNOWN, question, &none);
+                let applies = candidates
+                    .iter()
+                    .map(|&at| (self.policies[at].0, request.applies(&self.policies[at].1)));
+                decide(applies) == May::Maybe
+            })
+            .map(|(question, candidates)| (question.clone(), candidates))
+            .unzip();
+        let questions = &questions[..];
         let memory = Memory::new(&tests, &self.policies, &candidates, reserve);
         memory.reserve(4, 0)?;
         let forms = Forms::default();

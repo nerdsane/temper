@@ -390,6 +390,35 @@ fn a_literal_only_other_actions_compare_with_tells_no_senders_apart() {
 }
 
 #[test]
+fn questions_everyone_has_one_answer_to_leave_the_kinds_as_they_are() {
+    // Anyone may Archive and no one may Delete: neither tells a member
+    // from anyone else, and Add still does.
+    let analysis = SendAnalysis::new(
+        r#"permit(principal, action == Action::"Add", resource is Note)
+        when { principal has role && principal.role == "member" };
+        permit(principal, action == Action::"Archive", resource is Note);"#,
+    )
+    .expect("policies parse");
+    let question = |action| Question {
+        action,
+        resource_type: "Note",
+        cause: Cause::request(),
+    };
+    let unlimited = |_: usize| Ok(());
+    let alone = analysis
+        .outside_kinds(&[question("Add")], &unlimited)
+        .expect("fits");
+    let among = analysis
+        .outside_kinds(
+            &[question("Delete"), question("Archive"), question("Add")],
+            &unlimited,
+        )
+        .expect("fits");
+    assert_eq!(alone.len(), 2, "members, and the rest");
+    assert_eq!(among, alone);
+}
+
+#[test]
 fn the_same_questions_are_answered_once() {
     let analysis = SendAnalysis::new(
         r#"permit(principal, action, resource)
