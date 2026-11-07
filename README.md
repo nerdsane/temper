@@ -52,6 +52,26 @@ Tools build on tools.
 
 ---
 
+## Ideas about the near future of software
+
+1) No CI. Agents prove each change against rules while they write it.
+2) Code is a cache: rules stay, code regenerated with better models.
+3) No staging, simulation instead.
+4) Humans direct in plain words, agents compile that into formal rules, humans don't read the formulas, only examples and counterexamples.
+5) Agents find the rules the human never knew to express (and ask to confirm them).
+6) The checker catches contradictions between human's rules while they're still directing.
+7) Unchecked/unproved code becomes legacy code.
+8) Branches come back as experiments (many versions at once, humans pick among winners).
+9) Software gets bred, not built.
+10) Slop is variation without selection.
+11) If UI is generated on the fly, design becomes the rules every generated screen must follow. A checker runs those rules on every generation.
+12) Apps evolve from how they're used.
+13) Everyone uses their own software version. One product becomes many personal versions, that stay compatible via shared rules.
+
+Temper embodies these ideas.
+
+---
+
 ## Quick start
 
 Temper is an HTTP server with an OData API. Agents talk to it directly, through one of the SDKs, or via the MCP bridge for stdio agent clients.
