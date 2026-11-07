@@ -171,3 +171,13 @@ Primary: set `TEMPER_PROFILING_ENABLED=false` at the service level. Profiler thr
 Secondary: remove the `datadog-profiling` dep via a revert PR. `runtime-id` on spans remains (harmless; it's just a tag).
 
 Tertiary: keep the runtime-id plumbing indefinitely even if the profiler is disabled — it's free insurance for any future profiling backend.
+
+## Update, 2026-11-07: what was built
+
+The fallback in Alternative 1 is what runs: `pprof-rs` with Temper's own uploader, in `crates/temper-server/src/profiling/`. Its module documentation is the current list of settings; the switches above were never built. In short:
+
+- `TEMPER_PROFILING_CONTINUOUS=true` alone starts the loop: every interval (default 300 s) a CPU window (default 30 s at 100 Hz) and a heap snapshot are uploaded in Datadog's native profile format. Set it to anything else and the next cycle uploads nothing.
+- Uploads go to the local Datadog Agent unless `TEMPER_PROFILING_INTAKE_URL` names another intake; `TEMPER_PROFILING_INTAKE_HEADERS` adds headers, for example a forwarder's bearer token.
+- Heap profiles come from jemalloc's sampling profiler (`prof:true`, one sample per ~512 KiB), on Linux builds of temper-cli.
+- Frames in JIT-compiled wasm guest code are named from the module's name section (`temper_wasm::code_map`).
+- `TEMPER_PROFILING_ENABLED` now only serves the on-demand endpoints at `/_admin/profile/{cpu,wall,heap}`.

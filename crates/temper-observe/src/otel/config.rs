@@ -36,7 +36,9 @@ pub(super) fn read_non_empty_env(var_name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-pub(super) fn parse_otlp_headers(raw: &str) -> HashMap<String, String> {
+/// Parse `key=value,key=value` headers, the `OTEL_EXPORTER_OTLP_HEADERS` form.
+/// Pairs without a key or a value are left out.
+pub fn parse_otlp_headers(raw: &str) -> HashMap<String, String> {
     raw.split(',')
         .filter_map(|pair| pair.split_once('='))
         .map(|(key, value)| (key.trim().to_string(), value.trim().to_string()))

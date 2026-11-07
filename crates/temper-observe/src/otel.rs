@@ -55,8 +55,9 @@ mod retry;
 mod sampler;
 mod settings;
 
+pub use config::parse_otlp_headers;
 use config::{
-    parse_otlp_headers, read_non_empty_env, resolve_deployment_environment, resolve_otel_config,
+    read_non_empty_env, resolve_deployment_environment, resolve_otel_config,
     resolve_service_version,
 };
 use log_bridge::log_bridge;

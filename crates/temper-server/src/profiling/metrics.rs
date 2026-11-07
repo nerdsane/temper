@@ -1,9 +1,13 @@
+//! The profiler's own telemetry: captures, uploads and its settings.
+
 use std::sync::OnceLock;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use opentelemetry::KeyValue;
 use opentelemetry::global;
 use opentelemetry::metrics::{Counter, Gauge, Histogram};
+
+use super::config;
 
 pub(super) struct ProfilingMetrics {
     pub(super) profiles_uploaded: Counter<u64>,
@@ -25,13 +29,13 @@ pub(super) fn profiling_metrics() -> &'static ProfilingMetrics {
         ProfilingMetrics {
             profiles_uploaded: meter
                 .u64_counter("datadog.profiling.rust.profiles_uploaded")
-                .with_description(
-                    "Profiles successfully pushed to the Datadog Agent intake endpoint.",
-                )
+                .with_description("Profiles successfully pushed to the profile intake.")
                 .build(),
             upload_errors: meter
                 .u64_counter("datadog.profiling.rust.upload_errors")
-                .with_description("Profile upload attempts that failed to reach the Datadog Agent.")
+                .with_description(
+                    "Profile upload attempts that failed to reach the profile intake.",
+                )
                 .build(),
             captures_started: meter
                 .u64_counter("temper_profiling_capture_started_total")
@@ -85,23 +89,23 @@ pub(super) fn current_unix_seconds() -> u64 {
 pub fn record_profiling_config() {
     let metrics = profiling_metrics();
     metrics.config.record(
-        bool_as_gauge(super::profiling_enabled()),
+        bool_as_gauge(config::on_demand_enabled()),
         &[KeyValue::new("setting", "enabled")],
     );
     metrics.config.record(
-        bool_as_gauge(super::auto_upload_enabled()),
+        bool_as_gauge(config::auto_upload_enabled()),
         &[KeyValue::new("setting", "auto_upload")],
     );
     metrics.config.record(
-        bool_as_gauge(super::continuous_enabled()),
+        bool_as_gauge(config::continuous_enabled()),
         &[KeyValue::new("setting", "continuous")],
     );
     metrics
         .continuous_interval_seconds
-        .record(super::continuous_interval_seconds(), &[]);
+        .record(config::continuous_interval_seconds(), &[]);
     metrics
         .continuous_window_seconds
-        .record(super::continuous_window_seconds(), &[]);
+        .record(config::continuous_window_seconds(), &[]);
 }
 
 pub(super) fn profile_attrs(profile_type: &str, mode: &str) -> [KeyValue; 2] {
@@ -123,4 +127,17 @@ pub(super) fn record_capture_error(profile_type: &str, mode: &str, stage: &str) 
     profiling_metrics()
         .capture_errors
         .add(1, &profile_stage_attrs(profile_type, mode, stage));
+}
+
+/// Count a finished capture and how long it took.
+pub(super) fn record_capture_done(profile_type: &str, mode: &str, started: Instant) {
+    let attrs = profile_attrs(profile_type, mode);
+    let metrics = profiling_metrics();
+    metrics.captures_completed.add(1, &attrs);
+    metrics
+        .capture_duration_ms
+        .record(started.elapsed().as_secs_f64() * 1_000.0, &attrs);
+    metrics
+        .last_capture_unix_seconds
+        .record(current_unix_seconds(), &attrs);
 }

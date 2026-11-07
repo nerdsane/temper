@@ -156,6 +156,8 @@ struct CachedModule {
     instance_pre: Option<wasmtime::InstancePre<HostState>>,
     /// Pre-linked instance template for WASI modules.
     instance_pre_wasi: Option<wasmtime::InstancePre<HostState>>,
+    /// Names this module's compiled code for profilers while it is alive.
+    _code: crate::code_map::CodeRange,
 }
 
 /// Background ticker for Wasmtime epoch interruption.

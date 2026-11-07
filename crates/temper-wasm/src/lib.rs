@@ -6,6 +6,7 @@
 //! budgets (TigerStyle).
 
 pub mod authorized_host;
+pub mod code_map;
 pub mod engine;
 pub mod host_trait;
 pub mod http_stream;

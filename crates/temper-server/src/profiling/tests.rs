@@ -1,169 +1,362 @@
-use super::*;
-
 use std::sync::Mutex;
 
-// Cargo runs tests in parallel; env-var mutation races otherwise.
+use pprof::protos::{Message, Profile, ValueType};
+
+use super::capture::{encode, name_sample_types};
+use super::config;
+use super::upload::{Captured, PROFILE_ATTACHMENT, event_json, upload};
+
+// Cargo runs tests in parallel; environment changes race otherwise.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-#[test]
-fn profiling_toggle_states() {
-    let _g = ENV_LOCK.lock().unwrap();
-    unsafe {
-        std::env::remove_var("TEMPER_PROFILING_ENABLED");
-    }
-    assert!(!profiling_enabled(), "default should be off");
+const SETTINGS: [&str; 16] = [
+    "TEMPER_PROFILING_ENABLED",
+    "TEMPER_PROFILING_CONTINUOUS",
+    "TEMPER_PROFILING_MAX_SECONDS",
+    "TEMPER_PROFILING_CONTINUOUS_INTERVAL_SECONDS",
+    "TEMPER_PROFILING_CONTINUOUS_SECONDS",
+    "TEMPER_PROFILING_CONTINUOUS_FREQUENCY",
+    "TEMPER_PROFILING_INTAKE_URL",
+    "TEMPER_PROFILING_INTAKE_HEADERS",
+    "DD_AGENT_HOST",
+    "DD_TRACE_AGENT_PORT",
+    "DD_SERVICE",
+    "DD_ENV",
+    "DD_VERSION",
+    "DD_TAGS",
+    "OTEL_SERVICE_NAME",
+    "BUILD_VERSION",
+];
 
+/// Run `body` with exactly `vars` set among the profiler's settings.
+fn with_env(vars: &[(&str, &str)], body: impl FnOnce()) {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let set = |vars: &[(&str, &str)]| unsafe {
+        for name in SETTINGS {
+            std::env::remove_var(name);
+        }
+        for (name, value) in vars {
+            std::env::set_var(name, value);
+        }
+    };
+    set(vars);
+    body();
+    set(&[]);
+}
+
+#[test]
+fn switches_are_off_until_set() {
+    with_env(&[], || {
+        assert!(!config::on_demand_enabled());
+        assert!(!config::continuous_enabled());
+    });
     for truthy in ["1", "true", "yes", "on"] {
-        unsafe {
-            std::env::set_var("TEMPER_PROFILING_ENABLED", truthy);
-        }
-        assert!(profiling_enabled(), "{truthy} should enable");
+        with_env(&[("TEMPER_PROFILING_CONTINUOUS", truthy)], || {
+            assert!(config::continuous_enabled(), "{truthy} turns it on");
+        });
     }
-
     for falsy in ["0", "false", "no", "off", ""] {
-        unsafe {
-            std::env::set_var("TEMPER_PROFILING_ENABLED", falsy);
-        }
-        assert!(!profiling_enabled(), "{falsy:?} should disable");
-    }
-
-    unsafe {
-        std::env::remove_var("TEMPER_PROFILING_ENABLED");
+        with_env(&[("TEMPER_PROFILING_CONTINUOUS", falsy)], || {
+            assert!(!config::continuous_enabled(), "{falsy:?} leaves it off");
+        });
     }
 }
 
 #[test]
-fn max_window_clamps() {
-    let _g = ENV_LOCK.lock().unwrap();
-    unsafe {
-        std::env::set_var("TEMPER_PROFILING_MAX_SECONDS", "99999");
-    }
-    assert_eq!(max_window_seconds(), 600);
-    unsafe {
-        std::env::set_var("TEMPER_PROFILING_MAX_SECONDS", "2");
-    }
-    assert_eq!(max_window_seconds(), 5);
-    unsafe {
-        std::env::remove_var("TEMPER_PROFILING_MAX_SECONDS");
-    }
-}
-
-#[test]
-fn continuous_tuning_clamps() {
-    let _g = ENV_LOCK.lock().unwrap();
-    unsafe {
-        std::env::remove_var("TEMPER_PROFILING_MAX_SECONDS");
-        std::env::remove_var("TEMPER_PROFILING_CONTINUOUS_INTERVAL_SECONDS");
-        std::env::remove_var("TEMPER_PROFILING_CONTINUOUS_SECONDS");
-        std::env::remove_var("TEMPER_PROFILING_CONTINUOUS_FREQUENCY");
-    }
-    assert_eq!(continuous_interval_seconds(), 300);
-    assert_eq!(continuous_window_seconds(), 30);
-    assert_eq!(continuous_frequency(), 100);
-
-    unsafe {
-        std::env::set_var("TEMPER_PROFILING_CONTINUOUS_INTERVAL_SECONDS", "5");
-        std::env::set_var("TEMPER_PROFILING_CONTINUOUS_SECONDS", "1");
-        std::env::set_var("TEMPER_PROFILING_CONTINUOUS_FREQUENCY", "1");
-    }
-    assert_eq!(continuous_interval_seconds(), 60);
-    assert_eq!(continuous_window_seconds(), 5);
-    assert_eq!(continuous_frequency(), 10);
-
-    unsafe {
-        std::env::set_var("TEMPER_PROFILING_MAX_SECONDS", "60");
-        std::env::set_var("TEMPER_PROFILING_CONTINUOUS_INTERVAL_SECONDS", "999999");
-        std::env::set_var("TEMPER_PROFILING_CONTINUOUS_SECONDS", "999");
-        std::env::set_var("TEMPER_PROFILING_CONTINUOUS_FREQUENCY", "999");
-    }
-    assert_eq!(continuous_interval_seconds(), 3_600);
-    assert_eq!(continuous_window_seconds(), 60);
-    assert_eq!(continuous_frequency(), 500);
-
-    unsafe {
-        std::env::remove_var("TEMPER_PROFILING_MAX_SECONDS");
-        std::env::remove_var("TEMPER_PROFILING_CONTINUOUS_INTERVAL_SECONDS");
-        std::env::remove_var("TEMPER_PROFILING_CONTINUOUS_SECONDS");
-        std::env::remove_var("TEMPER_PROFILING_CONTINUOUS_FREQUENCY");
-    }
-}
-
-#[test]
-fn datadog_profile_event_uses_agent_intake_envelope() {
-    let _g = ENV_LOCK.lock().unwrap();
-    unsafe {
-        std::env::set_var("DD_SERVICE", "temperpaw");
-        std::env::set_var("DD_ENV", "prod");
-        std::env::set_var("DD_VERSION", "30feec4");
-        std::env::remove_var("DD_PROFILING_ENABLED");
-    }
-
-    let started_at = chrono::DateTime::parse_from_rfc3339("2026-05-12T19:39:42Z")
-        .unwrap()
-        .with_timezone(&chrono::Utc);
-    let ended_at = chrono::DateTime::parse_from_rfc3339("2026-05-12T19:39:47Z")
-        .unwrap()
-        .with_timezone(&chrono::Utc);
-    let filename = profile_filename("cpu");
-    let event = profile_upload_event_json("cpu", "on_demand", &filename, started_at, ended_at);
-
-    assert_eq!(event["version"], "4");
-    assert_eq!(event["family"], "rust");
-    assert_eq!(event["start"], "2026-05-12T19:39:42Z");
-    assert_eq!(event["end"], "2026-05-12T19:39:47Z");
-    assert_eq!(event["attachments"], serde_json::json!(["cpu.pprof"]));
-    assert_eq!(event["info"]["profiler"]["activation"], "manual");
-    assert_eq!(event["info"]["profiler"]["ssi"]["mechanism"], "none");
-    assert_eq!(event["info"]["profiler"]["settings"]["profile_type"], "cpu");
-
-    let tags = event["tags_profiler"].as_str().unwrap();
-    for expected in [
-        "service:temperpaw",
-        "env:prod",
-        "version:30feec4",
-        "runtime:rust",
-        "profile.component:cpu",
-        "profile.mode:on_demand",
-    ] {
-        assert!(tags.contains(expected), "missing tag {expected} in {tags}");
-    }
-    assert!(
-        tags.contains("runtime-id:"),
-        "runtime-id tag missing in {tags}"
+fn windows_and_rates_stay_in_bounds() {
+    with_env(&[], || {
+        assert_eq!(config::max_window_seconds(), 120);
+        assert_eq!(config::continuous_interval_seconds(), 300);
+        assert_eq!(config::continuous_window_seconds(), 30);
+        assert_eq!(config::continuous_frequency(), 100);
+    });
+    with_env(
+        &[
+            ("TEMPER_PROFILING_MAX_SECONDS", "2"),
+            ("TEMPER_PROFILING_CONTINUOUS_INTERVAL_SECONDS", "5"),
+            ("TEMPER_PROFILING_CONTINUOUS_SECONDS", "1"),
+            ("TEMPER_PROFILING_CONTINUOUS_FREQUENCY", "1"),
+        ],
+        || {
+            assert_eq!(config::max_window_seconds(), 5);
+            assert_eq!(config::continuous_interval_seconds(), 60);
+            assert_eq!(config::continuous_window_seconds(), 5);
+            assert_eq!(config::continuous_frequency(), 10);
+        },
     );
+    with_env(
+        &[
+            ("TEMPER_PROFILING_MAX_SECONDS", "60"),
+            ("TEMPER_PROFILING_CONTINUOUS_INTERVAL_SECONDS", "999999"),
+            ("TEMPER_PROFILING_CONTINUOUS_SECONDS", "999"),
+            ("TEMPER_PROFILING_CONTINUOUS_FREQUENCY", "99999999999"),
+        ],
+        || {
+            assert_eq!(config::continuous_interval_seconds(), 3_600);
+            assert_eq!(config::continuous_window_seconds(), 60);
+            assert_eq!(config::continuous_frequency(), 500);
+        },
+    );
+}
 
-    unsafe {
-        std::env::remove_var("DD_SERVICE");
-        std::env::remove_var("DD_ENV");
-        std::env::remove_var("DD_VERSION");
-        std::env::remove_var("DD_PROFILING_ENABLED");
+#[test]
+fn intake_is_the_local_agent_unless_configured() {
+    with_env(&[], || {
+        let intake = config::intake();
+        assert_eq!(intake.url, "http://127.0.0.1:8126/profiling/v1/input");
+        assert!(intake.headers.is_empty());
+    });
+    with_env(
+        &[
+            ("DD_AGENT_HOST", "agent.internal"),
+            ("DD_TRACE_AGENT_PORT", "9126"),
+        ],
+        || {
+            assert_eq!(
+                config::intake().url,
+                "http://agent.internal:9126/profiling/v1/input"
+            )
+        },
+    );
+    with_env(
+        &[
+            ("DD_AGENT_HOST", "agent.internal"),
+            (
+                "TEMPER_PROFILING_INTAKE_URL",
+                "https://collector.example/profiling/v1/input",
+            ),
+            (
+                "TEMPER_PROFILING_INTAKE_HEADERS",
+                "authorization=Bearer abc, x-extra = 1",
+            ),
+        ],
+        || {
+            let intake = config::intake();
+            assert_eq!(intake.url, "https://collector.example/profiling/v1/input");
+            assert_eq!(
+                intake.headers,
+                vec![
+                    ("authorization".to_string(), "Bearer abc".to_string()),
+                    ("x-extra".to_string(), "1".to_string()),
+                ]
+            );
+        },
+    );
+}
+
+fn captured(profile_type: &'static str) -> Captured {
+    let at = |t: &str| {
+        chrono::DateTime::parse_from_rfc3339(t)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    };
+    Captured {
+        pprof: vec![1, 2, 3],
+        profile_type,
+        mode: "continuous",
+        started_at: at("2026-11-07T19:39:42Z"),
+        ended_at: at("2026-11-07T19:40:12Z"),
     }
 }
 
 #[test]
-fn pprof_profile_encodes_to_decodable_protobuf() {
-    // ARN-169: profile serialization runs through pprof's `prost-codec` feature
-    // (rather than `protobuf-codec`, which pinned the vulnerable protobuf 2.x).
-    // Both codecs are generated from the same `profile.proto`, so the emitted
-    // bytes stay valid pprof protobuf. This guards the codec itself: if a future
-    // pprof bump silently reverted the feature, `encode`/`decode` would no longer
-    // resolve to prost's trait methods and this stops compiling — and if the
-    // encoding ever produced something undecodable, it fails.
-    use pprof::protos::{Profile, ValueType};
+fn event_follows_datadogs_native_profile_envelope() {
+    with_env(
+        &[
+            ("DD_SERVICE", "unikon-user-temper"),
+            ("DD_ENV", "staging"),
+            ("DD_VERSION", "30feec4"),
+            ("DD_TAGS", "app_id:a1,temper_id:t1"),
+            ("TEMPER_PROFILING_CONTINUOUS", "true"),
+        ],
+        || {
+            let event = event_json(&captured("heap"));
+            assert_eq!(event["version"], "4");
+            assert_eq!(event["family"], "native");
+            assert_eq!(event["start"], "2026-11-07T19:39:42Z");
+            assert_eq!(event["end"], "2026-11-07T19:40:12Z");
+            assert_eq!(
+                event["attachments"],
+                serde_json::json!([PROFILE_ATTACHMENT])
+            );
+            assert_eq!(event["info"]["profiler"]["activation"], "auto");
+            let tags = event["tags_profiler"].as_str().unwrap();
+            for expected in [
+                "service:unikon-user-temper",
+                "env:staging",
+                "version:30feec4",
+                "runtime:rust",
+                "profile.component:heap",
+                "profile.mode:continuous",
+                "app_id:a1",
+                "temper_id:t1",
+                "runtime-id:",
+            ] {
+                assert!(tags.contains(expected), "missing {expected} in {tags}");
+            }
+        },
+    );
+}
 
-    let profile = Profile {
-        string_table: vec![String::new(), "samples".to_string(), "count".to_string()],
-        sample_type: vec![ValueType { ty: 1, unit: 2 }],
+#[test]
+fn tags_name_no_environment_or_version_nobody_set() {
+    with_env(&[("OTEL_SERVICE_NAME", "katagami-app")], || {
+        let tags = super::upload::profile_tags("cpu", "continuous");
+        assert_eq!(tags[0], "service:katagami-app");
+        assert!(
+            !tags
+                .iter()
+                .any(|t| t.starts_with("env:") || t.starts_with("version:")),
+            "{tags:?}"
+        );
+    });
+    with_env(
+        &[
+            ("OTEL_SERVICE_NAME", "katagami-app"),
+            ("DD_SERVICE", "unikon-user-temper"),
+        ],
+        || {
+            assert_eq!(
+                super::upload::profile_tags("cpu", "continuous")[0],
+                "service:unikon-user-temper"
+            )
+        },
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn upload_reaches_the_intake_with_its_headers() {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let intake = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/profiling/v1/input"))
+        .and(header("authorization", "Bearer abc"))
+        .respond_with(ResponseTemplate::new(202))
+        .expect(1)
+        .mount(&intake)
+        .await;
+    let to = config::Intake {
+        url: format!("{}/profiling/v1/input", intake.uri()),
+        headers: vec![("authorization".to_string(), "Bearer abc".to_string())],
+    };
+    upload(captured("cpu"), to).await;
+
+    let requests = intake.received_requests().await.expect("recording on");
+    assert_eq!(requests.len(), 1);
+    let body = String::from_utf8_lossy(&requests[0].body);
+    assert!(
+        body.contains("name=\"event\"; filename=\"event.json\""),
+        "{body}"
+    );
+    assert!(
+        body.contains("name=\"profile.pprof\"; filename=\"profile.pprof\""),
+        "{body}"
+    );
+}
+
+#[test]
+fn sample_types_take_datadog_names_and_still_decode() {
+    let mut profile = Profile {
+        string_table: vec![
+            String::new(),
+            "samples".to_string(),
+            "count".to_string(),
+            "cpu".to_string(),
+            "nanoseconds".to_string(),
+        ],
+        sample_type: vec![ValueType { ty: 1, unit: 2 }, ValueType { ty: 3, unit: 4 }],
         period: 10_000_000,
         ..Default::default()
     };
+    name_sample_types(
+        &mut profile,
+        &[("cpu-samples", "count"), ("cpu-time", "nanoseconds")],
+    );
+    let decoded = Profile::decode(encode(&profile).unwrap().as_slice()).unwrap();
+    let name = |i: i64| decoded.string_table[i as usize].as_str();
+    let types: Vec<(&str, &str)> = decoded
+        .sample_type
+        .iter()
+        .map(|t| (name(t.ty), name(t.unit)))
+        .collect();
+    assert_eq!(
+        types,
+        [("cpu-samples", "count"), ("cpu-time", "nanoseconds")]
+    );
+    assert_eq!(name(3), "cpu", "existing strings keep their meaning");
+}
 
-    let mut body = Vec::new();
-    profile.encode(&mut body).expect("profile must encode");
-    assert!(!body.is_empty(), "encoded pprof profile must not be empty");
+/// A profile of one function per frame, leaf first, one sample per stack.
+fn profile_of(stacks: &[&[&str]]) -> Profile {
+    use pprof::protos::{Function, Line, Location, Sample};
+    let mut profile = Profile {
+        string_table: vec![String::new()],
+        ..Default::default()
+    };
+    for stack in stacks {
+        let mut ids = Vec::new();
+        for name in *stack {
+            let id = profile.function.len() as u64 + 1;
+            profile.string_table.push((*name).to_string());
+            profile.function.push(Function {
+                id,
+                name: profile.string_table.len() as i64 - 1,
+                ..Default::default()
+            });
+            profile.location.push(Location {
+                id,
+                line: vec![Line {
+                    function_id: id,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+            ids.push(id);
+        }
+        profile.sample.push(Sample {
+            location_id: ids,
+            value: vec![1 << 19],
+            label: Vec::new(),
+        });
+    }
+    profile
+}
 
-    let decoded = Profile::decode(&body[..]).expect("encoded bytes must be valid pprof protobuf");
-    assert_eq!(decoded.period, 10_000_000);
-    assert_eq!(decoded.sample_type.len(), 1);
-    assert_eq!(decoded.string_table[1], "samples");
+#[test]
+fn heap_stacks_start_at_the_code_that_allocated() {
+    let mut profile = profile_of(&[
+        &[
+            "prof_backtrace_impl",
+            "_rjem_je_prof_backtrace",
+            "_rjem_je_prof_tctx_create",
+            "do_rallocx",
+            "alloc::raw_vec::finish_grow",
+            "app::load",
+        ],
+        &["already::caller", "main"],
+    ]);
+    super::heap::start_at_the_caller(&mut profile);
+    let leaf_names: Vec<Vec<&str>> = profile
+        .sample
+        .iter()
+        .map(|sample| {
+            sample
+                .location_id
+                .iter()
+                .map(|id| {
+                    let function = &profile.function[*id as usize - 1];
+                    profile.string_table[function.name as usize].as_str()
+                })
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        leaf_names,
+        [
+            vec!["alloc::raw_vec::finish_grow", "app::load"],
+            vec!["already::caller", "main"],
+        ]
+    );
 }

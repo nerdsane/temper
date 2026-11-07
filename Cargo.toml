@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 exclude = [
+    "vendor/pprof",
     "wasm-modules/http-fetch",
     "wasm-modules/gepa-replay",
     "wasm-modules/gepa-score",
@@ -221,9 +222,15 @@ opt-level = 1
 [profile.release]
 lto = true
 codegen-units = 1
-strip = true
+# Keep the symbol table (function names) and drop only debug info: profiles
+# taken from a release binary name its frames by it.
+strip = "debuginfo"
 
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+# pprof-rs with a smaller sample table: see vendor/pprof/TEMPER.md.
+[patch.crates-io]
+pprof = { path = "vendor/pprof" }

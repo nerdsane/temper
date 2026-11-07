@@ -1,6 +1,7 @@
 //! The binary's jemalloc options take effect and leave the allocator fully
 //! started: no jemalloc warning, more than one arena, the decay settings in
-//! force, and background purging threads where they are supported (Linux).
+//! force, and background purging threads and the heap profiler where they are
+//! supported (Linux).
 
 use std::process::Command;
 
@@ -33,8 +34,12 @@ fn jemalloc_starts_with_the_purge_options() {
     );
     // Background purging threads exist only where jemalloc supports them;
     // elsewhere the option is not even reported.
+    // The sampling heap profiler is built and switched on with them.
     if cfg!(target_os = "linux") {
         assert_eq!(opt["background_thread"], true, "options: {opt}");
+        assert_eq!(opt["prof"], true, "options: {opt}");
+        assert_eq!(opt["prof_active"], true, "options: {opt}");
+        assert_eq!(opt["lg_prof_sample"], 19, "options: {opt}");
     } else {
         assert_ne!(opt["background_thread"], true, "options: {opt}");
     }
