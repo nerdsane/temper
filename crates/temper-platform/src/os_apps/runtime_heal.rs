@@ -205,6 +205,19 @@ async fn mark_app_specs_restored_from_matching_digest(
     }
 }
 
+/// Whether [`restore_app_specs_from_matching_digest`] can restore `bundle`'s
+/// specs, from what the tenant holds, without writing. Only a failed repair
+/// of the runtime metadata, which the restore logs, is not foreseen.
+pub(crate) fn app_specs_restorable(
+    state: &PlatformState,
+    tenant: &str,
+    bundle: &AppBundle,
+) -> bool {
+    tenant_has_app_spec_content_for_bundle(state, tenant, bundle)
+        && (tenant_has_registered_app_specs_for_bundle(state, tenant, bundle)
+            || tenant_has_app_spec_tables_for_bundle(state, tenant, bundle))
+}
+
 pub(crate) async fn restore_app_specs_from_matching_digest(
     state: &PlatformState,
     ps: &dyn PlatformStore,

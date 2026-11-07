@@ -69,6 +69,17 @@ pub(super) enum ClosureRefused {
     Inactive(String),
 }
 
+/// Why a check of a closure answers no.
+#[derive(Debug)]
+pub(super) enum CheckRefused {
+    /// A spec does not parse; says which and why.
+    Unparsed(String),
+    /// The install would refuse it, in the install's words.
+    Refused(String),
+    /// The check cannot answer as the install would; says why.
+    Unchecked(String),
+}
+
 /// Install the closure in `cache_root` for `tenant`.
 ///
 /// The caller holds this host's install turn ([`temper_server::host_turn`]).
@@ -206,6 +217,43 @@ pub(super) async fn install_materialized_closure(
                 )))
             }
         },
+    }
+}
+
+/// What [`install_materialized_closure`] would answer for the closure in
+/// `cache_root`, writing nothing: the same resolution and parse, then each
+/// app's install checks against the tenant as it is
+/// ([`check_app_install_order`]). The catalog keeps resolving every app to
+/// the files it held. What only an installed version shows, that its required
+/// modules compile once registered, is not checked.
+pub(super) async fn check_materialized_closure(
+    platform: &PlatformState,
+    tenant: &str,
+    cache_root: &Path,
+    closure: &MaterializedClosure<'_>,
+) -> Result<InstallResult, CheckRefused> {
+    let written: Vec<(String, AppFileSource)> = closure
+        .apps
+        .iter()
+        .map(|app| (app.version.name.clone(), app.files.clone()))
+        .collect();
+    let refused = |error: String| {
+        CheckRefused::Refused(format!(
+            "Genesis install of {} failed: {error}",
+            closure.app_ref
+        ))
+    };
+    let apps = resolve_materialized_app_closure(tenant, cache_root, &written)
+        .map_err(CheckRefused::Refused)?;
+    parse_closure_specs(&closure.root.name, &apps).map_err(|refusal| match refusal {
+        ClosureRefused::Unparsed(error) => CheckRefused::Unparsed(error),
+        ClosureRefused::Failed(error) | ClosureRefused::Inactive(error) => {
+            CheckRefused::Refused(error)
+        }
+    })?;
+    match check_app_install_order(platform, tenant, &closure.root.name, &apps).await {
+        Err(CheckRefused::Refused(error)) => Err(refused(error)),
+        other => other,
     }
 }
 

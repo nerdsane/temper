@@ -5,10 +5,10 @@ use super::*;
 use crate::genesis_install::{GenesisRegistryInstallRequest, install_genesis_app_from_registry};
 use crate::os_apps::{AppFileSource, add_tenant_written_apps, tenant_os_app_dir};
 
-const DEP: &str = "push-source";
+pub(super) const DEP: &str = "push-source";
 const POLICY: &str = "permit(principal, action == Action::\"dependency_action\", resource);";
 
-fn dependency_files() -> BTreeMap<String, String> {
+pub(super) fn dependency_files() -> BTreeMap<String, String> {
     BTreeMap::from([
         ("app.toml".into(), format!("name = {DEP:?}\n")),
         ("APP.md".into(), "# Recorded dependency".into()),

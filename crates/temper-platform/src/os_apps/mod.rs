@@ -24,6 +24,9 @@ mod app_files;
 mod apps_dir;
 mod bundle_files;
 mod bundle_modules;
+#[cfg(test)]
+#[path = "check_agreement_test.rs"]
+mod check_agreement;
 mod closure_bootstrap;
 mod entity_aliases;
 mod entity_owners;
@@ -74,15 +77,16 @@ pub use own_schema::converge_installed_schemas;
 #[cfg(test)]
 pub(super) use policy_rows::os_app_policy_row_id;
 pub(crate) use reconcile::{
-    InstallOrigin, reconcile_os_app_swapping, tenant_has_active_policies_for_bundle,
-    tenant_has_registered_wasm_for_bundle,
+    InstallOrigin, check_os_app_reconcile, reconcile_os_app_swapping,
+    tenant_has_active_policies_for_bundle, tenant_has_registered_wasm_for_bundle,
 };
 pub use reconcile::{
     os_app_bundle_digest, reconcile_os_app, resolve_os_app_install_order,
     resolve_tenant_os_app_install_order, tenant_os_app_bundle_digest, written_apps_bundle_digests,
 };
 pub(crate) use runtime_heal::{
-    restore_app_specs_from_matching_digest, tenant_has_ready_app_specs_for_bundle,
+    app_specs_restorable, restore_app_specs_from_matching_digest,
+    tenant_has_ready_app_specs_for_bundle,
 };
 pub use types::*;
 use wasm_replacement::{UploadedWasmReplacementContext, uploaded_wasm_replacement_context};
@@ -654,20 +658,85 @@ pub(super) async fn install_os_app_swapping(
     origin: InstallOrigin,
     swap: Swap,
 ) -> Result<InstallResult, String> {
+    run_install(state, tenant, app_name, plan, origin, swap, Run::Install).await
+}
+
+/// What the install of `app_name` with `files` would answer under `plan`, as a
+/// request: the same checks, in the same order, ending where the install's
+/// first write would begin. It writes nothing, and the catalog keeps resolving
+/// the app to the files it held. Proofs it walks are kept as an install's are,
+/// so the install that follows reads their verdicts.
+pub(crate) async fn check_os_app(
+    state: &PlatformState,
+    tenant: &str,
+    app_name: &str,
+    files: &AppFileSource,
+    plan: OsAppInstallPlan,
+) -> Result<InstallResult, String> {
+    let origin = InstallOrigin::Request;
+    let swap = Swap::for_origin(origin);
+    run_install(
+        state,
+        tenant,
+        app_name,
+        plan,
+        origin,
+        swap,
+        Run::Check(files),
+    )
+    .await
+}
+
+/// Whether a try installs the app the catalog resolves, or only checks given files.
+#[derive(Clone, Copy)]
+enum Run<'a> {
+    Install,
+    Check(&'a AppFileSource),
+}
+
+async fn run_install(
+    state: &PlatformState,
+    tenant: &str,
+    app_name: &str,
+    plan: OsAppInstallPlan,
+    origin: InstallOrigin,
+    swap: Swap,
+    run: Run<'_>,
+) -> Result<InstallResult, String> {
     // A proof that is still walking is waited for without the tenant's
     // install lock; the install then starts again under it and finds the
     // verdict in `attempt`, or a new walk when the tenant changed meanwhile.
-    let mut attempt = proofs::Attempt::default();
-    loop {
-        match install_once(state, tenant, app_name, plan, origin, swap, &attempt).await? {
-            ControlFlow::Break(result) => return Ok(result),
-            ControlFlow::Continue(proof) => proof.ended(&mut attempt).await?,
+    #[cfg(test)]
+    let checked = match run {
+        Run::Install if origin == InstallOrigin::Request => {
+            check_agreement::check_first(state, tenant, app_name, plan).await
         }
+        _ => None,
+    };
+    let installed = async {
+        let mut attempt = proofs::Attempt::default();
+        loop {
+            match install_once(state, tenant, app_name, plan, origin, swap, &attempt, run).await? {
+                ControlFlow::Break(result) => return Ok(result),
+                ControlFlow::Continue(proof) => proof.ended(&mut attempt).await?,
+            }
+        }
+    };
+    #[cfg(not(test))]
+    let installed = installed.await;
+    #[cfg(test)]
+    let (installed, past_the_check) = check_agreement::watched(Box::pin(installed)).await;
+    #[cfg(test)]
+    if let Some(checked) = &checked {
+        check_agreement::agrees(app_name, checked, &installed, past_the_check);
     }
+    installed
 }
 
 /// One try at an install: done, or the proof it must wait for. Everything
-/// before the proof only reads, so a try that waits leaves nothing behind.
+/// before the proof only reads, so a try that waits leaves nothing behind,
+/// and a check ([`Run::Check`]) answers there.
+#[allow(clippy::too_many_arguments)]
 async fn install_once(
     state: &PlatformState,
     tenant: &str,
@@ -676,16 +745,20 @@ async fn install_once(
     origin: InstallOrigin,
     swap: Swap,
     attempt: &proofs::Attempt,
+    run: Run<'_>,
 ) -> Result<ControlFlow<InstallResult, proofs::Wait>, String> {
     install_checks::refuse_unready_tenant(state, tenant, app_name, origin).await?;
     let mut install = install_guard::tenant(&state.server, tenant).await;
-    let app_files = {
-        let cat = catalog().read().unwrap(); // ci-ok: infallible lock
-        cat.app_files(Some(tenant), app_name)
-            .cloned()
-            .ok_or_else(|| {
-                format!("OS app '{app_name}' not found in catalog for tenant '{tenant}'")
-            })?
+    let app_files = match run {
+        Run::Check(files) => files.clone(),
+        Run::Install => {
+            let cat = catalog().read().unwrap(); // ci-ok: infallible lock
+            cat.app_files(Some(tenant), app_name)
+                .cloned()
+                .ok_or_else(|| {
+                    format!("OS app '{app_name}' not found in catalog for tenant '{tenant}'")
+                })?
+        }
     };
     let app_dir = app_files.dir();
     let bundle = load_app_bundle(&app_files).map_err(|why| {
@@ -735,9 +808,6 @@ async fn install_once(
     }
     for standing in &ownership.standing {
         tracing::warn!(tenant, app = %app_name, "{standing}");
-    }
-    if bundle.deployment_mode == AppDeploymentMode::Commons {
-        state.server.enable_commons_guardrails(tenant);
     }
     let tenant_id = TenantId::new(tenant);
     let upload_replacement = if plan.wasm && !bundle.wasm_modules.is_empty() {
@@ -859,6 +929,21 @@ async fn install_once(
     match checked.await? {
         ControlFlow::Continue(proof) => return Ok(ControlFlow::Continue(proof)),
         ControlFlow::Break(found) => warnings.extend(found),
+    }
+    // Every check has answered, and nothing is written yet: a check ends here.
+    if let Run::Check(_) = run {
+        return Ok(ControlFlow::Break(InstallResult {
+            added,
+            updated,
+            skipped,
+            warnings,
+            ..InstallResult::default()
+        }));
+    }
+    #[cfg(test)]
+    check_agreement::passed_the_check();
+    if bundle.deployment_mode == AppDeploymentMode::Commons {
+        state.server.enable_commons_guardrails(tenant);
     }
     // Jev reads the changed modules beside the install's writes, and goes on
     // after it answers. It starts once no proof is left to wait for, since a

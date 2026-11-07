@@ -8,8 +8,8 @@ use temper_server::platform_store::InstalledAppRecord;
 use super::app_catalog::AppCatalog;
 use super::{
     AppBundle, AppEntry, AppFileSource, OsAppBundleDigest, OsAppInstallPlan, OsAppReconcileResult,
-    catalog, get_os_app, install_os_app_swapping, load_app_bundle, load_tenant_os_app,
-    os_app_dependencies, restore_app_specs_from_matching_digest,
+    app_specs_restorable, catalog, get_os_app, install_os_app_swapping, load_app_bundle,
+    load_tenant_os_app, os_app_dependencies, restore_app_specs_from_matching_digest,
     tenant_has_ready_app_specs_for_bundle, tenant_os_app,
 };
 use crate::state::PlatformState;
@@ -560,120 +560,159 @@ pub(crate) async fn reconcile_os_app_swapping(
 ) -> Result<OsAppReconcileResult, String> {
     let bundle = load_tenant_os_app(tenant, app_name)?;
     let digest = digest_app_bundle(Some(tenant), app_name, &bundle);
-
-    if let Some(ps) = state
-        .server
-        .storage_stack
-        .as_ref()
-        .and_then(|stack| stack.platform.clone())
-    {
-        match ps.get_installed_app(tenant, app_name).await {
-            Ok(Some(record)) => {
-                let mut specs_ready = tenant_has_ready_app_specs_for_bundle(state, tenant, &bundle);
-                let wasm_registered = tenant_has_registered_wasm_for_bundle(state, tenant, &bundle);
-                let durable_wasm_ready =
-                    tenant_has_durable_wasm_for_bundle(state, tenant, &bundle).await;
-                let wasm_ready = wasm_registered && durable_wasm_ready;
-                let policies_active = tenant_has_active_policies_for_bundle(state, tenant, &bundle);
-
-                if record.bundle_digest == digest.bundle_digest && !specs_ready {
-                    specs_ready = restore_app_specs_from_matching_digest(
-                        state,
-                        ps.as_ref(),
-                        tenant,
-                        app_name,
-                        &bundle,
-                    )
-                    .await;
-                }
-
-                if record.bundle_digest == digest.bundle_digest
-                    && specs_ready
-                    && wasm_ready
-                    && policies_active
-                {
-                    tracing::info!(
-                        tenant,
-                        app = %app_name,
-                        bundle_digest = %digest.bundle_digest,
-                        "OS app unchanged; skipping hot reconcile"
-                    );
-                    return Ok(OsAppReconcileResult::Skipped {
-                        app_name: app_name.to_string(),
-                        bundle_digest: digest.bundle_digest,
-                    });
-                }
-
-                if !specs_ready && record.spec_digest == digest.spec_digest {
-                    specs_ready = restore_app_specs_from_matching_digest(
-                        state,
-                        ps.as_ref(),
-                        tenant,
-                        app_name,
-                        &bundle,
-                    )
-                    .await;
-                }
-                let plan = plan_reconcile_from_installed_record(
-                    &record,
-                    &digest,
-                    specs_ready,
-                    wasm_ready,
-                    policies_active,
-                );
-
-                tracing::info!(
-                    tenant,
-                    app = %app_name,
-                    bundle_digest = %digest.bundle_digest,
-                    specs = plan.specs,
-                    policies = plan.policies,
-                    wasm = plan.wasm,
-                    content = plan.content,
-                    seed = plan.seed,
-                    "OS app changed; running delta reconcile"
-                );
-                let install = install_os_app_swapping(
-                    state,
-                    tenant,
-                    app_name,
-                    plan,
-                    InstallOrigin::Request,
-                    swap,
-                )
-                .await?;
-                return Ok(OsAppReconcileResult::Installed {
-                    app_name: app_name.to_string(),
-                    bundle_digest: digest.bundle_digest,
-                    install: Box::new(install),
-                });
-            }
-            Ok(None) => {}
-            Err(error) => {
-                tracing::warn!(
-                    tenant,
-                    app = %app_name,
-                    error = %error,
-                    "Failed to read OS app digest metadata; falling back to reconcile"
-                );
-            }
-        }
-    }
-
-    let install = install_os_app_swapping(
-        state,
-        tenant,
-        app_name,
-        OsAppInstallPlan::all(),
-        InstallOrigin::Request,
-        swap,
-    )
-    .await?;
+    let Some(plan) = reconcile_plan(state, tenant, app_name, &bundle, &digest, Heal::Restore).await
+    else {
+        return Ok(OsAppReconcileResult::Skipped {
+            app_name: app_name.to_string(),
+            bundle_digest: digest.bundle_digest,
+        });
+    };
+    let install =
+        install_os_app_swapping(state, tenant, app_name, plan, InstallOrigin::Request, swap)
+            .await?;
     Ok(OsAppReconcileResult::Installed {
         app_name: app_name.to_string(),
         bundle_digest: digest.bundle_digest,
         install: Box::new(install),
     })
+}
+
+/// What [`reconcile_os_app_swapping`] would answer were `files` what the
+/// catalog resolves `app_name` to: the same plan, and the install's checks
+/// under it ([`super::check_os_app`]). It writes nothing: where the reconcile
+/// would restore stored specs that match, it takes them as restored.
+pub(crate) async fn check_os_app_reconcile(
+    state: &PlatformState,
+    tenant: &str,
+    app_name: &str,
+    files: &AppFileSource,
+) -> Result<OsAppReconcileResult, String> {
+    let bundle = load_app_bundle(files).map_err(|why| {
+        format!(
+            "OS app '{app_name}' at '{}' did not load: {why}",
+            files.dir().display()
+        )
+    })?;
+    let written = files.dir().parent().map(|dir| {
+        AppCatalog::from_apps(
+            dir.to_path_buf(),
+            vec![(app_name.to_string(), files.clone())],
+        )
+    });
+    let entry = written.as_ref().and_then(|catalog| {
+        catalog
+            .app_entries(None)
+            .into_iter()
+            .find(|entry| entry.name == app_name)
+    });
+    let digest = digest_entry_bundle(app_name, entry.as_ref(), &bundle);
+    let Some(plan) = reconcile_plan(state, tenant, app_name, &bundle, &digest, Heal::Assume).await
+    else {
+        return Ok(OsAppReconcileResult::Skipped {
+            app_name: app_name.to_string(),
+            bundle_digest: digest.bundle_digest,
+        });
+    };
+    let install = super::check_os_app(state, tenant, app_name, files, plan).await?;
+    Ok(OsAppReconcileResult::Installed {
+        app_name: app_name.to_string(),
+        bundle_digest: digest.bundle_digest,
+        install: Box::new(install),
+    })
+}
+
+/// What a reconcile does when the stored install matches but its specs are not loaded.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Heal {
+    /// Load the stored specs back, and go on as they then are.
+    Restore,
+    /// Write nothing, and go on as the restore would end, foreseen from what
+    /// the tenant holds ([`app_specs_restorable`]).
+    Assume,
+}
+
+/// The parts of `bundle` a reconcile installs, or `None` when the tenant
+/// already runs it whole.
+async fn reconcile_plan(
+    state: &PlatformState,
+    tenant: &str,
+    app_name: &str,
+    bundle: &AppBundle,
+    digest: &OsAppBundleDigest,
+    heal: Heal,
+) -> Option<OsAppInstallPlan> {
+    let Some(ps) = state
+        .server
+        .storage_stack
+        .as_ref()
+        .and_then(|stack| stack.platform.clone())
+    else {
+        return Some(OsAppInstallPlan::all());
+    };
+    let record = match ps.get_installed_app(tenant, app_name).await {
+        Ok(Some(record)) => record,
+        Ok(None) => return Some(OsAppInstallPlan::all()),
+        Err(error) => {
+            tracing::warn!(
+                tenant,
+                app = %app_name,
+                error = %error,
+                "Failed to read OS app digest metadata; falling back to reconcile"
+            );
+            return Some(OsAppInstallPlan::all());
+        }
+    };
+    let restored = async || match heal {
+        Heal::Restore => {
+            restore_app_specs_from_matching_digest(state, ps.as_ref(), tenant, app_name, bundle)
+                .await
+        }
+        Heal::Assume => app_specs_restorable(state, tenant, bundle),
+    };
+    let mut specs_ready = tenant_has_ready_app_specs_for_bundle(state, tenant, bundle);
+    let wasm_registered = tenant_has_registered_wasm_for_bundle(state, tenant, bundle);
+    let durable_wasm_ready = tenant_has_durable_wasm_for_bundle(state, tenant, bundle).await;
+    let wasm_ready = wasm_registered && durable_wasm_ready;
+    let policies_active = tenant_has_active_policies_for_bundle(state, tenant, bundle);
+
+    if record.bundle_digest == digest.bundle_digest && !specs_ready {
+        specs_ready = restored().await;
+    }
+
+    if record.bundle_digest == digest.bundle_digest && specs_ready && wasm_ready && policies_active
+    {
+        tracing::info!(
+            tenant,
+            app = %app_name,
+            bundle_digest = %digest.bundle_digest,
+            "OS app unchanged; skipping hot reconcile"
+        );
+        return None;
+    }
+
+    if !specs_ready && record.spec_digest == digest.spec_digest {
+        specs_ready = restored().await;
+    }
+    let plan = plan_reconcile_from_installed_record(
+        &record,
+        digest,
+        specs_ready,
+        wasm_ready,
+        policies_active,
+    );
+
+    tracing::info!(
+        tenant,
+        app = %app_name,
+        bundle_digest = %digest.bundle_digest,
+        specs = plan.specs,
+        policies = plan.policies,
+        wasm = plan.wasm,
+        content = plan.content,
+        seed = plan.seed,
+        "OS app changed; running delta reconcile"
+    );
+    Some(plan)
 }
 
 /// ARN-68: after a reconcile registers changed specs, re-key any type whose declared

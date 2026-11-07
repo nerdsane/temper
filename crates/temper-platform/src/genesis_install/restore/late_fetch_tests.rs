@@ -141,6 +141,7 @@ async fn late_fetch_cannot_replace_a_newer_install() {
                 PushedFile::Text("# notes\n\nnotes v2\n".to_string()),
             ),
         ]),
+        PushMode::Install,
     )
     .await
     .1

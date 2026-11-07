@@ -8,7 +8,7 @@ use tokio::sync::Semaphore;
 
 use super::*;
 use crate::genesis_install::{
-    GenesisRegistryInstallRequest, PushedFile, install_genesis_app_from_registry,
+    GenesisRegistryInstallRequest, PushMode, PushedFile, install_genesis_app_from_registry,
     install_pushed_app,
 };
 use crate::module_review::{
@@ -178,7 +178,7 @@ async fn install_directly(
 ) -> InstallResult {
     let files: BTreeMap<String, PushedFile> =
         serde_json::from_value(files).expect("files should read");
-    let (_, pushed) = install_pushed_app(state, tenant, APP, files).await;
+    let (_, pushed) = install_pushed_app(state, tenant, APP, files, PushMode::Install).await;
     pushed.expect("the push should install").result
 }
 

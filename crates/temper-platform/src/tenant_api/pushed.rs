@@ -4,13 +4,29 @@
 //!
 //! Body: `{"files": {"<path in the app>": "<text>" | {"base64": "..."} |
 //! {"keep": "<sha256 hex>"}}, "budget_ms": <time each spec's check may
-//! take>}`. The app goes into the credential's own tenant; a request cannot
-//! name another. Answers 200 with the install, 400 for a wrong request, 422
-//! when a spec does not parse or the installer refused it, with why. The
-//! install checks at main's level (each spec parses; joint proofs warn), so
-//! `budget_ms` bounds no check yet; it is still validated, because the
-//! caller (Katagami's apps_build) sends it for the per-spec check. Every answer
-//! says how long the push waited for this host's install turn (`waited_ms`).
+//! take>, "dry_run": <bool>}`. The app goes into the credential's own tenant; a
+//! request cannot name another. Answers 200 with the install, 400 for a wrong
+//! request, 422 when a spec does not parse or the installer refused it, with
+//! why.
+//!
+//! With `"dry_run": true` the push only checks: the installer's own checks run,
+//! in order, and stop where its first write would be. It answers as the install
+//! would (`"checked"` in place of `"installed"`), refuses what the install would
+//! refuse with the same words, and leaves the tenant's apps, specs, policies and
+//! records as they were. Like an install, it keeps the joint proofs' verdicts,
+//! filed by what they proved and shared by every tenant, and reports their
+//! progress as design-time events; an install of the same files then reads them
+//! instead of proving again. It does not take this host's install turn: its
+//! files go to a directory of its own, removed when it ends, also when the
+//! caller goes away. It does not show what only an installed version can:
+//! whether the app's required modules compile once registered. When the install
+//! would first install or change another app of the tenant's catalog that the
+//! app needs, a check cannot foresee the app beside it, and it answers 409 with
+//! the app that must be installed first. The install checks at main's level
+//! (each spec parses; joint proofs warn), so `budget_ms` bounds no check yet; it
+//! is still validated, because the caller (Katagami's apps_build) sends it for
+//! the per-spec check. Every answer says how long the push waited for this
+//! host's install turn (`waited_ms`); a check's is 0.
 //!
 //! The answer does not wait for Jev's review of the app's changed modules. It
 //! names the reviews left running (`result.reviewing`), and
@@ -41,7 +57,7 @@ use super::auth::{
     PlatformResourceAuthorization, require_authenticated, require_requested_resource_authorization,
 };
 use super::authorization_error;
-use crate::genesis_install::{PushRefused, PushedFile, install_pushed_app};
+use crate::genesis_install::{PushMode, PushRefused, PushedFile, install_pushed_app};
 use crate::module_review::ReviewStatus;
 use crate::state::PlatformState;
 
@@ -60,6 +76,9 @@ struct PushRequest {
     /// Time each spec's check may take, in milliseconds.
     #[serde(default)]
     budget_ms: Option<u64>,
+    /// Only check the files: answer what the install would, writing nothing.
+    #[serde(default)]
+    dry_run: bool,
 }
 
 /// The routes: a push, with the body limit it needs, and what became of its review.
@@ -170,12 +189,21 @@ async fn install(
         );
     }
 
-    let (waited, pushed) = install_pushed_app(&state, tenant, &name, request.files).await;
+    let mode = if request.dry_run {
+        PushMode::Check
+    } else {
+        PushMode::Install
+    };
+    let (waited, pushed) = install_pushed_app(&state, tenant, &name, request.files, mode).await;
+    let done = match mode {
+        PushMode::Install => "installed",
+        PushMode::Check => "checked",
+    };
     let (status, mut answer) = match pushed {
         Ok(pushed) => (
             StatusCode::OK,
             serde_json::json!({
-                "installed": name,
+                done: name,
                 "digest": pushed.digest,
                 "result": pushed.result,
             }),
@@ -184,6 +212,7 @@ async fn install(
         Err(PushRefused::Unparsed(error)) => (StatusCode::UNPROCESSABLE_ENTITY, error_body(error)),
         Err(PushRefused::Install(error)) => (StatusCode::UNPROCESSABLE_ENTITY, error_body(error)),
         Err(PushRefused::Server(error)) => (StatusCode::INTERNAL_SERVER_ERROR, error_body(error)),
+        Err(PushRefused::Unchecked(error)) => (StatusCode::CONFLICT, error_body(error)),
     };
     // How long the push waited for this host's install turn, so a slow answer
     // says whether it was the push or the queue.
