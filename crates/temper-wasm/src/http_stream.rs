@@ -21,6 +21,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 /// Chunk size used by SDK adapters when splitting writes. A single
@@ -170,6 +171,8 @@ enum ChannelEnd {
 /// hosts — they're opaque u32s.
 pub struct HttpStreamRegistry {
     inner: Mutex<RegistryState>,
+    /// Where the handles this registry holds are counted, when it is one of many that share a count.
+    held: Option<Arc<AtomicUsize>>,
 }
 
 struct RegistryState {
@@ -199,7 +202,16 @@ impl HttpStreamRegistry {
                 inbound_head_receivers: BTreeMap::new(),
                 pending_reads: BTreeMap::new(),
             }),
+            held: None,
         }
+    }
+
+    /// A registry whose handles are counted in `held`, with every other registry given the same count: the
+    /// count goes up as a handle opens and down as it closes or as the registry is dropped with it.
+    pub fn counted(held: Arc<AtomicUsize>) -> Self {
+        let mut registry = Self::new();
+        registry.held = Some(held);
+        registry
     }
 
     /// Allocate a new paired (sender, receiver) channel. Returns
@@ -213,6 +225,9 @@ impl HttpStreamRegistry {
         let read_id = state.next_id;
         state.next_id += 1;
         state.handles.insert(write_id, ChannelEnd::Sender(tx));
+        if let Some(held) = &self.held {
+            held.fetch_add(2, Ordering::Relaxed);
+        }
         state.handles.insert(
             read_id,
             ChannelEnd::Receiver(Arc::new(ChannelReceiver {
@@ -296,7 +311,11 @@ impl HttpStreamRegistry {
     pub async fn close(&self, handle: StreamHandle) -> Result<(), StreamError> {
         let mut state = self.inner.lock().await;
         state.pending_reads.remove(&handle.0);
-        match state.handles.remove(&handle.0) {
+        let removed = state.handles.remove(&handle.0);
+        if let (Some(held), Some(_)) = (&self.held, &removed) {
+            held.fetch_sub(1, Ordering::Relaxed);
+        }
+        match removed {
             Some(ChannelEnd::Receiver(receiver)) => {
                 // Dropping the registry's Arc alone does not close a receiver
                 // retained by an outstanding read. Reject writes immediately,
@@ -494,6 +513,14 @@ impl HttpStreamRegistry {
 impl Default for HttpStreamRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for HttpStreamRegistry {
+    fn drop(&mut self) {
+        if let Some(held) = &self.held {
+            held.fetch_sub(self.inner.get_mut().handles.len(), Ordering::Relaxed);
+        }
     }
 }
 

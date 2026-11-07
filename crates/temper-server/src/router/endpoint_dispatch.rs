@@ -6,7 +6,7 @@ use super::action_bridge::{
 use super::*;
 use tracing::Instrument as _;
 
-/// End-to-end dispatch: open an InboundExchange on the shared
+/// End-to-end dispatch: open an InboundExchange on the request's own
 /// HttpStreamRegistry, spawn tasks to pump axum body into the
 /// guest-visible request-body handle and build an axum Response
 /// body that drains the guest's response-body handle, fire the
@@ -134,8 +134,11 @@ pub(super) async fn dispatch_matched_route(
         }
     };
 
-    // Open an inbound exchange on the shared registry.
-    let streams = state.http_stream_registry.clone();
+    // The request's streams, and any its module opens, live in a registry of its own, held by the body pump, the
+    // module's host and the response drain: when the last of them ends, every handle is freed, closed or not.
+    let streams = std::sync::Arc::new(temper_wasm::http_stream::HttpStreamRegistry::counted(
+        state.http_stream_handles.clone(),
+    ));
     let exchange = streams.open_inbound_exchange().await;
     let guest_request_body = exchange.guest_request_body;
     let guest_response_body = exchange.guest_response_body;
@@ -266,7 +269,7 @@ pub(super) async fn dispatch_matched_route(
     );
 
     if let Some(action_bridge) = route.route.action_bridge.clone() {
-        let result = match engine
+        let invoked = engine
             .invoke_with_blobs(
                 &invoke_hash,
                 &ctx,
@@ -275,8 +278,10 @@ pub(super) async fn dispatch_matched_route(
                 invoke_streams,
                 std::collections::BTreeMap::new(),
             )
-            .await
-        {
+            .await;
+        // As below: the module reads no more of the request.
+        let _ = streams.close(guest_request_body).await;
+        let result = match invoked {
             Ok(result) => result,
             Err(e) => {
                 tracing::warn!(
@@ -339,6 +344,8 @@ pub(super) async fn dispatch_matched_route(
         head_streams
             .abandon_inbound_response_head(guest_response_body)
             .await;
+        // The module reads no more of the request: a body pump still writing it stops, and lets the registry go.
+        let _ = head_streams.close(guest_request_body).await;
     };
     // The module runs in its own task but is still this request's work, so it stays in the request's span.
     let invoke_task = tokio::spawn(invoke_future.in_current_span()); // determinism-ok: detached WASM invocation task, not simulation state

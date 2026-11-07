@@ -629,6 +629,62 @@ async fn a_module_that_ends_without_answering_is_answered_at_once() {
     );
 }
 
+/// An endpoint request frees the streams it opened when it ends, whether its module answered or ended without
+/// answering, so a process that serves many requests holds none between them.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_endpoint_request_frees_its_streams_when_it_ends() {
+    let (state, _dir) = fixture().await;
+    let silent = state
+        .wasm_engine
+        .compile_and_cache(
+            br#"(module (memory (export "memory") 1) (func (export "run") (param i32 i32) (result i32) unreachable))"#,
+        )
+        .unwrap();
+    state.wasm_module_registry.write().unwrap().register(
+        &TenantId::new("probe"),
+        "silent",
+        &silent,
+    );
+    let routes = [("/probe", "capability-probe"), ("/silent", "silent")]
+        .into_iter()
+        .map(|(path, module)| {
+            temper_server::http_endpoint::route_from_entity_fields(
+                module,
+                &json!({
+                    "PathPrefix": path, "Methods": "GET", "IntegrationModule": module, "RequiresAuth": true,
+                    "TimeoutSecs": 5,
+                }),
+            )
+            .unwrap()
+        })
+        .collect();
+    state
+        .http_endpoint_tables
+        .table_for(&TenantId::new("probe"))
+        .await
+        .replace(routes)
+        .await;
+    for _ in 0..3 {
+        let (status, body, _) = route_call(&state, "/probe").await;
+        assert_eq!(status, 200, "{body}");
+        let (status, body, _) = route_call(&state, "/silent").await;
+        assert_eq!(status, 502, "{body}");
+    }
+    // A module's task ends just after its answer is sent, so its streams may be held a moment longer.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let open = state.http_stream_handles_open().await;
+        if open == 0 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{open} stream handles are still held after every request ended"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
 /// A span's name, and its parent's (None for a root).
 type NamedSpan = (String, Option<String>);
 
