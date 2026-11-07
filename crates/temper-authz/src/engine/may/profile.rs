@@ -12,7 +12,7 @@
 //! ([`SendAnalysis::outside_kinds`](super::SendAnalysis::outside_kinds)),
 //! so each question about one sender is answered for one kind.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -37,8 +37,9 @@ pub struct Kind {
     pub(super) asked: Arc<Asked>,
 }
 
-/// The questions a split asked, by action and resource type.
-pub(super) type Asked = HashMap<String, HashMap<String, Vec<Cause>>>;
+/// The questions a split asked, by action and resource type. Ordered, as
+/// a kind prints into the digest a kept verdict is found by.
+pub(super) type Asked = BTreeMap<String, BTreeMap<String, Vec<Cause>>>;
 
 impl Kind {
     /// The kind of the one sender `profile` describes.

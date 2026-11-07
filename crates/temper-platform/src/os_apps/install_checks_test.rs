@@ -131,3 +131,69 @@ async fn an_install_that_changes_neither_specs_nor_cedar_proves_nothing() {
         .unwrap_err();
     assert!(err.contains("Child.rule BROKEN"), "{err}");
 }
+
+/// An install request can end before a walk it started does: the walk runs
+/// on, and the next request, which reads the specs and Cedar again, takes the
+/// verdict it left without walking again. Without a blob store the verdict
+/// is kept only by the digest of its model, as a walk that did not fit is.
+#[tokio::test]
+async fn a_walk_longer_than_one_request_is_read_by_the_next_without_walking_again() {
+    let board = "[automaton]\nname = 'Board'\nstates = ['Waiting', 'Pinged']\ninitial = 'Waiting'\n\
+        [[action]]\nname = 'Ping'\nkind = 'input'\nfrom = ['Waiting', 'Pinged']\nto = 'Pinged'\n";
+    // Four moves send the same reaction, so Cedar is asked about it once for
+    // each move that causes it.
+    let pinging = |name: &str, to: Option<&str>| {
+        let to = to.map(|to| format!("to = '{to}'\n")).unwrap_or_default();
+        format!(
+            "[[action]]\nname = '{name}'\nkind = 'input'\nfrom = ['Open']\n{to}\
+             [[action.triggers]]\nname = 'ping'\nkind = 'entity'\ntarget_entity = 'Board'\ntarget_action = 'Ping'\n\
+             [action.triggers.resolve_target]\nkind = 'field'\nid_field = 'board'\n"
+        )
+    };
+    let ticket = format!(
+        "[automaton]\nname = 'Ticket'\nstates = ['New', 'Open', 'Kept', 'Dropped']\ninitial = 'New'\n\
+         [[state]]\nname = 'board'\ntype = 'string'\ninitial = ''\n\
+         [[invariant]]\nname = 'rule'\nassert = \"status == 'Dropped' => Board[board].status != 'Pinged'\"\n\
+         [[action]]\nname = 'Start'\nkind = 'input'\nfrom = ['New']\nto = 'Open'\nparams = [{{ name = 'board', type = 'string' }}]\n\
+         {}{}{}{}",
+        pinging("Keep", Some("Kept")),
+        pinging("Drop", Some("Dropped")),
+        pinging("Poke", None),
+        pinging("Prod", None),
+    );
+    // Cedar lets no move's reaction through, so the rule holds.
+    let cedar = "permit(principal, action in [Action::\"Start\", Action::\"Keep\", Action::\"Drop\", Action::\"Poke\", Action::\"Prod\"], resource);\n\
+        permit(principal, action == Action::\"Ping\", resource) when { context has causeAction && context.causeAction == \"Nobody\" };\n";
+    let state = state("alice", &[("Board", board), ("Ticket", &ticket)]);
+    let specs = [
+        ("Board".to_string(), board.to_string()),
+        ("Ticket".to_string(), ticket.clone()),
+    ];
+    let request = || async {
+        prove(
+            &state,
+            "alice",
+            "app",
+            &specs,
+            true,
+            Some(cedar),
+            &Attempt::default(),
+        )
+        .await
+        .expect("the rule holds")
+    };
+
+    let ControlFlow::Continue(wait) = request().await else {
+        panic!("the first request starts the walk");
+    };
+    // The request's budget ran out; the walk ends after it.
+    wait.ended(&mut Attempt::default())
+        .await
+        .expect("the walk ends");
+    for later in 1..=3 {
+        match request().await {
+            ControlFlow::Break(unproved) => assert!(unproved.is_empty(), "{unproved:?}"),
+            ControlFlow::Continue(_) => panic!("request {later} after the walk walked again"),
+        }
+    }
+}

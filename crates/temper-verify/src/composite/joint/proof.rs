@@ -43,9 +43,10 @@ impl JointProof<'_> {
     pub fn digest(&self) -> String {
         // Every type a proof holds keeps its entries in order (no hash maps)
         // and prints all a walk reads of it, so this text is the same each
-        // time. Two print less than they hold: a model's `Senders` leaves
-        // out its cache and the policies no walk reads, and its `Expansion`
-        // is the walk's own accounting. A kernel that changes those types
+        // time. Three print less than they hold: a model's `Senders` leaves
+        // out its cache and the policies no walk reads, its `Order` leaves
+        // out the refusals it works out from what it prints, and its
+        // `Expansion` is the walk's own accounting. A kernel that changes those types
         // changes the text, and its proofs walk once again.
         let text = format!("{self:?}");
         format!("{:x}", Sha256::digest(text.as_bytes()))

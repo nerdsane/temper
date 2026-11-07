@@ -44,7 +44,7 @@ type Param = (String, String, String);
 type Refusals = FxHashMap<(Sym, Sym), Box<[(Sym, Sym)]>>;
 
 /// The families of counts kept as sequence numbers.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(super) struct Order {
     pub(super) families: Vec<Family>,
     /// The families as each state asks of them, by name.
@@ -58,6 +58,20 @@ pub(super) struct Order {
     /// The fields that never go down: each write adds to them, or takes a
     /// count only when it is greater.
     rising: BTreeSet<Field>,
+}
+
+/// What a model's digest reads of its order. `refusals` is left out: it is
+/// worked out from `compared` and `rising`, and its table is ordered by where
+/// its names sit in memory, which differs from one process to the next.
+impl std::fmt::Debug for Order {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Order")
+            .field("families", &self.families)
+            .field("numbered", &self.numbered)
+            .field("compared", &self.compared)
+            .field("rising", &self.rising)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Default, Clone)]
