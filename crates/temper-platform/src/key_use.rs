@@ -7,6 +7,11 @@
 //! from where. The event never carries the key, any part of it or its hash,
 //! and never the caller's address: the caller is the first 12 hex characters
 //! of `sha256(KEY_USE_SALT + address)`.
+//!
+//! The address is the TCP peer, unless `TEMPER_CLIENT_IP_HEADER` names the
+//! header a proxy in front of this server writes the client's address into.
+//! A header no proxy overwrites can be set by the caller, so none is read
+//! unless one is named.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::OnceLock;
@@ -18,6 +23,11 @@ use temper_server::identity::ResolvedIdentity;
 
 /// Environment variable holding the salt for the caller hash.
 pub const SALT_ENV: &str = "KEY_USE_SALT";
+
+/// Environment variable naming the header, such as `x-real-ip` or
+/// `x-forwarded-for`, that the proxy in front of this server writes the
+/// client's address into. Unset, the caller is the TCP peer.
+pub const CLIENT_IP_HEADER_ENV: &str = "TEMPER_CLIENT_IP_HEADER";
 
 /// `key_name` of the credential `TEMPER_API_KEY` holds, and of a refused attempt.
 pub const OPERATOR: &str = "operator";
@@ -79,12 +89,24 @@ impl KeyUse {
         } else {
             OTHER_OPERATOR
         };
-        Self::from_request(request, Outcome::Accepted, key_name, salt())
+        Self::from_request(
+            request,
+            Outcome::Accepted,
+            key_name,
+            salt(),
+            client_ip_header(),
+        )
     }
 
     /// The request's credential was offered as the operator key and did not match.
     pub fn refused<B>(request: &Request<B>) -> Self {
-        Self::from_request(request, Outcome::Refused, OPERATOR, salt())
+        Self::from_request(
+            request,
+            Outcome::Refused,
+            OPERATOR,
+            salt(),
+            client_ip_header(),
+        )
     }
 
     fn from_request<B>(
@@ -92,6 +114,7 @@ impl KeyUse {
         outcome: Outcome,
         key_name: &'static str,
         salt: Option<&str>,
+        client_header: Option<&str>,
     ) -> Self {
         let peer = request
             .extensions()
@@ -111,7 +134,7 @@ impl KeyUse {
                 .map_or(UNMATCHED_ROUTE, MatchedPath::as_str)
                 .to_string(),
             method: request.method().as_str().to_string(),
-            caller: caller(salt, caller_address(request.headers(), peer)),
+            caller: caller(salt, caller_address(request.headers(), client_header, peer)),
             agent: agent_family(user_agent),
         }
     }
@@ -166,19 +189,32 @@ fn salt() -> Option<&'static str> {
     .as_deref()
 }
 
-/// The client the request came from: the address Railway's edge saw
-/// (`X-Real-IP`), else the first `X-Forwarded-For` entry another proxy
-/// wrote, else the TCP peer.
-fn caller_address(headers: &HeaderMap, peer: Option<IpAddr>) -> Option<IpAddr> {
-    let header_address = |name: &str| {
-        headers
-            .get(name)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.split(',').next())
-            .and_then(parse_address)
-    };
-    header_address("x-real-ip")
-        .or_else(|| header_address("x-forwarded-for"))
+fn client_ip_header() -> Option<&'static str> {
+    static HEADER: OnceLock<Option<String>> = OnceLock::new();
+    HEADER
+        .get_or_init(|| {
+            std::env::var(CLIENT_IP_HEADER_ENV) // determinism-ok: startup config, read once
+                .ok()
+                .map(|name| name.trim().to_ascii_lowercase())
+                .filter(|name| !name.is_empty())
+        })
+        .as_deref()
+}
+
+/// The client the request came from. With `client_header` named, the last
+/// address in that header: the one the proxy in front of this server wrote or
+/// appended, where entries before it are whatever the caller sent. Otherwise,
+/// or when that header holds no address, the TCP peer.
+fn caller_address(
+    headers: &HeaderMap,
+    client_header: Option<&str>,
+    peer: Option<IpAddr>,
+) -> Option<IpAddr> {
+    client_header
+        .and_then(|name| headers.get(name))
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.rsplit(',').next())
+        .and_then(parse_address)
         .or(peer)
 }
 
