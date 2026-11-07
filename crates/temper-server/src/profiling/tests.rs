@@ -9,7 +9,7 @@ use super::upload::{Captured, PROFILE_ATTACHMENT, event_json, upload};
 // Cargo runs tests in parallel; environment changes race otherwise.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-const SETTINGS: [&str; 16] = [
+const SETTINGS: [&str; 17] = [
     "TEMPER_PROFILING_ENABLED",
     "TEMPER_PROFILING_CONTINUOUS",
     "TEMPER_PROFILING_MAX_SECONDS",
@@ -20,6 +20,7 @@ const SETTINGS: [&str; 16] = [
     "TEMPER_PROFILING_INTAKE_HEADERS",
     "DD_AGENT_HOST",
     "DD_TRACE_AGENT_PORT",
+    "DD_TRACE_AGENT_URL",
     "DD_SERVICE",
     "DD_ENV",
     "DD_VERSION",
@@ -100,10 +101,17 @@ fn windows_and_rates_stay_in_bounds() {
 }
 
 #[test]
-fn intake_is_the_local_agent_unless_configured() {
-    with_env(&[], || {
-        let intake = config::intake();
-        assert_eq!(intake.url, "http://127.0.0.1:8126/profiling/v1/input");
+fn intake_is_found_as_datadogs_libraries_find_their_agent() {
+    // 4. Nothing set: no intake, and no address of the kernel's own.
+    with_env(&[], || assert_eq!(config::intake(), None));
+    // A port alone names no agent.
+    with_env(&[("DD_TRACE_AGENT_PORT", "9126")], || {
+        assert_eq!(config::intake(), None)
+    });
+    // 3. DD_AGENT_HOST, with DD_TRACE_AGENT_PORT or the default port.
+    with_env(&[("DD_AGENT_HOST", "agent.internal")], || {
+        let intake = config::intake().expect("an agent host is set");
+        assert_eq!(intake.url, "http://agent.internal:8126/profiling/v1/input");
         assert!(intake.headers.is_empty());
     });
     with_env(
@@ -113,13 +121,28 @@ fn intake_is_the_local_agent_unless_configured() {
         ],
         || {
             assert_eq!(
-                config::intake().url,
-                "http://agent.internal:9126/profiling/v1/input"
+                config::intake().map(|intake| intake.url),
+                Some("http://agent.internal:9126/profiling/v1/input".to_string())
             )
         },
     );
+    // 2. DD_TRACE_AGENT_URL wins over the host and port.
     with_env(
         &[
+            ("DD_TRACE_AGENT_URL", "http://agent.example:8126/"),
+            ("DD_AGENT_HOST", "agent.internal"),
+        ],
+        || {
+            assert_eq!(
+                config::intake().map(|intake| intake.url),
+                Some("http://agent.example:8126/profiling/v1/input".to_string())
+            )
+        },
+    );
+    // 1. TEMPER_PROFILING_INTAKE_URL wins over every agent setting, with its headers.
+    with_env(
+        &[
+            ("DD_TRACE_AGENT_URL", "http://agent.example:8126"),
             ("DD_AGENT_HOST", "agent.internal"),
             (
                 "TEMPER_PROFILING_INTAKE_URL",
@@ -131,7 +154,7 @@ fn intake_is_the_local_agent_unless_configured() {
             ),
         ],
         || {
-            let intake = config::intake();
+            let intake = config::intake().expect("an intake is configured");
             assert_eq!(intake.url, "https://collector.example/profiling/v1/input");
             assert_eq!(
                 intake.headers,

@@ -102,7 +102,7 @@ fn answer(
     started_at: chrono::DateTime<Utc>,
 ) -> Response {
     tracing::info!(bytes = body.len(), profile_type, "profile capture complete");
-    if config::auto_upload_enabled() {
+    if let Some(intake) = config::intake().filter(|_| config::auto_upload_enabled()) {
         let captured = Captured {
             pprof: body.clone(),
             profile_type,
@@ -110,7 +110,7 @@ fn answer(
             started_at,
             ended_at: Utc::now(), // determinism-ok: observability profile metadata
         };
-        spawn_observability_task(upload(captured, config::intake()));
+        spawn_observability_task(upload(captured, intake));
     }
     (
         StatusCode::OK,
