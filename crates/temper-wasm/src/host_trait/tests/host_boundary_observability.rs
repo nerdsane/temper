@@ -322,8 +322,8 @@ fn a_url_in_telemetry_keeps_what_a_reader_needs() {
         "api.storage.example/artifact-storage/v1/token"
     );
     assert_eq!(
-        seen("http://h/tdata/AppSurfaces('c5m1hqtr33pk.vonwk2hzjr8bf')/Apps.Kept"),
-        "h/tdata/AppSurfaces('c5m1hqtr33pk.vonwk2hzjr8bf')/Apps.Kept"
+        seen("http://h/tdata/Records('q1w2e3r4t5y6.u7i8o9p0a1s2d')/Items.Kept"),
+        "h/tdata/Records('q1w2e3r4t5y6.u7i8o9p0a1s2d')/Items.Kept"
     );
     assert_eq!(
         seen("http://h/x/01a19923-dd62-7fd4-9e8c-ea29db7c3dba/y"),
