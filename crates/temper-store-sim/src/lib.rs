@@ -13,8 +13,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use temper_runtime::persistence::{
-    EntityVectorCandidate, EntityVectorRow, EventStore, PersistenceAppend, PersistenceAppendResult,
-    PersistenceEnvelope, PersistenceError,
+    CommitRows, EntityVectorCandidate, EntityVectorRow, EventStore, PersistenceAppend,
+    PersistenceAppendResult, PersistenceEnvelope, PersistenceError, ScheduledActionRecord,
+    StateTimerRecord,
 };
 use temper_runtime::tenant::parse_persistence_id_parts;
 
@@ -121,8 +122,6 @@ struct SimEventStoreInner {
     journals: BTreeMap<String, Vec<PersistenceEnvelope>>,
     /// Snapshots: persistence_id → (sequence_nr, snapshot_bytes)
     snapshots: BTreeMap<String, (u64, Vec<u8>)>,
-    /// Immutable snapshot history: persistence_id → sequence_nr → snapshot bytes.
-    snapshot_history: BTreeMap<String, BTreeMap<u64, Vec<u8>>>,
     /// Event segment metadata: persistence_id → Vec<SimEventSegment>.
     event_segments: BTreeMap<String, Vec<SimEventSegment>>,
     /// Fault injection RNG.
@@ -142,6 +141,21 @@ struct SimEventStoreInner {
     /// (e.g. proving the key-index backfill treats an unreadable entity as
     /// `LoadFailed` and does not watermark its type). See `fail_next_reads`.
     pending_read_failures: BTreeMap<String, usize>,
+    /// How many times `read_events` was called for each id, failed reads
+    /// included. See `reads`.
+    reads: BTreeMap<String, usize>,
+    /// Each entry makes the next N appends that write that id (alone or in a
+    /// batch) fail with a storage error, writing nothing. See `fail_next_appends`.
+    pending_append_failures: BTreeMap<String, usize>,
+    /// Each entry makes the next N single-journal appends to that id write their
+    /// events and then answer with a concurrency violation, as a store does when
+    /// it retries a write whose first answer was lost. See `lose_next_append_answers`.
+    pending_lost_append_answers: BTreeMap<String, usize>,
+    /// Each entry makes the next N appends that write that id (alone or in a
+    /// batch) write their events and rows and then answer with a storage
+    /// error, as a store does when a commit lands but its answer is lost. See
+    /// `land_next_appends_then_fail`.
+    pending_landed_failures: BTreeMap<String, usize>,
     /// One-shot append delays per `persistence_id`.
     ///
     /// Used by dispatch retry tests to deterministically model "the actor
@@ -165,10 +179,33 @@ struct SimEventStoreInner {
     /// exact-scan kNN access path. Unlike the key index this has no uniqueness
     /// constraint; it is derived, rebuildable ranking state.
     vector_index: BTreeMap<(String, String, String, String, String), Vec<f32>>,
+    /// Pending scheduled actions, committed with the event that armed them
+    /// under the same lock. `(tenant, entity_type, entity_id, arm_id) -> row`.
+    scheduled_actions: BTreeMap<(String, String, String, String), ScheduledActionRecord>,
+    /// While set, `delete_scheduled_action` never completes, as when the
+    /// process stops before it. See `hold_scheduled_action_deletes`.
+    scheduled_deletes_held: bool,
+    pending_scheduled_delete_failures: usize,
+    /// Each entry makes `list_scheduled_actions` for that tenant fail with a
+    /// storage error on the next N calls. See `fail_next_scheduled_lists`.
+    pending_scheduled_list_failures: BTreeMap<String, usize>,
     /// ADR-0155 backfill watermark: `(tenant, entity_type) -> vector_set` — each
     /// completed type mapped to the sorted comma-joined declared vector-path names the
     /// backfill covered. Mirrors `key_index_watermark`.
     vector_index_watermark: BTreeMap<(String, String), String>,
+    /// Query-plane rows written with their entity's events, by persistence id.
+    projections: BTreeMap<String, entity_rows::SimProjection>,
+    /// One state-timer row per entity: `(tenant, entity_type, entity_id)`.
+    state_timers: BTreeMap<(String, String, String), StateTimerRecord>,
+    /// How many commits wrote each persistence id's journal or rows.
+    commits: BTreeMap<String, u64>,
+    /// Whether appends are written. See `stop_writes_after_next_append`.
+    writes: write_stops::Writes,
+    /// The append set to hang. See `hang_next_append`.
+    hang: write_hangs::Hang,
+    /// Appends refused while the store took no writes, by the journal each
+    /// would have written. See `refused_appends`.
+    refused_appends: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,23 +219,42 @@ pub struct SimEventSegment {
 }
 
 impl SimEventStore {
+    fn lock(&self) -> std::sync::MutexGuard<'_, SimEventStoreInner> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Create a new SimEventStore with the given seed and fault config.
     pub fn new(seed: u64, faults: SimFaultConfig) -> Self {
         Self {
             inner: Arc::new(Mutex::new(SimEventStoreInner {
                 journals: BTreeMap::new(),
                 snapshots: BTreeMap::new(),
-                snapshot_history: BTreeMap::new(),
                 event_segments: BTreeMap::new(),
                 rng: DeterministicRng::new(seed),
                 faults,
                 pending_concurrency_violations: BTreeMap::new(),
                 pending_read_failures: BTreeMap::new(),
+                reads: BTreeMap::new(),
+                pending_append_failures: BTreeMap::new(),
+                pending_lost_append_answers: BTreeMap::new(),
+                pending_landed_failures: BTreeMap::new(),
                 pending_append_delays: BTreeMap::new(),
                 key_index: BTreeMap::new(),
                 key_index_watermark: BTreeMap::new(),
                 vector_index: BTreeMap::new(),
+                scheduled_actions: BTreeMap::new(),
+                scheduled_deletes_held: false,
+                pending_scheduled_delete_failures: 0,
+                pending_scheduled_list_failures: BTreeMap::new(),
                 vector_index_watermark: BTreeMap::new(),
+                projections: BTreeMap::new(),
+                state_timers: BTreeMap::new(),
+                commits: BTreeMap::new(),
+                writes: write_stops::Writes::default(),
+                hang: write_hangs::Hang::default(),
+                refused_appends: BTreeMap::new(),
             })),
         }
     }
@@ -223,6 +279,45 @@ impl SimEventStore {
         }
     }
 
+    /// While `held`, every `delete_scheduled_action` call waits forever and
+    /// removes nothing, as when the process stops right after a fire, before
+    /// any removal that is not part of the fire's commit. A test sets it, lets
+    /// a fire run, stops the process, and clears it before the next boot.
+    pub fn hold_scheduled_action_deletes(&self, held: bool) {
+        let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        inner.scheduled_deletes_held = held;
+    }
+
+    /// Fail the next `count` scheduled-row deletions without changing any row.
+    pub fn fail_next_scheduled_deletes(&self, count: usize) {
+        self.inner
+            .lock()
+            .expect("SimEventStore lock poisoned") // ci-ok: infallible lock
+            .pending_scheduled_delete_failures = count;
+    }
+
+    /// The number of injected deletion failures not yet observed.
+    pub fn scheduled_delete_failures_pending(&self) -> usize {
+        self.inner
+            .lock()
+            .expect("SimEventStore lock poisoned") // ci-ok: infallible lock
+            .pending_scheduled_delete_failures
+    }
+
+    /// Make the next `count` `list_scheduled_actions` calls for `tenant` fail
+    /// with a storage error, then behave normally, as when the store is
+    /// briefly unreachable at boot. `count == 0` clears the injection.
+    pub fn fail_next_scheduled_lists(&self, tenant: &str, count: usize) {
+        let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        if count == 0 {
+            inner.pending_scheduled_list_failures.remove(tenant);
+        } else {
+            inner
+                .pending_scheduled_list_failures
+                .insert(tenant.to_string(), count);
+        }
+    }
+
     /// Make the next `count` `read_events` calls for `persistence_id` fail with a
     /// storage error, then behave normally. Deterministic (unlike
     /// `read_truncation_prob`) so tests can prove read-failure handling — e.g. that
@@ -237,6 +332,85 @@ impl SimEventStore {
                 .pending_read_failures
                 .insert(persistence_id.to_string(), count);
         }
+    }
+
+    /// How many times `read_events` was called for `persistence_id`, failed
+    /// reads included, so a test can prove a record is not read again.
+    pub fn reads(&self, persistence_id: &str) -> usize {
+        let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        inner.reads.get(persistence_id).copied().unwrap_or(0)
+    }
+
+    /// Make the next `count` appends that write `persistence_id`, alone or in a
+    /// batch, fail with a storage error and write nothing, then behave normally.
+    /// Deterministic (unlike `write_failure_prob`) so tests can prove how a
+    /// failed write is answered. `count == 0` clears the injection.
+    pub fn fail_next_appends(&self, persistence_id: &str, count: usize) {
+        let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        if count == 0 {
+            inner.pending_append_failures.remove(persistence_id);
+        } else {
+            inner
+                .pending_append_failures
+                .insert(persistence_id.to_string(), count);
+        }
+    }
+
+    /// Return how many injected append failures are still pending for
+    /// `persistence_id`. Zero if none are set.
+    pub fn pending_append_failures(&self, persistence_id: &str) -> usize {
+        let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        inner
+            .pending_append_failures
+            .get(persistence_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Make the next `count` appends to `persistence_id`, alone or in a batch,
+    /// write their events and then answer with a concurrency violation, then
+    /// behave normally. This is what a store that retries a write whose answer
+    /// was lost reports (the Turso store does): the write landed, and the
+    /// retry finds the journal already past its expected sequence. A batch
+    /// that holds such a journal lands whole and answers with the violation.
+    /// `count == 0` clears the injection.
+    pub fn lose_next_append_answers(&self, persistence_id: &str, count: usize) {
+        let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        if count == 0 {
+            inner.pending_lost_append_answers.remove(persistence_id);
+        } else {
+            inner
+                .pending_lost_append_answers
+                .insert(persistence_id.to_string(), count);
+        }
+    }
+
+    /// Make the next `count` appends that write `persistence_id`, alone or in a
+    /// batch, write their events and every row they carry and then answer with
+    /// a storage error, then behave normally. This is a commit that landed
+    /// while its caller was told it failed: a connection lost after the
+    /// commit, or a commit abandoned by a timeout after it was published.
+    /// `count == 0` clears the injection.
+    pub fn land_next_appends_then_fail(&self, persistence_id: &str, count: usize) {
+        let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        if count == 0 {
+            inner.pending_landed_failures.remove(persistence_id);
+        } else {
+            inner
+                .pending_landed_failures
+                .insert(persistence_id.to_string(), count);
+        }
+    }
+
+    /// Return how many lost append answers are still pending for
+    /// `persistence_id`. Zero if none are set.
+    pub fn pending_lost_append_answers(&self, persistence_id: &str) -> usize {
+        let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        inner
+            .pending_lost_append_answers
+            .get(persistence_id)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Return the current count of pending injected concurrency violations for
@@ -264,6 +438,22 @@ impl SimEventStore {
             .entry(persistence_id.to_string())
             .or_default()
             .push_back(delay);
+    }
+
+    /// Whether a fault injected for appends to `persistence_id` (a failure, a
+    /// conflict, a lost or failed answer, a delay) has yet to meet one. A
+    /// test reads it to know the append it faulted was the one it meant.
+    pub fn append_faults_pending(&self, persistence_id: &str) -> bool {
+        let inner = self.lock();
+        inner.pending_append_failures.contains_key(persistence_id)
+            || inner
+                .pending_lost_append_answers
+                .contains_key(persistence_id)
+            || inner.pending_landed_failures.contains_key(persistence_id)
+            || inner
+                .pending_concurrency_violations
+                .contains_key(persistence_id)
+            || inner.pending_append_delays.contains_key(persistence_id)
     }
 
     /// Create a SimEventStore with no fault injection.
@@ -318,15 +508,6 @@ impl SimEventStore {
             .unwrap_or_default()
     }
 
-    pub fn snapshot_history_len(&self, persistence_id: &str) -> usize {
-        let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
-        inner
-            .snapshot_history
-            .get(persistence_id)
-            .map(BTreeMap::len)
-            .unwrap_or(0)
-    }
-
     pub fn dump_segments(&self, persistence_id: &str) -> Vec<SimEventSegment> {
         let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
         inner
@@ -335,6 +516,52 @@ impl SimEventStore {
             .cloned()
             .unwrap_or_default()
     }
+}
+
+impl SimEventStoreInner {
+    /// Consume one injected append failure for `persistence_id`, if one is set.
+    fn take_append_failure(&mut self, persistence_id: &str) -> Option<PersistenceError> {
+        take_one(&mut self.pending_append_failures, persistence_id).then(|| {
+            PersistenceError::Storage(format!(
+                "SimEventStore: injected append failure for '{persistence_id}'"
+            ))
+        })
+    }
+
+    /// Consume one lost append answer for `persistence_id`, if one is set.
+    fn take_lost_append_answer(&mut self, persistence_id: &str) -> bool {
+        take_one(&mut self.pending_lost_append_answers, persistence_id)
+    }
+
+    /// Consume one injected journal-read failure for `persistence_id`, if one
+    /// is set (see `fail_next_reads`). Every journal read checks it.
+    fn take_read_failure(&mut self, persistence_id: &str) -> Option<PersistenceError> {
+        take_one(&mut self.pending_read_failures, persistence_id).then(|| {
+            PersistenceError::Storage(format!("injected read failure for {persistence_id}"))
+        })
+    }
+
+    /// Consume one landed-then-failed append for `persistence_id`, if one is set.
+    fn take_landed_failure(&mut self, persistence_id: &str) -> Option<PersistenceError> {
+        take_one(&mut self.pending_landed_failures, persistence_id).then(|| {
+            PersistenceError::Storage(format!(
+                "SimEventStore: the append to '{persistence_id}' landed and its answer was lost"
+            ))
+        })
+    }
+}
+
+/// Consume one of the injections counted for `persistence_id` in `pending`.
+/// Returns whether one was pending.
+fn take_one(pending: &mut BTreeMap<String, usize>, persistence_id: &str) -> bool {
+    let Some(remaining) = pending.get_mut(persistence_id) else {
+        return false;
+    };
+    *remaining -= 1;
+    if *remaining == 0 {
+        pending.remove(persistence_id);
+    }
+    true
 }
 
 impl std::fmt::Debug for SimEventStore {
@@ -354,19 +581,31 @@ impl EventStore for SimEventStore {
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
     ) -> Result<u64, PersistenceError> {
-        self.append_with_index_rows(persistence_id, expected_sequence, events, &[], &[], false)
-            .await
+        self.append_with_rows(
+            persistence_id,
+            expected_sequence,
+            events,
+            CommitRows::default(),
+        )
+        .await
     }
 
-    async fn append_with_index_rows(
+    async fn append_with_rows(
         &self,
         persistence_id: &str,
         expected_sequence: u64,
         events: &[PersistenceEnvelope],
-        key_rows: &[temper_runtime::persistence::EntityKeyRow],
-        vector_rows: &[EntityVectorRow],
-        reconcile_vectors: bool,
+        rows: CommitRows<'_>,
     ) -> Result<u64, PersistenceError> {
+        let CommitRows {
+            key_rows,
+            vector_rows,
+            reconcile_vectors,
+            scheduled_actions,
+            fired_scheduled_action,
+            ..
+        } = rows;
+        self.hang_if_set([persistence_id]).await;
         let append_delay = {
             let mut inner = self
                 .inner
@@ -393,6 +632,10 @@ impl EventStore for SimEventStore {
 
         let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
 
+        if let Some(error) = inner.refused_write([persistence_id]) {
+            return Err(error);
+        }
+
         // Deterministic one-shot injection (see `inject_concurrency_violations`).
         // Consumes one counter per call; falls back to normal flow once drained.
         //
@@ -418,6 +661,9 @@ impl EventStore for SimEventStore {
                 expected: expected_sequence,
                 actual: expected_sequence,
             });
+        }
+        if let Some(error) = inner.take_append_failure(persistence_id) {
+            return Err(error);
         }
 
         // Fault injection: spurious concurrency violation (probabilistic).
@@ -582,7 +828,149 @@ impl EventStore for SimEventStore {
             }
         }
 
+        // The scheduled actions the transition armed, under the SAME lock: they
+        // exist exactly when the event does. A repeated arm keeps its row.
+        for action in scheduled_actions {
+            inner
+                .scheduled_actions
+                .entry((
+                    action.tenant.clone(),
+                    action.entity_type.clone(),
+                    action.entity_id.clone(),
+                    action.arm_id.clone(),
+                ))
+                .or_insert_with(|| action.clone());
+        }
+        // The scheduled action the transition fired goes in the same commit.
+        if let Some(arm_id) = fired_scheduled_action
+            && let Ok((tenant, entity_type, entity_id)) = parse_persistence_id_parts(persistence_id)
+        {
+            inner.scheduled_actions.remove(&(
+                tenant.to_string(),
+                entity_type.to_string(),
+                entity_id.to_string(),
+                arm_id.to_string(),
+            ));
+        }
+
+        // The entity's query-plane and timer rows, in the same commit.
+        inner.commit_entity_rows(persistence_id, new_seq, &rows);
+        inner.wrote(persistence_id);
+
+        // The write landed; a lost answer reaches the caller as the retry's
+        // concurrency violation (see `lose_next_append_answers`).
+        if inner.take_lost_append_answer(persistence_id) {
+            return Err(PersistenceError::ConcurrencyViolation {
+                expected: expected_sequence,
+                actual: new_seq,
+            });
+        }
+        if let Some(error) = inner.take_landed_failure(persistence_id) {
+            return Err(error);
+        }
+
         Ok(new_seq)
+    }
+
+    fn commits_entity_rows(&self) -> bool {
+        true
+    }
+
+    async fn list_scheduled_actions(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<ScheduledActionRecord>, PersistenceError> {
+        let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        if let Some(left) = inner.pending_scheduled_list_failures.get_mut(tenant) {
+            *left -= 1;
+            if *left == 0 {
+                inner.pending_scheduled_list_failures.remove(tenant);
+            }
+            return Err(PersistenceError::Storage(
+                "simulated scheduled-action list failure".to_string(),
+            ));
+        }
+        Ok(inner
+            .scheduled_actions
+            .values()
+            .filter(|action| action.tenant == tenant)
+            .cloned()
+            .collect())
+    }
+
+    /// One record's rows, read under the lock. The simulated listing
+    /// failures are for whole-tenant listings (boot, and the recovery of a
+    /// fire whose answer was lost), so this read does not take one.
+    async fn list_entity_scheduled_actions(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<Vec<ScheduledActionRecord>, PersistenceError> {
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Ok(inner
+            .scheduled_actions
+            .values()
+            .filter(|action| {
+                action.tenant == tenant
+                    && action.entity_type == entity_type
+                    && action.entity_id == entity_id
+            })
+            .cloned()
+            .collect())
+    }
+
+    async fn cancel_scheduled_action(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        arm_id: &str,
+    ) -> Result<(), PersistenceError> {
+        let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        if let Some(row) = inner.scheduled_actions.get_mut(&(
+            tenant.to_string(),
+            entity_type.to_string(),
+            entity_id.to_string(),
+            arm_id.to_string(),
+        )) {
+            row.action.clear();
+        }
+        Ok(())
+    }
+
+    async fn delete_scheduled_action(
+        &self,
+        tenant: &str,
+        entity_type: &str,
+        entity_id: &str,
+        arm_id: &str,
+    ) -> Result<(), PersistenceError> {
+        let held = self
+            .inner
+            .lock()
+            .expect("SimEventStore lock poisoned") // ci-ok: infallible lock
+            .scheduled_deletes_held;
+        if held {
+            std::future::pending::<()>().await;
+        }
+        let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        if inner.pending_scheduled_delete_failures > 0 {
+            inner.pending_scheduled_delete_failures -= 1;
+            return Err(PersistenceError::Storage(
+                "simulated scheduled-action delete failure".into(),
+            ));
+        }
+        inner.scheduled_actions.remove(&(
+            tenant.to_string(),
+            entity_type.to_string(),
+            entity_id.to_string(),
+            arm_id.to_string(),
+        ));
+        Ok(())
     }
 
     async fn backfill_entity_keys(
@@ -787,6 +1175,8 @@ impl EventStore for SimEventStore {
         if appends.is_empty() {
             return Ok(Vec::new());
         }
+        self.hang_if_set(appends.iter().map(|append| append.persistence_id.as_str()))
+            .await;
 
         let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
 
@@ -798,6 +1188,11 @@ impl EventStore for SimEventStore {
                     append.persistence_id
                 )));
             }
+        }
+        if let Some(error) =
+            inner.refused_write(appends.iter().map(|append| append.persistence_id.as_str()))
+        {
+            return Err(error);
         }
 
         for append in appends {
@@ -821,6 +1216,15 @@ impl EventStore for SimEventStore {
                     actual: append.expected_sequence,
                 });
             }
+        }
+        // Each journal in the batch uses up one of its own injected failures.
+        let mut failure = None;
+        for append in appends {
+            let failed = inner.take_append_failure(&append.persistence_id);
+            failure = failure.or(failed);
+        }
+        if let Some(error) = failure {
+            return Err(error);
         }
 
         // Fault injection happens before mutation so a batch either writes
@@ -868,10 +1272,39 @@ impl EventStore for SimEventStore {
                 stored.sequence_nr = new_seq;
                 journal.push(stored);
             }
+            // The record's rows commit with its events, as in one append.
+            inner.commit_entity_rows(&append.persistence_id, new_seq, &append.commit_rows());
             results.push(PersistenceAppendResult {
                 persistence_id: append.persistence_id.clone(),
                 sequence_nr: new_seq,
             });
+        }
+        for append in appends {
+            inner.wrote(&append.persistence_id);
+        }
+
+        // The batch landed; a lost answer for any of its journals reaches the
+        // caller as the retry's concurrency violation (see
+        // `lose_next_append_answers`).
+        let mut lost = None;
+        for (append, result) in appends.iter().zip(&results) {
+            if inner.take_lost_append_answer(&append.persistence_id) {
+                lost = lost.or(Some(PersistenceError::ConcurrencyViolation {
+                    expected: append.expected_sequence,
+                    actual: result.sequence_nr,
+                }));
+            }
+        }
+        if let Some(error) = lost {
+            return Err(error);
+        }
+        let mut landed_failure = None;
+        for append in appends {
+            let failed = inner.take_landed_failure(&append.persistence_id);
+            landed_failure = landed_failure.or(failed);
+        }
+        if let Some(error) = landed_failure {
+            return Err(error);
         }
 
         Ok(results)
@@ -883,17 +1316,10 @@ impl EventStore for SimEventStore {
         from_sequence: u64,
     ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
         let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        *inner.reads.entry(persistence_id.to_string()).or_default() += 1;
 
-        // Deterministic injected read failure (see `fail_next_reads`).
-        if let Some(remaining) = inner.pending_read_failures.get_mut(persistence_id) {
-            *remaining -= 1;
-            let cleared = *remaining == 0;
-            if cleared {
-                inner.pending_read_failures.remove(persistence_id);
-            }
-            return Err(PersistenceError::Storage(format!(
-                "injected read failure for {persistence_id}"
-            )));
+        if let Some(error) = inner.take_read_failure(persistence_id) {
+            return Err(error);
         }
 
         let journal = match inner.journals.get(persistence_id) {
@@ -917,6 +1343,34 @@ impl EventStore for SimEventStore {
         Ok(events)
     }
 
+    /// The newest `limit` events below `before_sequence`, ascending. Honors
+    /// `fail_next_reads`; read truncation models a replay read and is not
+    /// applied to a page.
+    async fn read_events_page(
+        &self,
+        persistence_id: &str,
+        before_sequence: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+        let mut inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+
+        if let Some(error) = inner.take_read_failure(persistence_id) {
+            return Err(error);
+        }
+        let Some(journal) = inner.journals.get(persistence_id) else {
+            return Ok(Vec::new());
+        };
+        let mut page: Vec<PersistenceEnvelope> = journal
+            .iter()
+            .rev()
+            .filter(|e| before_sequence.is_none_or(|before| e.sequence_nr < before))
+            .take(limit)
+            .cloned()
+            .collect();
+        page.reverse();
+        Ok(page)
+    }
+
     async fn save_snapshot(
         &self,
         persistence_id: &str,
@@ -936,11 +1390,6 @@ impl EventStore for SimEventStore {
         inner
             .snapshots
             .insert(persistence_id.to_string(), (sequence_nr, snapshot.to_vec()));
-        inner
-            .snapshot_history
-            .entry(persistence_id.to_string())
-            .or_default()
-            .insert(sequence_nr, snapshot.to_vec());
         let segments = inner
             .event_segments
             .entry(persistence_id.to_string())
@@ -994,6 +1443,62 @@ impl EventStore for SimEventStore {
         Ok(inner.snapshots.get(persistence_id).cloned())
     }
 
+    async fn latest_sequence_nr(&self, persistence_id: &str) -> Result<u64, PersistenceError> {
+        let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        let journal = inner
+            .journals
+            .get(persistence_id)
+            .and_then(|j| j.last())
+            .map_or(0, |e| e.sequence_nr);
+        let snapshot = inner
+            .snapshots
+            .get(persistence_id)
+            .map_or(0, |(seq, _)| *seq);
+        Ok(journal.max(snapshot))
+    }
+
+    async fn journal_heads(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<temper_runtime::persistence::JournalHead>, PersistenceError> {
+        let inner = self.inner.lock().expect("SimEventStore lock poisoned"); // ci-ok: infallible lock
+        let mut heads = BTreeMap::new();
+        for (pid, journal) in &inner.journals {
+            if let Ok((t, ty, id)) = parse_persistence_id_parts(pid)
+                && t == tenant
+            {
+                heads.insert(
+                    (ty.to_string(), id.to_string()),
+                    (
+                        journal.last().map_or(0, |e| e.sequence_nr),
+                        journal.iter().any(|e| e.is_tombstone()),
+                    ),
+                );
+            }
+        }
+        for (pid, (seq, _)) in &inner.snapshots {
+            if let Ok((t, ty, id)) = parse_persistence_id_parts(pid)
+                && t == tenant
+            {
+                let head = heads
+                    .entry((ty.to_string(), id.to_string()))
+                    .or_insert((0, false));
+                head.0 = head.0.max(*seq);
+            }
+        }
+        Ok(heads
+            .into_iter()
+            .map(|((entity_type, entity_id), (sequence_nr, deleted))| {
+                temper_runtime::persistence::JournalHead {
+                    entity_type,
+                    entity_id,
+                    sequence_nr,
+                    deleted,
+                }
+            })
+            .collect())
+    }
+
     async fn list_entity_ids(
         &self,
         tenant: &str,
@@ -1041,3 +1546,9 @@ impl EventStore for SimEventStore {
 
 #[cfg(test)]
 mod tests;
+
+mod entity_rows;
+pub use entity_rows::SimProjection;
+
+mod write_hangs;
+mod write_stops;

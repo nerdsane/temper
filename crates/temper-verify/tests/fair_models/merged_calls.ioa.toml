@@ -1,0 +1,57 @@
+[automaton]
+name = "M"
+states = ["Idle", "P", "Q", "Out"]
+initial = "Idle"
+
+[[action]]
+name = "Begin"
+kind = "input"
+from = ["Idle"]
+to = "P"
+
+[[action.triggers]]
+name = "a"
+kind = "wasm"
+module = "work"
+on_success = ["Finish"]
+on_failure = "Finish"
+
+[[action.triggers]]
+name = "b"
+kind = "wasm"
+module = "work"
+on_success = ["ToQ"]
+
+[[action]]
+name = "ToQ"
+kind = "internal"
+from = ["P"]
+to = "Q"
+
+[[action]]
+name = "Back"
+kind = "internal"
+from = ["Q"]
+to = "P"
+
+[[action.triggers]]
+name = "b"
+kind = "wasm"
+module = "work"
+on_success = ["ToQ"]
+
+[[action]]
+name = "Finish"
+kind = "internal"
+from = ["P", "Q"]
+to = "Out"
+
+[[state_timeout]]
+state = "Q"
+after_seconds = 60
+on_timeout = "Back"
+
+[[liveness]]
+name = "G"
+eventually = "status == 'Idle' || status == 'P' || status == 'Q' || status == 'Out'"
+fairness = {}

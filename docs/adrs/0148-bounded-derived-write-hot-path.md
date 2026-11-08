@@ -2,6 +2,7 @@
 
 - Status: Proposed
 - Date: 2026-06-18
+- Amended: 2026-10-01, every committed transition is projected before the response (see "Amendment: projection before response")
 - Deciders: Temper core maintainers
 - Supersedes: ADR-0142
 - Related:
@@ -18,7 +19,7 @@
 
 ## Context
 
-Canonical Foresight runs on the `foresight` deployment backed by the Supabase
+The canonical downstream deployment runs against a hosted Postgres reached through a
 pooler. Datadog evidence shows DB time dominates run latency. The hottest
 Temper-core buckets are derived writes and broad reads, not the event journal
 append itself: `snapshots`, `snapshot_history`, `entity_catalog`,
@@ -28,7 +29,7 @@ OData reads that can materialize far more rows than the caller needs.
 ADR-0142 moved dispatch projection writes inline to provide read-your-writes
 for OData point reads. That fixed a correctness bug, but it also put
 `entity_catalog` and `entity_field_index` writes on every successful dispatch.
-Foresight dispatches many Session-related transitions in tight loops, so this
+The consumer dispatches many Session-related transitions in tight loops, so this
 turns one synchronous journal append into several synchronous DB operations.
 
 Snapshots have the same shape. The event journal must stay synchronous because
@@ -93,11 +94,88 @@ idempotent retry can establish visibility and resume dispatch without appending
 another source transition. Delayed older projection writes remain subject to
 the store's sequence guard. Superseded state timers are invalidated before
 waiting, so a committed reset cannot leave its old deadline active during a
-slow write. Successor timers start only after visibility is established.
+slow write. Successor timers start only after visibility is established
+(superseded on 2026-10-25, below: they start before the wait).
+
+**Amendment: projection before response (2026-10-01).** Every committed
+single-action transition now awaits its query projection before the response
+returns, not only transitions with declared dependents. Until ADR-0181 every
+action carried an emit effect, which counted as a dependent, so in practice
+every transition was already projected before its response; removing those
+emits made ordinary transitions queued for the first time. On Postgres that
+made a collection read filtered on a just-changed field return the previous
+answer for about 10 ms (an OAuth grant still matched its old refresh-token
+hash 7 times in 80), where the previous kernel returned 0 in 80. Callers that
+write and then query (a token route and a curation pipeline) depend on
+that. The cost is one awaited projection write per transition, which is what
+deployments paid before ADR-0181. A projection failure is reported in the
+response as before. The queued path remains for composite dispatch, deletes
+and backfill.
+
+**Amendment: a failed projection is retried, not reported (2026-10-25).** The
+idempotent retry this section relied on does not come for most moves: a timer,
+a scheduled action or a reaction has no caller to retry it, and an agent that
+reads "failed" usually moves on. On a user's Temper, 19 moves between
+24 Oct 20:54 and 25 Oct committed, then hit "query projection timed out after
+30 seconds" under Turso write contention, and stayed in their new state with
+no state timer and no follow-on work. A release record sat in Making with its
+4500-second Lost timer never armed and its make run never started.
+
+Now the dispatch keeps the work. The state timer the transition entered or
+reset is armed right after the commit, before the projection wait: it fires
+through the record's actor and reads nothing from the query plane, so it is
+bookkeeping for the commit like the cancellation of the old one. An atomic
+composite batch keeps its order (cancel, project, reload, arm): wherever a
+query plane exists the server runs the projection queue, and the batch only
+enqueues its rows, so it neither waits for nor fails on the write. If the
+projection write fails, its
+scheduled actions are armed at once and taken out of the response, so the
+later arms on the ordinary path do not arm them a second time (a row that has
+already fired would fire again). The write is tried again with a doubling
+wait (100 ms up to the 30-second budget of one try) until it lands. Then
+dispatch continues down the ordinary path: SSE, webhooks, integrations,
+spawns, and the caller's reactions, each once. The response waits for that and
+reports success. The 30-second budget now bounds one try, since a write stuck
+on a dead connection or a held lock does not finish by waiting longer; it no
+longer bounds the response.
+
+A delete of the record committed while the write is being tried ends the
+tries, and the dependents start without it. The delete removes the record's
+row rather than replacing it, so the sequence guard has nothing to compare
+with, and the older write landing after the removal would bring the deleted
+record back. Each try first reads the record's journal after the
+transition's sequence: an event there that moved the record to `Deleted`
+(the kernel's tombstone or a spec action) means a delete was committed since.
+The journal answers, not the status cache, because the cache can evict the
+delete's status during a long outage. A try that cannot read the journal writes
+nothing and waits for the next. A try already in flight when the removal
+lands can still bring the row back, as a slow first write could before this
+change.
+
+The tries do not give up. Nothing else starts this transition's dependents,
+so a limit would drop committed work again, which is the defect. A store
+that refuses one row forever (no such error is known) keeps that request
+waiting and logs every try, and the request keeps what it holds: its
+admission permit, a reaction permit if it is a reaction, and for the commons
+tenant the commons write lock. On Turso this path no longer runs once
+query rows are written in the move's own commit ("one commit per move"), so it is reached only
+on the other stores.
+
+A caller can wait longer than 30 seconds while the store is stalled. A caller
+that hangs up meanwhile loses nothing once dispatch runs in its own task
+("one commit per move"). A caller that retries with the same idempotency key
+while the first dispatch is still catching up can start the dependents a
+second time, and arm its scheduled actions again from the actor's cached
+reply, as it can today while any post-dispatch work (an inline integration,
+awaited reactions) outlasts the caller's timeout. The wait now lasts as long
+as the outage, so the window is wider. The change "an Idempotency-Key answers only a retry of its own
+request" closes that race
+by giving a key's post-dispatch effects one owner: a retry that arrives while
+they run waits for them.
 
 ### Sub-Decision 3: Session Collection Reads Must Push Down Bounds
 
-Supported Session/OData queries used by Foresight and DSF2 must use the query
+Supported Session/OData queries used by downstream consumers must use the query
 plane or a Temper-native read model with SQL-side tenant/type/filter/page
 limits. They must not materialize the full Session entity set to answer a
 bounded page, filtered lookup, or latest-session style query.
@@ -120,7 +198,7 @@ still marked `queued`. MCP clients treat `503` and transient transport errors
 as retryable with bounded backoff, including final trajectory uploads on
 session close.
 
-**Why this approach**: Foresight needs reliable trajectory artifacts, but the
+**Why this approach**: The consumer needs reliable trajectory artifacts, but the
 terminal Session transition should not be coupled to a best-effort in-memory
 side effect. The durable admission write is the reliability boundary; the
 status transition and any retry/failure accounting happen outside dispatch.
@@ -131,7 +209,7 @@ status transition and any retry/failure accounting happen outside dispatch.
    query projection updates, route single and composite dispatch through them,
    add lag/error metrics, and add tests proving dispatch no longer awaits the
    derived writes.
-2. **Same effort** -- add Session query tests for the Foresight/DSF2 query
+2. **Same effort** -- add Session query tests for the consumer query
    shapes and make the query plane satisfy them without full table
    materialization.
 3. **Same effort** -- give OTS trajectory uploads durable admission,
@@ -156,8 +234,8 @@ status transition and any retry/failure accounting happen outside dispatch.
 - MCP final trajectory upload retries `503` and transient transport failures
   with a bounded backoff.
 - Datadog re-measurement uses `@version:<deployed-version>` and
-  the active database peer/service tag for the deployed target (`Postgres-v79y`
-  currently reports as `foresight-railway-postgres`).
+  the active database peer/service tag for the deployed target (a `Postgres-v79y`
+  peer reports under a service name of its own).
 
 ## Consequences
 
@@ -165,7 +243,7 @@ status transition and any retry/failure accounting happen outside dispatch.
 
 - Dispatch latency is no longer multiplied by snapshot, projection index, and
   trajectory artifact writes.
-- Derived DB writes can batch and coalesce naturally under bursty Foresight
+- Derived DB writes can batch and coalesce naturally under bursty consumer
   traffic.
 - Projection and snapshot lag becomes visible as a product signal instead of a
   hidden tail-latency tax.
@@ -192,7 +270,7 @@ status transition and any retry/failure accounting happen outside dispatch.
   applied-sequence metrics.
 - If a read path cannot tolerate projection lag and lacks actor fallback, it
   can observe stale data. Mitigation: add sequence-aware read tests for the
-  Foresight/DSF2 Session paths touched by this work.
+  consumer Session paths touched by this work.
 - If the durable OTS admission write itself is slow, the POST caller still
   pays that cost. Mitigation: keep this out of the Session dispatch path,
   retry transient failures at the MCP boundary, and measure OTS POST latency
@@ -208,17 +286,17 @@ status transition and any retry/failure accounting happen outside dispatch.
 
 ## Non-Goals
 
-- Switching Foresight away from Codex or changing model/provider behavior.
+- Switching the consumer away from Codex or changing model/provider behavior.
 - Increasing broad run concurrency before the DB hot path is reduced.
-- Moving app or agent logic from TemperPaw into the Temper kernel.
+- Moving app or agent logic from the downstream agent app into the Temper kernel.
 - Removing existing projection correctness repair or parity mechanisms.
 
 ## Alternatives Considered
 
 1. **Keep ADR-0142 inline projection writes** -- preserves immediate projection
    freshness, but keeps `entity_catalog` and `entity_field_index` latency on
-   every dispatch and does not address Foresight DB amplification.
-2. **Disable projection writes during Foresight runs** -- fast but incorrect;
+   every dispatch and does not address the consumer's DB amplification.
+2. **Disable projection writes during consumer runs** -- fast but incorrect;
    OData and file/session read paths depend on the projection.
 3. **Only tune PostgreSQL indexes** -- useful, but it does not reduce the
    number of writes or the fact that derived writes are awaited by dispatch.

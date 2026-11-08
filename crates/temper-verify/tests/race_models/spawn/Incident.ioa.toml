@@ -1,0 +1,16 @@
+[automaton]
+name = "Incident"
+states = ["Unmade", "Looking", "Over"]
+initial = "Unmade"
+
+[[action]]
+name = "TakenUp"
+kind = "input"
+from = ["Unmade"]
+to = "Looking"
+
+[[action]]
+name = "Recover"
+kind = "input"
+from = ["Looking"]
+to = "Over"

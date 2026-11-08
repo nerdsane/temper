@@ -142,11 +142,12 @@ impl EntitySnapshot {
             lists: self.lists.clone(),
             fields: self.fields.clone(),
             // Cross-entity references are not resolved: the audit reads one
-            // entity set at a time and has no lookup budget. An unresolved
-            // reference evaluates to unknown, which cannot satisfy a guard, so
-            // an invariant that reads one is skipped rather than failed -- see
-            // `audit_entity`, which is why that distinction is load-bearing.
+            // entity set at a time. An invariant that reads one is skipped
+            // rather than evaluated against a missing status -- see
+            // `audit_entity`, which says so in its findings.
             related: BTreeMap::new(),
+            // Invariants read no move's parameters.
+            params: serde_json::Map::new(),
         }
     }
 }

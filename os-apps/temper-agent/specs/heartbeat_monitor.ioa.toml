@@ -45,7 +45,7 @@ name = "ScanComplete"
 kind = "input"
 from = ["Scanning"]
 to = "Idle"
-params = ["last_scan_at", "stale_agents_found"]
+params = ["last_scan_at"]
 hint = "Scan finished. Schedule next scan."
 effect = ["stale_agents_found += 1"]
 

@@ -1,0 +1,38 @@
+[automaton]
+name = "Probe"
+states = ["New", "Open", "Ended"]
+initial = "New"
+
+[[state]]
+name = "parent_id"
+type = "string"
+initial = ""
+
+[[action]]
+name = "Open"
+kind = "input"
+from = ["New"]
+to = "Open"
+params = ["parent_type", "parent_id"]
+
+[[action.triggers]]
+name = "parent_cleared"
+kind = "entity"
+target_entity = "Probe"
+target_action = "End"
+guard = "Alarm[parent_id].status == 'Cleared'"
+[action.triggers.args]
+why = "'its alarm cleared while it opened'"
+[action.triggers.resolve_target]
+kind = "same_id"
+
+[[action]]
+name = "End"
+kind = "input"
+from = ["Open"]
+to = "Ended"
+params = ["why"]
+
+[[action.constraints]]
+kind = "param_nonempty"
+param = "why"

@@ -1,0 +1,23 @@
+# A box makes its lid, and the lid learns its box. A lid will not shut while its
+# box is full. That keeps a full box's lid open only if the lid a box names names
+# that box back, which is a second rule the first one needs.
+[automaton]
+name = "Box"
+states = ["Unmade", "Full"]
+initial = "Unmade"
+
+[[state]]
+name = "lid"
+type = "string"
+initial = ""
+
+[[invariant]]
+name = "LidStaysOpen"
+assert = "status == 'Full' && !empty(lid) => Lid[lid].status in ['Open']"
+
+[[action]]
+name = "Add"
+kind = "input"
+from = ["Unmade"]
+to = "Full"
+effect = ["spawn('Lid', 'Add', lid)"]

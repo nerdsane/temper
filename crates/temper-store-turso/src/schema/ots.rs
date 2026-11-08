@@ -41,8 +41,18 @@ CREATE TABLE IF NOT EXISTS ots_trajectories (
 pub const SELECT_OTS_TRAJECTORIES_DDL: &str = "\
 SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'ots_trajectories';";
 
-/// Marker the tenant-scoped DDL contains and the legacy DDL does not.
-pub const OTS_TRAJECTORIES_TENANT_IDENTITY_MARKER: &str = "PRIMARY KEY(tenant, trajectory_id)";
+/// Whether stored `ots_trajectories` DDL is already keyed by
+/// `(tenant, trajectory_id)`; the legacy DDL is keyed by `trajectory_id` alone.
+///
+/// Compared without whitespace or case: the engine stores DDL in its own
+/// spelling (`PRIMARY KEY (tenant, trajectory_id)`), not the text written here,
+/// so an exact match never held and every start rebuilt the table.
+pub fn ots_trajectories_ddl_is_tenant_scoped(ddl: &str) -> bool {
+    let compact: String = ddl.split_whitespace().collect();
+    compact
+        .to_ascii_lowercase()
+        .contains("primarykey(tenant,trajectory_id)")
+}
 
 /// Migration step 1: the tenant-scoped table, under a staging name.
 pub const CREATE_OTS_TRAJECTORIES_REBUILD_TABLE: &str = "\

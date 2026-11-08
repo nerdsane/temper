@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-07-06
 - Revised: 2026-07-11 after adversarial validation of PR #343
+- Amended: 2026-09-29, identity entities are read as ordinary entities (see "Amendment: identity reads")
 - Deciders: Temper core maintainers
 - Related: ADR-0033, ADR-0043, ARN-165, ARN-166, ARN-167, ARN-170, ARN-187, ARN-192, ARN-219, ARN-231, ARN-233
 
@@ -125,6 +126,24 @@ short, but the added latency is accepted in exchange for eliminating a
 revocation window. A later optimization must provide a durable, replica-visible
 version or revocation generation with equivalent fail-closed semantics; a TTL
 positive cache is not compatible with this boundary.
+
+**Amendment: identity reads (2026-09-29).** The credential and its agent type
+are now read the way every other entity is, through their actors, after an
+existence check so a caller's token cannot spawn one. A credential this server
+has not loaded since it started (after a restart, or one another server wrote)
+is found in the durable store once and then served from its actor. The full
+journal replay per read is removed. In production it replayed one operator credential's 61
+events three times per request, about two million replayed events an hour, and
+contributed to database connection waits on the shared store; the credential's
+journal also grew by one `Issue` event per boot, which bootstrap no longer
+appends to an already-current credential. What is given up is the cross-replica
+case above: a revocation durably written by another server is seen when this
+server's actor reloads, not on its next request. Revocation, deletion and type
+deprecation on the same server remain effective on the next request, and the
+sequence/status/fields stability check between the credential and type reads is
+unchanged. Sign-out generations and trusted issuers were already read this way.
+Freshness across several servers is a property every entity needs and will be
+solved at the entity layer, not for credentials alone; the deployment this was written for runs one server.
 
 Tenant authorization also fails closed when no tenant policy set is active.
 `ServerState` starts with the default-deny engine, and
@@ -563,9 +582,9 @@ broader surfaces are complete.
   bytes must use the authenticated property `$value` media endpoint.
 - A tenant can run only one raw ingest at a time. This is deliberate fair-share
   admission; independent tenants retain progress even when one sender stalls.
-- Protected requests perform two authoritative identity-state reads. Persistent
-  deployments pay bounded full-journal replay latency until a durable,
-  replica-visible version primitive is available.
+- Protected requests read the credential and agent type as ordinary entities
+  (amended 2026-09-29); a revocation written by another replica is seen when
+  this server's actor reloads, until entities gain replica-visible freshness.
 - Native adapter invocations have a one-hour execution budget. Work that needs
   more time must checkpoint and resume under a newly minted credential.
 
@@ -579,8 +598,8 @@ The change is accepted only with end-to-end tests proving:
   wrong-path credentials are rejected before persistence;
 - an already-used resolver rejects a directly revoked credential and a
   credential linked to a newly deprecated AgentType on its next call; generic
-  OData deletion cannot retain authority, and a second `ServerState` sharing the
-  durable store observes a revocation without process-local invalidation;
+  OData deletion cannot retain authority (the cross-replica revocation test was
+  removed by the 2026-09-29 amendment);
 - the no-key network server rejects protected reads and writes;
 - the exported kernel router rejects protected requests without a typed context;
 - `$hints` rejects anonymous requests and returns only the authenticated
@@ -599,7 +618,7 @@ The change is accepted only with end-to-end tests proving:
   unique staging directory and bundled Cedar text cannot become authority;
 - the deployment key is never selected as an Agent/Admin fallback; and
 - CLI adapter children never inherit the deployment key; captured invocation
-  credentials are rejected by a second `ServerState` immediately after success,
+  credentials are rejected immediately after success,
   adapter error, and caller cancellation, and are rejected after deterministic
   expiry even when cleanup does not run; plaintext is absent from serialized
   contexts, returned results/errors, debug output, and durable journal events;

@@ -11,6 +11,8 @@ mod compilation_tests;
 mod guest_read_bounds_test;
 mod guest_spans;
 mod host_functions;
+#[cfg(test)]
+mod outbound_failure_log_test;
 mod telemetry;
 #[cfg(test)]
 mod tests;
@@ -154,6 +156,8 @@ struct CachedModule {
     instance_pre: Option<wasmtime::InstancePre<HostState>>,
     /// Pre-linked instance template for WASI modules.
     instance_pre_wasi: Option<wasmtime::InstancePre<HostState>>,
+    /// Names this module's compiled code for profilers while it is alive.
+    _code: crate::code_map::CodeRange,
 }
 
 /// Background ticker for Wasmtime epoch interruption.
@@ -237,6 +241,14 @@ pub(crate) struct HostState {
 }
 
 impl HostState {
+    /// This invocation, for the line a host call to `url` logs at its deadline.
+    pub(crate) fn call_site<'a>(&'a self, url: &'a str) -> host_functions::HostCallSite<'a> {
+        host_functions::HostCallSite {
+            context_json: &self.context_json,
+            url,
+        }
+    }
+
     /// Remaining wall-clock budget for an async host call.
     pub(crate) fn remaining_host_call_timeout(&self) -> Duration {
         let remaining = self
@@ -449,7 +461,13 @@ impl WasmEngine {
         tracing::Span::current().record("blob_cache_entries", blob_cache_entries);
         tracing::Span::current().record("blob_cache_bytes", blob_cache_bytes);
         let span = tracing::Span::current();
+        // The guest thread logs where its caller logs. A new thread starts on
+        // the global subscriber, so without this a scoped one (a test's, or a
+        // harness's) never sees the host calls' log lines.
+        let dispatch = tracing::dispatcher::get_default(|current| current.clone());
         let runtime_handle = tokio::runtime::Handle::current();
+        let single_threaded =
+            runtime_handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread;
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         let thread_name = format!(
@@ -461,7 +479,7 @@ impl WasmEngine {
             .name(thread_name)
             .stack_size(WASM_INVOKE_THREAD_STACK_BYTES)
             .spawn(move || {
-                let result = {
+                let result = tracing::dispatcher::with_default(&dispatch, || {
                     let _runtime_entered = runtime_handle.enter();
                     let _entered = span.enter();
                     Self::invoke_blocking(
@@ -473,13 +491,28 @@ impl WasmEngine {
                         streams,
                         blob_cache,
                     )
-                };
+                });
                 let _ = tx.send(result);
             })
             .map_err(|e| WasmError::Invocation(format!("failed to spawn WASM thread: {e}")))?;
 
-        rx.await
-            .map_err(|e| WasmError::Invocation(format!("WASM thread terminated: {e}")))?
+        // A paused clock, which only a single-threaded runtime can have, jumps
+        // to the next timer whenever the runtime has nothing to run, and a
+        // module on a thread of its own is not work the runtime sees. So a
+        // simulation would move its clock on while the module runs, and the
+        // module's answer would arrive at whatever simulated time real time
+        // put it. A wait in the blocking pool is work the runtime sees: the
+        // clock stands still until the module answers. A multi-threaded
+        // runtime's clock is real, and its blocking pool stays free for the
+        // file and DNS work that shares it.
+        let answer = if single_threaded {
+            tokio::task::spawn_blocking(move || rx.blocking_recv())
+                .await
+                .map_err(|e| WasmError::Invocation(format!("WASM wait failed: {e}")))?
+        } else {
+            rx.await
+        };
+        answer.map_err(|e| WasmError::Invocation(format!("WASM thread terminated: {e}")))?
     }
 
     fn invoke_blocking(

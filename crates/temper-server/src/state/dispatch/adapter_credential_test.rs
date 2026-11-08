@@ -22,6 +22,8 @@ const PROVIDER_SECRET: &str = "provider-super-secret";
 
 struct PersistedIdentityFixture {
     first: crate::state::ServerState,
+    /// A second server on the same store that has loaded nothing yet, as after
+    /// a restart.
     second: crate::state::ServerState,
     store: TursoEventStore,
     _directory: tempfile::TempDir,
@@ -101,6 +103,9 @@ fn credential_entity_state() -> EntityState {
         last_snapshot_sequence_nr: 0,
         sequence_nr: 0,
         processed_idempotency_keys: BTreeMap::new(),
+        last_event: Default::default(),
+        status_clock: Default::default(),
+        spawn_reservations: Default::default(),
     }
 }
 
@@ -262,13 +267,41 @@ impl AgentAdapter for BlockingAdapter {
     }
 }
 
+/// A credential this server has not loaded since it started (after a restart,
+/// or one written by another server on the same store) still resolves, and an
+/// unknown token does not.
+#[tokio::test]
+async fn credential_resolves_on_a_server_that_has_not_loaded_it() {
+    let fixture = persisted_identity_fixture().await;
+    let credential = mint(&fixture).await;
+
+    assert!(
+        !fixture.second.entity_exists(
+            &TenantId::default(),
+            "AgentCredential",
+            &credential.key_hash
+        ),
+        "the second server must start without the credential in memory"
+    );
+    assert_token_resolves(&fixture.second, &credential.plaintext, true).await;
+    assert_token_resolves(&fixture.second, "tmpr_not-a-real-token", false).await;
+    assert!(
+        !fixture.second.entity_exists(
+            &TenantId::default(),
+            "AgentCredential",
+            &crate::identity::hash_token("tmpr_not-a-real-token")
+        ),
+        "an unknown token must not create a credential entity"
+    );
+}
+
 #[tokio::test]
 async fn adapter_success_revokes_captured_token_and_never_persists_plaintext() {
     let fixture = persisted_identity_fixture().await;
     let credential = mint(&fixture).await;
     let plaintext = credential.plaintext.clone();
     let key_hash = credential.key_hash.clone();
-    assert_token_resolves(&fixture.second, &plaintext, true).await;
+    assert_token_resolves(&fixture.first, &plaintext, true).await;
     let (sender, receiver) = oneshot::channel();
 
     let result = fixture
@@ -294,6 +327,7 @@ async fn adapter_success_revokes_captured_token_and_never_persists_plaintext() {
         receiver.await.expect("adapter should capture token"),
         plaintext
     );
+    assert_token_resolves(&fixture.first, &plaintext, false).await;
     assert_token_resolves(&fixture.second, &plaintext, false).await;
 
     let events = fixture
@@ -334,7 +368,7 @@ async fn adapter_error_still_revokes_captured_token() {
         receiver.await.expect("adapter should capture token"),
         plaintext
     );
-    assert_token_resolves(&fixture.second, &plaintext, false).await;
+    assert_token_resolves(&fixture.first, &plaintext, false).await;
 }
 
 #[tokio::test]
@@ -402,7 +436,7 @@ async fn adapter_panic_is_contained_and_still_revokes_token() {
         .await
         .expect_err("adapter panic should become a typed error after cleanup");
     assert!(error.to_string().contains("adapter invocation panicked"));
-    assert_token_resolves(&fixture.second, &plaintext, false).await;
+    assert_token_resolves(&fixture.first, &plaintext, false).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -437,7 +471,7 @@ async fn adapter_timeout_revokes_token_at_the_execution_budget() {
             .to_string()
             .contains("exceeded its 3600-second budget")
     );
-    assert_token_resolves(&fixture.second, &plaintext, false).await;
+    assert_token_resolves(&fixture.first, &plaintext, false).await;
 }
 
 #[tokio::test]
@@ -476,7 +510,7 @@ async fn caller_cancellation_detaches_cleanup_and_revokes_after_adapter_finishes
 
     for _ in 0..100 {
         if crate::identity::IdentityResolver::new()
-            .resolve(&fixture.second, &TenantId::default(), &plaintext)
+            .resolve(&fixture.first, &TenantId::default(), &plaintext)
             .await
             .is_err()
         {
@@ -505,6 +539,113 @@ async fn bounded_expiry_denies_token_from_second_state_without_cleanup() {
         .revoke_minted_adapter_credential(&TenantId::default(), &credential.key_hash)
         .await
         .expect("expired credential should still revoke durably");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn delegated_non_operator_adapter_execution_keeps_identity_writes_platform_only() {
+    for seed in [7, 73, 4096] {
+        delegated_adapter_execution(seed).await;
+    }
+}
+
+async fn delegated_adapter_execution(seed: u64) {
+    let clock = Arc::new(LogicalClock::with_delta_ms(1_000));
+    let id_gen = Arc::new(DeterministicIdGen::new(seed));
+    let _clock_guard = install_sim_context(clock, id_gen);
+    let fixture = persisted_identity_fixture().await;
+    fixture
+        .first
+        .authz
+        .reload_tenant_policies(
+            "default",
+            r#"
+        permit(principal == Agent::"runner", action == Action::"Delegate",
+               resource is AdapterCredentialDelegation)
+        when { resource.agent_type_id == "adapter-agent-type" };
+    "#,
+        )
+        .expect("delegation policy parses");
+    let caller = AgentContext {
+        security_ctx: Some(temper_authz::SecurityContext::from_resolved_identity(
+            "runner", "worker", None,
+        )),
+        ..AgentContext::default()
+    };
+    let security = caller.security_ctx.as_ref().unwrap();
+    for action in ["create", "Issue", "Rotate", "Revoke", "Delegate"] {
+        assert!(
+            fixture
+                .first
+                .authorize_with_context(
+                    security,
+                    action,
+                    "AgentCredential",
+                    &BTreeMap::new(),
+                    "default",
+                )
+                .is_err(),
+            "delegation must not permit direct {action}"
+        );
+    }
+    let before = fixture
+        .first
+        .list_entity_ids(&TenantId::default(), "AgentCredential");
+    let mut other_type = credential_entity_state();
+    other_type.fields["agent_type_id"] = serde_json::json!("privileged-type");
+    assert!(
+        fixture
+            .first
+            .mint_agent_credential_if_needed(&TenantId::default(), &other_type, &caller,)
+            .await
+            .err()
+            .expect("delegation must be denied")
+            .contains("delegation denied")
+    );
+    assert!(
+        fixture
+            .first
+            .mint_agent_credential_if_needed(
+                &TenantId::new("other-tenant"),
+                &credential_entity_state(),
+                &caller,
+            )
+            .await
+            .err()
+            .expect("delegation must be denied")
+            .contains("delegation denied")
+    );
+    assert_eq!(
+        fixture
+            .first
+            .list_entity_ids(&TenantId::default(), "AgentCredential"),
+        before
+    );
+
+    let credential = fixture
+        .first
+        .mint_agent_credential_if_needed(&TenantId::default(), &credential_entity_state(), &caller)
+        .await
+        .expect("authorized delegation")
+        .expect("required credential");
+    assert_token_resolves(&fixture.first, &credential.plaintext, true).await;
+    let plaintext = credential.plaintext.clone();
+    let (sender, receiver) = oneshot::channel();
+    let result = fixture
+        .first
+        .execute_adapter_with_credential_cleanup(
+            Arc::new(ResultAdapter {
+                captured: Mutex::new(Some(sender)),
+                fails: false,
+            }),
+            adapter_context(credential.plaintext),
+            &TenantId::default(),
+            Some(credential.key_hash),
+        )
+        .await
+        .expect("delegated adapter executes");
+    assert!(result.success);
+    assert_eq!(receiver.await.unwrap(), plaintext);
+    assert_token_resolves(&fixture.first, &plaintext, false).await;
 }
 
 #[tokio::test]
@@ -560,6 +701,7 @@ async fn strict_adapter_callbacks_keep_declared_values_in_both_modes() {
                     entity_type: "StrictJob",
                     entity_id: "job",
                 },
+                "fixture",
                 "Complete",
                 params,
                 &AgentContext::for_service("test-adapter"),
@@ -606,6 +748,7 @@ async fn strict_adapter_stale_callback_is_visible_without_requesting_compensatio
                     entity_type: "StrictJob",
                     entity_id: "job",
                 },
+                "fixture",
                 "Complete",
                 serde_json::json!({"observed":"stale", "expected_revision":1, "duration_ms":17}),
                 &agent,
@@ -647,6 +790,7 @@ name = "Rollover""#,
                 entity_type: "StrictJob",
                 entity_id: "job",
             },
+            "fixture",
             "Complete",
             serde_json::json!({"observed":"receipt","expected_revision":1}),
             &AgentContext::for_service("local-adapter"),

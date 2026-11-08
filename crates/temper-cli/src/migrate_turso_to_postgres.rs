@@ -835,12 +835,10 @@ async fn migrate_wasm_invocations(
     dry_run: bool,
     builder: &mut ManifestBuilder,
 ) -> Result<()> {
-    let all_rows = source.load_recent_wasm_invocations(MAX_ROWS).await?;
-    ensure_row_bound("wasm_invocation_logs", all_rows.len())?;
-    let rows = all_rows
-        .into_iter()
-        .filter(|row| row.tenant == tenant)
-        .collect::<Vec<_>>();
+    let rows = source
+        .load_recent_wasm_invocations(tenant, MAX_ROWS)
+        .await?;
+    ensure_row_bound("wasm_invocation_logs", rows.len())?;
     builder.record_source(
         tenant,
         "wasm_invocation_logs",
@@ -2033,8 +2031,7 @@ mod tests {
     #[tokio::test]
     async fn smoke_migration_copies_events_snapshots_specs_projections_and_blobs_when_database_url_set()
      {
-        let Ok(database_url) = std::env::var("DATABASE_URL") else {
-            eprintln!("skipping migration smoke test: DATABASE_URL is not set");
+        let Some(database_url) = temper_test_resource::env_var("DATABASE_URL") else {
             return;
         };
         let temp = tempfile::tempdir().expect("tempdir");

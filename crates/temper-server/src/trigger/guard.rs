@@ -62,7 +62,6 @@ impl Env for ReactionEnv<'_> {
     fn cross_statuses(&self, entity_type: &str, id_field: &str) -> Option<Vec<Val<'_>>> {
         let key = (entity_type.to_string(), id_field.to_string());
         match self.related.get(&key) {
-            Some(Related::Unresolved) => None,
             Some(Related::Statuses(statuses)) if !statuses.is_empty() => Some(
                 statuses
                     .iter()

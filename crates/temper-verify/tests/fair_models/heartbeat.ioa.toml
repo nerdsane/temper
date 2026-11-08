@@ -1,0 +1,34 @@
+[automaton]
+name = "H"
+states = ["Idle", "A", "Out"]
+initial = "Idle"
+
+[[action]]
+name = "Begin"
+kind = "input"
+from = ["Idle"]
+to = "A"
+
+[[action]]
+name = "Beat"
+kind = "input"
+from = ["A"]
+to = "A"
+
+[[action]]
+name = "Expire"
+kind = "internal"
+from = ["A"]
+to = "Out"
+
+[[state_timeout]]
+state = "A"
+after_seconds = 60
+on_timeout = "Expire"
+reset_on = ["Beat"]
+
+[[liveness]]
+name = "GetsOut"
+eventually = "status == 'Idle' || status == 'Out'"
+relies_on = ["Beat"]
+fairness = {}

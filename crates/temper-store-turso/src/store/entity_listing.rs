@@ -6,6 +6,63 @@ use tracing::instrument;
 
 use super::TursoEventStore;
 
+/// Live ids of one entity type from the catalog, the field index and the
+/// journal. Each `NOT EXISTS` probe is served by `idx_events_deleted`.
+pub(super) const LIST_ENTITY_IDS_BY_TYPE_SQL: &str = concat!(
+    "\
+SELECT entity_id
+    FROM (
+      SELECT c.entity_id
+      FROM entity_catalog c
+      WHERE c.tenant = ?1
+        AND c.entity_type = ?2
+        AND NOT EXISTS (
+          SELECT 1
+          FROM events d
+          WHERE d.tenant = c.tenant
+            AND d.entity_type = c.entity_type
+            AND d.entity_id = c.entity_id
+            ",
+    "AND ",
+    tombstone_sql!(),
+    "
+        )
+      UNION
+      SELECT f.entity_id
+      FROM entity_field_index f
+      WHERE f.tenant = ?1
+        AND f.entity_type = ?2
+        AND NOT EXISTS (
+          SELECT 1
+          FROM events d
+          WHERE d.tenant = f.tenant
+            AND d.entity_type = f.entity_type
+            AND d.entity_id = f.entity_id
+            ",
+    "AND ",
+    tombstone_sql!(),
+    "
+        )
+      UNION
+      SELECT DISTINCT e.entity_id
+      FROM events e
+      WHERE e.tenant = ?1
+        AND e.entity_type = ?2
+        AND NOT EXISTS (
+          SELECT 1
+          FROM events d
+          WHERE d.tenant = e.tenant
+            AND d.entity_type = e.entity_type
+            AND d.entity_id = e.entity_id
+            ",
+    "AND ",
+    tombstone_sql!(),
+    "
+        )
+    )
+    ORDER BY entity_id"
+);
+
 impl TursoEventStore {
     #[instrument(skip_all, fields(
         tenant,
@@ -19,51 +76,7 @@ impl TursoEventStore {
     ) -> Result<Vec<String>, PersistenceError> {
         let conn = self.configured_connection().await?;
         let mut rows = conn
-            .query(
-                "SELECT entity_id
-                 FROM (
-                   SELECT c.entity_id
-                   FROM entity_catalog c
-                   WHERE c.tenant = ?1
-                     AND c.entity_type = ?2
-                     AND NOT EXISTS (
-                       SELECT 1
-                       FROM events d
-                       WHERE d.tenant = c.tenant
-                         AND d.entity_type = c.entity_type
-                         AND d.entity_id = c.entity_id
-                         AND d.event_type = 'Deleted'
-                     )
-                   UNION
-                   SELECT f.entity_id
-                   FROM entity_field_index f
-                   WHERE f.tenant = ?1
-                     AND f.entity_type = ?2
-                     AND NOT EXISTS (
-                       SELECT 1
-                       FROM events d
-                       WHERE d.tenant = f.tenant
-                         AND d.entity_type = f.entity_type
-                         AND d.entity_id = f.entity_id
-                         AND d.event_type = 'Deleted'
-                     )
-                   UNION
-                   SELECT DISTINCT e.entity_id
-                   FROM events e
-                   WHERE e.tenant = ?1
-                     AND e.entity_type = ?2
-                     AND NOT EXISTS (
-                       SELECT 1
-                       FROM events d
-                       WHERE d.tenant = e.tenant
-                         AND d.entity_type = e.entity_type
-                         AND d.entity_id = e.entity_id
-                         AND d.event_type = 'Deleted'
-                     )
-                 )
-                 ORDER BY entity_id",
-                params![tenant, entity_type],
-            )
+            .query(LIST_ENTITY_IDS_BY_TYPE_SQL, params![tenant, entity_type])
             .await
             .map_err(storage_error)?;
 

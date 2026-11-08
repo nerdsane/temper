@@ -4,7 +4,9 @@
 //! translation layer in `temper-spec`. The shared layer eliminates duplicated
 //! guard/effect translation logic between JIT and verification paths.
 
-use temper_spec::automaton::{self, Automaton, ResolvedEffect, translate_actions};
+use temper_spec::automaton::{
+    self, Automaton, ResolvedEffect, translate_actions, translate_carries,
+};
 
 use super::types::{
     CompositeActionMetadata, CompositeCedarGate, Effect, SubWriteSpec, TransitionRule,
@@ -37,9 +39,12 @@ impl TransitionTable {
     ///
     /// Each action becomes a [`TransitionRule`] with guards and effects
     /// derived from the IOA specification via the shared translation layer.
-    /// Output actions are skipped (they don't transition state).
+    /// Output actions are skipped (they don't transition state). Each
+    /// `[[carry]]` becomes a rule too, named by
+    /// [`Automaton::carry_moves`], for the platform to make at install.
     pub fn from_automaton(automaton: &Automaton) -> Self {
-        let resolved_actions = translate_actions(automaton);
+        let mut resolved_actions = translate_actions(automaton);
+        resolved_actions.extend(translate_carries(automaton));
 
         let rules: Vec<TransitionRule> = resolved_actions
             .into_iter()
@@ -175,10 +180,38 @@ impl TransitionTable {
                                         .map(|source| (param.name().to_owned(), source))
                                 })
                                 .collect(),
+                            fire_now_in: automaton
+                                .state_timeouts
+                                .iter()
+                                .filter(|timeout| timeout.fire_now_on.contains(&action.name))
+                                .map(|timeout| timeout.state.clone())
+                                .collect(),
                             constraints: action.constraints.clone(),
                         },
                     )
                 })
+                .chain(automaton.carry_moves().into_iter().map(|(name, carry)| {
+                    let declared = |var: &String| {
+                        automaton
+                            .state
+                            .iter()
+                            .find(|state| &state.name == var)
+                            .map(|state| (var.clone(), state.var_type))
+                    };
+                    (
+                        name,
+                        super::action_contract::ActionContract {
+                            params: carry.set.keys().cloned().collect(),
+                            param_types: carry.set.keys().filter_map(declared).collect(),
+                            ..Default::default()
+                        },
+                    )
+                }))
+                .collect(),
+            invariants: automaton
+                .invariants
+                .iter()
+                .filter_map(super::invariant::MoveInvariant::from_spec)
                 .collect(),
             rule_index,
         }
@@ -192,8 +225,10 @@ fn convert_effect(effect: ResolvedEffect) -> Effect {
         ResolvedEffect::AddCounter { var, value } => Effect::AddCounter { var, value },
         ResolvedEffect::SubCounter { var, value } => Effect::SubCounter { var, value },
         ResolvedEffect::SetBool { var, value } => Effect::SetBool { var, value },
+        ResolvedEffect::SetString { var, value } => Effect::SetString { var, value },
         ResolvedEffect::ListAppend { var, value } => Effect::ListAppend { var, value },
         ResolvedEffect::ListRemoveAt { var, index } => Effect::ListRemoveAt { var, index },
+        ResolvedEffect::ListRemove { var, value } => Effect::ListRemove { var, value },
         ResolvedEffect::Dispatch(name) => Effect::Custom(name),
         ResolvedEffect::Schedule {
             action,
@@ -208,11 +243,13 @@ fn convert_effect(effect: ResolvedEffect) -> Effect {
             initial_action,
             store_id_in,
             id,
+            copy,
         } => Effect::SpawnEntity {
             entity_type,
             initial_action,
             store_id_in,
             id,
+            copy,
         },
     }
 }
@@ -396,6 +433,7 @@ effect = ["spawn('SubTask', 'Begin', subtask_id)"]
                 initial_action: "Begin".into(),
                 store_id_in: Some("subtask_id".into()),
                 id: None,
+                copy: Vec::new(),
             }),
             "expected SpawnEntity effect, got: {:?}",
             rule.effects

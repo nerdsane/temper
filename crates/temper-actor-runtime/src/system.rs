@@ -12,6 +12,9 @@ use crate::pg::{PgActorActivator, PgMailbox, PgMailboxConfig};
 use crate::scheduler::{Scheduler, SchedulerConfig};
 use crate::schema;
 
+#[path = "system_preview.rs"]
+mod preview;
+
 /// The actor system. Entry point for all actor operations.
 pub struct ActorSystem {
     pool: Pool,

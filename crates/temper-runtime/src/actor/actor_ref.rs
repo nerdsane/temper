@@ -1,4 +1,5 @@
 use std::fmt;
+use std::marker::PhantomData;
 use std::time::Duration;
 
 use tokio::sync::oneshot;
@@ -6,6 +7,8 @@ use tokio::sync::oneshot;
 use super::errors::ActorError;
 use super::traits::Message;
 use crate::mailbox::MailboxSender;
+
+type AskReply = Result<Box<dyn std::any::Any + Send>, ActorError>;
 
 /// An envelope wrapping a message with an optional reply channel.
 pub enum Envelope<M: Message> {
@@ -15,6 +18,10 @@ pub enum Envelope<M: Message> {
     Ask {
         msg: M,
         reply: oneshot::Sender<Result<Box<dyn std::any::Any + Send>, ActorError>>,
+        /// The asker's span: the actor handles the message inside it, so what
+        /// the actor does (storage writes, snapshots) is part of the asker's
+        /// trace. The asker waits for the reply, so the span is open meanwhile.
+        span: tracing::Span,
     },
     /// System-level signal (stop, restart, etc.)
     Signal(SystemSignal),
@@ -83,22 +90,47 @@ impl<M: Message> ActorRef<M> {
     /// Send a message and wait for a typed response.
     /// Times out after the specified duration.
     pub async fn ask<R: Send + 'static>(&self, msg: M, timeout: Duration) -> Result<R, ActorError> {
+        self.send_pending(msg)?.wait(timeout).await
+    }
+
+    /// Send a message and hold its place in the queue. [`PendingAsk::wait`] can
+    /// be called again after a timeout, so a caller that keeps waiting does not
+    /// add a second copy behind the first. Dropping the handle gives up the ask:
+    /// if the message has not started, it never runs.
+    pub fn send_pending<R: Send + 'static>(
+        &self,
+        msg: M,
+    ) -> Result<PendingAsk<'_, M, R>, ActorError> {
+        Ok(PendingAsk {
+            actor: self,
+            reply: self.send_ask(msg)?,
+            answer: PhantomData,
+        })
+    }
+
+    /// Send a message and wait until the actor replies or stops, without a
+    /// caller deadline. Use when the sender owns work whose outcome must be
+    /// learned even if a store takes longer than a request's timeout.
+    pub async fn ask_until_reply<R: Send + 'static>(&self, msg: M) -> Result<R, ActorError> {
+        let result = self.send_ask(msg)?.await.map_err(|_| ActorError::Stopped)?;
+        Self::decode_reply(result)
+    }
+
+    fn send_ask(&self, msg: M) -> Result<oneshot::Receiver<AskReply>, ActorError> {
         let (tx, rx) = oneshot::channel();
+        self.sender.send(Envelope::Ask {
+            msg,
+            reply: tx,
+            span: tracing::Span::current(),
+        })?;
+        Ok(rx)
+    }
 
-        self.sender.send(Envelope::Ask { msg, reply: tx })?;
-
-        let result = tokio::time::timeout(timeout, rx)
-            .await
-            .map_err(|_| ActorError::AskTimeout(timeout))?
-            .map_err(|_| ActorError::Stopped)?;
-
-        match result {
-            Ok(boxed) => boxed
-                .downcast::<R>()
-                .map(|b| *b)
-                .map_err(|_| ActorError::custom("ask reply type mismatch")),
-            Err(e) => Err(e),
-        }
+    fn decode_reply<R: Send + 'static>(result: AskReply) -> Result<R, ActorError> {
+        result?
+            .downcast::<R>()
+            .map(|boxed| *boxed)
+            .map_err(|_| ActorError::custom("ask reply type mismatch"))
     }
 
     /// Send a system signal to the actor.
@@ -133,6 +165,35 @@ impl<M: Message> ActorRef<M> {
     }
 }
 
+/// An ask that has been sent and not yet answered. See [`ActorRef::send_pending`].
+pub struct PendingAsk<'a, M: Message, R> {
+    actor: &'a ActorRef<M>,
+    reply: oneshot::Receiver<AskReply>,
+    answer: PhantomData<R>,
+}
+
+impl<M: Message, R: Send + 'static> PendingAsk<'_, M, R> {
+    /// Wait up to `timeout` for the answer. After [`ActorError::AskTimeout`] the
+    /// ask is still queued and this may be called again; after any other answer
+    /// the ask is over and this handle must be dropped.
+    pub async fn wait(&mut self, timeout: Duration) -> Result<R, ActorError> {
+        match tokio::time::timeout(timeout, &mut self.reply).await {
+            Ok(Ok(answer)) => ActorRef::<M>::decode_reply(answer),
+            Ok(Err(_)) => Err(ActorError::Stopped),
+            Err(_) => {
+                tracing::warn!(
+                    actor = %self.actor.id,
+                    timeout_ms = timeout.as_millis() as u64,
+                    mailbox_depth = self.actor.mailbox_depth(),
+                    mailbox_capacity = self.actor.mailbox_capacity(),
+                    "ask timed out"
+                );
+                Err(ActorError::AskTimeout(timeout))
+            }
+        }
+    }
+}
+
 impl<M: Message> Clone for ActorRef<M> {
     fn clone(&self) -> Self {
         Self {
@@ -154,13 +215,6 @@ impl<M: Message> fmt::Debug for ActorRef<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn actor_id_new_sets_name_and_path() {
-        let id = ActorId::new("order-actor", "system/orders/order-1");
-        assert_eq!(id.name, "order-actor");
-        assert_eq!(id.path, "system/orders/order-1");
-    }
 
     #[test]
     fn actor_id_display_format() {

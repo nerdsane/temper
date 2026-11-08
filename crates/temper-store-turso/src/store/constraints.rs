@@ -4,6 +4,7 @@ use crate::driver::params;
 use temper_runtime::persistence::{PersistenceError, storage_error};
 use tracing::instrument;
 
+use super::write_gate::WritePriority;
 use super::{TursoEventStore, TursoTenantConstraintRow};
 use crate::metrics::TursoQueryTimer;
 
@@ -16,7 +17,9 @@ impl TursoEventStore {
         cross_invariants_toml: &str,
     ) -> Result<(), PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.upsert_tenant_constraints");
-        let conn = self.configured_connection().await?;
+        let conn = self
+            .write_connection("turso.upsert_tenant_constraints", WritePriority::High)
+            .await?;
         conn.execute(
             "INSERT INTO tenant_constraints (tenant, cross_invariants_toml, version, updated_at)
              VALUES (?1, ?2, 1, datetime('now'))
@@ -35,7 +38,9 @@ impl TursoEventStore {
     #[instrument(skip_all, fields(tenant, otel.name = "turso.delete_tenant_constraints"))]
     pub async fn delete_tenant_constraints(&self, tenant: &str) -> Result<(), PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.delete_tenant_constraints");
-        let conn = self.configured_connection().await?;
+        let conn = self
+            .write_connection("turso.delete_tenant_constraints", WritePriority::High)
+            .await?;
         conn.execute(
             "DELETE FROM tenant_constraints WHERE tenant = ?1",
             params![tenant],

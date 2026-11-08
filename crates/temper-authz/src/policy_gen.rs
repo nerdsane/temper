@@ -5,6 +5,9 @@
 //! independently selectable, giving fine-grained control over generated Cedar
 //! policies.
 
+use std::str::FromStr;
+
+use cedar_policy::{EntityId, EntityTypeName, EntityUid, PolicySet};
 use serde::{Deserialize, Serialize};
 
 /// Who the policy applies to.
@@ -142,6 +145,12 @@ pub fn validate_policy_scope_matrix(matrix: &PolicyScopeMatrix) -> Result<(), St
 /// - **ActionScope**: action clause
 /// - **ResourceScope**: resource clause
 /// - **DurationScope**: optional `when` condition for session scoping
+///
+/// Every value is rendered as a typed Cedar value: entity types must be valid
+/// Cedar type names, and entity ids and condition values become escaped Cedar
+/// string literals. The result is always exactly one permit statement with the
+/// matrix's constraints; a value that cannot be rendered that way is an error
+/// and no text is produced.
 pub fn generate_cedar_from_matrix(
     agent_id: &str,
     principal_kind: &str,
@@ -149,40 +158,29 @@ pub fn generate_cedar_from_matrix(
     resource_type: &str,
     resource_id: &str,
     matrix: &PolicyScopeMatrix,
-) -> String {
-    // Pre-assertions (TigerStyle): companion fields must be present when their scope requires them.
-    debug_assert!(
-        matrix.principal != PrincipalScope::AgentsOfType || matrix.agent_type_value.is_some(),
-        "AgentsOfType requires agent_type_value"
-    );
-    debug_assert!(
-        matrix.principal != PrincipalScope::AgentsWithRole || matrix.role_value.is_some(),
-        "AgentsWithRole requires role_value"
-    );
-    debug_assert!(
-        matrix.duration != DurationScope::Session || matrix.session_id.is_some(),
-        "Session duration requires session_id"
-    );
+) -> Result<String, String> {
+    // Precondition: companion fields are present when their scope requires them.
+    validate_policy_scope_matrix(matrix)?;
 
     let principal_clause = match &matrix.principal {
         PrincipalScope::ThisAgent => {
-            format!("principal == {}::\"{}\"", principal_kind, agent_id)
+            format!("principal == {}", entity_uid(principal_kind, agent_id)?)
         }
         PrincipalScope::AgentsWithRole
         | PrincipalScope::AgentsOfType
-        | PrincipalScope::AnyAgent => format!("principal is {}", principal_kind),
+        | PrincipalScope::AnyAgent => format!("principal is {}", entity_type(principal_kind)?),
     };
 
     let action_clause = match &matrix.action {
-        ActionScope::ThisAction => format!("action == Action::\"{}\"", action),
+        ActionScope::ThisAction => format!("action == {}", entity_uid("Action", action)?),
         ActionScope::AllActionsOnType | ActionScope::AllActions => "action".to_string(),
     };
 
     let resource_clause = match &matrix.resource {
         ResourceScope::ThisResource => {
-            format!("resource == {}::\"{}\"", resource_type, resource_id)
+            format!("resource == {}", entity_uid(resource_type, resource_id)?)
         }
-        ResourceScope::AnyOfType => format!("resource is {}", resource_type),
+        ResourceScope::AnyOfType => format!("resource is {}", entity_type(resource_type)?),
         ResourceScope::AnyResource => "resource".to_string(),
     };
 
@@ -192,12 +190,12 @@ pub fn generate_cedar_from_matrix(
     match &matrix.principal {
         PrincipalScope::AgentsWithRole => {
             if let Some(ref role) = matrix.role_value {
-                conditions.push(format!("context.role == \"{}\"", role));
+                conditions.push(format!("context.role == {}", cedar_string(role)));
             }
         }
         PrincipalScope::AgentsOfType => {
             if let Some(ref agent_type) = matrix.agent_type_value {
-                conditions.push(format!("context.agentType == \"{}\"", agent_type));
+                conditions.push(format!("context.agentType == {}", cedar_string(agent_type)));
                 // Require credential-verified identity (ADR-0033).
                 conditions.push("context.agentTypeVerified == true".to_string());
             }
@@ -208,7 +206,7 @@ pub fn generate_cedar_from_matrix(
     if matrix.duration == DurationScope::Session
         && let Some(ref session_id) = matrix.session_id
     {
-        conditions.push(format!("context.sessionId == \"{}\"", session_id));
+        conditions.push(format!("context.sessionId == {}", cedar_string(session_id)));
     }
 
     let when_clause = if conditions.is_empty() {
@@ -217,202 +215,43 @@ pub fn generate_cedar_from_matrix(
         format!("\nwhen {{ {} }}", conditions.join(" && "))
     };
 
-    format!(
+    let text = format!(
         "permit(\n  {},\n  {},\n  {}\n){};",
         principal_clause, action_clause, resource_clause, when_clause,
-    )
+    );
+
+    // Postcondition: the text is exactly one statement.
+    let parsed =
+        PolicySet::from_str(&text).map_err(|e| format!("generated Cedar does not parse: {e}"))?;
+    let count = parsed.policies().count();
+    if count != 1 {
+        return Err(format!(
+            "generated Cedar must be exactly one statement, got {count}"
+        ));
+    }
+    Ok(text)
+}
+
+/// Parse a Cedar entity type name such as `Agent` or `Shop::Order`.
+fn entity_type(name: &str) -> Result<EntityTypeName, String> {
+    EntityTypeName::from_str(name)
+        .map_err(|e| format!("{name:?} is not a Cedar entity type name: {e}"))
+}
+
+/// Build an entity UID from a type name and an id. Its `Display` renders the
+/// id as an escaped Cedar string literal.
+fn entity_uid(type_name: &str, id: &str) -> Result<EntityUid, String> {
+    Ok(EntityUid::from_type_name_and_id(
+        entity_type(type_name)?,
+        EntityId::new(id),
+    ))
+}
+
+/// Render a Cedar string literal, escaped the way Cedar renders entity ids.
+fn cedar_string(value: &str) -> String {
+    format!("\"{}\"", value.escape_debug())
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_this_agent_this_action_this_resource() {
-        let m = PolicyScopeMatrix {
-            principal: PrincipalScope::ThisAgent,
-            action: ActionScope::ThisAction,
-            resource: ResourceScope::ThisResource,
-            duration: DurationScope::Always,
-            agent_type_value: None,
-            role_value: None,
-            session_id: None,
-        };
-        let policy =
-            generate_cedar_from_matrix("bot-1", "Agent", "submitOrder", "Order", "order-123", &m);
-        assert!(policy.contains("principal == Agent::\"bot-1\""));
-        assert!(policy.contains("action == Action::\"submitOrder\""));
-        assert!(policy.contains("resource == Order::\"order-123\""));
-        assert!(!policy.contains("when"));
-    }
-
-    #[test]
-    fn test_this_agent_this_action_any_of_type() {
-        let m = PolicyScopeMatrix {
-            principal: PrincipalScope::ThisAgent,
-            action: ActionScope::ThisAction,
-            resource: ResourceScope::AnyOfType,
-            duration: DurationScope::Always,
-            agent_type_value: None,
-            role_value: None,
-            session_id: None,
-        };
-        let policy =
-            generate_cedar_from_matrix("bot-1", "Agent", "submitOrder", "Order", "order-123", &m);
-        assert!(policy.contains("resource is Order"));
-    }
-
-    #[test]
-    fn test_any_agent_all_actions_any_resource() {
-        let m = PolicyScopeMatrix {
-            principal: PrincipalScope::AnyAgent,
-            action: ActionScope::AllActions,
-            resource: ResourceScope::AnyResource,
-            duration: DurationScope::Always,
-            agent_type_value: None,
-            role_value: None,
-            session_id: None,
-        };
-        let policy =
-            generate_cedar_from_matrix("bot-1", "Agent", "submitOrder", "Order", "order-123", &m);
-        assert!(policy.contains("principal is Agent"));
-        assert!(!policy.contains("Action::"));
-        assert!(!policy.contains("Order"));
-    }
-
-    #[test]
-    fn test_agents_of_type_condition() {
-        let m = PolicyScopeMatrix {
-            principal: PrincipalScope::AgentsOfType,
-            action: ActionScope::ThisAction,
-            resource: ResourceScope::AnyOfType,
-            duration: DurationScope::Always,
-            agent_type_value: Some("claude-code".to_string()),
-            role_value: None,
-            session_id: None,
-        };
-        let policy =
-            generate_cedar_from_matrix("bot-1", "Agent", "submitOrder", "Order", "order-123", &m);
-        assert!(policy.contains("principal is Agent"));
-        assert!(policy.contains("context.agentType == \"claude-code\""));
-        assert!(policy.contains("context.agentTypeVerified == true"));
-    }
-
-    #[test]
-    fn test_agents_with_role_condition() {
-        let m = PolicyScopeMatrix {
-            principal: PrincipalScope::AgentsWithRole,
-            action: ActionScope::ThisAction,
-            resource: ResourceScope::AnyOfType,
-            duration: DurationScope::Always,
-            agent_type_value: None,
-            role_value: Some("operations_agent".to_string()),
-            session_id: None,
-        };
-        let policy =
-            generate_cedar_from_matrix("bot-1", "Agent", "submitOrder", "Order", "order-123", &m);
-        assert!(policy.contains("context.role == \"operations_agent\""));
-    }
-
-    #[test]
-    fn test_session_duration_adds_session_id() {
-        let m = PolicyScopeMatrix {
-            principal: PrincipalScope::ThisAgent,
-            action: ActionScope::ThisAction,
-            resource: ResourceScope::AnyOfType,
-            duration: DurationScope::Session,
-            agent_type_value: None,
-            role_value: None,
-            session_id: Some("sess-abc".to_string()),
-        };
-        let policy =
-            generate_cedar_from_matrix("bot-1", "Agent", "submitOrder", "Order", "order-123", &m);
-        assert!(policy.contains("context.sessionId == \"sess-abc\""));
-    }
-
-    #[test]
-    fn test_combined_agent_type_and_session() {
-        let m = PolicyScopeMatrix {
-            principal: PrincipalScope::AgentsOfType,
-            action: ActionScope::ThisAction,
-            resource: ResourceScope::AnyOfType,
-            duration: DurationScope::Session,
-            agent_type_value: Some("openclaw".to_string()),
-            role_value: None,
-            session_id: Some("sess-xyz".to_string()),
-        };
-        let policy =
-            generate_cedar_from_matrix("bot-1", "Agent", "submitOrder", "Order", "order-123", &m);
-        assert!(policy.contains("context.agentType == \"openclaw\""));
-        assert!(policy.contains("context.sessionId == \"sess-xyz\""));
-    }
-
-    #[test]
-    fn test_all_actions_on_type_still_constrains_resource() {
-        let m = PolicyScopeMatrix {
-            principal: PrincipalScope::ThisAgent,
-            action: ActionScope::AllActionsOnType,
-            resource: ResourceScope::AnyOfType,
-            duration: DurationScope::Always,
-            agent_type_value: None,
-            role_value: None,
-            session_id: None,
-        };
-        let policy =
-            generate_cedar_from_matrix("bot-1", "Agent", "submitOrder", "Order", "order-123", &m);
-        assert!(policy.contains("resource is Order"));
-        assert!(!policy.contains("Action::"));
-    }
-
-    #[test]
-    fn test_default_matrix() {
-        let m = PolicyScopeMatrix::default_for(Some("claude-code"));
-        assert_eq!(m.principal, PrincipalScope::ThisAgent);
-        assert_eq!(m.action, ActionScope::ThisAction);
-        assert_eq!(m.resource, ResourceScope::AnyOfType);
-        assert_eq!(m.duration, DurationScope::Always);
-        assert_eq!(m.agent_type_value, Some("claude-code".to_string()));
-    }
-
-    #[test]
-    fn validate_matrix_requires_agent_type_for_agents_of_type() {
-        let m = PolicyScopeMatrix {
-            principal: PrincipalScope::AgentsOfType,
-            action: ActionScope::ThisAction,
-            resource: ResourceScope::AnyOfType,
-            duration: DurationScope::Always,
-            agent_type_value: None,
-            role_value: None,
-            session_id: None,
-        };
-        assert!(validate_policy_scope_matrix(&m).is_err());
-    }
-
-    #[test]
-    fn validate_matrix_requires_role_for_agents_with_role() {
-        let m = PolicyScopeMatrix {
-            principal: PrincipalScope::AgentsWithRole,
-            action: ActionScope::ThisAction,
-            resource: ResourceScope::AnyOfType,
-            duration: DurationScope::Always,
-            agent_type_value: None,
-            role_value: None,
-            session_id: None,
-        };
-        assert!(validate_policy_scope_matrix(&m).is_err());
-    }
-
-    #[test]
-    fn validate_matrix_requires_session_for_session_duration() {
-        let m = PolicyScopeMatrix {
-            principal: PrincipalScope::ThisAgent,
-            action: ActionScope::ThisAction,
-            resource: ResourceScope::AnyOfType,
-            duration: DurationScope::Session,
-            agent_type_value: None,
-            role_value: None,
-            session_id: None,
-        };
-        assert!(validate_policy_scope_matrix(&m).is_err());
-    }
-}
+#[path = "policy_gen_test.rs"]
+mod tests;

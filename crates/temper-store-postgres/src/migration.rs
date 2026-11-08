@@ -6,7 +6,21 @@
 //! not just a bag of startup-time `CREATE TABLE IF NOT EXISTS` statements.
 
 use sqlx::PgPool;
+use sqlx::migrate::Migrator;
 use temper_runtime::persistence::PersistenceError;
+
+/// The migrations this release knows.
+///
+/// A database a newer release migrated has versions this one lacks. Those are
+/// ignored rather than refused, so the previous release still boots after a
+/// rollback; that is safe only because every migration is additive and
+/// backward compatible (`migrations/README.md`). Known versions are still
+/// checked against their checksums.
+fn migrator() -> Migrator {
+    let mut migrator = sqlx::migrate!("./migrations");
+    migrator.set_ignore_missing(true);
+    migrator
+}
 
 /// Run all schema migrations.
 ///
@@ -15,11 +29,11 @@ use temper_runtime::persistence::PersistenceError;
 /// been created by the pre-ADR-0065 bootstrap runner before `_sqlx_migrations`
 /// existed.
 pub async fn run_migrations(pool: &PgPool) -> Result<(), PersistenceError> {
-    static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
-    MIGRATOR
-        .run(pool)
-        .await
-        .map_err(|e| PersistenceError::Storage(format!("failed to run Postgres migrations: {e}")))
+    run(pool, migrator()).await
+}
+
+async fn run(pool: &PgPool, migrator: Migrator) -> Result<(), PersistenceError> {
+    migrator.run(pool).await.map_err(migration_error)
 }
 
 /// Run migrations in an explicitly selected schema, creating it if necessary.
@@ -34,10 +48,17 @@ pub async fn run_migrations_in_schema(
     pool: &PgPool,
     schema: &crate::PostgresSchema,
 ) -> Result<(), PersistenceError> {
+    run_in_schema(pool, schema, migrator()).await
+}
+
+async fn run_in_schema(
+    pool: &PgPool,
+    schema: &crate::PostgresSchema,
+    mut migrator: Migrator,
+) -> Result<(), PersistenceError> {
     let Some(name) = schema.name() else {
-        return run_migrations(pool).await;
+        return run(pool, migrator).await;
     };
-    let mut migrator = sqlx::migrate!("./migrations");
     if migrator.iter().any(|migration| migration.no_tx) {
         return Err(PersistenceError::Storage(
             "schema-selected migrations must support transactions".into(),
@@ -70,6 +91,10 @@ pub async fn run_migrations_in_schema(
 fn migration_error(error: impl std::fmt::Display) -> PersistenceError {
     PersistenceError::Storage(format!("failed to run Postgres migrations: {error}"))
 }
+
+#[cfg(test)]
+#[path = "migration_compat_test.rs"]
+mod compat_test;
 
 #[cfg(test)]
 mod tests {
@@ -144,19 +169,6 @@ mod tests {
     }
 
     #[test]
-    fn migration_six_keeps_historical_segmented_event_history() {
-        let migration_six = include_str!("../migrations/0006_segmented_event_history.sql");
-        assert!(
-            migration_six.contains("CREATE TABLE IF NOT EXISTS event_segments"),
-            "migration 0006 is already applied in production and must stay segmented_event_history"
-        );
-        assert!(
-            !migration_six.contains("entity_catalog"),
-            "entity_catalog state must not reuse migration version 0006"
-        );
-    }
-
-    #[test]
     fn capture_order_column_exists_on_both_schema_paths() {
         // A fresh bootstrap reads schema.rs and an existing database reads the
         // migration; a session read that orders by `capture_seq` fails on
@@ -173,6 +185,23 @@ mod tests {
         assert!(
             schema::CREATE_TRAJECTORIES_TABLE.contains("capture_seq"),
             "a freshly bootstrapped trajectories table must carry the capture-order column"
+        );
+    }
+
+    #[test]
+    fn secret_version_id_exists_on_both_schema_paths() {
+        // A conditional secret write compares this column; a store missing it
+        // refuses every If-Match and fails every write that names it.
+        let migration = include_str!("../migrations/0021_tenant_secret_version_id.sql");
+        assert!(
+            migration
+                .contains("ADD COLUMN IF NOT EXISTS version_id TEXT DEFAULT gen_random_uuid()"),
+            "migration 0021 must add a random version id to every secret row"
+        );
+        assert!(
+            schema::CREATE_TENANT_SECRETS_TABLE
+                .contains("version_id  TEXT         DEFAULT gen_random_uuid()"),
+            "a freshly bootstrapped tenant_secrets table must carry the version id"
         );
     }
 
@@ -198,75 +227,6 @@ mod tests {
             !schema::CREATE_OTS_TRAJECTORIES_TABLE
                 .contains("trajectory_id TEXT         PRIMARY KEY"),
             "the globally keyed column definition must be gone, not shadowed"
-        );
-    }
-
-    #[test]
-    fn migration_sql_is_idempotent() {
-        // Both schemas must use IF NOT EXISTS so repeated execution is safe.
-        assert!(
-            schema::CREATE_EVENTS_TABLE.contains("IF NOT EXISTS"),
-            "events DDL must be idempotent"
-        );
-        assert!(
-            schema::CREATE_EVENTS_TABLE.contains("segment_index"),
-            "events rows must carry segment metadata"
-        );
-        assert!(
-            schema::ALTER_EVENTS_ADD_SEGMENT_INDEX.contains("ADD COLUMN IF NOT EXISTS"),
-            "events segment migration must be idempotent"
-        );
-        assert!(
-            schema::CREATE_EVENT_SEGMENTS_TABLE.contains("IF NOT EXISTS"),
-            "event segment DDL must be idempotent"
-        );
-        assert!(
-            schema::CREATE_SNAPSHOT_HISTORY_TABLE.contains("IF NOT EXISTS"),
-            "snapshot history DDL must be idempotent"
-        );
-        assert!(
-            schema::CREATE_SNAPSHOTS_TABLE.contains("IF NOT EXISTS"),
-            "snapshots DDL must be idempotent"
-        );
-        assert!(
-            schema::CREATE_SPECS_TABLE.contains("IF NOT EXISTS"),
-            "specs DDL must be idempotent"
-        );
-        assert!(
-            schema::CREATE_TRAJECTORIES_TABLE.contains("IF NOT EXISTS"),
-            "trajectories DDL must be idempotent"
-        );
-        assert!(
-            schema::CREATE_DESIGN_TIME_EVENTS_TABLE.contains("IF NOT EXISTS"),
-            "design_time_events DDL must be idempotent"
-        );
-        assert!(
-            schema::CREATE_TENANT_CONSTRAINTS_TABLE.contains("IF NOT EXISTS"),
-            "tenant_constraints DDL must be idempotent"
-        );
-        assert!(
-            schema::CREATE_ENTITY_LISTING_INDEX.contains("IF NOT EXISTS"),
-            "entity listing index DDL must be idempotent"
-        );
-        assert!(
-            schema::CREATE_WASM_MODULES_TABLE.contains("IF NOT EXISTS"),
-            "wasm_modules DDL must be idempotent"
-        );
-        assert!(
-            schema::CREATE_WASM_INVOCATION_LOGS_TABLE.contains("IF NOT EXISTS"),
-            "wasm_invocation_logs DDL must be idempotent"
-        );
-        assert!(
-            schema::CREATE_PENDING_DECISIONS_TABLE.contains("IF NOT EXISTS"),
-            "pending_decisions DDL must be idempotent"
-        );
-        assert!(
-            schema::CREATE_ENTITY_CATALOG_TABLE.contains("IF NOT EXISTS"),
-            "entity_catalog DDL must be idempotent"
-        );
-        assert!(
-            schema::CREATE_PUBLISHED_ARTIFACTS_TABLE.contains("IF NOT EXISTS"),
-            "published_artifacts DDL must be idempotent"
         );
     }
 }

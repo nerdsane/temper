@@ -26,26 +26,16 @@ fn log_gives_the_count_of_seeded_secrets_and_no_names() {
 #[test]
 fn no_report_log_line_or_span_contains_a_value() {
     let vault = test_vault();
-    // One variable for every outcome: seeded, badly named, already set, too
-    // large, and (below) over the budget.
-    vault
-        .cache_platform_secret("region", "north".to_string())
-        .expect("platform secret cached");
+    // One variable for every outcome: seeded, badly named, already set and
+    // too large.
+    vault.cache_platform_secret("region", "north".to_string());
     let too_large = DISTINCT_VALUE.repeat(crate::secrets::vault::MAX_SECRET_VALUE_BYTES);
-    let mut variables = vars(&[
+    let variables = vars(&[
         ("TEMPER_SECRET_BUILD_TOKEN", DISTINCT_VALUE),
         ("TEMPER_SECRET_build_token", DISTINCT_VALUE),
         ("TEMPER_SECRET_REGION", DISTINCT_VALUE),
         ("TEMPER_SECRET_LARGE", &too_large),
     ]);
-    variables.extend(
-        (0..crate::secrets::vault::MAX_SECRETS_PER_TENANT).flat_map(|i| {
-            vars(&[(
-                format!("TEMPER_SECRET_FILL_{i:03}").as_str(),
-                DISTINCT_VALUE,
-            )])
-        }),
-    );
 
     let (report, log) = seed_with_log(&vault, variables);
 
@@ -55,7 +45,6 @@ fn no_report_log_line_or_span_contains_a_value() {
         EnvironmentSecretSkip::InvalidName,
         EnvironmentSecretSkip::AlreadySet,
         EnvironmentSecretSkip::ValueTooLarge,
-        EnvironmentSecretSkip::BudgetExhausted,
     ] {
         assert!(reasons.contains(&reason), "{reason:?} not exercised");
     }

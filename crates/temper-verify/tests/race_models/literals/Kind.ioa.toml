@@ -1,0 +1,38 @@
+[automaton]
+name = "Kind"
+states = ["New", "Set", "Spoiled"]
+initial = "New"
+
+[[state]]
+name = "kind"
+type = "string"
+initial = ""
+
+[[state]]
+name = "other"
+type = "string"
+initial = ""
+
+[[state]]
+name = "board"
+type = "string"
+initial = ""
+
+[[invariant]]
+name = "NeverSpoiled"
+assert = "status == 'Spoiled' && kind != '' && other != '' => Board[board].status == 'Never'"
+
+[[action]]
+name = "Choose"
+kind = "input"
+from = ["New"]
+to = "Set"
+params = ["kind", "other", "board"]
+guard = "params.kind in ['a', 'b', 'c'] && params.other in ['a', 'b', 'c'] && params.board != ''"
+
+[[action]]
+name = "Spoil"
+kind = "input"
+from = ["Set"]
+to = "Spoiled"
+guard = "kind == 'c'"

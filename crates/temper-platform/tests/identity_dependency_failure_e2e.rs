@@ -110,22 +110,28 @@ async fn define_type_and_issue_credential(
 /// the dependency-test HTTP policy loaded. Returns the state plus a handle
 /// to the backing `SimEventStore` for fault injection.
 async fn dependency_test_state() -> (PlatformState, SimEventStore) {
+    let sim_store = SimEventStore::no_faults(0);
+    (platform_on_store(&sim_store), sim_store)
+}
+
+/// A server over `sim_store` that has loaded no entities yet: what this
+/// server looks like after a restart, or another server on the same store.
+/// Identity entities are read through their actors, so a store fault reaches
+/// identity resolution only when a credential or type is loaded from the
+/// store; the fault tests resolve on a server like this one.
+fn platform_on_store(sim_store: &SimEventStore) -> PlatformState {
     let mut state = PlatformState::new(None);
     bootstrap_system_tenant(&state, &BTreeMap::new());
     bootstrap_agent_specs(&state, TENANT, false, &BTreeMap::new());
-
-    let sim_store = SimEventStore::no_faults(0);
     state
         .server
         .set_storage_stack(StorageStack::from_sim(sim_store.clone(), None));
-
     state
         .server
         .authz
         .reload_tenant_policies(TENANT, POLICY)
         .expect("dependency test policy should parse");
-
-    (state, sim_store)
+    state
 }
 
 fn persistence_id(entity_type: &str, entity_id: &str) -> String {
@@ -315,7 +321,7 @@ async fn credential_replay_failure_is_503_not_401() {
         "dep-inst",
     )
     .await;
-
+    let state = platform_on_store(&sim_store);
     sim_store.fail_next_reads(&persistence_id("AgentCredential", &key_hash), 1);
 
     let app = temper_platform::router::build_platform_router(state);
@@ -350,7 +356,7 @@ async fn linked_agent_type_replay_failure_is_503_not_401() {
         "dep-inst",
     )
     .await;
-
+    let state = platform_on_store(&sim_store);
     sim_store.fail_next_reads(&persistence_id("AgentType", "dep-type-type-fault"), 1);
 
     let app = temper_platform::router::build_platform_router(state);
@@ -382,6 +388,8 @@ async fn linked_agent_type_replay_failure_is_503_not_401() {
 /// (identical to the initial read's `classify_dependency_read(...)?`,
 /// verified by code review) is exercised at the unit level in
 /// `temper_server::identity::error::tests::classify_dependency_read_covers_every_resolver_call_site`.
+/// The recheck reads the credential's actor, so only its load from the store
+/// can meet the fault here.
 #[tokio::test]
 async fn both_credential_reads_faulted_is_503_not_401() {
     let (state, sim_store) = dependency_test_state().await;
@@ -394,7 +402,7 @@ async fn both_credential_reads_faulted_is_503_not_401() {
         "dep-inst",
     )
     .await;
-
+    let state = platform_on_store(&sim_store);
     sim_store.fail_next_reads(&persistence_id("AgentCredential", &key_hash), 2);
 
     let app = temper_platform::router::build_platform_router(state);
@@ -476,6 +484,7 @@ async fn identity_resolve_endpoint_dependency_failure_is_503_not_404() {
         "dep-inst",
     )
     .await;
+    let state = platform_on_store(&sim_store);
     sim_store.fail_next_reads(&persistence_id("AgentCredential", &key_hash), 1);
 
     let app = temper_platform::router::build_platform_router(state);
@@ -516,6 +525,7 @@ async fn store_restored_after_fault_resolves_successfully() {
         "dep-inst",
     )
     .await;
+    let state = platform_on_store(&sim_store);
     sim_store.fail_next_reads(&persistence_id("AgentCredential", &key_hash), 1);
 
     let app = temper_platform::router::build_platform_router(state);
@@ -570,6 +580,7 @@ async fn dependency_failure_never_reaches_the_protected_handler() {
         "dep-inst",
     )
     .await;
+    let state = platform_on_store(&sim_store);
     sim_store.fail_next_reads(&persistence_id("AgentCredential", &key_hash), 1);
 
     let server = state.server.clone();
@@ -611,6 +622,7 @@ async fn dependency_failure_does_not_fall_back_to_anonymous() {
         "dep-inst",
     )
     .await;
+    let state = platform_on_store(&sim_store);
     sim_store.fail_next_reads(&persistence_id("AgentCredential", &key_hash), 1);
 
     let app = temper_platform::router::build_platform_router(state);

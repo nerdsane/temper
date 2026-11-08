@@ -1,5 +1,7 @@
 use super::super::migrate_source;
-use crate::automaton::{LivenessEnforcement, TargetResolver, parse_automaton_with_liveness};
+use crate::automaton::{
+    LivenessEnforcement, TargetResolver, WebhookSignature, parse_automaton_with_liveness,
+};
 use crate::predicate::Arg;
 
 /// A spec in every old spelling this pass rewrites.
@@ -90,6 +92,9 @@ path = "cb"
 action = "Finish"
 entity_lookup = "query_param"
 entity_param = "state"
+signature = "hmac"
+hmac_secret = "{secret:CB}"
+hmac_header = "x-sig"
 
 [webhook.extract]
 code = "code"
@@ -162,6 +167,11 @@ fn old_spellings_become_current() {
     );
     assert_eq!(auto.webhooks[0].entity_id, "query.state");
     assert_eq!(auto.webhooks[0].extract["code"], "query.code");
+    assert_eq!(
+        auto.webhooks[0].signature,
+        WebhookSignature::Hmac,
+        "the provider's scheme survives migration"
+    );
 
     for expected in [
         "[automaton.timeouts]",

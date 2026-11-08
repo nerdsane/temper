@@ -155,13 +155,22 @@ pub fn run_multi_seed_simulation_from_ioa(
     num_seeds: u64,
 ) -> Result<Vec<SimulationResult>, String> {
     let model = build_model_from_ioa(ioa_toml, base_config.max_counter)?;
-    Ok((0..num_seeds)
+    Ok(run_multi_seed_simulation(&model, base_config, num_seeds))
+}
+
+/// Run simulation across multiple seeds on a pre-built `TemperModel`.
+pub fn run_multi_seed_simulation(
+    model: &TemperModel,
+    base_config: &SimConfig,
+    num_seeds: u64,
+) -> Vec<SimulationResult> {
+    (0..num_seeds)
         .map(|i| {
             let mut config = base_config.clone();
             config.seed = base_config.seed.wrapping_add(i);
-            run_simulation_impl(&model, &config)
+            run_simulation_impl(model, &config)
         })
-        .collect())
+        .collect()
 }
 
 fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationResult {
@@ -171,11 +180,17 @@ fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationRes
     // Initialize actors
     let mut actor_states: Vec<(String, TemperModelState)> = Vec::new();
     let mut actor_action_counts: Vec<usize> = Vec::new();
+    // Each rule's pending obligation, updated in visit order. An earlier
+    // target cannot satisfy a later visit to one of the rule's `from` places.
+    let mut actor_reaches: Vec<Vec<bool>> = Vec::new();
 
     for i in 0..config.num_actors {
         let actor_id = format!("entity-{i}");
         sched.register_actor(&actor_id);
         let initial = model.init_states()[0].clone();
+        let mut pending = vec![false; model.liveness.len()];
+        visit_reaches(model, &mut pending, &initial.status, true);
+        actor_reaches.push(pending);
         actor_states.push((actor_id, initial));
         actor_action_counts.push(0);
     }
@@ -212,7 +227,7 @@ fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationRes
         let action_idx = rng.next_bound(valid_actions.len());
         let action = valid_actions[action_idx].clone();
 
-        let action_name = action.name.clone();
+        let action_name = action.name;
         sched.send(
             "sim-driver",
             actor_id,
@@ -253,13 +268,14 @@ fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationRes
                 check_invariants_on_state(
                     model,
                     target_id,
-                    &action.name,
+                    &action,
                     state_before,
                     &new_state,
                     tick,
                     &mut violations,
                 );
 
+                visit_reaches(model, &mut actor_reaches[idx], &new_state.status, false);
                 actor_states[idx].1 = new_state;
                 actor_action_counts[idx] += 1;
                 total_transitions += 1;
@@ -270,7 +286,7 @@ fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationRes
     }
 
     // Post-simulation liveness checks
-    let liveness_violations = check_liveness_post_simulation(model, &actor_states);
+    let liveness_violations = check_liveness_post_simulation(model, &actor_states, &actor_reaches);
 
     SimulationResult {
         all_invariants_held: violations.is_empty(),
@@ -286,22 +302,44 @@ fn run_simulation_impl(model: &TemperModel, config: &SimConfig) -> SimulationRes
     }
 }
 
+/// A visit starts an obligation for each matching rule and satisfies it if
+/// this place is also a target. Without `from`, only a new record starts one.
+fn visit_reaches(model: &TemperModel, pending: &mut [bool], place: &str, initial: bool) {
+    for (live, pending) in model.liveness.iter().zip(pending) {
+        if let LivenessKind::ReachesState { from, targets } = &live.kind {
+            if (from.is_empty() && initial) || from.iter().any(|from| from == place) {
+                *pending = !targets.is_empty();
+            }
+            if targets.iter().any(|target| target == place) {
+                *pending = false;
+            }
+        }
+    }
+}
+
 /// Post-simulation liveness checks.
 ///
 /// - **NoDeadlock**: Each actor in a "from" state must have at least one valid action.
-/// - **ReachesState**: Each actor must have reached one of the target states by simulation end.
-///   (Weaker than Stateright's exhaustive BFS, but catches stuck actors.)
+/// - **ReachesState**: Every obligation started during the run must have
+///   reached a target at or after it started, wherever the actor ended.
+///   (Weaker than the model check's whole walk, but catches stuck actors.)
 fn check_liveness_post_simulation(
     model: &TemperModel,
     actor_states: &[(String, TemperModelState)],
+    actor_reaches: &[Vec<bool>],
 ) -> Vec<LivenessViolation> {
     let mut violations = Vec::new();
+    // Past a budget's deadline the model offers no actions, so every actor
+    // would look deadlocked or stuck: the run proves nothing about liveness.
+    if model.out_of_time() {
+        return violations;
+    }
 
-    for (actor_id, final_state) in actor_states {
-        for live in &model.liveness {
+    for ((actor_id, final_state), pending) in actor_states.iter().zip(actor_reaches) {
+        for (rule, live) in model.liveness.iter().enumerate() {
             match &live.kind {
                 LivenessKind::NoDeadlock { from } => {
-                    if from.contains(&final_state.status) {
+                    if from.iter().any(|s| *s == final_state.status) {
                         let mut actions = Vec::new();
                         model.actions(final_state, &mut actions);
                         if actions.is_empty() {
@@ -317,19 +355,16 @@ fn check_liveness_post_simulation(
                         }
                     }
                 }
-                LivenessKind::ReachesState { from, targets } => {
-                    if targets.is_empty() {
-                        continue;
-                    }
-                    // If the actor started from a "from" state, it should have
-                    // reached a target state by the end of simulation.
-                    let started_from = from.is_empty() || from.contains(&model.initial_status);
-                    if started_from && !targets.contains(&final_state.status) {
+                // Whether a record can still get somewhere needs every state
+                // after it, not one run's last: the model check's walk has them.
+                LivenessKind::CanReach { .. } => {}
+                LivenessKind::ReachesState { targets, .. } => {
+                    if pending[rule] {
                         violations.push(LivenessViolation {
                             actor_id: actor_id.clone(),
                             property: live.name.clone(),
                             description: format!(
-                                "actor did not reach target states {:?}, stuck at '{}'",
+                                "actor did not reach target states {:?} after the rule started; its run ended at '{}'",
                                 targets, final_state.status
                             ),
                             final_state: final_state.clone(),
@@ -349,17 +384,17 @@ fn check_liveness_post_simulation(
 fn check_invariants_on_state(
     model: &TemperModel,
     actor_id: &str,
-    action_name: &str,
+    action: &TemperModelAction,
     state_before: &TemperModelState,
     state_after: &TemperModelState,
     tick: u64,
     violations: &mut Vec<InvariantViolation>,
 ) {
     // TypeInvariant: status must be in valid state set
-    if !model.states.contains(&state_after.status) {
+    if !model.states.iter().any(|s| *s == state_after.status) {
         violations.push(InvariantViolation {
             actor_id: actor_id.to_string(),
-            action: action_name.to_string(),
+            action: action.name.to_string(),
             state_before: state_before.clone(),
             state_after: state_after.clone(),
             invariant: "TypeInvariant: status not in valid states".to_string(),
@@ -370,7 +405,7 @@ fn check_invariants_on_state(
     let mut violated = |invariant: String| {
         violations.push(InvariantViolation {
             actor_id: actor_id.to_string(),
-            action: action_name.to_string(),
+            action: action.name.to_string(),
             state_before: state_before.clone(),
             state_after: state_after.clone(),
             invariant,
@@ -384,8 +419,11 @@ fn check_invariants_on_state(
             violated(inv.name.clone());
         }
     }
+    if let Some(rule) = crate::model::broken_by_action(model, action, state_before) {
+        violated(rule.name.clone());
+    }
 
-    if model.terminal.contains(&state_after.status) {
+    if model.terminal.iter().any(|s| *s == state_after.status) {
         let mut actions = Vec::new();
         model.actions(state_after, &mut actions);
         if !actions.is_empty() {
@@ -395,213 +433,4 @@ fn check_invariants_on_state(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const ORDER_IOA: &str = include_str!("../../../test-fixtures/specs/order.ioa.toml");
-    const LATE_DELIVERY_IOA: &str =
-        include_str!("../../../test-fixtures/specs/late_delivery.ioa.toml");
-
-    /// A fault-delayed action must not be applied where it is not enabled.
-    ///
-    /// The simulator chooses an action that is legal in the actor's state *now*,
-    /// hands it to a scheduler that may delay it by up to 20 ticks, and applies
-    /// it on delivery -- by which time the actor has moved on. Production
-    /// re-evaluates a late write against the entity's current state and refuses
-    /// it with a 409, so an execution that applies one models nothing that can
-    /// happen, and any violation it reports is a phantom.
-    ///
-    /// `late_delivery.ioa.toml` has no legal execution that breaks its
-    /// invariant, so this asserts on a property of the checker rather than of
-    /// the spec: every reported violation is a false positive by construction.
-    #[test]
-    fn delayed_actions_are_not_applied_outside_their_from_states() {
-        let config = SimConfig {
-            seed: 7,
-            max_ticks: 400,
-            num_actors: 3,
-            max_actions_per_actor: 40,
-            max_counter: 2,
-            faults: FaultConfig::heavy(),
-        };
-
-        let results = run_multi_seed_simulation_from_ioa(LATE_DELIVERY_IOA, &config, 20).unwrap();
-
-        let phantoms: Vec<_> = results
-            .iter()
-            .flat_map(|r| r.violations.iter().map(move |v| (r.seed, v)))
-            .collect();
-        assert!(
-            phantoms.is_empty(),
-            "no legal execution can break SealedMeansFlagClear, so these are \
-             transitions applied outside their from-states: {phantoms:#?}"
-        );
-        assert!(
-            results.iter().any(|r| r.total_transitions > 0),
-            "fixture applied no transitions at all, so it proves nothing"
-        );
-    }
-
-    #[test]
-    fn test_simulation_no_faults() {
-        let config = SimConfig {
-            seed: 42,
-            max_ticks: 200,
-            num_actors: 3,
-            max_actions_per_actor: 15,
-            max_counter: 2,
-            faults: FaultConfig::none(),
-        };
-
-        let result = run_simulation_from_ioa(ORDER_IOA, &config).unwrap();
-        assert!(
-            result.all_invariants_held,
-            "No invariant violations expected without faults, got: {:?}",
-            result.violations
-        );
-        assert!(
-            result.total_transitions > 0,
-            "Should have applied some transitions"
-        );
-    }
-
-    #[test]
-    fn test_simulation_light_faults() {
-        let config = SimConfig {
-            seed: 123,
-            max_ticks: 300,
-            num_actors: 3,
-            max_actions_per_actor: 20,
-            max_counter: 2,
-            faults: FaultConfig::light(),
-        };
-
-        let result = run_simulation_from_ioa(ORDER_IOA, &config).unwrap();
-        assert!(
-            result.all_invariants_held,
-            "No invariant violations expected with light faults, got: {:?}",
-            result.violations
-        );
-    }
-
-    #[test]
-    fn test_simulation_heavy_faults() {
-        let config = SimConfig {
-            seed: 456,
-            max_ticks: 300,
-            num_actors: 5,
-            max_actions_per_actor: 15,
-            max_counter: 2,
-            faults: FaultConfig::heavy(),
-        };
-
-        let result = run_simulation_from_ioa(ORDER_IOA, &config).unwrap();
-        assert!(
-            result.all_invariants_held,
-            "Invariants must hold even under heavy faults, got: {:?}",
-            result.violations
-        );
-        assert!(
-            result.total_dropped > 0 || result.total_messages > 0,
-            "Should have processed messages"
-        );
-    }
-
-    #[test]
-    fn test_simulation_is_reproducible() {
-        let config = SimConfig {
-            seed: 999,
-            max_ticks: 100,
-            num_actors: 2,
-            max_actions_per_actor: 10,
-            max_counter: 2,
-            faults: FaultConfig::light(),
-        };
-
-        let result1 = run_simulation_from_ioa(ORDER_IOA, &config).unwrap();
-        let result2 = run_simulation_from_ioa(ORDER_IOA, &config).unwrap();
-
-        assert_eq!(
-            result1.total_transitions, result2.total_transitions,
-            "Same seed must produce same number of transitions"
-        );
-        assert_eq!(
-            result1.total_messages, result2.total_messages,
-            "Same seed must produce same number of messages"
-        );
-
-        for (i, ((id1, s1), (id2, s2))) in result1
-            .actor_final_states
-            .iter()
-            .zip(result2.actor_final_states.iter())
-            .enumerate()
-        {
-            assert_eq!(id1, id2, "Actor {i} ID mismatch");
-            assert_eq!(s1.status, s2.status, "Actor {i} status mismatch");
-            assert_eq!(s1.counters, s2.counters, "Actor {i} counters mismatch");
-        }
-    }
-
-    #[test]
-    fn test_simulation_different_seeds_diverge() {
-        let config1 = SimConfig::default().with_seed(42);
-        let config2 = SimConfig::default().with_seed(9999);
-
-        let result1 = run_simulation_from_ioa(ORDER_IOA, &config1).unwrap();
-        let result2 = run_simulation_from_ioa(ORDER_IOA, &config2).unwrap();
-
-        assert!(result1.total_transitions > 0);
-        assert!(result2.total_transitions > 0);
-    }
-
-    #[test]
-    fn test_multi_seed_simulation() {
-        let config = SimConfig {
-            seed: 1,
-            max_ticks: 100,
-            num_actors: 2,
-            max_actions_per_actor: 10,
-            max_counter: 2,
-            faults: FaultConfig::light(),
-        };
-
-        let results = run_multi_seed_simulation_from_ioa(ORDER_IOA, &config, 10).unwrap();
-        assert_eq!(results.len(), 10);
-
-        for (i, result) in results.iter().enumerate() {
-            assert!(
-                result.all_invariants_held,
-                "Seed {} failed with violations: {:?}",
-                result.seed, result.violations
-            );
-            assert_eq!(result.seed, 1 + i as u64);
-        }
-    }
-
-    #[test]
-    fn test_simulation_result_contains_final_states() {
-        let config = SimConfig {
-            seed: 77,
-            max_ticks: 50,
-            num_actors: 2,
-            max_actions_per_actor: 5,
-            max_counter: 2,
-            faults: FaultConfig::none(),
-        };
-
-        let result = run_simulation_from_ioa(ORDER_IOA, &config).unwrap();
-        assert_eq!(result.actor_final_states.len(), 2);
-
-        let model = build_model_from_ioa(ORDER_IOA, config.max_counter).unwrap();
-
-        for (id, state) in &result.actor_final_states {
-            assert!(id.starts_with("entity-"));
-            assert!(
-                model.states.contains(&state.status),
-                "Status '{}' not in spec states {:?}",
-                state.status,
-                model.states
-            );
-        }
-    }
-}
+mod tests;

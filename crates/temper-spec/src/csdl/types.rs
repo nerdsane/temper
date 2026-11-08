@@ -81,7 +81,20 @@ pub struct NavigationProperty {
     pub nullable: bool,
     pub contains_target: bool,
     pub referential_constraints: Vec<ReferentialConstraint>,
+    /// What deleting the entity this property points at does to the entity
+    /// that declares it, from a [`DELETE_POLICY_TERM`] annotation. `None`
+    /// leaves the tenant's default in force.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delete_policy: Option<crate::cross_invariant::DeletePolicy>,
 }
+
+/// Annotation term a navigation property uses to declare its delete policy:
+/// `<Annotation Term="Temper.Vocab.Relation.DeletePolicy" String="cascade"/>`.
+///
+/// It sits on the referencing side, beside the `ReferentialConstraint`, like an
+/// SQL `ON DELETE` clause on a foreign key. The values are the
+/// `cross-invariants.toml` names: `restrict`, `cascade`, `none`.
+pub const DELETE_POLICY_TERM: &str = "Temper.Vocab.Relation.DeletePolicy";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReferentialConstraint {

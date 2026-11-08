@@ -6,7 +6,7 @@ use axum::response::IntoResponse as _;
 use crate::blob_store::BlobStageError;
 use crate::response::odata_error;
 
-pub(super) fn stage_error_response(error: BlobStageError) -> axum::response::Response {
+pub(in crate::odata) fn stage_error_response(error: BlobStageError) -> axum::response::Response {
     let (status, code) = match &error {
         BlobStageError::BodyStream(_) => (StatusCode::BAD_REQUEST, "BodyStreamError"),
         BlobStageError::BodyExceedsDeclaredLength { .. } => {
@@ -39,7 +39,7 @@ pub(super) fn stage_error_response(error: BlobStageError) -> axum::response::Res
     odata_error(status, code, &message).into_response()
 }
 
-pub(super) fn blob_store_error_response(error: &str) -> axum::response::Response {
+pub(in crate::odata) fn blob_store_error_response(error: &str) -> axum::response::Response {
     tracing::error!(%error, "raw Blob object-store write failed");
     odata_error(
         StatusCode::SERVICE_UNAVAILABLE,

@@ -50,6 +50,15 @@ name = "created_by"
 type = "string"
 initial = ""
 
+# Who holds this issuer's keys. While unset or false, a deployment whose environment
+# names this issuer (TEMPER_TRUSTED_ISSUER_*) applies its keys and audience at
+# each start. True once RotateIssuerKeys has run: the keys are this record's,
+# and a start leaves them as stored.
+[[state]]
+name = "keys_rotated"
+type = "bool"
+initial = false
+
 # --- Actions ---
 
 [[action]]
@@ -64,6 +73,7 @@ name = "RotateIssuerKeys"
 kind = "input"
 from = ["Active"]
 params = ["jwks_json"]
+effect = ["keys_rotated = true"]
 hint = "Replace the issuer's inline JWKS with a rotated key set."
 
 [[action]]

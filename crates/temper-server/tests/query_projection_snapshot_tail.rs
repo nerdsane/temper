@@ -7,8 +7,6 @@
 mod fixtures;
 #[path = "query_projection_snapshot_tail/postgres.rs"]
 mod postgres;
-#[path = "query_projection_snapshot_tail/read_failures.rs"]
-mod read_failures;
 
 use fixtures::{ENTITY_ID, build_state, projected_state, run_isolated, write_snapshot_and_tail};
 use temper_runtime::scheduler::install_deterministic_context;
@@ -24,7 +22,7 @@ enum CatalogSeed {
 }
 
 #[test]
-fn cold_backfill_recovers_snapshot_tail_into_missing_catalog() {
+fn cold_backfill_leaves_a_missing_catalog_row_to_boot_repair() {
     cold_backfill(CatalogSeed::Missing);
 }
 
@@ -104,7 +102,7 @@ fn cold_backfill(catalog_seed: CatalogSeed) {
                 "seed={seed} catalog={catalog_seed:?} S={} T={}",
                 a.snapshot.sequence_nr, a.current.sequence_nr
             );
-            assert_projection(&store, a.tenant.as_str(), &expected).await;
+            assert_a(&store, a.tenant.as_str(), catalog_seed, &expected).await;
             assert_eq!(
                 catalog(&store, b.tenant.as_str()).await,
                 b_before,
@@ -114,10 +112,10 @@ fn cold_backfill(catalog_seed: CatalogSeed) {
             reader.populate_index_from_store(&b.tenant).await;
             reader.populate_field_index_from_snapshots(&b.tenant).await;
             assert_projection(&store, b.tenant.as_str(), &b.current).await;
-            assert_projection(&store, a.tenant.as_str(), &expected).await;
+            assert_a(&store, a.tenant.as_str(), catalog_seed, &expected).await;
             // Explicit reruns converge; they must not regress a newer row either.
             reader.populate_field_index_from_snapshots(&a.tenant).await;
-            assert_projection(&store, a.tenant.as_str(), &expected).await;
+            assert_a(&store, a.tenant.as_str(), catalog_seed, &expected).await;
             assert!(reader.actor_registry.read().unwrap().is_empty());
         });
     }
@@ -136,6 +134,24 @@ async fn seed_catalog(store: &TursoEventStore, tenant: &str, state: &EntityState
         )
         .await
         .unwrap();
+}
+
+/// While the server serves, the backfill rewrites only rows that exist: a
+/// missing one is created before serving by boot repair, or by the record's
+/// own commit.
+async fn assert_a(
+    store: &TursoEventStore,
+    tenant: &str,
+    catalog_seed: CatalogSeed,
+    expected: &EntityState,
+) {
+    match catalog_seed {
+        CatalogSeed::Missing => assert!(
+            catalog(store, tenant).await.is_empty(),
+            "{tenant}: the backfill leaves a missing catalog row missing"
+        ),
+        CatalogSeed::Stale | CatalogSeed::Newer => assert_projection(store, tenant, expected).await,
+    }
 }
 
 async fn catalog(
@@ -178,7 +194,8 @@ async fn assert_projection(store: &TursoEventStore, tenant: &str, expected: &Ent
             .query_field_index(
                 tenant,
                 "Order",
-                "field_name = ?3 AND field_value = ?4",
+                "entity_id IN (SELECT entity_id FROM entity_field_index \
+                 WHERE tenant = ?1 AND entity_type = ?2 AND field_name = ?3 AND field_value = ?4)",
                 vec![field.to_string(), text],
             )
             .await
@@ -195,7 +212,8 @@ async fn assert_projection(store: &TursoEventStore, tenant: &str, expected: &Ent
                 .query_field_index(
                     tenant,
                     "Order",
-                    "field_name = ?3 AND field_value = ?4",
+                    "entity_id IN (SELECT entity_id FROM entity_field_index \
+                     WHERE tenant = ?1 AND entity_type = ?2 AND field_name = ?3 AND field_value = ?4)",
                     vec!["ProductId".into(), "snapshot-product".into()],
                 )
                 .await

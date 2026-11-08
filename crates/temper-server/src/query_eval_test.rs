@@ -334,10 +334,13 @@ async fn expand_authorizes_related_rows_before_blob_hydration() {
             role: None,
             acting_for: None,
             agent_type: None,
+            label: None,
             attributes: Default::default(),
         },
         context_attrs: Default::default(),
         correlation_id: "expand-auth-before-hydration".to_string(),
+        cause: None,
+        credential: None,
     };
     let budget = BlobHydrationBudget::new(1024, 1024, 0, 0);
     let attempts_before = budget.read_attempts_remaining();
@@ -397,4 +400,215 @@ async fn expand_authorizes_related_rows_before_blob_hydration() {
         denied_budget.read_attempts_remaining(),
         denied_attempts_before
     );
+}
+
+/// A server holding `customer-1` and its one order, readable by anyone.
+async fn customer_with_one_order() -> (
+    crate::state::ServerState,
+    temper_runtime::tenant::TenantId,
+    temper_authz::SecurityContext,
+) {
+    use temper_authz::{Principal, PrincipalKind, SecurityContext};
+    use temper_runtime::ActorSystem;
+    use temper_runtime::tenant::TenantId;
+    use temper_spec::csdl::parse_csdl;
+
+    let csdl_xml = include_str!("../../../test-fixtures/specs/model.csdl.xml");
+    let order_ioa = include_str!("../../../test-fixtures/specs/order.ioa.toml");
+    // A registered tenant, so its relation graph resolves Order.Customer
+    // through the CustomerId constraint.
+    let mut registry = crate::registry::SpecRegistry::new();
+    registry.register_tenant(
+        "default",
+        parse_csdl(csdl_xml).expect("test CSDL"),
+        csdl_xml.to_string(),
+        &[("Customer", order_ioa), ("Order", order_ioa)],
+    );
+    let state =
+        crate::state::ServerState::from_registry(ActorSystem::new("expand-depth"), registry);
+    let tenant = TenantId::default();
+    state
+        .get_or_create_tenant_entity(&tenant, "Customer", "customer-1", serde_json::json!({}))
+        .await
+        .expect("create customer");
+    state
+        .get_or_create_tenant_entity(
+            &tenant,
+            "Order",
+            "order-1",
+            serde_json::json!({ "CustomerId": "customer-1" }),
+        )
+        .await
+        .expect("create order");
+    state
+        .authz
+        .reload_tenant_policies(
+            tenant.as_str(),
+            r#"
+                permit(principal, action == Action::"list", resource is Order);
+                permit(principal, action == Action::"read", resource is Order);
+                permit(principal, action == Action::"read", resource is Customer);
+            "#,
+        )
+        .expect("install read policy");
+    let security = SecurityContext {
+        principal: Principal {
+            id: "reader-1".to_string(),
+            kind: PrincipalKind::Customer,
+            role: None,
+            acting_for: None,
+            agent_type: None,
+            label: None,
+            attributes: Default::default(),
+        },
+        context_attrs: Default::default(),
+        correlation_id: "expand-depth".to_string(),
+        cause: None,
+        credential: None,
+    };
+    (state, tenant, security)
+}
+
+/// `property($expand=<nested>)`, or a plain `property` with no nested items.
+fn expand_path(properties: &[&str]) -> Vec<temper_odata::query::types::ExpandItem> {
+    use temper_odata::query::types::{ExpandItem, ExpandOptions};
+    let Some((first, rest)) = properties.split_first() else {
+        return Vec::new();
+    };
+    let options = (!rest.is_empty()).then(|| ExpandOptions {
+        expand: Some(expand_path(rest)),
+        ..ExpandOptions::default()
+    });
+    vec![ExpandItem {
+        property: first.to_string(),
+        options,
+    }]
+}
+
+#[tokio::test]
+async fn expand_follows_a_relation_back_to_a_type_already_expanded() {
+    let (state, tenant, security) = customer_with_one_order().await;
+    let budget = BlobHydrationBudget::new(1024, 1024, 0, 0);
+    let mut customer = serde_json::json!({ "entity_id": "customer-1", "fields": {} });
+
+    // Customer -> Orders -> Customer -> Orders: the old type check saw
+    // Customer twice and dropped the last level without a word.
+    expand_entity(
+        &mut customer,
+        &expand_path(&["Orders", "Customer", "Orders"]),
+        "Customer",
+        &state,
+        &tenant,
+        &security,
+        &budget,
+    )
+    .await
+    .expect("expand three levels");
+
+    let order = &customer["Orders"][0];
+    assert_eq!(order["fields"]["CustomerId"], "customer-1", "{customer}");
+    let orders_again = order["Customer"]["Orders"].as_array();
+    assert_eq!(orders_again.map(Vec::len), Some(1), "{customer}");
+}
+
+#[tokio::test]
+async fn expand_items_nested_past_the_bound_are_refused() {
+    let (state, tenant, security) = customer_with_one_order().await;
+    let budget = BlobHydrationBudget::new(1024, 1024, 0, 0);
+    let mut customer = serde_json::json!({ "entity_id": "customer-1", "fields": {} });
+
+    let response = expand_entity(
+        &mut customer,
+        &expand_path(&["Orders", "Customer", "Orders", "Customer"]),
+        "Customer",
+        &state,
+        &tenant,
+        &security,
+        &budget,
+    )
+    .await
+    .expect_err("a fourth level is an error, not a silent stop");
+
+    assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn event_time_orders_fractional_seconds_and_filters_equivalent_offsets() {
+    let entities = vec![
+        serde_json::json!({"Id":"unknown", "last_event_at":null}),
+        serde_json::json!({"Id":"whole", "last_event_at":"2026-01-01T00:00:00Z"}),
+        serde_json::json!({"Id":"fraction", "last_event_at":"2026-01-01T00:00:00.1Z"}),
+    ];
+    let mut sorted = entities.clone();
+    sort_entities(
+        &mut sorted,
+        &[OrderByClause {
+            property: "last_event_at".into(),
+            direction: OrderDirection::Desc,
+        }],
+    );
+    // Match the kernel's paging convention: NULLS FIRST for descending.
+    assert_eq!(sorted[0]["Id"], "unknown");
+    assert_eq!(sorted[1]["Id"], "fraction");
+    let filter = FilterExpr::BinaryOp {
+        left: Box::new(FilterExpr::Property("last_event_at".into())),
+        op: BinaryOperator::Eq,
+        right: Box::new(FilterExpr::Literal(ODataValue::DateTimeOffset(
+            chrono::DateTime::parse_from_rfc3339("2026-01-01T01:00:00+01:00")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        ))),
+    };
+    let filtered = filter_entities(entities, &filter);
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0]["Id"], "whole");
+}
+
+#[test]
+fn legacy_app_fields_cannot_supply_kernel_event_metadata() {
+    let entity = serde_json::json!({"fields": {
+        "first_event_at":"1900-01-01T00:00:00Z", "last_event_at":"1900-01-01T00:00:00Z", "last_event_via":"request", "last_event_by":"forged"
+    }});
+    for property in [
+        "first_event_at",
+        "last_event_at",
+        "last_event_via",
+        "last_event_by",
+    ] {
+        assert_eq!(
+            resolve_property(&entity, property),
+            Some(serde_json::Value::Null)
+        );
+    }
+}
+#[test]
+fn first_event_time_orders_fractional_seconds_and_filters_equivalent_offsets() {
+    let entities = vec![
+        serde_json::json!({"Id":"unknown", "first_event_at":null}),
+        serde_json::json!({"Id":"whole", "first_event_at":"2026-01-01T00:00:00Z"}),
+        serde_json::json!({"Id":"fraction", "first_event_at":"2026-01-01T00:00:00.1Z"}),
+    ];
+    let mut sorted = entities.clone();
+    sort_entities(
+        &mut sorted,
+        &[OrderByClause {
+            property: "first_event_at".into(),
+            direction: OrderDirection::Desc,
+        }],
+    );
+    // Match the kernel's paging convention: NULLS FIRST for descending.
+    assert_eq!(sorted[0]["Id"], "unknown");
+    assert_eq!(sorted[1]["Id"], "fraction");
+    let filter = FilterExpr::BinaryOp {
+        left: Box::new(FilterExpr::Property("first_event_at".into())),
+        op: BinaryOperator::Eq,
+        right: Box::new(FilterExpr::Literal(ODataValue::DateTimeOffset(
+            chrono::DateTime::parse_from_rfc3339("2026-01-01T01:00:00+01:00")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        ))),
+    };
+    let filtered = filter_entities(entities, &filter);
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0]["Id"], "whole");
 }

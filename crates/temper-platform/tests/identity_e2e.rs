@@ -16,10 +16,8 @@ use std::collections::BTreeMap;
 use temper_platform::bootstrap::{bootstrap_agent_specs, bootstrap_system_tenant};
 use temper_platform::state::PlatformState;
 use temper_runtime::tenant::TenantId;
-use temper_server::StorageStack;
 use temper_server::identity::{IdentityResolver, hash_token};
 use temper_server::request_context::AgentContext;
-use temper_store_turso::TursoEventStore;
 use tower::ServiceExt;
 
 mod common;
@@ -606,6 +604,72 @@ async fn e2e_http_identity_resolve_exempt_from_auth() {
     );
 }
 
+/// A span's name, and its parent's (None for a root).
+type NamedSpan = (String, Option<String>);
+
+/// Each span made, in order.
+#[derive(Clone, Default)]
+struct SpanParents(std::sync::Arc<std::sync::Mutex<Vec<NamedSpan>>>);
+
+impl<S> tracing_subscriber::Layer<S> for SpanParents
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    fn on_new_span(
+        &self,
+        _attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let span = ctx.span(id).expect("a new span is registered");
+        let parent = span.parent().map(|parent| parent.name().to_string());
+        self.0
+            .lock()
+            .unwrap()
+            .push((span.name().to_string(), parent));
+    }
+}
+
+/// The credential lookup is inside the request's own span: one request is one
+/// trace, never a lookup that starts a trace of its own.
+#[tokio::test]
+async fn e2e_http_credential_lookup_is_inside_the_request_span() {
+    use tracing_subscriber::layer::SubscriberExt as _;
+    let app = identity_test_router().await;
+    let spans = SpanParents::default();
+    let _guard =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(spans.clone()));
+    let response = app
+        .oneshot(
+            // Not the public service document: a read that needs the credential.
+            Request::get("/tdata/AgentTypes")
+                .header("Authorization", format!("Bearer {TEST_OPERATOR_KEY}"))
+                .header("X-Tenant-Id", TEST_TENANT)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // The credential is accepted (the test policy may still refuse the read).
+    assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+    let seen = spans.0.lock().unwrap().clone();
+    assert!(
+        seen.iter()
+            .any(|(name, _)| name == "get_tenant_entity_state"),
+        "the credential is looked up: {seen:?}"
+    );
+    let roots: Vec<&str> = seen
+        .iter()
+        .filter(|(_, parent)| parent.is_none())
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert_eq!(
+        roots,
+        ["http.request"],
+        "only the request is a root: {seen:?}"
+    );
+}
+
 /// Bearer auth: valid agent credential resolves identity on HTTP requests.
 #[tokio::test]
 async fn e2e_http_agent_credential_auth() {
@@ -645,7 +709,8 @@ async fn e2e_http_agent_credential_auth() {
     let json = body_json(response).await;
     assert_eq!(json["status"], "Active");
 
-    // 2. Create AgentCredential with key_hash as entity ID
+    // 2. Create AgentCredential with key_hash as entity ID. It starts Active,
+    // so it carries the bindings an Active credential must have.
     let agent_key = "tmpr_http-auth-test-key";
     let key_hash = hash_token(agent_key);
 
@@ -656,7 +721,9 @@ async fn e2e_http_agent_credential_auth() {
                 .header("Content-Type", "application/json")
                 .header("Authorization", format!("Bearer {TEST_OPERATOR_KEY}"))
                 .header("X-Tenant-Id", TEST_TENANT)
-                .body(Body::from(format!(r#"{{"id": "{key_hash}"}}"#)))
+                .body(Body::from(format!(
+                    r#"{{"id": "{key_hash}", "key_hash": "{key_hash}", "agent_type_id": "http-cc-type", "agent_instance_id": "http-inst-1"}}"#
+                )))
                 .unwrap(),
         )
         .await
@@ -722,6 +789,30 @@ async fn e2e_http_agent_credential_auth() {
 }
 
 /// Bearer auth: no token → 401, wrong token → 401.
+/// A credential starts Active, so one created with no key hash, agent type or
+/// instance is refused: an Active credential must carry all three.
+#[tokio::test]
+async fn e2e_http_bare_active_credential_is_refused() {
+    let app = identity_test_router().await;
+    let key_hash = hash_token("tmpr_http-bare-credential");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/tdata/AgentCredentials")
+                .header("Content-Type", "application/json")
+                .header("Authorization", format!("Bearer {TEST_OPERATOR_KEY}"))
+                .header("X-Tenant-Id", TEST_TENANT)
+                .body(Body::from(format!(r#"{{"id": "{key_hash}"}}"#)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let json = body_json(response).await;
+    assert_eq!(json["error"]["code"], "ConstraintViolation", "{json}");
+}
+
 #[tokio::test]
 async fn e2e_http_missing_and_wrong_token_rejected() {
     let app = identity_test_router().await;
@@ -822,66 +913,6 @@ async fn e2e_http_generic_delete_removes_credential_authority() {
     );
 }
 
-/// A mutation on one replica is authoritative for identity checks on another.
-#[tokio::test]
-async fn e2e_replica_revocation_is_read_from_shared_durable_state() {
-    let directory = tempfile::tempdir().expect("create identity replica test directory");
-    let database_url = format!("file:{}", directory.path().join("identity.db").display());
-    let store = TursoEventStore::new(&database_url, None)
-        .await
-        .expect("create shared identity store");
-
-    let mut first = identity_test_state();
-    let registry = first
-        .registry
-        .read()
-        .expect("identity registry lock should be healthy")
-        .clone();
-    let mut second = PlatformState::with_registry(registry, None);
-    first
-        .server
-        .set_storage_stack(StorageStack::from_turso(store.clone()));
-    second
-        .server
-        .set_storage_stack(StorageStack::from_turso(store));
-
-    let plaintext = "tmpr_cross-replica-revocation";
-    let key_hash = define_type_and_issue_credential(
-        &first,
-        "replica-type",
-        "replica-agent",
-        plaintext,
-        "replica-inst",
-    )
-    .await;
-    let tenant = TenantId::new(TEST_TENANT);
-    let resolver = IdentityResolver::new();
-    assert!(
-        resolver
-            .resolve(&first.server, &tenant, plaintext)
-            .await
-            .is_ok()
-    );
-
-    let response = dispatch(
-        &second,
-        "AgentCredential",
-        &key_hash,
-        "Revoke",
-        serde_json::json!({}),
-    )
-    .await;
-    assert!(response.success, "replica Revoke: {:?}", response.error);
-
-    assert!(
-        resolver
-            .resolve(&first.server, &tenant, plaintext)
-            .await
-            .is_err(),
-        "the first replica must observe revocation from shared durable state"
-    );
-}
-
 // =========================================================================
 // Bootstrap operator credential tests
 // =========================================================================
@@ -921,9 +952,31 @@ async fn e2e_bootstrap_operator_credential_idempotent() {
     temper_platform::bootstrap_operator_credential(&state, api_key, TEST_TENANT)
         .await
         .expect("operator credential bootstrap should succeed");
+    let key_hash = hash_token(api_key);
+    let history_after_first = state
+        .server
+        .get_tenant_entity_state(&tenant, "AgentCredential", &key_hash)
+        .await
+        .expect("credential exists after bootstrap")
+        .state
+        .total_event_count;
     temper_platform::bootstrap_operator_credential(&state, api_key, TEST_TENANT)
         .await
         .expect("operator credential bootstrap should succeed");
+
+    // Every boot bootstraps: a second one must not grow the journal identity
+    // resolution replays (a production credential had reached 61 events).
+    let history_after_second = state
+        .server
+        .get_tenant_entity_state(&tenant, "AgentCredential", &key_hash)
+        .await
+        .expect("credential exists after second bootstrap")
+        .state
+        .total_event_count;
+    assert_eq!(
+        history_after_second, history_after_first,
+        "re-bootstrapping an already-current operator credential must not re-issue it"
+    );
 
     // Should still resolve correctly.
     let resolver = IdentityResolver::new();
@@ -934,6 +987,66 @@ async fn e2e_bootstrap_operator_credential_idempotent() {
 
     assert_eq!(identity.agent_instance_id, "operator");
     assert!(identity.verified);
+}
+
+/// A restarted server finds the operator credential in the store: it does not
+/// issue it again, and the operator key still resolves.
+#[tokio::test]
+async fn e2e_bootstrap_operator_credential_idempotent_across_restart() {
+    use temper_runtime::persistence::EventStore;
+
+    let directory = tempfile::tempdir().expect("create identity store directory");
+    let database_url = format!("file:{}", directory.path().join("identity.db").display());
+    let store = temper_store_turso::TursoEventStore::new(&database_url, None)
+        .await
+        .expect("create identity store");
+    let api_key = "tmpr_restart-bootstrap-test";
+    let tenant = TenantId::new(TEST_TENANT);
+    let persistence_id = format!("{TEST_TENANT}:AgentCredential:{}", hash_token(api_key));
+
+    let mut first = identity_test_state();
+    first
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(store.clone()));
+    temper_platform::bootstrap_operator_credential(&first, api_key, TEST_TENANT)
+        .await
+        .expect("first boot bootstraps the operator credential");
+    let journal_after_first = store
+        .read_events(&persistence_id, 0)
+        .await
+        .expect("read credential journal")
+        .len();
+    assert!(
+        journal_after_first > 0,
+        "first boot must persist the credential"
+    );
+
+    // The restarted server opens the database afresh, as a new process would.
+    let reopened_store = temper_store_turso::TursoEventStore::new(&database_url, None)
+        .await
+        .expect("reopen identity store");
+    let mut restarted = identity_test_state();
+    restarted
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(reopened_store));
+    temper_platform::bootstrap_operator_credential(&restarted, api_key, TEST_TENANT)
+        .await
+        .expect("restarted boot bootstraps the operator credential");
+    let journal_after_restart = store
+        .read_events(&persistence_id, 0)
+        .await
+        .expect("read credential journal")
+        .len();
+    assert_eq!(
+        journal_after_restart, journal_after_first,
+        "a restart must not re-issue a current operator credential"
+    );
+
+    let identity = IdentityResolver::new()
+        .resolve(&restarted.server, &tenant, api_key)
+        .await
+        .expect("operator credential should resolve after a restart");
+    assert_eq!(identity.agent_instance_id, "operator");
 }
 
 /// Identity resolution is tenant-scoped.

@@ -53,6 +53,7 @@ pub fn migrate_source(source: &str) -> Result<Migration, String> {
 pub(super) fn rewrite(source: &str, drop_unknown: bool) -> Result<(String, Vec<String>), String> {
     let mut doc: DocumentMut = source.parse().map_err(|e| format!("not valid TOML: {e}"))?;
     let mut notes = Vec::new();
+    promote_appended_strings_to_lists(&mut doc, &mut notes)?;
     let kinds = state_kinds(&doc);
 
     if let Some(actions) = doc.get_mut("action").and_then(Item::as_array_of_tables_mut) {
@@ -102,6 +103,55 @@ pub(super) fn rewrite(source: &str, drop_unknown: bool) -> Result<(String, Vec<S
     Ok((doc.to_string(), notes))
 }
 
+/// The old runtime let `list_append` grow a variable declared as a string with
+/// an empty-list initial value (`type = "string"`, `initial = "[]"`). The
+/// current reader types it, so declare those variables as lists.
+fn promote_appended_strings_to_lists(
+    doc: &mut DocumentMut,
+    notes: &mut Vec<String>,
+) -> Result<(), String> {
+    let mut appended = std::collections::BTreeSet::new();
+    if let Some(actions) = doc.get("action").and_then(Item::as_array_of_tables) {
+        for action in actions.iter() {
+            let Some(item) = action.get("effect") else {
+                continue;
+            };
+            let mut effects = Vec::new();
+            // An effect this pass cannot read is reported by migrate_effects.
+            if super::effects::parse_effect_value(&to_toml(item)?, &mut effects).is_err() {
+                continue;
+            }
+            for effect in effects {
+                if let super::effects::Effect::ListAppend { var } = effect {
+                    appended.insert(var);
+                }
+            }
+        }
+    }
+    let Some(states) = doc.get_mut("state").and_then(Item::as_array_of_tables_mut) else {
+        return Ok(());
+    };
+    for state in states.iter_mut() {
+        let Some(name) = state.get("name").and_then(Item::as_str).map(str::to_string) else {
+            continue;
+        };
+        let declared = state.get("type").and_then(Item::as_str).unwrap_or("string");
+        let empty_initial = state.get("initial").is_none_or(|initial| {
+            initial
+                .as_str()
+                .is_some_and(|text| matches!(text.trim(), "" | "[]"))
+        });
+        if appended.contains(&name) && old_kind(declared) == VarKind::Str && empty_initial {
+            state.insert("type", value("list"));
+            state.insert("initial", value(Array::new()));
+            notes.push(format!(
+                "state '{name}' is appended to; declared as a list (the old runtime treated it as one)"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// How the old reader typed a `[[state]] type`; unknown types read as strings.
 fn old_kind(var_type: &str) -> VarKind {
     match var_type {
@@ -131,7 +181,8 @@ fn state_kinds(doc: &DocumentMut) -> BTreeMap<String, VarKind> {
 pub(super) fn to_toml(item: &Item) -> Result<toml::Value, String> {
     let text = match item {
         Item::Value(v) => format!("v = {v}"),
-        Item::Table(t) => format!("[v]\n{t}"),
+        // Inline, so nested sub-tables (`[action.triggers.guard.guard]`) come along.
+        Item::Table(t) => format!("v = {}", t.clone().into_inline_table()),
         // `[[action.guard]]`: an array of sub-tables, read as an array of
         // inline tables.
         Item::ArrayOfTables(tables) => {

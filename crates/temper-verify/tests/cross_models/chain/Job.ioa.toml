@@ -1,0 +1,89 @@
+# A job opened by a chain of reactions: Kick.Go, Job.Join on the new job,
+# Job.Lend on its source, Job.Open back on the new job. Add puts a missing home
+# right with a reaction. Open does not, so a job opened that way has no home.
+[automaton]
+name = "Job"
+states = ["Unmade", "Queued"]
+initial = "Unmade"
+
+[[state]]
+name = "home"
+type = "string"
+initial = ""
+
+[[state]]
+name = "source"
+type = "string"
+initial = ""
+
+[[state]]
+name = "lend_to"
+type = "string"
+initial = ""
+
+[[invariant]]
+name = "HomeExists"
+assert = "status != 'Unmade' => Home[home].status in ['Open']"
+
+[[action]]
+name = "Add"
+kind = "input"
+from = ["Unmade"]
+to = "Queued"
+params = ["home"]
+
+[[action.triggers]]
+name = "homed"
+kind = "entity"
+target_entity = "Job"
+target_action = "Rehome"
+guard = "empty(home) || !(Home[home].status in ['Open'])"
+[action.triggers.args]
+home = "'main'"
+[action.triggers.resolve_target]
+kind = "same_id"
+
+[[action]]
+name = "Rehome"
+kind = "input"
+from = ["Queued"]
+params = ["home"]
+
+[[action]]
+name = "Join"
+kind = "input"
+from = ["Unmade", "Queued"]
+params = ["source"]
+
+[[action.triggers]]
+name = "borrow"
+kind = "entity"
+target_entity = "Job"
+target_action = "Lend"
+guard = "status == 'Unmade' && source != ''"
+[action.triggers.args]
+lend_to = "Id"
+[action.triggers.resolve_target]
+kind = "field"
+id_field = "source"
+
+[[action]]
+name = "Lend"
+kind = "input"
+from = ["Queued"]
+params = ["lend_to"]
+
+[[action.triggers]]
+name = "open"
+kind = "entity"
+target_entity = "Job"
+target_action = "Open"
+[action.triggers.resolve_target]
+kind = "field"
+id_field = "lend_to"
+
+[[action]]
+name = "Open"
+kind = "input"
+from = ["Unmade"]
+to = "Queued"

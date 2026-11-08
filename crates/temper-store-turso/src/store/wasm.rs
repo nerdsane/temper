@@ -1,7 +1,10 @@
 //! WASM module storage and invocation log persistence.
 
 use crate::driver::params;
-use temper_runtime::persistence::{PersistenceError, storage_error};
+use temper_runtime::persistence::{
+    PersistenceError, WASM_INVOCATIONS_KEPT_PER_TENANT, WASM_INVOCATIONS_PRUNE_BATCH_ROWS,
+    storage_error,
+};
 use tracing::instrument;
 
 use super::{
@@ -69,9 +72,10 @@ impl TursoEventStore {
             }
         }
         drop(existing_rows);
+        drop(conn);
 
-        let _write_permit = self
-            .acquire_write_permit("turso.upsert_wasm_module", WritePriority::High)
+        let conn = self
+            .write_connection("turso.upsert_wasm_module", WritePriority::High)
             .await?;
         conn.execute(
             "INSERT INTO wasm_modules (tenant, module_name, wasm_bytes, sha256_hash, version, size_bytes, updated_at, source)
@@ -212,7 +216,9 @@ impl TursoEventStore {
         entry: &TursoWasmInvocationInsert<'_>,
     ) -> Result<(), PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.persist_wasm_invocation");
-        let conn = self.configured_connection().await?;
+        let conn = self
+            .write_connection("turso.persist_wasm_invocation", WritePriority::Low)
+            .await?;
         let success_val: i64 = if entry.success { 1 } else { 0 };
         let duration_val: i64 = entry.duration_ms as i64;
         conn.execute(
@@ -237,10 +243,88 @@ impl TursoEventStore {
         Ok(())
     }
 
-    /// Load recent WASM invocation log entries (newest first, up to `limit`).
-    #[instrument(skip_all, fields(otel.name = "turso.load_recent_wasm_invocations"))]
+    /// How many WASM invocation log rows `tenant` holds.
+    #[instrument(skip_all, fields(tenant, otel.name = "turso.count_wasm_invocations"))]
+    pub async fn count_wasm_invocations(&self, tenant: &str) -> Result<i64, PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.count_wasm_invocations");
+        let conn = self.configured_connection().await?;
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM wasm_invocation_logs \
+                 INDEXED BY idx_wasm_invocation_logs_tenant WHERE tenant = ?1",
+                params![tenant],
+            )
+            .await
+            .map_err(storage_error)?;
+        let row = rows.next().await.map_err(storage_error)?;
+        row.map_or(Ok(0), |row| row.get::<i64>(0).map_err(storage_error))
+    }
+
+    /// Trim `tenant`'s WASM invocation log to its newest
+    /// [`WASM_INVOCATIONS_KEPT_PER_TENANT`] rows.
+    ///
+    /// Kept apart from [`Self::persist_wasm_invocation`] so recording an
+    /// invocation holds the shared writer for one insert only.
+    #[instrument(skip_all, fields(tenant, otel.name = "turso.prune_wasm_invocations"))]
+    pub async fn prune_wasm_invocations(&self, tenant: &str) -> Result<(), PersistenceError> {
+        let _query_timer = TursoQueryTimer::start("turso.prune_wasm_invocations");
+        // The global id says nothing about this tenant's write frequency:
+        // alternating tenants can otherwise leave one unpruned forever.
+        // Find the cutoff on a read connection, outside the shared writer.
+        let cutoff = {
+            let conn = self.configured_connection().await?;
+            let mut rows = conn
+                .query(
+                    "SELECT id FROM wasm_invocation_logs \
+                     INDEXED BY idx_wasm_invocation_logs_tenant \
+                     WHERE tenant = ?1 ORDER BY id DESC LIMIT 1 OFFSET ?2",
+                    params![tenant, WASM_INVOCATIONS_KEPT_PER_TENANT],
+                )
+                .await
+                .map_err(storage_error)?;
+            match rows.next().await.map_err(storage_error)? {
+                Some(row) => Some(row.get::<i64>(0).map_err(storage_error)?),
+                None => None,
+            }
+        };
+        if let Some(cutoff) = cutoff {
+            // Existing stores can have a large backlog. Each low-priority
+            // batch releases the writer so journal appends can land between
+            // batches, rather than waiting for the entire backlog to drain.
+            const BATCH_ROWS: i64 = WASM_INVOCATIONS_PRUNE_BATCH_ROWS;
+            loop {
+                let conn = self
+                    .write_connection("turso.prune_wasm_invocations", WritePriority::Low)
+                    .await?;
+                let deleted = conn
+                    .execute(
+                        "DELETE FROM wasm_invocation_logs WHERE id IN ( \
+                         SELECT id FROM wasm_invocation_logs \
+                         INDEXED BY idx_wasm_invocation_logs_tenant \
+                         WHERE tenant = ?1 AND id <= ?2 ORDER BY id LIMIT ?3)",
+                        params![tenant, cutoff, BATCH_ROWS],
+                    )
+                    .await
+                    .map_err(storage_error)?;
+                drop(conn);
+                if deleted < BATCH_ROWS as u64 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        }
+        Ok(())
+    }
+
+    /// Load one tenant's recent WASM invocation log entries (newest first, up
+    /// to `limit`).
+    ///
+    /// The tenant is bound in the query because several tenants may share
+    /// one database; the limit then counts only that tenant's rows.
+    #[instrument(skip_all, fields(tenant, otel.name = "turso.load_recent_wasm_invocations"))]
     pub async fn load_recent_wasm_invocations(
         &self,
+        tenant: &str,
         limit: i64,
     ) -> Result<Vec<TursoWasmInvocationRow>, PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.load_recent_wasm_invocations");
@@ -250,9 +334,10 @@ impl TursoEventStore {
                 "SELECT tenant, entity_type, entity_id, module_name, trigger_action, \
                         callback_action, success, error, duration_ms, created_at \
                  FROM wasm_invocation_logs \
+                 WHERE tenant = ?1 \
                  ORDER BY created_at DESC \
-                 LIMIT ?1",
-                params![limit],
+                 LIMIT ?2",
+                params![tenant, limit],
             )
             .await
             .map_err(storage_error)?;
@@ -283,7 +368,9 @@ impl TursoEventStore {
         module_name: &str,
     ) -> Result<bool, PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.delete_wasm_module");
-        let conn = self.configured_connection().await?;
+        let conn = self
+            .write_connection("turso.delete_wasm_module", WritePriority::High)
+            .await?;
         let affected = conn
             .execute(
                 "DELETE FROM wasm_modules WHERE tenant = ?1 AND module_name = ?2",

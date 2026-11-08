@@ -61,6 +61,9 @@ struct QueuedOtsTrajectory {
     store: Arc<dyn OtsStore>,
     backend: &'static str,
     item: OtsTrajectoryWrite,
+    /// The trace of the span that queued this upload (none when recovered after a
+    /// restart): its persist span continues it.
+    parent: opentelemetry::Context,
 }
 
 /// Bounded queue for OTS trajectory artifacts.
@@ -212,6 +215,7 @@ impl OtsTrajectoryOutbox {
             store,
             backend,
             item,
+            parent: crate::trace_context::capture(),
         };
         match self.sender.try_send(queued) {
             Ok(()) => {
@@ -317,6 +321,7 @@ async fn persist_with_retries(
     failed_total: &AtomicU64,
 ) {
     let span = tracing::info_span!(
+        parent: None,
         "ots_trajectory_outbox.persist",
         tenant = %queued.item.tenant,
         trajectory_id = %queued.item.trajectory_id,
@@ -324,6 +329,8 @@ async fn persist_with_retries(
         session_id = %queued.item.session_id,
         backend = queued.backend,
     );
+    // The upload is part of the request that queued it.
+    crate::trace_context::continue_in(&span, &queued.parent);
     async move {
         let mut attempt = 1;
         loop {

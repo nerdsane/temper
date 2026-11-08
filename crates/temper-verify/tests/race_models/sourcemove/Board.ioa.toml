@@ -1,0 +1,10 @@
+[automaton]
+name = "Board"
+states = ["Waiting", "Pinged"]
+initial = "Waiting"
+
+[[action]]
+name = "Ping"
+kind = "input"
+from = ["Waiting", "Pinged"]
+to = "Pinged"

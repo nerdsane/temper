@@ -21,6 +21,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 /// Chunk size used by SDK adapters when splitting writes. A single
@@ -170,6 +171,8 @@ enum ChannelEnd {
 /// hosts — they're opaque u32s.
 pub struct HttpStreamRegistry {
     inner: Mutex<RegistryState>,
+    /// Where the handles this registry holds are counted, when it is one of many that share a count.
+    held: Option<Arc<AtomicUsize>>,
 }
 
 struct RegistryState {
@@ -199,7 +202,16 @@ impl HttpStreamRegistry {
                 inbound_head_receivers: BTreeMap::new(),
                 pending_reads: BTreeMap::new(),
             }),
+            held: None,
         }
+    }
+
+    /// A registry whose handles are counted in `held`, with every other registry given the same count: the
+    /// count goes up as a handle opens and down as it closes or as the registry is dropped with it.
+    pub fn counted(held: Arc<AtomicUsize>) -> Self {
+        let mut registry = Self::new();
+        registry.held = Some(held);
+        registry
     }
 
     /// Allocate a new paired (sender, receiver) channel. Returns
@@ -213,6 +225,9 @@ impl HttpStreamRegistry {
         let read_id = state.next_id;
         state.next_id += 1;
         state.handles.insert(write_id, ChannelEnd::Sender(tx));
+        if let Some(held) = &self.held {
+            held.fetch_add(2, Ordering::Relaxed);
+        }
         state.handles.insert(
             read_id,
             ChannelEnd::Receiver(Arc::new(ChannelReceiver {
@@ -296,7 +311,11 @@ impl HttpStreamRegistry {
     pub async fn close(&self, handle: StreamHandle) -> Result<(), StreamError> {
         let mut state = self.inner.lock().await;
         state.pending_reads.remove(&handle.0);
-        match state.handles.remove(&handle.0) {
+        let removed = state.handles.remove(&handle.0);
+        if let (Some(held), Some(_)) = (&self.held, &removed) {
+            held.fetch_sub(1, Ordering::Relaxed);
+        }
+        match removed {
             Some(ChannelEnd::Receiver(receiver)) => {
                 // Dropping the registry's Arc alone does not close a receiver
                 // retained by an outstanding read. Reject writes immediately,
@@ -405,6 +424,16 @@ impl HttpStreamRegistry {
             .map_err(|_| StreamError::Aborted("kernel head receiver dropped".into()))
     }
 
+    /// Kernel-called once the guest's invocation has ended: a head it never submitted will not
+    /// come, so the kernel's wait ends now with `Aborted`. A head already submitted is unaffected.
+    pub async fn abandon_inbound_response_head(&self, guest_response_body: StreamHandle) {
+        self.inner
+            .lock()
+            .await
+            .inbound_head_senders
+            .remove(&guest_response_body.0);
+    }
+
     /// Kernel-called: await the head submitted by the guest.
     pub async fn await_inbound_response_head(
         &self,
@@ -487,9 +516,50 @@ impl Default for HttpStreamRegistry {
     }
 }
 
+impl Drop for HttpStreamRegistry {
+    fn drop(&mut self) {
+        if let Some(held) = &self.held {
+            held.fetch_sub(self.inner.get_mut().handles.len(), Ordering::Relaxed);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn an_abandoned_inbound_head_ends_the_wait_and_a_submitted_one_is_kept() {
+        let reg = HttpStreamRegistry::new();
+        let ended = reg.open_inbound_exchange().await;
+        reg.abandon_inbound_response_head(ended.guest_response_body)
+            .await;
+        let waited = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            reg.await_inbound_response_head(ended.guest_response_body),
+        )
+        .await
+        .expect("the wait ends at once");
+        assert!(matches!(waited, Err(StreamError::Aborted(_))));
+
+        let answered = reg.open_inbound_exchange().await;
+        let head = HttpResponseHead {
+            status: 202,
+            headers: vec![],
+        };
+        reg.submit_inbound_response_head(answered.guest_response_body, head)
+            .await
+            .unwrap();
+        reg.abandon_inbound_response_head(answered.guest_response_body)
+            .await;
+        assert_eq!(
+            reg.await_inbound_response_head(answered.guest_response_body)
+                .await
+                .unwrap()
+                .status,
+            202
+        );
+    }
 
     #[tokio::test]
     async fn create_pair_returns_distinct_ids() {

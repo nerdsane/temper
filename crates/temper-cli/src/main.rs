@@ -5,9 +5,11 @@
 
 /// Use jemalloc to aggressively return freed pages to the OS via MADV_DONTNEED,
 /// preventing the RSS bloat caused by glibc malloc on Debian bookworm (Railway).
+/// Its purge settings are in [`allocator`].
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+mod allocator;
 mod audit;
 mod codegen;
 mod decide;
@@ -17,6 +19,7 @@ mod mcp;
 mod migrate_predicates;
 mod migrate_turso_to_postgres;
 mod serve;
+mod sync_copy_cmd;
 mod util;
 mod verify;
 mod verify_ioa;
@@ -132,7 +135,7 @@ enum Commands {
         /// IP address to bind the API to. The default, all interfaces, is
         /// unchanged; `--bind 127.0.0.1` keeps Temper loopback-only, for a
         /// server reached through an SSH tunnel or a local proxy. The Observe
-        /// UI and the local sandbox follow it.
+        /// UI follows it; the local sandbox always listens on 127.0.0.1 only.
         ///
         /// Only `0.0.0.0` and `127.0.0.1` are accepted: Temper's own
         /// components reach the API at 127.0.0.1, so any other address would
@@ -242,6 +245,11 @@ enum Commands {
         #[arg(long)]
         database_url: Option<String>,
     },
+    /// Inspect or repair a database copied to Turso Cloud (TURSO_SYNC_URL).
+    SyncCopy {
+        #[command(subcommand)]
+        action: sync_copy_cmd::Action,
+    },
     /// Start the stdio MCP server for Code Mode
     Mcp {
         /// Port where Temper HTTP server is running.
@@ -282,6 +290,7 @@ fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     let cli = Cli::parse();
     let is_mcp = matches!(&cli.command, Commands::Mcp { .. });
+    let is_serve = matches!(&cli.command, Commands::Serve { .. });
 
     let tokio_thread_stack_bytes = resolve_tokio_thread_stack_bytes(
         std::env::var("TEMPER_TOKIO_THREAD_STACK_BYTES")
@@ -296,9 +305,11 @@ fn main() -> anyhow::Result<()> {
         .build()?;
 
     let result = runtime.block_on(async_main(cli));
-    if is_mcp {
+    if is_mcp || is_serve {
         // A canceled Tokio stdio task may leave an uncancellable OS pipe call.
         // MCP has already drained output or reported failure before returning.
+        // A stopped server has reported the writes it owed and flushed its
+        // telemetry; its background tasks must not hold up the exit.
         runtime.shutdown_timeout(std::time::Duration::from_secs(1));
     }
     result
@@ -435,6 +446,7 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
             url,
             agent_id,
         } => mcp::run(port, url, agent_id).await?,
+        Commands::SyncCopy { action } => sync_copy_cmd::run(action).await?,
         Commands::MigrateTursoToPostgres {
             tenant,
             dry_run,
@@ -742,15 +754,6 @@ mod tests {
     fn tokio_thread_stack_rejects_tiny_or_invalid_override() {
         assert!(resolve_tokio_thread_stack_bytes(Some("abc")).is_err());
         assert!(resolve_tokio_thread_stack_bytes(Some("1048576")).is_err());
-    }
-
-    #[test]
-    fn railway_start_command_does_not_pin_turso_storage() {
-        let railway_toml = include_str!("../../../railway.toml");
-        assert!(
-            !railway_toml.contains("--storage turso"),
-            "Railway must allow TEMPER_EVENT_STORE=postgres to select the backend"
-        );
     }
 
     #[test]

@@ -1,0 +1,57 @@
+[automaton]
+name = "Job"
+states = ["Idle", "Calling", "Waiting", "Out"]
+initial = "Idle"
+
+[[action]]
+name = "Begin"
+kind = "input"
+from = ["Idle"]
+to = "Calling"
+
+[[action.triggers]]
+name = "call"
+kind = "wasm"
+module = "work"
+on_success = ["Answer"]
+on_failure = "Failed"
+
+[[action]]
+name = "Answer"
+kind = "internal"
+from = ["Calling"]
+to = "Out"
+
+[[action]]
+name = "Failed"
+kind = "internal"
+from = ["Calling"]
+to = "Waiting"
+
+[[action]]
+name = "Retry"
+kind = "internal"
+from = ["Waiting"]
+to = "Calling"
+
+[[action.triggers]]
+name = "call"
+kind = "wasm"
+module = "work"
+on_success = ["Answer"]
+on_failure = "Failed"
+
+[[state_timeout]]
+state = "Calling"
+after_seconds = 60
+on_timeout = "Failed"
+
+[[state_timeout]]
+state = "Waiting"
+after_seconds = 60
+on_timeout = "Retry"
+
+[[liveness]]
+name = "GetsOut"
+eventually = "status == 'Idle' || status == 'Out'"
+fairness = { strong = ["Answer"] }

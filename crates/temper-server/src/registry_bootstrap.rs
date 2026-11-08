@@ -4,7 +4,9 @@
 //! populating a `SpecRegistry` with tenant registrations and verification status.
 //! This keeps storage-specific row translation out of the CLI layer.
 
-use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use temper_runtime::tenant::TenantId;
 use temper_spec::csdl::{CsdlDocument, emit_csdl_xml, merge_csdl, parse_csdl};
@@ -12,6 +14,17 @@ use temper_store_turso::TursoEventStore;
 
 use crate::registry::{
     EntityLevelSummary, EntityVerificationResult, SpecRegistry, VerificationStatus,
+};
+
+mod converted;
+mod platform_store;
+mod stored;
+pub use converted::Converted;
+use converted::{ConvertedSpec, StoredSpec, read_stored_spec};
+pub use platform_store::restore_registry_from_platform_store;
+pub use stored::{
+    StoredTenant, StoredTenants, read_stored_tenants_from_postgres, read_stored_tenants_from_turso,
+    register_stored_tenant,
 };
 
 /// Common accessors for spec rows from different storage backends.
@@ -162,70 +175,128 @@ fn restored_csdl_for_rows<R>(
     }))
 }
 
+/// Restore every tenant in `grouped` into `registry`
+/// ([`register_tenant_rows`] for each).
+#[cfg(test)]
 fn populate_registry<R: SpecRowLike>(
     registry: &mut SpecRegistry,
     grouped: BTreeMap<String, Vec<R>>,
     constraints_by_tenant: &mut BTreeMap<String, String>,
     get_csdl: impl Fn(&R) -> Option<String>,
     get_ioa: impl Fn(&R) -> (String, String),
-) -> Result<usize, String> {
-    let mut restored_specs = 0usize;
-    for (tenant, tenant_rows) in grouped {
-        let Some((csdl, csdl_xml)) = restored_csdl_for_rows(&tenant, &tenant_rows, &get_csdl)?
-        else {
-            tracing::warn!(tenant = %tenant, "skipping restored tenant due to missing CSDL");
-            continue;
-        };
-
-        // A stored spec that no longer parses (for example, one still in the
-        // old predicate syntax) disables only its own entity type, not the
-        // tenant or the server.
-        let ioa_owned: Vec<(String, String)> = tenant_rows
-            .iter()
-            .map(&get_ioa)
-            .filter(|(entity_type, ioa)| match temper_spec::automaton::parse_automaton(ioa) {
-                Ok(_) => true,
-                Err(error) => {
-                    tracing::error!(
-                        tenant = %tenant,
-                        entity_type = %entity_type,
-                        %error,
-                        "skipping stored spec that does not parse; convert it with `temper migrate-predicates` and redeploy"
-                    );
-                    false
-                }
-            })
-            .collect();
-        let ioa_pairs: Vec<(&str, &str)> = ioa_owned
-            .iter()
-            .map(|(entity_type, ioa)| (entity_type.as_str(), ioa.as_str()))
-            .collect();
-
-        let cross_invariants_toml = constraints_by_tenant.remove(&tenant);
-        registry
-            .try_register_tenant_with_constraints(
-                tenant.as_str(),
-                csdl,
-                csdl_xml,
-                &ioa_pairs,
-                cross_invariants_toml,
-                false,
+) -> usize {
+    grouped
+        .into_iter()
+        .map(|(tenant, tenant_rows)| {
+            let constraints = constraints_by_tenant.remove(&tenant);
+            register_tenant_rows(
+                registry,
+                &tenant,
+                tenant_rows,
+                constraints,
+                &get_csdl,
+                &get_ioa,
             )
-            .map_err(|e| format!("Failed to restore tenant '{tenant}' into registry: {e}"))?;
-        let tenant_id = TenantId::new(&tenant);
-        for row in &tenant_rows {
-            let entity_type = get_ioa(row).0;
-            if !ioa_owned
-                .iter()
-                .any(|(restored, _)| *restored == entity_type)
-            {
-                continue;
+            .0
+        })
+        .sum()
+}
+
+/// Register one stored tenant's spec rows and constraints into `registry`,
+/// returning how many specs it restored and the specs it converted from the
+/// old syntax, to be written back.
+///
+/// The tenant's rows belong to it alone, so a tenant whose stored CSDL or
+/// constraints do not load is logged, marked unavailable in the registry and
+/// left out; every other tenant is still restored. Its rows stay in the store
+/// untouched, so once they are fixed the next start restores it. Only
+/// store-level read failures, handled by the callers, stop a restore.
+fn register_tenant_rows<R: SpecRowLike>(
+    registry: &mut SpecRegistry,
+    tenant: &str,
+    tenant_rows: Vec<R>,
+    constraints: Option<String>,
+    get_csdl: &impl Fn(&R) -> Option<String>,
+    get_ioa: &impl Fn(&R) -> (String, String),
+) -> (usize, Vec<ConvertedSpec>) {
+    let mut restored_specs = 0usize;
+    let (csdl, csdl_xml) = match restored_csdl_for_rows(tenant, &tenant_rows, get_csdl) {
+        Ok(Some(restored)) => restored,
+        Ok(None) => {
+            tracing::warn!(tenant = %tenant, "skipping restored tenant due to missing CSDL");
+            return (0, Vec::new());
+        }
+        Err(reason) => {
+            mark_unrestorable(registry, tenant, reason);
+            return (0, Vec::new());
+        }
+    };
+
+    // A stored spec in the old predicate syntax is converted, and written
+    // back once the tenant registers; one that still cannot be read disables
+    // only its own entity type, not the tenant or the server.
+    let mut ioa_owned: Vec<(String, String)> = Vec::with_capacity(tenant_rows.len());
+    let mut converted: Vec<ConvertedSpec> = Vec::new();
+    for row in &tenant_rows {
+        let (entity_type, ioa) = get_ioa(row);
+        match read_stored_spec(tenant, &entity_type, &ioa) {
+            StoredSpec::Current => ioa_owned.push((entity_type, ioa)),
+            StoredSpec::Converted(source) => {
+                converted.push(ConvertedSpec {
+                    entity_type: entity_type.clone(),
+                    source: source.clone(),
+                    original: ioa,
+                    csdl_xml: get_csdl(row).unwrap_or_default(),
+                    verified: row.verified(),
+                });
+                ioa_owned.push((entity_type, source));
             }
-            registry.set_verification_status(&tenant_id, &entity_type, row_to_registry_status(row));
-            restored_specs += 1;
+            StoredSpec::Unreadable => {}
         }
     }
-    Ok(restored_specs)
+    let ioa_pairs: Vec<(&str, &str)> = ioa_owned
+        .iter()
+        .map(|(entity_type, ioa)| (entity_type.as_str(), ioa.as_str()))
+        .collect();
+
+    if let Err(error) = registry.try_register_tenant_with_constraints(
+        tenant,
+        csdl,
+        csdl_xml,
+        &ioa_pairs,
+        constraints,
+        false,
+    ) {
+        mark_unrestorable(
+            registry,
+            tenant,
+            format!("Failed to restore tenant '{tenant}' into registry: {error}"),
+        );
+        return (0, Vec::new());
+    }
+    let tenant_id = TenantId::new(tenant);
+    for row in &tenant_rows {
+        let entity_type = get_ioa(row).0;
+        if !ioa_owned
+            .iter()
+            .any(|(restored, _)| *restored == entity_type)
+        {
+            continue;
+        }
+        registry.set_verification_status(&tenant_id, &entity_type, row_to_registry_status(row));
+        restored_specs += 1;
+    }
+    (restored_specs, converted)
+}
+
+/// Log a tenant whose stored rows do not load and mark it unavailable.
+fn mark_unrestorable(registry: &mut SpecRegistry, tenant: &str, reason: String) {
+    tracing::error!(
+        tenant,
+        %reason,
+        "stored specs for this tenant do not load; the tenant is unavailable until they are fixed, every other tenant is restored"
+    );
+    registry.mark_tenant_unavailable(tenant, reason);
 }
 
 /// Restore a [`SpecRegistry`] from Postgres.
@@ -242,52 +313,8 @@ pub async fn restore_registry_from_postgres_store(
     registry: &mut SpecRegistry,
     store: &temper_store_postgres::PostgresEventStore,
 ) -> Result<usize, String> {
-    let rows: Vec<PersistedSpecRow> = sqlx::query_as(&store.schema().qualify_sql(
-        "SELECT tenant, entity_type, ioa_source, csdl_xml, verification_status, verified, \
-                levels_passed, levels_total, verification_result, updated_at \
-         FROM {schema}specs \
-         ORDER BY tenant, entity_type",
-    ))
-    .fetch_all(store.pool())
-    .await
-    .map_err(|e| format!("Failed to read specs from Postgres: {e}"))?;
-
-    #[derive(sqlx::FromRow)]
-    struct ConstraintRow {
-        tenant: String,
-        cross_invariants_toml: String,
-    }
-
-    let constraints_rows: Vec<ConstraintRow> = sqlx::query_as(&store.schema().qualify_sql(
-        "SELECT tenant, cross_invariants_toml \
-         FROM {schema}tenant_constraints \
-         ORDER BY tenant",
-    ))
-    .fetch_all(store.pool())
-    .await
-    .map_err(|e| format!("Failed to read tenant constraints from Postgres: {e}"))?;
-
-    let mut constraints_by_tenant: BTreeMap<String, String> = constraints_rows
-        .into_iter()
-        .map(|row| (row.tenant, row.cross_invariants_toml))
-        .collect();
-
-    if rows.is_empty() {
-        return Ok(0);
-    }
-
-    let mut grouped: BTreeMap<String, Vec<PersistedSpecRow>> = BTreeMap::new();
-    for row in rows {
-        grouped.entry(row.tenant.clone()).or_default().push(row);
-    }
-
-    populate_registry(
-        registry,
-        grouped,
-        &mut constraints_by_tenant,
-        |rows| rows.csdl_xml.clone(),
-        |row| (row.entity_type.clone(), row.ioa_source.clone()),
-    )
+    let stored = read_stored_tenants_from_postgres(store).await?;
+    Ok(register_stored_tenants(registry, stored).await)
 }
 
 /// Restore a [`SpecRegistry`] from Turso.
@@ -295,140 +322,20 @@ pub async fn restore_registry_from_turso(
     registry: &mut SpecRegistry,
     turso: &TursoEventStore,
 ) -> Result<usize, String> {
-    // GC uncommitted specs left behind by interrupted install_os_app writes.
-    match turso.delete_uncommitted_specs().await {
-        Ok(0) => {}
-        Ok(n) => tracing::info!("deleted {n} uncommitted specs during startup recovery"),
-        Err(e) => tracing::warn!("failed to delete uncommitted specs: {e}"),
-    }
-    let rows = turso
-        .load_specs()
-        .await
-        .map_err(|e| format!("Failed to read specs from Turso: {e}"))?;
-    let constraints_rows = turso
-        .load_tenant_constraints()
-        .await
-        .map_err(|e| format!("Failed to read tenant constraints from Turso: {e}"))?;
-
-    let mut constraints_by_tenant: BTreeMap<String, String> = constraints_rows
-        .into_iter()
-        .map(|row| (row.tenant, row.cross_invariants_toml))
-        .collect();
-
-    if rows.is_empty() {
-        return Ok(0);
-    }
-
-    let mut grouped: BTreeMap<String, Vec<temper_store_turso::TursoSpecRow>> = BTreeMap::new();
-    for row in rows {
-        grouped.entry(row.tenant.clone()).or_default().push(row);
-    }
-
-    populate_registry(
-        registry,
-        grouped,
-        &mut constraints_by_tenant,
-        |rows| rows.csdl_xml.clone(),
-        |row| (row.entity_type.clone(), row.ioa_source.clone()),
-    )
+    let stored = read_stored_tenants_from_turso(turso).await?;
+    Ok(register_stored_tenants(registry, stored).await)
 }
 
-/// Restore a [`SpecRegistry`] from a [`PlatformStore`] (trait-based).
-///
-/// This is the production code path for restoring specs from any platform
-/// store backend (Turso, Sim, etc.). Used by both the CLI bootstrap and
-/// the DST harness — ensuring simulation runs identical code.
-///
-/// Unlike [`restore_registry_from_turso`], this does not restore verification
-/// status or cross-entity constraints (the `PlatformStore` trait returns simpler
-/// `SpecRow` types). Specs are registered with `Pending` verification status.
-pub async fn restore_registry_from_platform_store(
-    registry: &mut SpecRegistry,
-    store: &dyn crate::platform_store::PlatformStore,
-) -> Result<usize, String> {
-    match store.delete_uncommitted_specs().await {
-        Ok(0) => {}
-        Ok(n) => tracing::info!("deleted {n} uncommitted specs during startup recovery"),
-        Err(e) => tracing::warn!("failed to delete uncommitted specs: {e}"),
+/// Register every one of `stored` into `registry` and write back what it
+/// converted, returning how many specs were restored.
+async fn register_stored_tenants(registry: &mut SpecRegistry, stored: StoredTenants) -> usize {
+    let mut restored = 0;
+    for (tenant, stored) in stored {
+        let (specs, converted) = register_stored_tenant(registry, tenant, stored);
+        converted.write_back().await;
+        restored += specs;
     }
-    let rows = store
-        .load_specs()
-        .await
-        .map_err(|e| format!("Failed to read specs from platform store: {e}"))?;
-
-    if rows.is_empty() {
-        return Ok(0);
-    }
-
-    // Group by tenant.
-    let mut grouped: BTreeMap<String, Vec<crate::platform_store::SpecRow>> = BTreeMap::new();
-    for row in rows {
-        grouped.entry(row.tenant.clone()).or_default().push(row);
-    }
-
-    let mut restored_specs = 0usize;
-    // Track specs that failed to register — these are orphans to reconcile.
-    let mut orphaned_specs: Vec<(String, String)> = Vec::new();
-
-    for (tenant, tenant_rows) in &grouped {
-        let (csdl, csdl_xml) = match restored_csdl_for_rows(tenant, tenant_rows, &|r| {
-            r.csdl_xml.clone()
-        }) {
-            Ok(Some(restored)) => restored,
-            Ok(None) => {
-                tracing::warn!(tenant = %tenant, "reconciling orphaned specs for tenant with missing CSDL");
-                for row in tenant_rows {
-                    orphaned_specs.push((row.tenant.clone(), row.entity_type.clone()));
-                }
-                continue;
-            }
-            Err(e) => {
-                tracing::warn!(tenant = %tenant, "reconciling orphaned specs for tenant with invalid CSDL: {e}");
-                for row in tenant_rows {
-                    orphaned_specs.push((row.tenant.clone(), row.entity_type.clone()));
-                }
-                continue;
-            }
-        };
-
-        let ioa_pairs: Vec<(&str, &str)> = tenant_rows
-            .iter()
-            .map(|r| (r.entity_type.as_str(), r.ioa_source.as_str()))
-            .collect();
-
-        match registry.try_register_tenant_with_constraints(
-            tenant.as_str(),
-            csdl,
-            csdl_xml,
-            &ioa_pairs,
-            None,
-            false,
-        ) {
-            Ok(()) => {
-                restored_specs += tenant_rows.len();
-            }
-            Err(e) => {
-                tracing::warn!(tenant = %tenant, "reconciling orphaned specs for tenant that failed registration: {e}");
-                for row in tenant_rows {
-                    orphaned_specs.push((row.tenant.clone(), row.entity_type.clone()));
-                }
-            }
-        }
-    }
-
-    // Reconciliation: delete orphaned specs from the store so P1 holds
-    // (every spec in store has a matching registry entry).
-    for (tenant, entity_type) in &orphaned_specs {
-        if let Err(e) = store.delete_spec(tenant, entity_type).await {
-            tracing::warn!(
-                tenant = %tenant,
-                entity_type = %entity_type,
-                "best-effort orphan cleanup failed: {e}"
-            );
-        }
-    }
-
-    Ok(restored_specs)
+    restored
 }
 
 #[cfg(test)]

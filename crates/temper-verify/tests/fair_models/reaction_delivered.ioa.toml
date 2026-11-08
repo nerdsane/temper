@@ -1,0 +1,15 @@
+[automaton]
+name = "Target"
+states = ["Waiting", "Taken"]
+initial = "Waiting"
+
+[[action]]
+name = "Take"
+kind = "internal"
+from = ["Waiting"]
+to = "Taken"
+
+[[liveness]]
+name = "TargetTakes"
+eventually = "Source[Id].status != 'Sent' || status == 'Taken'"
+fairness = {}

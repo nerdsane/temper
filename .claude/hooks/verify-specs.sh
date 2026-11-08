@@ -2,8 +2,9 @@
 # verify-specs.sh -- Claude Code PostToolUse hook for spec verification.
 #
 # Reads the PostToolUse JSON payload from stdin, extracts the file path,
-# and checks repository source behavior if the file is a spec file (*.ioa.toml,
-# *.csdl.xml, or *.cedar).
+# and runs `temper verify-ioa` on it if it is an IOA spec (*.ioa.toml): it
+# parses and passes its verification cascade. CSDL, Cedar and the other checks
+# over a whole source directory run in CI (scripts/verify-ioa.sh says why).
 #
 # Exit codes:
 #   0 -- not a spec file, or verification passed
@@ -12,8 +13,7 @@
 # Expected behavior:
 #   Input: {"tool_name":"Write","tool_input":{"file_path":"/path/to/order.ioa.toml",...}}
 #   -> extracts /path/to/order.ioa.toml
-#   -> determines parent directory as specs dir
-#   -> runs: scripts/verify-source-collection.sh /path/to
+#   -> runs: scripts/verify-ioa.sh /path/to/order.ioa.toml
 #   -> exit 0 on pass, exit 2 on fail
 #
 #   Input: {"tool_name":"Edit","tool_input":{"file_path":"/path/to/main.rs",...}}
@@ -37,42 +37,19 @@ if [ -z "$FILE_PATH" ]; then
     exit 0
 fi
 
-# Check if the file is a spec file we care about.
+# Only IOA specs have a local check.
 case "$FILE_PATH" in
-    *.ioa.toml)  ;;
-    *.csdl.xml)  ;;
-    *.cedar)     ;;
-    *)
-        # Not a spec file -- nothing to verify.
-        exit 0
-        ;;
+    *.ioa.toml) ;;
+    *) exit 0 ;;
 esac
 
-# Determine the specs directory.
-# For *.ioa.toml and *.csdl.xml the parent directory is the specs dir.
-# For *.cedar files the specs dir is two levels up (policies/ sits inside specs/).
-case "$FILE_PATH" in
-    *.cedar)
-        SPECS_DIR="$(dirname "$(dirname "$FILE_PATH")")"
-        ;;
-    *)
-        SPECS_DIR="$(dirname "$FILE_PATH")"
-        ;;
-esac
-
-# Verify the specs directory exists and contains a CSDL model.
-if [ ! -d "$SPECS_DIR" ]; then
-    # Directory does not exist yet; skip verification.
-    exit 0
-fi
-
-if [ ! -f "$SPECS_DIR/model.csdl.xml" ]; then
-    # No CSDL model present; skip verification (incomplete spec set).
+if [ ! -f "$FILE_PATH" ]; then
+    # Deleted, or not written yet; nothing to verify.
     exit 0
 fi
 
 # Find the workspace root (location of the top-level Cargo.toml).
-WORKSPACE_ROOT="$(cd "$SPECS_DIR" && while [ "$(pwd)" != "/" ]; do
+WORKSPACE_ROOT="$(cd "$(dirname "$FILE_PATH")" && while [ "$(pwd)" != "/" ]; do
     if [ -f Cargo.toml ] && grep -q '\[workspace\]' Cargo.toml 2>/dev/null; then
         pwd
         break
@@ -85,10 +62,10 @@ if [ -z "$WORKSPACE_ROOT" ]; then
     exit 0
 fi
 
-echo "Verifying specs in $SPECS_DIR ..." >&2
+echo "Verifying $FILE_PATH ..." >&2
 
 # Run the verification cascade.
-if OUTPUT="$(cd "$WORKSPACE_ROOT" && "$WORKSPACE_ROOT/scripts/verify-source-collection.sh" "$SPECS_DIR" 2>&1)"; then
+if OUTPUT="$(cd "$WORKSPACE_ROOT" && "$WORKSPACE_ROOT/scripts/verify-ioa.sh" "$FILE_PATH" 2>&1)"; then
     echo "$OUTPUT" >&2
     echo "Spec verification passed." >&2
     exit 0
@@ -97,7 +74,7 @@ else
     echo "$OUTPUT" >&2
     echo "" >&2
     echo "Spec verification FAILED (exit $EXIT_CODE)." >&2
-    echo "The edited spec file did not pass the verification cascade." >&2
+    echo "The edited spec did not parse or did not pass its verification cascade." >&2
     echo "Fix the spec errors above and try again." >&2
     exit 2
 fi

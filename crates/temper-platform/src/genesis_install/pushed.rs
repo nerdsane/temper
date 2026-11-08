@@ -1,0 +1,371 @@
+//! A second source for the one installer: an app's files, posted to this
+//! server (`POST /api/os-apps/{name}/install`).
+//!
+//! A push only materializes its files into a cache directory of its own
+//! ([`InstallSource::Pushed`], named by the digest of the files); from there
+//! it is installed like a registry closure
+//! ([`closure_install::install_materialized_closure`]): parse, register,
+//! reconcile, verify, then commit or roll back. Its install record says
+//! `pushed` and names the version as `pushed/<app>@<digest>`, so boot restores
+//! it from that directory and a later failed install rolls back to it, as for
+//! a registry install.
+
+use std::time::{Duration, Instant};
+
+use serde::Deserialize;
+
+use super::closure_install::{
+    CheckRefused, ClosureRefused, ClosureSource, MaterializedApp, MaterializedClosure,
+};
+use super::*;
+use crate::os_apps::{AppFileSource, read_app_guide, read_app_manifest, tenant_os_app_dir};
+
+mod files;
+
+/// The source kind a pushed install's records carry.
+pub(super) const SOURCE_KIND: &str = "pushed";
+
+/// One pushed file: its text, its bytes in base64, or the same bytes as the
+/// file at its path in the version installed now, named by their SHA-256.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum PushedFile {
+    /// UTF-8 text.
+    Text(String),
+    /// Bytes, base64-encoded.
+    Bytes(Base64File),
+    /// The installed version's file at the same path, unchanged.
+    Kept(KeptFile),
+}
+
+/// `{"base64": "..."}`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Base64File {
+    /// The file's bytes, standard base64.
+    pub base64: String,
+}
+
+/// `{"keep": "<sha256 hex>"}`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeptFile {
+    /// The SHA-256 of the installed file, in hex.
+    pub keep: String,
+}
+
+/// Whether a push installs its files or only checks them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushMode {
+    /// Install the files, or refuse them and keep the version before.
+    Install,
+    /// Answer what the install would, through the same checks, and write
+    /// nothing the tenant reads: no spec, policy, module, record or catalog
+    /// entry. Its files go to a directory of its own, removed when it ends.
+    Check,
+}
+
+/// A pushed version that is installed, or that a check found would install.
+#[derive(Debug)]
+pub struct PushedInstall {
+    /// The digest of its files, which names its version.
+    pub digest: String,
+    /// What the installer did.
+    pub result: InstallResult,
+}
+
+/// Why a push was refused.
+#[derive(Debug)]
+pub enum PushRefused {
+    /// The request is wrong: a name, a path, a kept file, or files that are
+    /// not the app named. Nothing changed.
+    Request(String),
+    /// A spec does not parse; says which and why. Nothing changed.
+    Unparsed(String),
+    /// The installer refused the version, saying why; the version installed
+    /// before it, if any, is installed again.
+    Install(String),
+    /// This server could not do its part, such as writing the files.
+    Server(String),
+    /// A check that cannot answer as the install would, saying why. Nothing
+    /// changed.
+    Unchecked(String),
+}
+
+/// Install `files` as `tenant`'s version of `app`, or with [`PushMode::Check`]
+/// only check them, and say how long the push waited for this host's install
+/// turn ([`temper_server::host_turn`]).
+///
+/// A check takes no turn, so no check, however long its proofs take, holds up
+/// an install. The turn guards the shared cache directories, and a check never
+/// uses them: its files go to a directory of its own ([`check_pushed`]). What
+/// it reads of the tenant it reads under the tenant's install lock, as each
+/// install step does, and it waits for a proof without that lock, as an install
+/// does.
+pub async fn install_pushed_app(
+    platform: &PlatformState,
+    tenant: &str,
+    app: &str,
+    files: BTreeMap<String, PushedFile>,
+    mode: PushMode,
+) -> (Duration, Result<PushedInstall, PushRefused>) {
+    for (label, value) in [("tenant", tenant), ("app name", app)] {
+        if let Err(error) = validate_identity_component(label, value) {
+            return (Duration::ZERO, Err(PushRefused::Request(error)));
+        }
+    }
+    if mode == PushMode::Check {
+        return (
+            Duration::ZERO,
+            check_pushed(platform, tenant, app, files).await,
+        );
+    }
+    let asked = Instant::now();
+    let turn = temper_server::host_turn::take().await;
+    let waited = asked.elapsed();
+    let result = match turn {
+        Ok(_turn) => install_in_turn(platform, tenant, app, files).await,
+        Err(error) => Err(PushRefused::Server(error)),
+    };
+    (waited, result)
+}
+
+/// What installing `files` would answer. They are written under a directory
+/// of their own beside the pushed versions, which no install reads or prunes
+/// (prune takes only a version's name), and which is removed when the check
+/// ends, even one its caller abandons.
+async fn check_pushed(
+    platform: &PlatformState,
+    tenant: &str,
+    app: &str,
+    files: BTreeMap<String, PushedFile>,
+) -> Result<PushedInstall, PushRefused> {
+    let prior = recorded_digest(platform, tenant, app).await;
+    let kept_from = prior
+        .as_deref()
+        .map(|digest| pushed_root(platform, tenant, app, digest).join(app));
+    let files = files::resolve(files, kept_from.as_deref())?;
+    let digest = files::digest(&files);
+    let unwritten = |error: std::io::Error| {
+        PushRefused::Server(format!("the pushed files could not be written: {error}"))
+    };
+    let versions = pushed_root(platform, tenant, app, &digest)
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| {
+            PushRefused::Server("a pushed version's directory has no parent".to_string())
+        })?;
+    std::fs::create_dir_all(&versions).map_err(unwritten)?;
+    let own = tempfile::Builder::new()
+        .prefix(".pushed-check-")
+        .tempdir_in(&versions)
+        .map_err(unwritten)?;
+    let root = own.path().join("version");
+    files::materialize(&root, app, &files).map_err(unwritten)?;
+    let app_dir = root.join(app);
+    let written = AppFileSource::written(app_dir.clone(), files.keys().cloned());
+    is_the_app(&app_dir, app)?;
+    let app_ref = pushed_ref(app, &digest);
+    let checked = closure_install::check_materialized_closure(
+        platform,
+        tenant,
+        &root,
+        &closure(&app_ref, app, &digest, written),
+    )
+    .await;
+    match checked {
+        Ok(result) => Ok(PushedInstall { digest, result }),
+        Err(CheckRefused::Unparsed(error)) => Err(PushRefused::Unparsed(error)),
+        Err(CheckRefused::Refused(error)) => Err(PushRefused::Install(error)),
+        Err(CheckRefused::Unchecked(error)) => Err(PushRefused::Unchecked(error)),
+    }
+}
+
+/// The installer reads an app from its `app.toml`, which must name it, and its
+/// `APP.md`.
+fn is_the_app(app_dir: &Path, app: &str) -> Result<(), PushRefused> {
+    let named = read_app_manifest(app_dir).is_some_and(|manifest| manifest.name == app);
+    if named && read_app_guide(app_dir).is_some() {
+        return Ok(());
+    }
+    Err(PushRefused::Request(format!(
+        "these files are not the app '{app}': it needs an app.toml naming '{app}' and an APP.md"
+    )))
+}
+
+async fn install_in_turn(
+    platform: &PlatformState,
+    tenant: &str,
+    app: &str,
+    files: BTreeMap<String, PushedFile>,
+) -> Result<PushedInstall, PushRefused> {
+    let prior = recorded_digest(platform, tenant, app).await;
+    let kept_from = prior
+        .as_deref()
+        .map(|digest| pushed_root(platform, tenant, app, digest).join(app));
+    let files = files::resolve(files, kept_from.as_deref())?;
+    let digest = files::digest(&files);
+    let root = pushed_root(platform, tenant, app, &digest);
+    // A directory's name does not prove its bytes or saved list still match.
+    // Repair a damaged cache from the request before it can be installed.
+    let created = !root.is_dir();
+    if created || !files::matches(&root, app, &files) {
+        files::materialize(&root, app, &files).map_err(|error| {
+            PushRefused::Server(format!("the pushed files could not be written: {error}"))
+        })?;
+    }
+    // Only discard a new version proven inactive. A repeated push can also
+    // recreate a missing cache for the prior install; never delete that if
+    // rollback selected it again.
+    let discard = || {
+        if created
+            && tenant_os_app_dir(tenant, app).as_deref() != Some(root.join(app).as_path())
+            && let Err(error) = std::fs::remove_dir_all(&root)
+        {
+            tracing::warn!(app, path = %root.display(), %error, "a refused pushed version could not be deleted");
+        }
+    };
+
+    let app_dir = root.join(app);
+    // The installer reads exactly these files, by name: a folder just renamed
+    // into place can list short, and is never listed here.
+    let written = AppFileSource::written(app_dir.clone(), files.keys().cloned());
+    if let Err(refused) = is_the_app(&app_dir, app) {
+        discard();
+        return Err(refused);
+    }
+
+    let app_ref = pushed_ref(app, &digest);
+    let installed = closure_install::install_materialized_closure(
+        platform,
+        tenant,
+        &root,
+        closure(&app_ref, app, &digest, written),
+    )
+    .await;
+    match installed {
+        Ok(installed) => {
+            let keep: Vec<&str> = [Some(digest.as_str()), prior.as_deref()]
+                .into_iter()
+                .flatten()
+                .collect();
+            prune(platform, tenant, app, &keep);
+            Ok(PushedInstall {
+                digest,
+                result: installed.install,
+            })
+        }
+        Err(ClosureRefused::Unparsed(error)) => {
+            discard();
+            Err(PushRefused::Unparsed(error))
+        }
+        Err(ClosureRefused::Inactive(error)) => {
+            discard();
+            Err(PushRefused::Install(error))
+        }
+        Err(ClosureRefused::Failed(error)) => Err(PushRefused::Install(error)),
+    }
+}
+
+/// Whether `tenant`'s install of `app` that this server stored is a pushed
+/// version: boot then replays it as recorded rather than installing its
+/// catalog files over it.
+pub async fn pushed_install_recorded(platform: &PlatformState, tenant: &str, app: &str) -> bool {
+    recorded_digest(platform, tenant, app).await.is_some()
+}
+
+/// The digest of the pushed version `tenant`'s stored install of `app` names.
+async fn recorded_digest(platform: &PlatformState, tenant: &str, app: &str) -> Option<String> {
+    let record = platform_store(platform)?
+        .get_installed_app(tenant, app)
+        .await
+        .ok()??;
+    if record.source_kind != SOURCE_KIND || record.status != "installed" {
+        return None;
+    }
+    let (_, digest) = record.app_ref.rsplit_once('@')?;
+    let is_digest = digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit());
+    is_digest.then(|| digest.to_string())
+}
+
+/// The ref a pushed version is recorded under, and its cache key.
+fn pushed_ref(app: &str, digest: &str) -> String {
+    format!("{SOURCE_KIND}/{app}@{digest}")
+}
+
+/// The files this push supplies: version `digest` of `app`, recorded as
+/// pushed and pinned. The shared core resolves its complete dependency
+/// closure over the tenant catalog before checking or mutating anything.
+fn closure<'a>(
+    app_ref: &'a str,
+    app: &str,
+    digest: &str,
+    files: AppFileSource,
+) -> MaterializedClosure<'a> {
+    let version = RegistryAppRef {
+        owner: SOURCE_KIND.to_string(),
+        name: app.to_string(),
+        version_hash: Some(digest.to_string()),
+    };
+    MaterializedClosure {
+        app_ref,
+        root: version.clone(),
+        apps: vec![MaterializedApp { version, files }],
+        source: ClosureSource {
+            source_kind: SOURCE_KIND,
+            registry_url: "",
+            registry_tenant: "",
+            follow_policy: "pinned",
+        },
+    }
+}
+
+/// Delete every pushed version of `app` for `tenant` but `keep`: the version
+/// installed now and the one before it, which a failed install rolls back to.
+/// Each version holds a whole copy of the app, so without this a server's
+/// disk fills one push at a time.
+fn prune(platform: &PlatformState, tenant: &str, app: &str, keep: &[&str]) {
+    let kept: Vec<PathBuf> = keep
+        .iter()
+        .map(|digest| pushed_root(platform, tenant, app, digest))
+        .collect();
+    let Some(base) = kept.first().and_then(|root| root.parent()) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(base) else {
+        return;
+    };
+    // A version's directory is `<sanitized ref>-<owner digest>`; a name is
+    // taken as one only when it is exactly where that digest's version of
+    // this app for this tenant lives.
+    let prefix = format!("{}-", sanitize_fragment(&format!("{SOURCE_KIND}/{app}@")));
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(digest) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(&prefix))
+            .and_then(|rest| rest.get(..64))
+        else {
+            continue;
+        };
+        let root = pushed_root(platform, tenant, app, digest);
+        if root != entry.path() || kept.contains(&root) {
+            continue;
+        }
+        if let Err(error) = std::fs::remove_dir_all(&root) {
+            tracing::warn!(app, path = %root.display(), %error, "an old pushed version could not be deleted");
+        }
+    }
+}
+
+/// The cache directory of `tenant`'s pushed version `digest` of `app`.
+fn pushed_root(platform: &PlatformState, tenant: &str, app: &str, digest: &str) -> PathBuf {
+    genesis_cache_root(
+        &platform.server,
+        CacheOwner::Install {
+            tenant,
+            source: InstallSource::Pushed,
+        },
+        &pushed_ref(app, digest),
+    )
+}

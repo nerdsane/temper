@@ -20,12 +20,11 @@ fn test_envelope(event_type: &str, payload: serde_json::Value) -> PersistenceEnv
 
 /// ADR-0153 live verification: the real postgres store honors the same
 /// negative-existence + atomicity invariants the DST proved in SimEventStore.
-/// Gated on DATABASE_URL (skips otherwise); isolated by a unique tenant.
+/// Gated on DATABASE_URL (skips locally without it, fails in CI); isolated by a unique tenant.
 #[test]
 fn entity_key_index_present_absent_and_atomic_reject() {
-    let database_url = match std::env::var("DATABASE_URL") {
-        Ok(url) => url,
-        Err(_) => return,
+    let Some(database_url) = temper_test_resource::env_var("DATABASE_URL") else {
+        return;
     };
 
     sqlx::test_block_on(async {
@@ -109,9 +108,8 @@ fn entity_key_index_present_absent_and_atomic_reject() {
 /// 0010). Gated on DATABASE_URL; isolated by a unique tenant.
 #[test]
 fn key_index_backfill_and_watermark_methods_round_trip_on_postgres() {
-    let database_url = match std::env::var("DATABASE_URL") {
-        Ok(url) => url,
-        Err(_) => return,
+    let Some(database_url) = temper_test_resource::env_var("DATABASE_URL") else {
+        return;
     };
 
     sqlx::test_block_on(async {
@@ -198,9 +196,8 @@ fn key_index_backfill_and_watermark_methods_round_trip_on_postgres() {
 
 #[test]
 fn list_entity_ids_by_type_unions_catalog_field_index_and_events() {
-    let database_url = match std::env::var("DATABASE_URL") {
-        Ok(url) => url,
-        Err(_) => return,
+    let Some(database_url) = temper_test_resource::env_var("DATABASE_URL") else {
+        return;
     };
 
     sqlx::test_block_on(async {
@@ -258,7 +255,29 @@ fn list_entity_ids_by_type_unions_catalog_field_index_and_events() {
             .append(
                 &format!("{tenant}:{entity_type}:dl-deleted"),
                 0,
-                &[test_envelope("Deleted", serde_json::json!({}))],
+                &[test_envelope(
+                    "Deleted",
+                    serde_json::json!({
+                        "action": "Deleted", "from_status": "Published",
+                        "to_status": "Deleted", "params": {}, "kind": "tombstone"
+                    }),
+                )],
+            )
+            .await
+            .unwrap();
+        // A spec action named Deleted, journaled before events had a kind:
+        // its params tell it from the kernel's tombstone, so it stays listed.
+        store
+            .append(
+                &format!("{tenant}:{entity_type}:dl-spec-deleted"),
+                0,
+                &[test_envelope(
+                    "Deleted",
+                    serde_json::json!({
+                        "action": "Deleted", "from_status": "Deleting",
+                        "to_status": "Deleted", "params": { "note": "gone" }
+                    }),
+                )],
             )
             .await
             .unwrap();
@@ -274,6 +293,7 @@ fn list_entity_ids_by_type_unions_catalog_field_index_and_events() {
                 "dl-catalog".to_string(),
                 "dl-event".to_string(),
                 "dl-index".to_string(),
+                "dl-spec-deleted".to_string(),
             ]
         );
 
@@ -297,9 +317,8 @@ fn list_entity_ids_by_type_unions_catalog_field_index_and_events() {
 
 #[test]
 fn load_selected_entity_catalog_rows_pg_returns_sparse_json_values() {
-    let database_url = match std::env::var("DATABASE_URL") {
-        Ok(url) => url,
-        Err(_) => return,
+    let Some(database_url) = temper_test_resource::env_var("DATABASE_URL") else {
+        return;
     };
 
     sqlx::test_block_on(async {
@@ -321,7 +340,14 @@ fn load_selected_entity_catalog_rows_pg_returns_sparse_json_values() {
             "entity_id": entity_id,
             "status": "Published",
             "Title": "State title",
-            "fields": fields,
+            "fields": {
+                "Id": entity_id,
+                "Name": "State name wins",
+                "Status": "Published",
+                "JsonField": { "kind": "nested", "score": 9 },
+                "Large": "x".repeat(4096),
+                "Private": "state only",
+            },
             "events": [{ "type": "ShouldNotLoad" }],
             "sequence_nr": 7,
             "total_event_count": 7,
@@ -333,7 +359,7 @@ fn load_selected_entity_catalog_rows_pg_returns_sparse_json_values() {
                 entity_type,
                 entity_id,
                 "Published",
-                state.get("fields").unwrap(),
+                &fields,
                 &state,
                 7,
             )
@@ -368,6 +394,18 @@ fn load_selected_entity_catalog_rows_pg_returns_sparse_json_values() {
         assert!(rows[0].fields.get("Large").is_none());
         assert!(rows[0].fields.get("Missing").is_none());
 
+        let selected_fields = store
+            .load_selected_entity_catalog_rows_pg(
+                &tenant,
+                entity_type,
+                &[entity_id.to_string()],
+                &["fields".to_string()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(selected_fields[0].fields["fields"], state["fields"]);
+        assert!(selected_fields[0].state.is_none());
+
         crate::dbm::postgres_query!("DELETE FROM entity_field_index WHERE tenant = $1")
             .bind(&tenant)
             .execute(&pool)
@@ -383,9 +421,8 @@ fn load_selected_entity_catalog_rows_pg_returns_sparse_json_values() {
 
 #[test]
 fn query_field_index_page_orders_and_limits_inside_postgres() {
-    let database_url = match std::env::var("DATABASE_URL") {
-        Ok(url) => url,
-        Err(_) => return,
+    let Some(database_url) = temper_test_resource::env_var("DATABASE_URL") else {
+        return;
     };
 
     sqlx::test_block_on(async {
@@ -520,9 +557,8 @@ fn query_field_index_page_orders_and_limits_inside_postgres() {
 
 #[test]
 fn upsert_query_projection_diffs_field_index_rows() {
-    let database_url = match std::env::var("DATABASE_URL") {
-        Ok(url) => url,
-        Err(_) => return,
+    let Some(database_url) = temper_test_resource::env_var("DATABASE_URL") else {
+        return;
     };
 
     sqlx::test_block_on(async {
@@ -638,18 +674,10 @@ fn upsert_query_projection_diffs_field_index_rows() {
                 (
                     "content_hash".to_string(),
                     Some("sha256:new".to_string()),
-                    Some("Ready".to_string())
+                    None
                 ),
-                (
-                    "owner".to_string(),
-                    Some("alice".to_string()),
-                    Some("Ready".to_string())
-                ),
-                (
-                    "size_bytes".to_string(),
-                    Some("128".to_string()),
-                    Some("Ready".to_string())
-                ),
+                ("owner".to_string(), Some("alice".to_string()), None),
+                ("size_bytes".to_string(), Some("128".to_string()), None),
             ]
         );
 
@@ -683,10 +711,9 @@ fn upsert_query_projection_diffs_field_index_rows() {
 }
 
 #[test]
-fn native_data_only_create_inserts_event_catalog_and_index_atomically() {
-    let database_url = match std::env::var("DATABASE_URL") {
-        Ok(url) => url,
-        Err(_) => return,
+fn append_with_projection_commits_event_catalog_and_index_together() {
+    let Some(database_url) = temper_test_resource::env_var("DATABASE_URL") else {
+        return;
     };
 
     sqlx::test_block_on(async {
@@ -707,15 +734,26 @@ fn native_data_only_create_inserts_event_catalog_and_index_atomically() {
         let mut envelope = test_envelope("Created", fields.clone());
         envelope.sequence_nr = 1;
 
+        let state = serde_json::json!({
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "status": "Active",
+            "fields": fields,
+            "events": [],
+            "total_event_count": 1,
+            "sequence_nr": 1
+        });
+        let rows = || temper_runtime::persistence::CommitRows {
+            projection: Some(temper_runtime::persistence::ProjectionRow::Upsert {
+                status: "Active",
+                fields: &fields,
+                state: &state,
+            }),
+            ..Default::default()
+        };
+        let pid = format!("{tenant}:{entity_type}:{entity_id}");
         let sequence_nr = store
-            .create_data_only_entity_native(
-                &tenant,
-                entity_type,
-                entity_id,
-                "Active",
-                &fields,
-                &envelope,
-            )
+            .append_with_rows(&pid, 0, std::slice::from_ref(&envelope), rows())
             .await
             .unwrap();
 
@@ -746,11 +784,23 @@ fn native_data_only_create_inserts_event_catalog_and_index_atomically() {
         let (status, stored_fields, stored_state, stored_sequence) = catalog.unwrap();
         assert_eq!(status, "Active");
         assert_eq!(stored_fields, fields);
-        let stored_state = stored_state.expect("native create should store full catalog state");
-        assert_eq!(stored_state["fields"], fields);
+        let stored_state = stored_state.expect("the append stores the catalog state");
+        assert!(
+            stored_state.get("fields").is_none(),
+            "the stored state leaves out fields the fields column holds"
+        );
         assert_eq!(stored_state["sequence_nr"], 1);
         assert_eq!(stored_state["total_event_count"], 1);
         assert_eq!(stored_sequence, 1);
+        let read = store
+            .load_entity_catalog_rows_pg(&tenant, entity_type, &[entity_id.to_string()])
+            .await
+            .unwrap();
+        let read_state = read[0].state.as_ref().expect("catalog read has a state");
+        assert_eq!(
+            read_state["fields"], fields,
+            "a catalog read puts the fields back"
+        );
 
         let indexed_count: i64 = crate::dbm::postgres_query_scalar!(
             "SELECT COUNT(*)::bigint FROM entity_field_index \
@@ -765,14 +815,7 @@ fn native_data_only_create_inserts_event_catalog_and_index_atomically() {
         assert!(indexed_count >= 5);
 
         let duplicate = store
-            .create_data_only_entity_native(
-                &tenant,
-                entity_type,
-                entity_id,
-                "Active",
-                &fields,
-                &envelope,
-            )
+            .append_with_rows(&pid, 0, std::slice::from_ref(&envelope), rows())
             .await;
         assert!(matches!(
             duplicate,
@@ -799,9 +842,8 @@ fn native_data_only_create_inserts_event_catalog_and_index_atomically() {
 
 #[test]
 fn upsert_query_projection_advances_sequence_without_rewriting_unchanged_index() {
-    let database_url = match std::env::var("DATABASE_URL") {
-        Ok(url) => url,
-        Err(_) => return,
+    let Some(database_url) = temper_test_resource::env_var("DATABASE_URL") else {
+        return;
     };
 
     sqlx::test_block_on(async {
@@ -882,11 +924,12 @@ fn upsert_query_projection_advances_sequence_without_rewriting_unchanged_index()
     });
 }
 
+/// The index holds field values only; the status lives in the catalog row, so
+/// a move that changes only the status leaves the index rows alone.
 #[test]
-fn upsert_query_projection_updates_index_status_when_fields_are_unchanged() {
-    let database_url = match std::env::var("DATABASE_URL") {
-        Ok(url) => url,
-        Err(_) => return,
+fn upsert_query_projection_leaves_index_rows_alone_when_only_status_changes() {
+    let Some(database_url) = temper_test_resource::env_var("DATABASE_URL") else {
+        return;
     };
 
     sqlx::test_block_on(async {
@@ -925,9 +968,9 @@ fn upsert_query_projection_updates_index_status_when_fields_are_unchanged() {
         assert_eq!(
             field_rows,
             vec![
-                ("message_count".to_string(), Some("Complete".to_string())),
-                ("owner".to_string(), Some("Complete".to_string())),
-                ("title".to_string(), Some("Complete".to_string())),
+                ("message_count".to_string(), None),
+                ("owner".to_string(), None),
+                ("title".to_string(), None),
             ]
         );
 
@@ -960,9 +1003,8 @@ fn upsert_query_projection_updates_index_status_when_fields_are_unchanged() {
 
 #[test]
 fn upsert_query_projection_clears_index_when_scalar_fields_disappear() {
-    let database_url = match std::env::var("DATABASE_URL") {
-        Ok(url) => url,
-        Err(_) => return,
+    let Some(database_url) = temper_test_resource::env_var("DATABASE_URL") else {
+        return;
     };
 
     sqlx::test_block_on(async {
@@ -1052,9 +1094,8 @@ fn upsert_query_projection_clears_index_when_scalar_fields_disappear() {
 
 #[test]
 fn upsert_query_projection_removes_index_row_when_value_becomes_too_long() {
-    let database_url = match std::env::var("DATABASE_URL") {
-        Ok(url) => url,
-        Err(_) => return,
+    let Some(database_url) = temper_test_resource::env_var("DATABASE_URL") else {
+        return;
     };
 
     sqlx::test_block_on(async {
@@ -1153,12 +1194,11 @@ fn upsert_query_projection_removes_index_row_when_value_becomes_too_long() {
 /// property in `temper-store-turso`; this is the Postgres half, so the two
 /// backends cannot drift into different replay orders.
 ///
-/// Gated on DATABASE_URL (skips otherwise); isolated by a unique tenant.
+/// Gated on DATABASE_URL (skips locally without it, fails in CI); isolated by a unique tenant.
 #[test]
 fn session_read_follows_capture_order_not_insert_order() {
-    let database_url = match std::env::var("DATABASE_URL") {
-        Ok(url) => url,
-        Err(_) => return,
+    let Some(database_url) = temper_test_resource::env_var("DATABASE_URL") else {
+        return;
     };
 
     sqlx::test_block_on(async {
@@ -1219,5 +1259,38 @@ fn session_read_follows_capture_order_not_insert_order() {
             .execute(&pool)
             .await
             .unwrap();
+    });
+}
+
+/// Every listing's tombstone probe reads `idx_events_deleted` (migration 0017)
+/// instead of scanning the whole journal. Gated on DATABASE_URL.
+///
+/// The catalog read names this test's schema: other tests migrate their own
+/// schemas, each with an `events` table and this index, and drop them when
+/// they finish. Reading every schema's index definition raced those drops
+/// ("could not open relation with OID").
+#[test]
+fn migrations_create_the_tombstone_index() {
+    let Some(database_url) = temper_test_resource::env_var("DATABASE_URL") else {
+        return;
+    };
+
+    sqlx::test_block_on(async {
+        let pool = PgPool::connect(&database_url).await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let definition: Option<String> = crate::dbm::postgres_query_scalar!(
+            "SELECT indexdef FROM pg_indexes \
+             WHERE schemaname = current_schema() \
+             AND tablename = 'events' AND indexname = 'idx_events_deleted'",
+        )
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        let definition = definition.expect("idx_events_deleted exists after migrations");
+        assert!(
+            definition.contains("(tenant, entity_type, entity_id)")
+                && definition.contains("WHERE (event_type = 'Deleted'::text)"),
+            "unexpected tombstone index: {definition}"
+        );
     });
 }

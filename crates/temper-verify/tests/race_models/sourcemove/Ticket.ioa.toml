@@ -1,0 +1,81 @@
+# Planted: four moves send the same reaction, and Cedar lets only the one from
+# `Drop` through. Walking them as one reaction would ask Cedar about `Keep`,
+# which it refuses, and the rule would read HOLDS.
+[automaton]
+name = "Ticket"
+states = ["New", "Open", "Kept", "Dropped"]
+initial = "New"
+
+[[state]]
+name = "board"
+type = "string"
+initial = ""
+
+[[invariant]]
+name = "DroppedTicketLeavesItsBoardAlone"
+assert = "status == 'Dropped' => Board[board].status != 'Pinged'"
+
+[[action]]
+name = "Start"
+kind = "input"
+from = ["New"]
+to = "Open"
+params = [{ name = "board", type = "string" }]
+
+[[action]]
+name = "Keep"
+kind = "input"
+from = ["Open"]
+to = "Kept"
+
+[[action.triggers]]
+name = "ping"
+kind = "entity"
+target_entity = "Board"
+target_action = "Ping"
+[action.triggers.resolve_target]
+kind = "field"
+id_field = "board"
+
+[[action]]
+name = "Drop"
+kind = "input"
+from = ["Open"]
+to = "Dropped"
+
+[[action.triggers]]
+name = "ping"
+kind = "entity"
+target_entity = "Board"
+target_action = "Ping"
+[action.triggers.resolve_target]
+kind = "field"
+id_field = "board"
+
+[[action]]
+name = "Poke"
+kind = "input"
+from = ["Open"]
+
+[[action.triggers]]
+name = "ping"
+kind = "entity"
+target_entity = "Board"
+target_action = "Ping"
+[action.triggers.resolve_target]
+kind = "field"
+id_field = "board"
+
+[[action]]
+name = "Prod"
+kind = "input"
+from = ["Open"]
+
+[[action.triggers]]
+name = "ping"
+kind = "entity"
+target_entity = "Board"
+target_action = "Ping"
+[action.triggers.resolve_target]
+kind = "field"
+id_field = "board"

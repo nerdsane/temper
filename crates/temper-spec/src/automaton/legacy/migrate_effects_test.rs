@@ -114,6 +114,24 @@ effect = [{ type = "spawn", entity_type = "Child", entity_id_source = "child_key
 }
 
 #[test]
+fn copy_fields_become_a_spawn_copy_list() {
+    // Cron-job and computer entities hand parent fields to the spawned
+    // child; the conversion keeps that instead of refusing the spec.
+    let (source, _) = migrate(
+        r#"
+[[action]]
+name = "Start"
+from = ["A"]
+effect = [{ type = "spawn", entity_type = "Session", entity_id_source = "{uuid}", initial_action = "Configure", store_id_in = "session_id", copy_fields = "system_prompt,model" }]
+"#,
+    );
+    assert_eq!(
+        effects(&source, "Start"),
+        ["spawn('Session', 'Configure', session_id, copy(system_prompt, model))"]
+    );
+}
+
+#[test]
 fn integrations_become_triggers_on_the_actions_that_fired_them() {
     let (source, notes) = migrate(
         r#"
@@ -163,7 +181,7 @@ module = "m"
     let trigger = &charge.triggers[0];
     assert_eq!(trigger.name, "charge");
     assert_eq!(trigger.module.as_deref(), Some("stripe"));
-    assert_eq!(trigger.on_success.as_deref(), Some("Done"));
+    assert_eq!(trigger.on_success, ["Done"]);
     assert_eq!(trigger.on_failure.as_deref(), Some("Failed"));
     assert_eq!(
         trigger.config.get("url").map(String::as_str),
@@ -253,6 +271,20 @@ fn an_unresolvable_trigger_effect_is_an_error() {
 }
 
 #[test]
+fn an_outbound_webhook_integration_is_an_error() {
+    // It used to become a kind = "webhook" trigger, which installs and never
+    // sends its request (ADR-0182).
+    let err = migrate_source(&format!(
+        "{HEADER}\n[[action]]\nname = \"Go\"\nfrom = [\"A\"]\neffect = \"trigger notify\"\n\n[[integration]]\nname = \"notify\"\ntrigger = \"notify\"\ntype = \"webhook\"\nurl = \"https://example.com/hook\"\n"
+    ))
+    .unwrap_err();
+    assert!(
+        err.contains("'notify'") && err.contains("http_fetch"),
+        "{err}"
+    );
+}
+
+#[test]
 fn item_named_actions_get_the_effects_their_name_implied() {
     let (source, notes) = migrate(
         r#"
@@ -275,4 +307,100 @@ to = "B"
     assert_eq!(effects(&source, "RemoveItem"), ["items -= 1", "used -= 1"]);
     assert!(effects(&source, "Submit").is_empty());
     assert_eq!(notes.len(), 2, "{notes:?}");
+}
+
+#[test]
+fn a_string_variable_that_is_appended_to_becomes_a_list() {
+    let source = r#"
+[automaton]
+name = "Q"
+states = ["Open"]
+initial = "Open"
+
+[[state]]
+name = "job_ids"
+type = "string"
+initial = "[]"
+
+[[state]]
+name = "label"
+type = "string"
+initial = ""
+
+[[action]]
+name = "RecordJob"
+from = ["Open"]
+params = ["job_ids"]
+effect = [{ type = "list_append", var = "job_ids" }]
+"#;
+    let migration = migrate_source(source).unwrap_or_else(|e| panic!("{e}"));
+    let automaton = parse_automaton(&migration.source).expect("converted spec parses");
+    let job_ids = automaton
+        .state
+        .iter()
+        .find(|var| var.name == "job_ids")
+        .expect("job_ids declared");
+    assert_eq!(job_ids.var_type, crate::automaton::VarType::List);
+    let label = automaton
+        .state
+        .iter()
+        .find(|var| var.name == "label")
+        .expect("label declared");
+    assert_eq!(
+        label.var_type,
+        crate::automaton::VarType::String,
+        "a string nothing appends to stays a string"
+    );
+    assert_eq!(
+        effects(&migration.source, "RecordJob"),
+        ["append(job_ids, params.job_ids)"]
+    );
+}
+
+#[test]
+fn a_nested_not_trigger_guard_converts() {
+    let (source, _) = migrate(
+        r#"
+[[action]]
+name = "Go"
+from = ["A"]
+to = "B"
+
+[[action.triggers]]
+name = "tell_parent"
+kind = "entity"
+target_entity = "Parent"
+target_action = "Done"
+
+[action.triggers.guard]
+type = "not"
+
+[action.triggers.guard.guard]
+type = "field_equals"
+field = "parent_id"
+value = ""
+
+[action.triggers.resolve_target]
+type = "field"
+field = "parent_id"
+"#,
+    );
+    assert!(
+        source.contains(r#"guard = "parent_id != ''""#),
+        "the inner guard must survive conversion:\n{source}"
+    );
+}
+
+#[test]
+fn an_effect_array_quoted_as_one_string_converts() {
+    let (source, _) = migrate(
+        r#"
+[[action]]
+name = "Go"
+from = ["A"]
+to = "B"
+effect = '[{ type = "increment", var = "items" }, { type = "set_bool", var = "ready", value = true }]'
+"#,
+    );
+    assert_eq!(effects(&source, "Go"), ["items += 1", "ready = true"]);
 }

@@ -1,0 +1,23 @@
+# A post names its thread, and a reaction makes the thread if it is new. The
+# kernel reads a named record that was never made as being in its first status,
+# so without the reaction the post points at a thread that reads Unmade.
+[automaton]
+name = "Post"
+states = ["Unmade", "Written"]
+initial = "Unmade"
+
+[[state]]
+name = "thread"
+type = "string"
+initial = ""
+
+[[invariant]]
+name = "ThreadExists"
+assert = "status != 'Unmade' && !empty(thread) => Thread[thread].status in ['Open']"
+
+[[action]]
+name = "Add"
+kind = "input"
+from = ["Unmade"]
+to = "Written"
+params = ["thread"]

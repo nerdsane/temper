@@ -3,7 +3,7 @@
 //! Each function represents an explicit phase of the startup pipeline.
 //! The `run` coordinator in `mod.rs` calls these in sequence.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -15,15 +15,18 @@ use temper_runtime::tenant::TenantId;
 use temper_server::authz::load_and_activate_tenant_policies;
 use temper_server::registry::SpecRegistry;
 use temper_server::registry_bootstrap::{
-    restore_registry_from_postgres, restore_registry_from_turso,
+    StoredTenants, read_stored_tenants_from_postgres, read_stored_tenants_from_turso,
+    register_stored_tenant,
 };
-use temper_server::storage::StorageStack;
+use temper_server::storage::{StorageRoom, StorageStack};
 use temper_server::webhooks::WebhookDispatcher;
 use temper_store_redis::RedisEventStore;
 use temper_store_turso::{TenantStoreRouter, TursoEventStore};
 
 use crate::StorageBackend;
 
+use super::data_dir::{self, data_dir};
+use super::later::Later;
 use super::loader::load_into_registry;
 use super::storage::{
     connect_postgres_store, redact_connection_url, upsert_loaded_specs_to_postgres,
@@ -31,11 +34,22 @@ use super::storage::{
 };
 
 /// Phase 1: Initialize the storage backend (Postgres, Turso, Redis, or memory).
+///
+/// Also returns the local Turso database when `TURSO_SYNC_URL` gives it a
+/// Turso Cloud copy; the server answers changes only once they reach it.
 pub(super) async fn init_storage(
     storage: StorageBackend,
     storage_explicit: bool,
-) -> Result<(Option<sqlx::PgPool>, Option<StorageStack>)> {
+) -> Result<(
+    Option<sqlx::PgPool>,
+    Option<StorageStack>,
+    Option<TursoEventStore>,
+)> {
     let mut pg_pool: Option<sqlx::PgPool> = None;
+    let mut synced_store: Option<TursoEventStore> = None;
+    if !matches!(storage, StorageBackend::Turso) && std::env::var_os("TURSO_SYNC_URL").is_some() {
+        anyhow::bail!("TURSO_SYNC_URL needs --storage turso");
+    }
     let storage_stack: Option<StorageStack> = match storage {
         StorageBackend::Postgres => {
             if let Ok(database_url) = std::env::var("DATABASE_URL") {
@@ -57,12 +71,15 @@ pub(super) async fn init_storage(
         StorageBackend::Turso => {
             // Multi-tenant cloud mode: TURSO_PLATFORM_URL points at the shared platform DB.
             if let Ok(platform_url) = std::env::var("TURSO_PLATFORM_URL") {
+                if std::env::var_os("TURSO_SYNC_URL").is_some() {
+                    anyhow::bail!(
+                        "TURSO_SYNC_URL works with one local database, not TURSO_PLATFORM_URL"
+                    );
+                }
                 let platform_token = std::env::var("TURSO_PLATFORM_AUTH_TOKEN").ok();
-                let local_base_dir = std::env::var("TURSO_LOCAL_BASE_DIR").ok().or_else(|| {
-                    let home = std::env::var("HOME").ok()?;
-                    Some(format!("{home}/.local/share/temper/tenants"))
-                });
+                let local_base_dir = data_dir::routed_local_base_dir(&data_dir::env);
 
+                let room = local_base_dir.clone().map(StorageRoom::on_disk);
                 let mut router = TenantStoreRouter::new(
                     &platform_url,
                     platform_token.as_deref(),
@@ -84,14 +101,13 @@ pub(super) async fn init_storage(
                 println!(
                     "  Storage: turso-routed ({platform_url}, {tenant_count} tenants connected)"
                 );
-                Some(StorageStack::from_tenant_router(router))
+                Some(with_room(StorageStack::from_tenant_router(router), room))
             } else {
                 // Single-DB mode (local dev).
                 let turso_url = match std::env::var("TURSO_URL") {
                     Ok(url) => url,
                     Err(_) => {
-                        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-                        let db_path = Path::new(&home).join(".local/share/temper/agents.db");
+                        let db_path = data_dir().join("agents.db");
                         let parent_dir = db_path.parent().context(
                             "Failed to determine parent directory for default Turso DB path",
                         )?;
@@ -104,12 +120,34 @@ pub(super) async fn init_storage(
                         format!("file:{}", db_path.display())
                     }
                 };
-                let turso_token = std::env::var("TURSO_AUTH_TOKEN").ok();
-                let store = TursoEventStore::new(&turso_url, turso_token.as_deref())
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to connect to Turso/libSQL: {e}"))?;
-                println!("  Storage: turso ({})", turso_url);
-                Some(StorageStack::from_turso(store))
+                let sync_url = std::env::var("TURSO_SYNC_URL")
+                    .ok()
+                    .filter(|url| !url.is_empty());
+                let (store, copied) = if let Some(sync_url) = sync_url {
+                    if turso_url.starts_with("libsql://") {
+                        anyhow::bail!("TURSO_SYNC_URL needs a local TURSO_URL (file:...)");
+                    }
+                    let sync_token = std::env::var("TURSO_SYNC_AUTH_TOKEN")
+                        .context("TURSO_SYNC_AUTH_TOKEN is required with TURSO_SYNC_URL")?;
+                    let store = TursoEventStore::new_synced(&turso_url, &sync_url, &sync_token)
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!("Failed to open synced Turso database: {e}")
+                        })?;
+                    synced_store = Some(store.clone());
+                    let copied =
+                        format!(", each change copied to {sync_url} before it is answered");
+                    (store, copied)
+                } else {
+                    let turso_token = std::env::var("TURSO_AUTH_TOKEN").ok();
+                    let store = TursoEventStore::new(&turso_url, turso_token.as_deref())
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Failed to connect to Turso/libSQL: {e}"))?;
+                    (store, String::new())
+                };
+                println!("  Storage: turso ({turso_url}){copied}");
+                let room = local_store_dir(&turso_url).map(StorageRoom::on_disk);
+                Some(with_room(StorageStack::from_turso(store), room))
             }
         }
         StorageBackend::Redis => {
@@ -122,49 +160,101 @@ pub(super) async fn init_storage(
             Some(StorageStack::from_redis(store))
         }
     };
-    Ok((pg_pool, storage_stack))
+    Ok((pg_pool, storage_stack, synced_store))
+}
+
+/// The directory a local database at `url` (`file:` or a bare path) lives in;
+/// a remote one (`libsql://`) has none.
+fn local_store_dir(url: &str) -> Option<std::path::PathBuf> {
+    if url.starts_with("libsql://") {
+        return None;
+    }
+    let path = Path::new(url.strip_prefix("file:").unwrap_or(url));
+    let dir = path.parent().filter(|dir| !dir.as_os_str().is_empty());
+    Some(dir.unwrap_or(Path::new(".")).to_path_buf())
+}
+
+/// A stack whose store lives on a local disk refuses appends while that disk
+/// is under the floor (`temper_server::storage::STORAGE_FLOOR_BYTES`).
+fn with_room(stack: StorageStack, room: Option<StorageRoom>) -> StorageStack {
+    match room {
+        Some(room) => stack.with_storage_room(room),
+        None => stack,
+    }
 }
 
 /// Phase 2: Build the spec registry from persistent storage and disk apps.
+///
+/// Every tenant's spec rows are read, one read per store, but only `later`'s
+/// own tenants are registered; each other tenant's rows are left in `later`
+/// for its restore after serving. A routed store of a tenant not the
+/// server's own is read when that tenant is restored.
 pub(super) async fn build_registry(
     pg_pool: Option<&sqlx::PgPool>,
     storage_stack: Option<&StorageStack>,
     apps: &[(String, String)],
+    later: &mut Later,
 ) -> Result<(SpecRegistry, BTreeMap<String, String>)> {
     let mut registry = SpecRegistry::new();
     let mut tenant_policy_seed = BTreeMap::new();
 
     // Restore from persistent backend first.
+    let mut stored = StoredTenants::new();
     if let Some(pool) = pg_pool {
-        let restored = restore_registry_from_postgres(&mut registry, pool)
+        let store = temper_store_postgres::PostgresEventStore::new(pool.clone());
+        stored = read_stored_tenants_from_postgres(&store)
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
-        if restored > 0 {
-            println!("  Restored {restored} specs from Postgres.");
-        }
     } else if let Some(provider) = storage_stack.and_then(|stack| stack.turso.clone()) {
-        let mut total_restored = 0usize;
         if let Some(platform_store) = provider.platform_store() {
-            let restored = restore_registry_from_turso(&mut registry, &platform_store)
+            stored = read_stored_tenants_from_turso(&platform_store)
                 .await
                 .map_err(|e| anyhow::anyhow!(e))?;
-            total_restored += restored;
         }
         for tenant_id in provider.connected_tenants().await {
+            if !later.is_own(&tenant_id) {
+                later.tenant(&tenant_id).routed = true;
+                continue;
+            }
             if let Some(store) = provider.store_for_tenant(&tenant_id).await {
-                let restored = restore_registry_from_turso(&mut registry, &store)
+                let routed = read_stored_tenants_from_turso(&store)
                     .await
                     .map_err(|e| anyhow::anyhow!(e))?;
-                total_restored += restored;
+                stored.extend(routed);
             }
         }
-        if total_restored > 0 {
-            println!("  Restored {total_restored} specs from Turso.");
+    }
+    let mut restored = 0usize;
+    for (tenant, rows) in stored {
+        if later.is_own(&tenant) {
+            let (specs, converted) = register_stored_tenant(&mut registry, tenant, rows);
+            converted.write_back().await;
+            restored += specs;
+        } else {
+            later.tenant(&tenant).specs = Some(rows);
         }
+    }
+    if restored > 0 {
+        println!("  Restored {restored} specs of the server's own tenants.");
+    }
+    if !later.tenants.is_empty() {
+        println!(
+            "  {} other tenants are restored after the server serves.",
+            later.tenants.len()
+        );
+    }
+    for (tenant, reason) in registry.unavailable_tenants() {
+        tracing::warn!(tenant = %tenant, %reason, "tenant is unavailable, its stored specs did not load");
     }
 
     // Load app specs from disk, persisting to backend.
     for (tenant, specs_dir) in apps {
+        let unavailable = registry
+            .tenant_unavailable_reason(&TenantId::new(tenant))
+            .is_some();
+        if skip_if_marked(unavailable, tenant, &format!("specs from {specs_dir}")) {
+            continue;
+        }
         println!("  Loading app: {tenant} from {specs_dir}");
         let loaded = load_into_registry(&mut registry, specs_dir, tenant)?;
         if let Some(text) = loaded.cedar_policy_text.as_ref() {
@@ -180,6 +270,51 @@ pub(super) async fn build_registry(
     }
 
     Ok((registry, tenant_policy_seed))
+}
+
+/// Whether startup must leave `tenant` alone, printing one line if so.
+///
+/// A tenant whose stored specs did not load keeps its stored rows exactly as
+/// they are, for repair; every startup step that would write for it skips it.
+pub(super) fn skip_unavailable_tenant(state: &PlatformState, tenant: &str, what: &str) -> bool {
+    skip_if_marked(
+        state.tenant_unavailable_reason(tenant).is_some(),
+        tenant,
+        what,
+    )
+}
+
+fn skip_if_marked(unavailable: bool, tenant: &str, what: &str) -> bool {
+    if !unavailable {
+        return false;
+    }
+    tracing::warn!(
+        tenant = %tenant,
+        "skipping {what}: the tenant is unavailable, its stored rows are kept for repair"
+    );
+    true
+}
+
+/// Load the Cedar policies of the `--app` tenants read from disk.
+pub(super) fn seed_cedar_policies(
+    state: &PlatformState,
+    tenant_policy_seed: BTreeMap<String, String>,
+) {
+    for (tenant, policy_text) in &tenant_policy_seed {
+        if let Err(e) = state
+            .server
+            .authz
+            .reload_tenant_policies(tenant, policy_text)
+        {
+            eprintln!("  Warning: failed to load Cedar policies for tenant '{tenant}': {e}");
+            continue;
+        }
+    }
+    // Update in-memory text cache.
+    let mut policies = state.server.tenant_policies.write().unwrap(); // ci-ok: infallible lock
+    for (tenant, policy_text) in tenant_policy_seed {
+        policies.insert(tenant, policy_text);
+    }
 }
 
 /// Phase 4: Load webhook configurations from app directories.
@@ -212,10 +347,40 @@ pub(super) fn load_webhooks(apps: &[(String, String)]) -> Option<Arc<WebhookDisp
 }
 
 /// Phase 5: Hydrate entities from the event store for each tenant.
-pub(super) async fn hydrate_entities(state: &PlatformState, apps: &[(String, String)]) {
+///
+/// A connected tenant `later` defers is hydrated when it is restored.
+pub(super) async fn hydrate_entities(
+    state: &PlatformState,
+    apps: &[(String, String)],
+    later: &Later,
+) {
     if state.server.storage_stack.is_none() {
         return;
     }
+    let mut all_tenants: Vec<TenantId> = apps
+        .iter()
+        .map(|(tenant, _dir)| TenantId::new(tenant.as_str()))
+        .collect();
+    // In TenantRouted mode, also hydrate all registered tenants.
+    if let Some(provider) = state
+        .server
+        .storage_stack
+        .as_ref()
+        .and_then(|stack| stack.turso.clone())
+    {
+        for tenant in provider.connected_tenants().await {
+            if !later.tenants.contains_key(&tenant) {
+                all_tenants.push(TenantId::new(&tenant));
+            }
+        }
+    }
+    hydrate_tenants(state, all_tenants).await;
+}
+
+/// Load `tenants`' records from the event store, or only their index unless
+/// `TEMPER_EAGER_HYDRATE` is set, then backfill their indexes from snapshots
+/// in the background.
+pub(super) async fn hydrate_tenants(state: &PlatformState, all_tenants: Vec<TenantId>) {
     let eager_hydrate = std::env::var("TEMPER_EAGER_HYDRATE") // determinism-ok: read once at startup
         .ok()
         .map(|v| {
@@ -225,31 +390,11 @@ pub(super) async fn hydrate_entities(state: &PlatformState, apps: &[(String, Str
             )
         })
         .unwrap_or(false);
-    let mut all_tenants = Vec::new();
-    for (tenant, _dir) in apps {
-        let tenant_id = TenantId::new(tenant.as_str());
+    for tenant_id in &all_tenants {
         if eager_hydrate {
-            state.server.hydrate_from_store(&tenant_id).await;
+            state.server.hydrate_from_store(tenant_id).await;
         } else {
-            state.server.populate_index_from_store(&tenant_id).await;
-        }
-        all_tenants.push(tenant_id);
-    }
-    // In TenantRouted mode, also hydrate all registered tenants.
-    if let Some(provider) = state
-        .server
-        .storage_stack
-        .as_ref()
-        .and_then(|stack| stack.turso.clone())
-    {
-        for tenant in provider.connected_tenants().await {
-            let tenant_id = TenantId::new(&tenant);
-            if eager_hydrate {
-                state.server.hydrate_from_store(&tenant_id).await;
-            } else {
-                state.server.populate_index_from_store(&tenant_id).await;
-            }
-            all_tenants.push(tenant_id);
+            state.server.populate_index_from_store(tenant_id).await;
         }
     }
 
@@ -288,7 +433,9 @@ pub(super) async fn hydrate_entities(state: &PlatformState, apps: &[(String, Str
 /// 2. New pass: reads from `policies` (per-entry rows with hash tracking) via
 ///    [`load_and_activate_tenant_policies`].  The new table takes precedence for
 ///    any tenant that has entries there, overwriting what the legacy pass loaded.
-pub(super) async fn recover_cedar_policies(state: &PlatformState) {
+///
+/// A legacy blob of a tenant `later` defers waits there for its restore.
+pub(super) async fn recover_cedar_policies(state: &PlatformState, later: &mut Later) {
     let Some(stack) = state.server.storage_stack.as_ref() else {
         return;
     };
@@ -319,6 +466,10 @@ pub(super) async fn recover_cedar_policies(state: &PlatformState) {
     if !all_policy_rows.is_empty() {
         let mut loaded_count = 0usize;
         for (tenant, policy_text) in &all_policy_rows {
+            if later.defers(state, tenant) {
+                later.tenant(tenant).legacy_policies = Some(policy_text.clone());
+                continue;
+            }
             // Validate each tenant's policies individually so one bad tenant
             // doesn't prevent all others from loading.
             if let Err(e) = state
@@ -361,19 +512,31 @@ pub(super) async fn recover_cedar_policies(state: &PlatformState) {
     }
 }
 
-/// Phase 7: Recover WASM modules from persistent backend.
-pub(super) async fn recover_wasm_modules(state: &PlatformState) {
+/// Phase 7: Recover the WASM modules of the tenants restored before
+/// serving from persistent backend: the server's own and those registered.
+pub(super) async fn recover_wasm_modules(state: &PlatformState, later: &Later) {
     if state.server.storage_stack.is_none() {
         return;
     }
-    match state.server.load_wasm_modules().await {
-        Ok(count) if count > 0 => {
-            println!("  Recovered {count} WASM modules from database.");
+    let mut tenants: BTreeSet<String> = later.own().clone();
+    tenants.extend(
+        state
+            .registry
+            .read()
+            .expect("registry lock poisoned")
+            .tenant_ids()
+            .into_iter()
+            .map(|t| t.as_str().to_string()),
+    );
+    let mut count = 0usize;
+    for tenant in &tenants {
+        match state.server.load_tenant_wasm_modules(tenant).await {
+            Ok(loaded) => count += loaded,
+            Err(e) => eprintln!("  Warning: failed to recover WASM modules of '{tenant}': {e}"),
         }
-        Ok(_) => {}
-        Err(e) => {
-            eprintln!("  Warning: failed to recover WASM modules: {e}");
-        }
+    }
+    if count > 0 {
+        println!("  Recovered {count} WASM modules from database.");
     }
 }
 
@@ -427,12 +590,38 @@ async fn load_verified_cache(
     }
 }
 
+/// What a boot does with the operator credentials earlier boots issued for other keys.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum EarlierOperatorKeys {
+    /// Keep them: another holder may still use an older key.
+    Keep,
+    /// Revoke them: this deployment is the only holder of its key (an app's
+    /// Temper, keyed by its control plane), so a key it no longer holds
+    /// stops working. Set by `TEMPER_RETIRE_OLD_OPERATOR_KEYS=1`.
+    Retire,
+}
+
+impl EarlierOperatorKeys {
+    /// The policy `TEMPER_RETIRE_OLD_OPERATOR_KEYS` sets for this boot.
+    pub(super) fn from_env() -> Self {
+        let retire = std::env::var("TEMPER_RETIRE_OLD_OPERATOR_KEYS").is_ok_and(|v| v == "1"); // determinism-ok: read once at startup
+        if retire { Self::Retire } else { Self::Keep }
+    }
+}
+
 /// Phase 8: Bootstrap system tenant and agent specs.
 ///
 /// After verifying (or skipping via cache), persists spec hashes and
 /// verification status to the per-tenant Turso store so subsequent boots
 /// skip the cascade.
-pub(super) async fn bootstrap_tenants(state: &PlatformState, apps: &[(String, String)]) {
+///
+/// A connected tenant `later` defers gets them when it is restored.
+pub(super) async fn bootstrap_tenants(
+    state: &PlatformState,
+    apps: &[(String, String)],
+    earlier_operator_keys: EarlierOperatorKeys,
+    later: &Later,
+) {
     let sys_cache = load_verified_cache(state, "temper-system").await;
     let sys_hashes = temper_platform::bootstrap_system_tenant(state, &sys_cache);
     if let Some(turso) = state.server.turso_store_for_tenant("temper-system").await {
@@ -441,266 +630,75 @@ pub(super) async fn bootstrap_tenants(state: &PlatformState, apps: &[(String, St
 
     // Every tenant that receives the agent specs also needs the trusted issuer
     // registered, or issuer-signed JWTs 401 there: bearer resolution looks the
-    // issuer up in the REQUEST's tenant, not in `default`.
+    // issuer up in the REQUEST's tenant, not in `default`. App tenants already
+    // have user specs loaded in Phase 2. In TenantRouted mode every connected
+    // tenant gets them too: its OS app specs were restored from the `specs`
+    // table in Phase 2 and its Cedar policies in Phase 6, so no reinstall loop
+    // is needed. Every tenant merges (`default` included), so specs restored
+    // in Phase 2 keep their entity sets.
     let mut agent_spec_tenants: std::collections::BTreeSet<String> =
         std::collections::BTreeSet::new();
     agent_spec_tenants.insert("default".to_string());
-
-    let default_cache = load_verified_cache(state, "default").await;
-    let default_hashes =
-        temper_platform::bootstrap_agent_specs(state, "default", false, &default_cache);
-    if let Some(turso) = state.server.turso_store_for_tenant("default").await {
-        temper_platform::persist_agent_verification(
-            &turso,
-            "default",
-            &default_hashes,
-            &default_cache,
-        )
-        .await;
-    }
-
-    for (tenant, _dir) in apps {
-        agent_spec_tenants.insert(tenant.clone());
-        let cache = load_verified_cache(state, tenant).await;
-        // App tenants already have user specs loaded in Phase 2; merge the
-        // built-in agent OS entities so we do not replace their entity-set map.
-        let hashes = temper_platform::bootstrap_agent_specs(state, tenant, true, &cache);
-        if let Some(turso) = state.server.turso_store_for_tenant(tenant).await {
-            temper_platform::persist_agent_verification(&turso, tenant, &hashes, &cache).await;
-        }
-    }
-    // In TenantRouted mode, bootstrap agent specs for all registered tenants.
-    // OS app specs are already restored from the `specs` table by
-    // `restore_registry_from_turso` (Phase 2) and Cedar policies by
-    // `recover_cedar_policies` (Phase 6), so no reinstall loop is needed.
+    agent_spec_tenants.extend(apps.iter().map(|(tenant, _dir)| tenant.clone()));
     if let Some(provider) = state
         .server
         .storage_stack
         .as_ref()
         .and_then(|stack| stack.turso.clone())
     {
-        for tenant in provider.connected_tenants().await {
-            agent_spec_tenants.insert(tenant.clone());
-            let cache = load_verified_cache(state, &tenant).await;
-            let hashes = temper_platform::bootstrap_agent_specs(state, &tenant, true, &cache);
-            if let Some(turso) = state.server.turso_store_for_tenant(&tenant).await {
-                temper_platform::persist_agent_verification(&turso, &tenant, &hashes, &cache).await;
-            }
-        }
+        agent_spec_tenants.extend(provider.connected_tenants().await);
+    }
+    agent_spec_tenants.retain(|tenant| {
+        !later.tenants.contains_key(tenant)
+            && !skip_unavailable_tenant(state, tenant, "agent specs")
+    });
+
+    for tenant in &agent_spec_tenants {
+        bootstrap_connected_tenant(state, tenant).await;
     }
 
     // Register the bootstrap key as a normal operator credential in the default
     // tenant. It grants no implicit authority in other tenants (ADR-0157).
     if let Some(ref api_key) = state.api_token
+        && agent_spec_tenants.contains("default")
         && let Err(e) =
             temper_platform::bootstrap_operator_credential(state, api_key, "default").await
     {
         eprintln!("  Warning: failed to bootstrap operator credential for tenant 'default': {e}");
     }
+    // A deployment that is the only holder of its key (an app's Temper,
+    // keyed by its control plane) retires the credentials earlier boots issued
+    // for other keys, so a key it no longer holds stops working.
+    if earlier_operator_keys == EarlierOperatorKeys::Retire
+        && let Some(ref api_key) = state.api_token
+    {
+        temper_platform::retire_other_operator_credentials(state, api_key, "default").await;
+    }
+}
 
+/// What every tenant carrying the agent specs gets at boot: the agent specs
+/// (verified, or skipped by the verification cache), the trusted JWT issuer
+/// from env config, and the platform's HttpEndpoint type.
+pub(super) async fn bootstrap_connected_tenant(state: &PlatformState, tenant: &str) {
+    let cache = load_verified_cache(state, tenant).await;
+    let hashes = temper_platform::bootstrap_agent_specs(state, tenant, true, &cache);
+    if let Some(turso) = state.server.turso_store_for_tenant(tenant).await {
+        temper_platform::persist_agent_verification(&turso, tenant, &hashes, &cache).await;
+    }
     // Register a trusted JWT issuer from env config, if provided (ARN-255).
     // This is how a deployment activates the platform-issued-token path without
     // an authenticated API call. Registered for every tenant that carries the
     // agent specs, since the issuer is resolved in the request's own tenant.
-    for tenant in &agent_spec_tenants {
-        if let Err(e) = temper_platform::bootstrap_trusted_issuer_from_env(state, tenant).await {
-            eprintln!("  Warning: failed to bootstrap trusted issuer for tenant '{tenant}': {e}");
-        }
+    if let Err(e) = temper_platform::bootstrap_trusted_issuer_from_env(state, tenant).await {
+        eprintln!("  Warning: failed to bootstrap trusted issuer for tenant '{tenant}': {e}");
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AppBootstrapSource {
-    Persisted,
-    Cli,
-}
-
-/// Phase 8b: Restore persisted local apps and apply explicit `--app` requests.
-///
-/// Why this exists:
-/// - agent bootstrap (Phase 8) can replace tenant specs;
-/// - App installs are durably tracked in `tenant_installed_apps`.
-///
-/// This phase replays persisted installs so app entities remain available
-/// after restart, and then applies explicit CLI installs for `default`.
-pub(super) async fn bootstrap_installed_apps(
-    state: &PlatformState,
-    apps: &[String],
-) -> anyhow::Result<()> {
-    let mut requested: BTreeMap<(String, String), AppBootstrapSource> = BTreeMap::new();
-
-    if let Some(platform_store) = state
-        .server
-        .storage_stack
-        .as_ref()
-        .and_then(|stack| stack.platform.clone())
-    {
-        match platform_store.list_all_installed_apps().await {
-            Ok(installed) => {
-                for (tenant, app_name) in installed {
-                    requested.insert((tenant, app_name), AppBootstrapSource::Persisted);
-                }
-            }
-            Err(e) => {
-                eprintln!("  Warning: failed to load installed apps: {e}");
-            }
-        }
+    // ADR-0069: every tenant has the platform's HttpEndpoint type, so its routes
+    // have somewhere to live from its first boot.
+    if let Err(e) = temper_platform::bootstrap_http_endpoint_spec(state, tenant) {
+        tracing::warn!(tenant = %tenant, error = %e, "failed to register HttpEndpoint");
     }
-
-    for app_name in apps {
-        requested
-            .entry(("default".to_string(), app_name.clone()))
-            .and_modify(|source| *source = AppBootstrapSource::Cli)
-            .or_insert(AppBootstrapSource::Cli);
-    }
-
-    if let Some(manifest_path) = std::env::var_os("TEMPER_BOOTSTRAP_MANIFEST")
-        .map(std::path::PathBuf::from)
-        .filter(|path| !path.as_os_str().is_empty())
-    {
-        let tenant = std::env::var("TEMPER_BOOTSTRAP_TENANT")
-            .ok()
-            .filter(|tenant| !tenant.trim().is_empty())
-            .unwrap_or_else(|| "default".to_string());
-        let result =
-            temper_platform::os_apps::bootstrap_closure_manifest(state, &tenant, &manifest_path)
-                .await
-                .map_err(anyhow::Error::msg)?;
-        println!(
-            "  Bootstrap closure '{}' installed for '{}': {}",
-            result.closure.id,
-            tenant,
-            result.installed_apps.join(", ")
-        );
-    }
-
-    let restored_genesis_caches =
-        temper_platform::genesis_install::restore_genesis_app_cache_roots(state).await;
-    let restored_genesis_registry_caches =
-        temper_platform::genesis_install::restore_genesis_registry_cache_roots(state).await;
-    if restored_genesis_caches > 0 || restored_genesis_registry_caches > 0 {
-        println!(
-            "  Restored Genesis app cache roots: service={restored_genesis_caches}, registry={restored_genesis_registry_caches}"
-        );
-    }
-
-    for ((tenant, app_name), source) in requested {
-        if matches!(source, AppBootstrapSource::Persisted)
-            && temper_platform::os_apps::get_os_app(&app_name).is_none()
-        {
-            use std::io::Write as _;
-
-            let mut stderr = std::io::stderr();
-            let _ = writeln!(
-                stderr,
-                "  Info: skipping persisted app '{app_name}' for '{tenant}': not present in configured app sources"
-            );
-            continue;
-        }
-
-        // Replay through the real installer every startup. Presence-only checks
-        // are not sufficient because an installed app's bundle can drift:
-        // updated IOA/Cedar/WASM/ADR assets must refresh even when the tenant
-        // already has entity tables from an older install.
-        match temper_platform::install_os_app(state, &tenant, &app_name).await {
-            Ok(result) => match source {
-                AppBootstrapSource::Persisted => {
-                    let all: Vec<String> = result
-                        .added
-                        .iter()
-                        .chain(&result.updated)
-                        .chain(&result.skipped)
-                        .cloned()
-                        .collect();
-                    println!(
-                        "  Restored app '{app_name}' for '{tenant}': {}",
-                        all.join(", ")
-                    );
-                }
-                AppBootstrapSource::Cli => {
-                    let all: Vec<String> = result
-                        .added
-                        .iter()
-                        .chain(&result.updated)
-                        .chain(&result.skipped)
-                        .cloned()
-                        .collect();
-                    println!(
-                        "  App '{app_name}' installed for '{tenant}': {}",
-                        all.join(", ")
-                    );
-                }
-            },
-            Err(e) => {
-                eprintln!("  Warning: failed to install app '{app_name}' for '{tenant}': {e}");
-            }
-        }
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
-mod tests {
-    use temper_platform::os_apps::get_os_app;
-    use temper_platform::state::PlatformState;
-    use temper_runtime::tenant::TenantId;
-    use temper_server::storage::StorageStack;
-    use temper_spec::csdl::parse_csdl;
-    use temper_store_turso::TursoEventStore;
-
-    use super::bootstrap_installed_apps;
-
-    #[tokio::test]
-    async fn bootstrap_installed_apps_replays_persisted_app_when_registry_specs_are_stale() {
-        let tenant = "bootstrap-drift";
-        let app_name = "temper-fs";
-        let bundle = get_os_app(app_name).expect("temper-fs app bundle should load");
-        let csdl_xml = bundle.csdl.clone().expect("temper-fs should have CSDL");
-        let csdl = parse_csdl(&csdl_xml).expect("temper-fs CSDL should parse");
-        let mut stale_specs: Vec<(String, String)> = bundle.specs.clone();
-        stale_specs[0].1.push_str("\n# stale bootstrap copy\n");
-        let stale_refs: Vec<(&str, &str)> = stale_specs
-            .iter()
-            .map(|(entity_type, source)| (entity_type.as_str(), source.as_str()))
-            .collect();
-
-        let mut state = PlatformState::new(None);
-        {
-            let mut registry = state.registry.write().unwrap();
-            registry.register_tenant(tenant, csdl, csdl_xml, &stale_refs);
-        }
-
-        let db_path = std::env::temp_dir().join(format!(
-            "temper-bootstrap-{}.db",
-            temper_runtime::scheduler::sim_uuid()
-        ));
-        let db_url = format!("file:{}", db_path.display());
-        let turso = TursoEventStore::new(&db_url, None)
-            .await
-            .expect("turso store should initialize");
-        turso
-            .record_installed_app(tenant, app_name)
-            .await
-            .expect("installed app should persist");
-        state
-            .server
-            .set_storage_stack(StorageStack::from_turso(turso));
-
-        bootstrap_installed_apps(&state, &[])
-            .await
-            .expect("bootstrap should replay persisted apps");
-
-        let tenant_id = TenantId::new(tenant);
-        let registry = state.registry.read().unwrap();
-        let refreshed = registry
-            .get_spec(&tenant_id, &bundle.specs[0].0)
-            .expect("replayed app spec should remain registered");
-        assert_eq!(
-            refreshed.ioa_source, bundle.specs[0].1,
-            "startup replay should refresh stale installed app specs from the current bundle"
-        );
-
-        let _ = std::fs::remove_file(&db_path);
-    }
-}
+#[path = "bootstrap_test.rs"]
+mod tests;

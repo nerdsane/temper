@@ -1,7 +1,7 @@
 //! ES256 (ECDSA P-256) JWT verification for platform-issued access tokens.
 //!
 //! The platform authorization server (and, during the ARN-255 rollout,
-//! katagami.ai's authorization server as the first allowlisted issuer) mints
+//! an authorization server as the first allowlisted issuer) mints
 //! short-lived ES256 JWTs. This module verifies one against a registered
 //! issuer's JWKS and returns the validated claims. See RFC-0002.
 //!
@@ -130,10 +130,20 @@ pub struct Claims {
     pub client_id: Option<String>,
     #[serde(default)]
     pub agent_type: Option<String>,
-    /// The owning human's role (owner/curator/contributor), set by the AS from
-    /// the Member record. Carried onto the principal for Cedar evaluation.
+    /// The caller's role at this token's audience: on a person's token, the
+    /// person's role; on an agent's token, the agent's own role (for example,
+    /// its role in one app). Carried onto the principal for Cedar evaluation.
+    ///
+    /// `service` is reserved. The kernel treats a principal whose role is
+    /// `service` as one of its own internal identities: it names no caller and
+    /// its moves record no request subject. An issuer must never grant it.
     #[serde(default)]
     pub role: Option<String>,
+    /// On an agent's token, the name of this agent instance, for people to know
+    /// it by. It goes onto the principal and into what each move saves, and is
+    /// not an authorization input.
+    #[serde(default)]
+    pub agent_label: Option<String>,
     #[serde(default)]
     pub grant_id: Option<String>,
     #[serde(default)]
@@ -324,7 +334,7 @@ mod tests {
 
     fn valid_claims() -> serde_json::Value {
         serde_json::json!({
-            "iss": "https://katagami.ai",
+            "iss": "https://issuer.example",
             "sub": "human-sub-123",
             "aud": "temper",
             "exp": 2000,
@@ -335,7 +345,7 @@ mod tests {
     }
 
     fn verify_valid(token: &str, jwks: &Jwks) -> Result<Claims, JwtError> {
-        verify(token, jwks, "https://katagami.ai", "temper", 1500, 60)
+        verify(token, jwks, "https://issuer.example", "temper", 1500, 60)
     }
 
     #[test]
@@ -344,7 +354,7 @@ mod tests {
         let jwks = jwks_for(&sk, "k1");
         let token = mint(&sk, valid_header(), valid_claims());
         let claims = verify_valid(&token, &jwks).expect("should verify");
-        assert_eq!(claims.iss, "https://katagami.ai");
+        assert_eq!(claims.iss, "https://issuer.example");
         assert_eq!(claims.sub.as_deref(), Some("human-sub-123"));
         assert_eq!(claims.client_id.as_deref(), Some("agent-xyz"));
         assert_eq!(claims.agent_type.as_deref(), Some("contributor"));
@@ -398,7 +408,7 @@ mod tests {
         // Swap the payload for one granting a different agent_type, keep the sig.
         let mut parts: Vec<&str> = token.split('.').collect();
         let forged = b64(&serde_json::json!({
-            "iss": "https://katagami.ai", "aud": "temper", "exp": 2000,
+            "iss": "https://issuer.example", "aud": "temper", "exp": 2000,
             "agent_type": "owner",
         }));
         parts[1] = &forged;
@@ -412,7 +422,7 @@ mod tests {
         let jwks = jwks_for(&sk, "k1");
         let token = mint(&sk, valid_header(), valid_claims());
         // now = 3000, exp = 2000, leeway 60 → expired.
-        let r = verify(&token, &jwks, "https://katagami.ai", "temper", 3000, 60);
+        let r = verify(&token, &jwks, "https://issuer.example", "temper", 3000, 60);
         assert_eq!(r, Err(JwtError::Expired));
     }
 
@@ -422,7 +432,7 @@ mod tests {
         let jwks = jwks_for(&sk, "k1");
         let token = mint(&sk, valid_header(), valid_claims());
         // now = 500, nbf = 1000, leeway 60 → not yet valid.
-        let r = verify(&token, &jwks, "https://katagami.ai", "temper", 500, 60);
+        let r = verify(&token, &jwks, "https://issuer.example", "temper", 500, 60);
         assert_eq!(r, Err(JwtError::NotYetValid));
     }
 
@@ -432,7 +442,7 @@ mod tests {
         let jwks = jwks_for(&sk, "k1");
         let token = mint(&sk, valid_header(), valid_claims());
         // now = 2030, exp = 2000, leeway 60 → still valid within skew.
-        assert!(verify(&token, &jwks, "https://katagami.ai", "temper", 2030, 60).is_ok());
+        assert!(verify(&token, &jwks, "https://issuer.example", "temper", 2030, 60).is_ok());
     }
 
     #[test]
@@ -449,7 +459,14 @@ mod tests {
         let sk = test_key();
         let jwks = jwks_for(&sk, "k1");
         let token = mint(&sk, valid_header(), valid_claims());
-        let r = verify(&token, &jwks, "https://katagami.ai", "other-app", 1500, 60);
+        let r = verify(
+            &token,
+            &jwks,
+            "https://issuer.example",
+            "other-app",
+            1500,
+            60,
+        );
         assert_eq!(r, Err(JwtError::WrongAudience));
     }
 
@@ -503,6 +520,6 @@ mod tests {
         let sk = test_key();
         let token = mint(&sk, valid_header(), valid_claims());
         let claims = decode_claims_unverified(&token).expect("decodes");
-        assert_eq!(claims.iss, "https://katagami.ai");
+        assert_eq!(claims.iss, "https://issuer.example");
     }
 }

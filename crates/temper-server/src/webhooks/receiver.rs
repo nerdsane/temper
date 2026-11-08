@@ -1,36 +1,43 @@
-//! Inbound webhook receiver for external callbacks.
+//! Inbound webhook receiver: another system's request becomes one entity
+//! action (ADR-0182).
 //!
-//! Handles GET/POST requests to `/webhooks/{tenant}/{*path}` and dispatches
-//! entity actions based on webhook declarations in IOA specs. This enables
-//! OAuth2 callbacks, payment gateway notifications, and other external system
-//! integrations to trigger entity state transitions.
+//! Any method on `/webhooks/{tenant}/{*path}` reaches the webhook declared at
+//! that path. The request's signature is checked with the provider's own
+//! scheme ([`super::signature`]) before anything in it is read. The entity id
+//! and the action's parameters then come from the query string, the headers
+//! or the JSON body, as the declaration names them, and the action runs as
+//! `Agent::"webhook:{name}"` only when the tenant's Cedar permits it.
 
 use std::collections::BTreeMap;
 
-use axum::body::{Body, Bytes, to_bytes};
+use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, Method, Request, StatusCode};
+use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::IntoResponse;
-
+use serde_json::{Map, Value};
 use tracing::instrument;
 
-use crate::aws_sigv4::{hex_encode, hmac_sha256};
+use super::signature::{SignedRequest, verify_signature};
 use crate::request_context::AgentContext;
 use crate::secrets::template::resolve_secret_templates;
 use crate::state::ServerState;
+use crate::state::redecide::Redecide;
 use temper_authz::SecurityContext;
+use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
-use temper_spec::automaton::Webhook;
-
-const WEBHOOK_BODY_BUDGET_BYTES: usize = 64 * 1024;
+use temper_spec::automaton::{Webhook, WebhookSource};
 
 /// Handle an inbound webhook request.
 ///
-/// Route: `GET|POST /webhooks/{tenant}/{*path}`
+/// Route: any method on `/webhooks/{tenant}/{*path}`. The body is bounded
+/// only by the router's request-body limit (axum's `DefaultBodyLimit`),
+/// which answers 413 itself when a body exceeds it.
 ///
-/// The handler looks up the webhook configuration from the tenant's spec
-/// registry, validates the HTTP method, extracts the entity ID and action
-/// parameters, then dispatches the configured action to the target entity.
+/// Answers 404 when no webhook is declared at the path, 405 when the
+/// webhook declares another method, 401 when the signature does not check
+/// out, 400 when the entity id is missing or a body the webhook reads is not
+/// JSON, 403 when Cedar does not permit the action, and otherwise the
+/// action's response.
 #[instrument(skip_all, fields(
     otel.name = %format_args!("{} /webhooks/{}/{}", method, tenant_str, webhook_path),
     tenant = %tenant_str,
@@ -42,14 +49,13 @@ pub async fn handle_webhook(
     State(state): State<ServerState>,
     Path((tenant_str, webhook_path)): Path<(String, String)>,
     Query(query): Query<BTreeMap<String, String>>,
-    request: Request<Body>,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> impl IntoResponse {
     let tenant = TenantId::new(&tenant_str);
 
-    // Look up webhook config from registry.
-    let lookup = find_webhook(&state, &tenant, &webhook_path);
-
-    let Some((entity_type, webhook)) = lookup else {
+    let Some((entity_type, webhook)) = find_webhook(&state, &tenant, &webhook_path) else {
         tracing::warn!(path = %webhook_path, "no webhook registered at path");
         return (
             StatusCode::NOT_FOUND,
@@ -57,79 +63,49 @@ pub async fn handle_webhook(
         );
     };
 
-    // Validate HTTP method.
-    let expected_method = webhook.method.to_uppercase();
-    if method.as_str() != expected_method {
-        tracing::warn!(expected = %expected_method, actual = %method, "webhook method mismatch");
+    if let Some(expected) = webhook.method.as_deref()
+        && !method.as_str().eq_ignore_ascii_case(expected)
+    {
+        tracing::warn!(expected = %expected, actual = %method, "webhook method mismatch");
         return (
             StatusCode::METHOD_NOT_ALLOWED,
             format!(
                 "Webhook '{}' expects {} but received {}",
                 webhook.name,
-                expected_method,
+                expected.to_ascii_uppercase(),
                 method.as_str()
             ),
         );
     }
 
-    // Extract entity ID from the configured source (`query.<name>`, checked
-    // when the spec loads).
-    let entity_id = extract_param(&webhook.entity_id, &query);
-
-    let Some(entity_id) = entity_id else {
-        let param_name = Webhook::query_param(&webhook.entity_id).unwrap_or_default();
-        tracing::warn!(param = %param_name, "missing entity ID in webhook request");
+    let path_and_query = uri
+        .path_and_query()
+        .map_or_else(|| uri.path(), |pq| pq.as_str());
+    let signed = SignedRequest {
+        method: method.as_str(),
+        path_and_query,
+        headers: &headers,
+        body: &body,
+    };
+    let Some(security_ctx) = admit_webhook(&state, &tenant, &webhook, &signed) else {
         return (
-            StatusCode::BAD_REQUEST,
-            format!("Missing entity ID: expected query parameter '{param_name}'"),
+            StatusCode::UNAUTHORIZED,
+            "Webhook admission denied".to_string(),
         );
     };
 
-    let path_and_query = request
-        .uri()
-        .path_and_query()
-        .map(|pq| pq.as_str().to_string())
-        .unwrap_or_else(|| request.uri().path().to_string());
-    let headers = request.headers().clone();
-    let body = match to_bytes(request.into_body(), WEBHOOK_BODY_BUDGET_BYTES).await {
-        Ok(body) => body,
-        Err(_) => {
-            return (
-                StatusCode::PAYLOAD_TOO_LARGE,
-                format!("Webhook body exceeds {WEBHOOK_BODY_BUDGET_BYTES} bytes"),
-            );
+    // Only now, with the signature checked, is anything in the request read.
+    let (entity_id, params) = match read_action_input(&webhook, &query, &headers, &body) {
+        Ok(input) => input,
+        Err(reason) => {
+            tracing::warn!(webhook = %webhook.name, reason = %reason, "webhook request unreadable");
+            return (StatusCode::BAD_REQUEST, reason);
         }
     };
-
-    let security_ctx = match admit_webhook(
-        &state,
-        &tenant,
-        &webhook,
-        &method,
-        &path_and_query,
-        &headers,
-        &body,
-    ) {
-        Ok(ctx) => ctx,
-        Err(status) => {
-            return (status, "Webhook admission denied".to_string());
-        }
-    };
-
-    // Extract action parameters from the configured extraction map.
-    let mut params = serde_json::Map::new();
-    for (param_name, source) in &webhook.extract {
-        if let Some(value) = extract_param(source, &query) {
-            params.insert(param_name.clone(), serde_json::Value::String(value));
-        }
-    }
 
     let action = &webhook.action;
     let mut resource_attrs = BTreeMap::new();
-    resource_attrs.insert(
-        "id".to_string(),
-        serde_json::Value::String(entity_id.clone()),
-    );
+    resource_attrs.insert("id".to_string(), Value::String(entity_id.clone()));
     if let Err(denial) = state.authorize_with_context(
         &security_ctx,
         action,
@@ -153,20 +129,37 @@ pub async fn handle_webhook(
         ..AgentContext::default()
     };
 
-    match state
-        .dispatch_tenant_action(
-            &tenant,
-            &entity_type,
-            &entity_id,
-            action,
-            serde_json::Value::Object(params),
-            &agent_ctx,
-        )
-        .await
-    {
+    // The policy above reads only the record's id; the record's own checks run
+    // in the dispatch, on the record as it is. A dispatch decided on a record
+    // that changed first is decided again on it (`state::redecide`).
+    let params = Value::Object(params);
+    let mut redecide = Redecide::start(&state);
+    let dispatched = loop {
+        let dispatched = state
+            .dispatch_outside_action(crate::state::DispatchCommand {
+                tenant: &tenant,
+                entity_type: &entity_type,
+                entity_id: &entity_id,
+                action,
+                params: params.clone(),
+                agent_ctx: &agent_ctx,
+                await_integration: false,
+                await_reactions: true,
+            })
+            .await;
+        let stale = matches!(dispatched, Err(crate::state::DispatchError::StaleWrite(_)));
+        if !redecide.again(stale, "webhook") {
+            break dispatched;
+        }
+    };
+    match dispatched {
         Ok(response) => {
             let body = serde_json::to_string(&response).unwrap_or_default();
             (StatusCode::OK, body)
+        }
+        Err(crate::state::DispatchError::StaleWrite(stale)) => {
+            tracing::warn!(error = %stale, webhook = %webhook.name, "webhook action refused as stale");
+            (StatusCode::CONFLICT, stale.body().to_string())
         }
         Err(e) => {
             tracing::error!(error = %e, "webhook action dispatch failed");
@@ -178,76 +171,141 @@ pub async fn handle_webhook(
     }
 }
 
-/// Class B admission: HMAC is required and fail-closed.
+/// Class B admission: a signature from the webhook's secret is required and
+/// fail-closed. Every refusal is logged with its reason; the sender sees 401.
 fn admit_webhook(
     state: &ServerState,
     tenant: &TenantId,
     webhook: &Webhook,
-    method: &Method,
-    path_and_query: &str,
-    headers: &HeaderMap,
-    body: &Bytes,
-) -> Result<SecurityContext, StatusCode> {
+    request: &SignedRequest<'_>,
+) -> Option<SecurityContext> {
+    // Specs load only with a secret (ADR-0182); this guards specs stored
+    // before that check existed.
     let Some(secret_template) = webhook.hmac_secret.as_deref().filter(|s| !s.is_empty()) else {
         tracing::warn!(webhook = %webhook.name, "webhook missing hmac_secret");
-        return Err(StatusCode::UNAUTHORIZED);
-    };
-    let Some(header_name) = webhook.hmac_header.as_deref().filter(|s| !s.is_empty()) else {
-        tracing::warn!(webhook = %webhook.name, "webhook missing hmac_header");
-        return Err(StatusCode::UNAUTHORIZED);
+        return None;
     };
     let Some(vault) = state.secrets_vault.as_ref() else {
-        tracing::warn!(webhook = %webhook.name, "webhook HMAC required but no secrets vault");
-        return Err(StatusCode::UNAUTHORIZED);
+        tracing::warn!(webhook = %webhook.name, "webhook secret required but no secrets vault");
+        return None;
     };
     let mut templates = BTreeMap::new();
     templates.insert("hmac".to_string(), secret_template.to_string());
     let resolved = resolve_secret_templates(&templates, vault, tenant.as_str());
     let secret = resolved.get("hmac").cloned().unwrap_or_default();
     if secret.is_empty() || secret.contains("{secret:") {
-        tracing::warn!(webhook = %webhook.name, "webhook HMAC secret did not resolve");
-        return Err(StatusCode::UNAUTHORIZED);
+        tracing::warn!(webhook = %webhook.name, "webhook secret did not resolve");
+        return None;
     }
-    let Some(provided) = headers
-        .get(header_name)
-        .and_then(|value| value.to_str().ok())
-    else {
-        tracing::warn!(webhook = %webhook.name, header = %header_name, "missing HMAC header");
-        return Err(StatusCode::UNAUTHORIZED);
-    };
-    let mut payload =
-        Vec::with_capacity(method.as_str().len() + path_and_query.len() + body.len() + 2);
-    payload.extend_from_slice(method.as_str().as_bytes());
-    payload.push(b'\n');
-    payload.extend_from_slice(path_and_query.as_bytes());
-    payload.push(b'\n');
-    payload.extend_from_slice(body);
-    if !hmac_hex_matches(secret.as_bytes(), &payload, provided) {
-        tracing::warn!(webhook = %webhook.name, "HMAC mismatch");
-        return Err(StatusCode::UNAUTHORIZED);
+    let now_unix_seconds = sim_now().timestamp();
+    if let Err(rejection) = verify_signature(
+        webhook.signature,
+        &secret,
+        webhook.hmac_header.as_deref(),
+        request,
+        now_unix_seconds,
+    ) {
+        tracing::warn!(
+            webhook = %webhook.name,
+            scheme = webhook.signature.as_str(),
+            reason = %rejection,
+            "webhook signature refused"
+        );
+        return None;
     }
-    Ok(SecurityContext::from_resolved_identity(
+    Some(SecurityContext::from_resolved_identity(
         &format!("webhook:{}", webhook.name),
         "webhook",
         None,
     ))
 }
 
-fn hmac_hex_matches(secret: &[u8], payload: &[u8], provided: &str) -> bool {
-    let expected = hex_encode(&hmac_sha256(secret, payload));
-    let provided = provided
-        .strip_prefix("sha256=")
-        .unwrap_or(provided)
-        .to_ascii_lowercase();
-    if expected.len() != provided.len() {
-        return false;
+/// The entity id and action parameters the webhook declares, read from a
+/// request whose signature has been checked. A parameter whose source is
+/// absent (or a JSON `null`) is left out; the action's own contract decides
+/// whether it may be.
+///
+/// # Errors
+///
+/// The body is read and is not JSON, or the entity id is absent, empty or
+/// neither text nor a number.
+fn read_action_input(
+    webhook: &Webhook,
+    query: &BTreeMap<String, String>,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<(String, Map<String, Value>), String> {
+    let reads_body = std::iter::once(&webhook.entity_id)
+        .chain(webhook.extract.values())
+        .any(|source| matches!(WebhookSource::parse(source), Some(WebhookSource::Body(_))));
+    let json = if reads_body {
+        let parsed = serde_json::from_slice::<Value>(body).map_err(|e| {
+            format!(
+                "Webhook '{}' reads the body, which is not JSON: {e}",
+                webhook.name
+            )
+        })?;
+        Some(parsed)
+    } else {
+        None
+    };
+    let read = |source: &str| read_source(source, query, headers, json.as_ref());
+
+    let entity_id = match read(&webhook.entity_id) {
+        Some(Value::String(id)) if !id.is_empty() => id,
+        Some(Value::Number(number)) => number.to_string(),
+        Some(Value::String(_)) | None => {
+            return Err(format!(
+                "Missing entity id: the request has nothing at '{}'",
+                webhook.entity_id
+            ));
+        }
+        Some(other) => {
+            return Err(format!(
+                "Entity id at '{}' is {other}, not text or a number",
+                webhook.entity_id
+            ));
+        }
+    };
+    let mut params = Map::new();
+    for (name, source) in &webhook.extract {
+        if let Some(value) = read(source) {
+            params.insert(name.clone(), value);
+        }
     }
-    expected
-        .as_bytes()
-        .iter()
-        .zip(provided.as_bytes())
-        .fold(0u8, |acc, (left, right)| acc | (left ^ right))
-        == 0
+    debug_assert!(!entity_id.is_empty());
+    debug_assert!(params.len() <= webhook.extract.len());
+    Ok((entity_id, params))
+}
+
+/// The value a source names: query and header values as text, body values
+/// as their JSON. `None` when absent or a JSON `null`.
+fn read_source(
+    source: &str,
+    query: &BTreeMap<String, String>,
+    headers: &HeaderMap,
+    body: Option<&Value>,
+) -> Option<Value> {
+    let value = match WebhookSource::parse(source)? {
+        WebhookSource::Query(name) => Value::String(query.get(name)?.clone()),
+        WebhookSource::Header(name) => Value::String(headers.get(name)?.to_str().ok()?.to_string()),
+        WebhookSource::Body(path) => json_at(body?, path)?.clone(),
+    };
+    (!value.is_null()).then_some(value)
+}
+
+/// The value at a dot-separated path into `value` (the whole value for an
+/// empty path); a number segment indexes an array.
+fn json_at<'v>(value: &'v Value, path: &str) -> Option<&'v Value> {
+    if path.is_empty() {
+        return Some(value);
+    }
+    path.split('.')
+        .try_fold(value, |current, segment| match current {
+            Value::Object(fields) => fields.get(segment),
+            Value::Array(items) => items.get(segment.parse::<usize>().ok()?),
+            _ => None,
+        })
 }
 
 /// Find a webhook matching (tenant, path) in the registry.
@@ -270,11 +328,6 @@ fn find_webhook(state: &ServerState, tenant: &TenantId, path: &str) -> Option<(S
         }
     }
     None
-}
-
-/// Read a `query.<name>` source from the URL query string.
-fn extract_param(source: &str, query: &BTreeMap<String, String>) -> Option<String> {
-    query.get(Webhook::query_param(source)?).cloned()
 }
 
 #[cfg(test)]

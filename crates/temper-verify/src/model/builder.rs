@@ -9,11 +9,20 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use temper_spec::automaton::{Automaton, Initial, ResolvedEffect, translate_actions};
-use temper_spec::predicate::{Arg, Literal, ParamKind};
+use temper_spec::automaton::{ActionKind, Automaton, Initial, ResolvedEffect, translate_actions};
+use temper_spec::predicate::{Arg, Expr, Literal, Operand, ParamKind, Set, VarKind};
 
+mod fields;
+mod strings;
+
+use fields::read_fields;
+use strings::{string_literals, string_params, tracked_strings};
+
+use super::counters::leave_out_unread_counters;
+use super::entry::resolve_entry_rules;
 use super::types::{
-    LivenessKind, ModelEffect, ResolvedInvariant, ResolvedLiveness, ResolvedTransition, TemperModel,
+    LivenessKind, ModelEffect, ModelString, ResolvedInvariant, ResolvedLiveness,
+    ResolvedTransition, Sym, TemperModel,
 };
 
 /// Build a `TemperModel` from I/O Automaton TOML source.
@@ -28,18 +37,33 @@ pub fn build_model_from_ioa(ioa_toml: &str, max_counter: usize) -> Result<Temper
     Ok(build_model_from_automaton(&automaton, max_counter))
 }
 
-/// Build a `TemperModel` directly from a parsed [`Automaton`].
+/// Build a `TemperModel` directly from a parsed [`Automaton`], without the
+/// counters nothing reads.
 pub fn build_model_from_automaton(automaton: &Automaton, max_counter: usize) -> TemperModel {
+    let mut model = build_model_tracking(automaton, max_counter, &BTreeSet::new());
+    leave_out_unread_counters(automaton, &mut model);
+    model
+}
+
+/// [`build_model_from_automaton`], also tracking the string variables in
+/// `also_tracked`: those another entity's invariant reads through
+/// `Type[id].field`, or a reaction copies into a tracked variable.
+pub fn build_model_tracking(
+    automaton: &Automaton,
+    max_counter: usize,
+    also_tracked: &BTreeSet<String>,
+) -> TemperModel {
     let states = automaton.automaton.states.clone();
     let initial_status = automaton.automaton.initial.clone();
 
     // Extract initial values from [[state]] declarations.
     let mut initial_counters = BTreeMap::new();
     let mut initial_booleans = BTreeMap::new();
-    let mut initial_lists = BTreeMap::new();
+    let mut initial_lists: BTreeMap<String, Vec<ModelString>> = BTreeMap::new();
     let mut counter_bounds = BTreeMap::new();
+    let read = read_fields(automaton, also_tracked);
 
-    for sv in &automaton.state {
+    for sv in automaton.state.iter().filter(|sv| read.contains(&sv.name)) {
         match &sv.initial {
             Initial::Counter(n) => {
                 initial_counters.insert(sv.name.clone(), *n);
@@ -49,14 +73,30 @@ pub fn build_model_from_automaton(automaton: &Automaton, max_counter: usize) -> 
                 initial_booleans.insert(sv.name.clone(), *b);
             }
             Initial::List(items) => {
-                initial_lists.insert(sv.name.clone(), items.clone());
+                initial_lists.insert(
+                    sv.name.clone(),
+                    items.iter().cloned().map(Into::into).collect(),
+                );
             }
-            // Strings and ints are not modeled.
+            // Strings are initialized below; ints are not modeled.
             Initial::String(_) | Initial::Int(_) => {}
         }
     }
 
-    let transitions = resolve_transitions(automaton);
+    let tracked_strings = tracked_strings(automaton, also_tracked);
+    let initial_strings: BTreeMap<String, super::types::ModelString> = automaton
+        .state
+        .iter()
+        .filter(|sv| tracked_strings.contains(&sv.name))
+        .map(|sv| {
+            let value = match &sv.initial {
+                Initial::String(text) => text.clone(),
+                _ => String::new(),
+            };
+            (sv.name.clone(), value.into())
+        })
+        .collect();
+    let transitions = resolve_transitions(automaton, &tracked_strings, &read);
     // A counter written with a literal larger than the exploration bound is
     // explored up to that literal, so the write is not pruned away.
     for t in &transitions {
@@ -69,7 +109,8 @@ pub fn build_model_from_automaton(automaton: &Automaton, max_counter: usize) -> 
                 var,
                 value: Arg::Lit(Literal::Int(n)),
             } = effect
-                && let (Some(bound), Ok(n)) = (counter_bounds.get_mut(var), usize::try_from(*n))
+                && let (Some(bound), Ok(n)) =
+                    (counter_bounds.get_mut(var.as_str()), usize::try_from(*n))
             {
                 *bound = (*bound).max(n);
             }
@@ -80,7 +121,24 @@ pub fn build_model_from_automaton(automaton: &Automaton, max_counter: usize) -> 
             *bound = (*bound).max(*initial);
         }
     }
+    // A list is explored at least as long as it starts.
+    let mut list_bounds: BTreeMap<String, usize> = initial_lists
+        .iter()
+        .map(|(name, items)| (name.clone(), max_counter.max(items.len())))
+        .collect();
     let invariants = resolve_invariants(automaton);
+    let entry_rules = resolve_entry_rules(automaton);
+    // A counter, or a list's length, is explored one past every literal a
+    // guard or rule compares it with, so a rule about a count passing a
+    // threshold is checked at the threshold, not passed because the count
+    // never got there.
+    let guards = transitions.iter().map(|t| &t.guard);
+    for (name, literal) in compared_literals(guards.chain(rule_asserts(automaton))) {
+        let bound = counter_bounds.get_mut(&name).or(list_bounds.get_mut(&name));
+        if let Some(bound) = bound {
+            *bound = (*bound).max(literal.saturating_add(1));
+        }
+    }
     let liveness = resolve_liveness(automaton);
     let var_kinds = automaton
         .state
@@ -88,31 +146,51 @@ pub fn build_model_from_automaton(automaton: &Automaton, max_counter: usize) -> 
         .map(|sv| (sv.name.clone(), sv.var_type.kind()))
         .collect();
 
+    let mut string_inputs = tracked_strings.clone();
+    for t in &transitions {
+        string_inputs.extend(t.string_params.iter().map(|p| p.name.to_string()));
+    }
     TemperModel {
         states,
         transitions,
         invariants,
+        entry_rules,
         liveness,
         terminal: automaton.automaton.terminal.clone(),
         var_kinds,
-        initial_status,
-        initial_counters,
-        initial_booleans,
-        initial_lists,
+        initial_status: initial_status.into(),
+        initial_counters: initial_counters.into(),
+        initial_booleans: initial_booleans.into(),
+        initial_lists: initial_lists.into(),
+        string_literals: string_literals(automaton, &string_inputs),
+        string_classes: BTreeMap::new(),
+        never_blank: BTreeSet::new(),
+        literals_by_class: false,
+        initial_strings: initial_strings.into(),
+        tracked_strings,
         counter_bounds,
         default_max_counter: max_counter,
+        list_bounds,
         list_literals: list_literals(automaton),
+        limit: None,
     }
 }
 
-/// `'x' in list` literals per list, across every guard and invariant.
+/// The asserts of the spec's invariants and entry rules: what the model
+/// checks beyond the guards.
+fn rule_asserts(automaton: &Automaton) -> impl Iterator<Item = &Expr> {
+    let invariants = automaton.invariants.iter().map(|inv| &inv.assert);
+    invariants.chain(automaton.entry_rules.iter().map(|rule| &rule.assert))
+}
+
+/// `'x' in list` literals per list, across every guard and rule.
 fn list_literals(automaton: &Automaton) -> BTreeMap<String, BTreeSet<String>> {
     let mut pairs = BTreeSet::new();
     for action in &automaton.actions {
         super::semantics::collect_list_contains_pairs(&action.guard, &mut pairs);
     }
-    for inv in &automaton.invariants {
-        super::semantics::collect_list_contains_pairs(&inv.assert, &mut pairs);
+    for assert in rule_asserts(automaton) {
+        super::semantics::collect_list_contains_pairs(assert, &mut pairs);
     }
     let mut literals: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (list, value) in pairs {
@@ -122,35 +200,174 @@ fn list_literals(automaton: &Automaton) -> BTreeMap<String, BTreeSet<String>> {
 }
 
 /// Translate IOA actions into resolved transitions using the shared translation layer.
-fn resolve_transitions(automaton: &Automaton) -> Vec<ResolvedTransition> {
+fn resolve_transitions(
+    automaton: &Automaton,
+    tracked_strings: &BTreeSet<String>,
+    read: &BTreeSet<String>,
+) -> Vec<ResolvedTransition> {
+    // `translate_actions` keeps every action but outputs, in order.
+    let declared = automaton
+        .actions
+        .iter()
+        .filter(|a| a.kind != ActionKind::Output);
     translate_actions(automaton)
         .into_iter()
-        .map(|a| {
-            let effects: Vec<ModelEffect> =
-                a.effects.into_iter().filter_map(convert_effect).collect();
-            let params = effect_params(&effects);
+        .zip(declared)
+        .map(|(a, action)| {
+            let effects: Vec<ModelEffect> = a
+                .effects
+                .into_iter()
+                .filter_map(convert_effect)
+                .filter(|effect| holds_written(effect, read, tracked_strings))
+                .collect();
+            let mut params = effect_params(&effects);
+            let read = super::trigger_guard::params_read(automaton, action);
+            let beside_related = super::trigger_guard::read_beside_related(automaton, action);
+            for (name, kind) in read
+                .iter()
+                .filter(|(name, _)| beside_related.contains(*name))
+            {
+                params.entry(name.clone()).or_insert(*kind);
+            }
+            if !automaton.entry_rules.is_empty() {
+                // A guard-only input still determines whether entry is legal.
+                let reads = action.guard.params_read();
+                for param in &action.params {
+                    let constraints: Vec<_> = action
+                        .constraints
+                        .iter()
+                        .filter(|c| c.param() == param.name())
+                        .collect();
+                    if !reads.iter().any(|name| name == param.name()) && constraints.is_empty() {
+                        continue;
+                    }
+                    let kind = constraints
+                        .iter()
+                        .filter_map(|c| c.field())
+                        .find_map(|field| automaton.state.iter().find(|s| s.name == field))
+                        .map_or(param.param_type().kind(), |s| s.var_type.kind());
+                    let kind = match kind {
+                        VarKind::Str => ParamKind::Str,
+                        VarKind::Bool => ParamKind::Bool,
+                        VarKind::Counter => ParamKind::Count,
+                        VarKind::Num | VarKind::List => continue,
+                    };
+                    params.entry(param.name().to_string()).or_insert(kind);
+                }
+            }
+            let string_params = string_params(action, tracked_strings, &params);
+            // What follows the move reads the values it carried.
+            let after_params = read
+                .into_iter()
+                .filter(|(name, _)| !params.contains_key(name))
+                .filter(|(name, _)| !string_params.iter().any(|p| &p.name == name))
+                .collect();
             ResolvedTransition {
-                name: a.name,
-                from_states: a.from_states,
-                to_state: a.to_state,
-                guard: a.guard,
+                name: a.name.into(),
+                from_states: a.from_states.into_iter().map(Sym::from).collect(),
+                to_state: a.to_state.map(Sym::from),
+                guard: if automaton.entry_rules.is_empty() {
+                    a.guard
+                } else {
+                    super::parameters::guard_with_constraints(action)
+                },
                 effects,
                 params,
+                string_params,
+                constraints: action.constraints.clone(),
+                after: super::trigger_guard::after(automaton, action),
+                after_params,
+                bound: action
+                    .params
+                    .iter()
+                    .filter(|param| param.source().is_some())
+                    .map(|param| Sym::new(param.name()))
+                    .collect(),
             }
         })
         .collect()
+}
+
+/// The largest non-negative integer literal each counter, or each list's
+/// length, is compared with in `exprs` (`v < 4`, `4 <= v`, `v in [1, 4]`,
+/// `len(l) < 4`), by the variable's name.
+fn compared_literals<'a>(exprs: impl Iterator<Item = &'a Expr>) -> BTreeMap<String, usize> {
+    fn note(var: &str, literal: &Literal, out: &mut BTreeMap<String, usize>) {
+        if let Literal::Int(n) = literal
+            && let Ok(n) = usize::try_from(*n)
+        {
+            let largest = out.entry(var.to_string()).or_default();
+            *largest = (*largest).max(n);
+        }
+    }
+    fn visit(expr: &Expr, out: &mut BTreeMap<String, usize>) {
+        match expr {
+            Expr::Not(inner) => visit(inner, out),
+            Expr::And(parts) | Expr::Or(parts) => {
+                parts.iter().for_each(|part| visit(part, out));
+            }
+            Expr::Implies(a, b) => {
+                visit(a, out);
+                visit(b, out);
+            }
+            Expr::Compare { lhs, rhs, .. } => {
+                for (var, literal) in [(lhs, rhs), (rhs, lhs)] {
+                    if let (Operand::Var(var) | Operand::Len(var), Operand::Lit(literal)) =
+                        (var, literal)
+                    {
+                        note(var, literal, out);
+                    }
+                }
+            }
+            Expr::In {
+                value: Operand::Var(var) | Operand::Len(var),
+                set: Set::List(items),
+                ..
+            } => items.iter().for_each(|item| note(var, item, out)),
+            _ => {}
+        }
+    }
+    let mut out = BTreeMap::new();
+    exprs.for_each(|expr| visit(expr, &mut out));
+    out
 }
 
 /// Convert a state [`ResolvedEffect`] to the verification [`ModelEffect`];
 /// runtime-only effects (dispatch, schedule, spawn) have no model.
 fn convert_effect(effect: ResolvedEffect) -> Option<ModelEffect> {
     Some(match effect {
-        ResolvedEffect::SetCounter { var, value } => ModelEffect::SetCounter { var, value },
-        ResolvedEffect::AddCounter { var, value } => ModelEffect::AddCounter { var, value },
-        ResolvedEffect::SubCounter { var, value } => ModelEffect::SubCounter { var, value },
-        ResolvedEffect::SetBool { var, value } => ModelEffect::SetBool { var, value },
-        ResolvedEffect::ListAppend { var, value } => ModelEffect::ListAppend { var, value },
-        ResolvedEffect::ListRemoveAt { var, index } => ModelEffect::ListRemoveAt { var, index },
+        ResolvedEffect::SetCounter { var, value } => ModelEffect::SetCounter {
+            var: var.into(),
+            value,
+        },
+        ResolvedEffect::AddCounter { var, value } => ModelEffect::AddCounter {
+            var: var.into(),
+            value,
+        },
+        ResolvedEffect::SubCounter { var, value } => ModelEffect::SubCounter {
+            var: var.into(),
+            value,
+        },
+        ResolvedEffect::SetBool { var, value } => ModelEffect::SetBool {
+            var: var.into(),
+            value,
+        },
+        ResolvedEffect::SetString { var, value } => ModelEffect::SetString {
+            var: var.into(),
+            value: value.into(),
+        },
+        ResolvedEffect::ListAppend { var, value } => ModelEffect::ListAppend {
+            var: var.into(),
+            value,
+        },
+        ResolvedEffect::ListRemoveAt { var, index } => ModelEffect::ListRemoveAt {
+            var: var.into(),
+            index,
+        },
+        ResolvedEffect::ListRemove { var, value } => ModelEffect::ListRemove {
+            var: var.into(),
+            value,
+        },
         ResolvedEffect::Dispatch(_)
         | ResolvedEffect::Schedule { .. }
         | ResolvedEffect::ScheduleAt { .. }
@@ -158,8 +375,27 @@ fn convert_effect(effect: ResolvedEffect) -> Option<ModelEffect> {
     })
 }
 
+/// Whether the model holds the field `effect` writes: a tracked string
+/// (applying a write to any other is a no-op) or a field in `read`.
+fn holds_written(
+    effect: &ModelEffect,
+    read: &BTreeSet<String>,
+    tracked_strings: &BTreeSet<String>,
+) -> bool {
+    match effect {
+        ModelEffect::SetString { var, .. } => tracked_strings.contains(var.as_str()),
+        ModelEffect::SetCounter { var, .. }
+        | ModelEffect::AddCounter { var, .. }
+        | ModelEffect::SubCounter { var, .. }
+        | ModelEffect::SetBool { var, .. }
+        | ModelEffect::ListAppend { var, .. }
+        | ModelEffect::ListRemove { var, .. }
+        | ModelEffect::ListRemoveAt { var, .. } => read.contains(var.as_str()),
+    }
+}
+
 /// The kind of every `params.p` the effects read (checked consistent at load).
-fn effect_params(effects: &[ModelEffect]) -> BTreeMap<String, ParamKind> {
+pub(crate) fn effect_params(effects: &[ModelEffect]) -> BTreeMap<String, ParamKind> {
     let mut params = BTreeMap::new();
     for effect in effects {
         let (arg, kind) = match effect {
@@ -167,7 +403,10 @@ fn effect_params(effects: &[ModelEffect]) -> BTreeMap<String, ParamKind> {
             | ModelEffect::AddCounter { value, .. }
             | ModelEffect::SubCounter { value, .. } => (value, ParamKind::Count),
             ModelEffect::SetBool { value, .. } => (value, ParamKind::Bool),
-            ModelEffect::ListAppend { value, .. } => (value, ParamKind::Str),
+            ModelEffect::SetString { .. } => continue,
+            ModelEffect::ListAppend { value, .. } | ModelEffect::ListRemove { value, .. } => {
+                (value, ParamKind::Str)
+            }
             ModelEffect::ListRemoveAt { index, .. } => (index, ParamKind::Count),
         };
         if let Arg::Param(name) = arg {
@@ -190,16 +429,23 @@ fn resolve_invariants(automaton: &Automaton) -> Vec<ResolvedInvariant> {
         .collect()
 }
 
-/// Translate IOA liveness properties into resolved liveness.
+/// Translate IOA liveness properties into resolved liveness. An `eventually`
+/// property is checked on the joint model instead.
 fn resolve_liveness(automaton: &Automaton) -> Vec<ResolvedLiveness> {
     automaton
         .liveness
         .iter()
+        .filter(|l| l.eventually.is_none())
         .map(|l| {
             let kind = if !l.reaches.is_empty() {
                 LivenessKind::ReachesState {
                     from: l.from.clone(),
                     targets: l.reaches.clone(),
+                }
+            } else if !l.can_reach.is_empty() {
+                LivenessKind::CanReach {
+                    from: l.from.clone(),
+                    targets: l.can_reach.clone(),
                 }
             } else if l.has_actions == Some(true) {
                 LivenessKind::NoDeadlock {
@@ -221,275 +467,5 @@ fn resolve_liveness(automaton: &Automaton) -> Vec<ResolvedLiveness> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use stateright::Model;
-
-    const ORDER_IOA: &str = include_str!("../../../../test-fixtures/specs/order.ioa.toml");
-
-    fn build_order_model() -> TemperModel {
-        build_model_from_ioa(ORDER_IOA, 2).unwrap()
-    }
-
-    #[test]
-    fn test_build_model_has_correct_states() {
-        let model = build_order_model();
-        assert_eq!(model.states.len(), 10);
-        assert!(model.states.contains(&"Draft".to_string()));
-        assert!(model.states.contains(&"Submitted".to_string()));
-        assert!(model.states.contains(&"Confirmed".to_string()));
-        assert!(model.states.contains(&"Refunded".to_string()));
-    }
-
-    #[test]
-    fn test_build_model_initial_state_is_draft() {
-        let model = build_order_model();
-        let init = model.init_states();
-        assert_eq!(init.len(), 1);
-        assert_eq!(init[0].status, "Draft");
-        assert_eq!(*init[0].counters.get("items").unwrap_or(&99), 0);
-    }
-
-    #[test]
-    fn test_draft_actions_include_add_item() {
-        let model = build_order_model();
-        let state = super::super::types::TemperModelState {
-            status: "Draft".to_string(),
-            counters: BTreeMap::from([("items".to_string(), 0)]),
-            booleans: BTreeMap::from([("has_address".to_string(), false)]),
-            lists: BTreeMap::new(),
-        };
-        let mut actions = Vec::new();
-        model.actions(&state, &mut actions);
-        let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
-        assert!(
-            names.contains(&"AddItem"),
-            "Draft state should allow AddItem, got: {names:?}"
-        );
-    }
-
-    #[test]
-    fn test_submitted_does_not_allow_add_item() {
-        let model = build_order_model();
-        let state = super::super::types::TemperModelState {
-            status: "Submitted".to_string(),
-            counters: BTreeMap::from([("items".to_string(), 1)]),
-            booleans: BTreeMap::from([("has_address".to_string(), true)]),
-            lists: BTreeMap::new(),
-        };
-        let mut actions = Vec::new();
-        model.actions(&state, &mut actions);
-        let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
-        assert!(
-            !names.contains(&"AddItem"),
-            "Submitted state should NOT allow AddItem, got: {names:?}"
-        );
-    }
-
-    #[test]
-    fn test_draft_to_submitted_transition() {
-        let model = build_order_model();
-        let state = super::super::types::TemperModelState {
-            status: "Draft".to_string(),
-            counters: BTreeMap::from([("items".to_string(), 1)]),
-            booleans: BTreeMap::from([("has_address".to_string(), false)]),
-            lists: BTreeMap::new(),
-        };
-        let action = super::super::types::TemperModelAction {
-            name: "SubmitOrder".to_string(),
-            target_state: Some("Submitted".to_string()),
-            params: BTreeMap::new(),
-        };
-        let next = model.next_state(&state, action);
-        assert!(next.is_some());
-        let next = next.unwrap();
-        assert_eq!(next.status, "Submitted");
-        assert_eq!(*next.counters.get("items").unwrap(), 1);
-    }
-
-    #[test]
-    fn test_add_item_increments_count() {
-        let model = build_order_model();
-        let state = super::super::types::TemperModelState {
-            status: "Draft".to_string(),
-            counters: BTreeMap::from([("items".to_string(), 0)]),
-            booleans: BTreeMap::from([("has_address".to_string(), false)]),
-            lists: BTreeMap::new(),
-        };
-        let action = super::super::types::TemperModelAction {
-            name: "AddItem".to_string(),
-            target_state: None,
-            params: BTreeMap::new(),
-        };
-        let next = model.next_state(&state, action).unwrap();
-        assert_eq!(*next.counters.get("items").unwrap(), 1);
-        assert_eq!(next.status, "Draft");
-    }
-
-    #[test]
-    fn test_properties_are_generated() {
-        let model = build_order_model();
-        let props = model.properties();
-        assert!(!props.is_empty(), "Model should have at least one property");
-    }
-
-    #[test]
-    fn test_counter_invariant_resolved() {
-        let model = build_order_model();
-        assert!(
-            model
-                .invariants
-                .iter()
-                .any(|i| i.assert.to_string().ends_with("=> items > 0")),
-            "Should have an `items > 0` invariant"
-        );
-    }
-
-    #[test]
-    fn test_terminal_states_resolved() {
-        let model = build_order_model();
-        assert!(!model.terminal.is_empty(), "Should have terminal states");
-    }
-
-    #[test]
-    fn test_cross_entity_guard_is_preserved_as_abstract_guard() {
-        let spec = r#"
-[automaton]
-name = "Parent"
-states = ["Waiting", "Ready"]
-initial = "Waiting"
-
-[[action]]
-name = "Proceed"
-from = ["Waiting"]
-to = "Ready"
-guard = "Child[child_id].status in ['Done']"
-"#;
-        let model = build_model_from_ioa(spec, 2).unwrap();
-        let guard = &model
-            .transitions
-            .iter()
-            .find(|transition| transition.name == "Proceed")
-            .expect("Proceed transition")
-            .guard;
-        assert_eq!(guard.to_string(), "Child[child_id].status in ['Done']");
-        let state = model.init_states().remove(0);
-        assert!(
-            super::super::semantics::guard_may_hold(guard, &model.var_kinds, &state),
-            "a related-entity guard may hold (free boolean)"
-        );
-        assert!(
-            !super::super::semantics::evaluate_guard(guard, &model.var_kinds, &state),
-            "a related-entity guard is not locally enabled"
-        );
-    }
-
-    #[test]
-    fn debug_resolved_transitions() {
-        let model = build_model_from_ioa(ORDER_IOA, 2).unwrap();
-        for t in &model.transitions {
-            eprintln!(
-                "{}: from={:?} to={:?} guard={:?} effects={:?}",
-                t.name, t.from_states, t.to_state, t.guard, t.effects
-            );
-        }
-    }
-
-    // --- Compound invariant tests ---------------------------------------
-
-    const COMPOUND_IOA: &str = r#"
-[automaton]
-name = "Release"
-states = ["Planning", "Testing", "Shipped"]
-initial = "Planning"
-
-[[state]]
-name = "migrations_ok"
-type = "bool"
-initial = false
-
-[[state]]
-name = "typecheck_ok"
-type = "bool"
-initial = false
-
-[[state]]
-name = "unit_tests_ok"
-type = "bool"
-initial = false
-
-[[action]]
-name = "EnterTesting"
-kind = "input"
-from = ["Planning"]
-to = "Testing"
-
-[[action]]
-name = "Ship"
-kind = "internal"
-from = ["Testing"]
-to = "Shipped"
-
-[[invariant]]
-name = "TestingRequiresAllGates"
-assert = "status in ['Testing', 'Shipped'] => migrations_ok && typecheck_ok && unit_tests_ok"
-
-[[invariant]]
-name = "EitherReviewer"
-assert = "status in ['Shipped'] => migrations_ok || typecheck_ok"
-"#;
-
-    #[test]
-    fn test_compound_invariants_keep_their_structure() {
-        let model = build_model_from_ioa(COMPOUND_IOA, 2).unwrap();
-        let text = |name: &str| {
-            model
-                .invariants
-                .iter()
-                .find(|i| i.name == name)
-                .map(|i| i.assert.to_string())
-                .unwrap()
-        };
-        assert_eq!(
-            text("TestingRequiresAllGates"),
-            "status in ['Testing', 'Shipped'] => migrations_ok && typecheck_ok && unit_tests_ok"
-        );
-        assert_eq!(
-            text("EitherReviewer"),
-            "status in ['Shipped'] => migrations_ok || typecheck_ok"
-        );
-    }
-
-    const COMPOUND_UNDECLARED_IOA: &str = r#"
-[automaton]
-name = "Release"
-states = ["Planning", "Shipped"]
-initial = "Planning"
-
-[[state]]
-name = "migrations_ok"
-type = "bool"
-initial = false
-
-[[action]]
-name = "Ship"
-kind = "internal"
-from = ["Planning"]
-to = "Shipped"
-
-[[invariant]]
-name = "MixedDeclaredUndeclared"
-assert = "status in ['Shipped'] => migrations_ok && undeclared_flag"
-"#;
-
-    #[test]
-    fn test_invariant_over_undeclared_variable_fails_to_load() {
-        let err = build_model_from_ioa(COMPOUND_UNDECLARED_IOA, 2)
-            .err()
-            .expect("undeclared variable must be rejected");
-        assert!(
-            err.contains("unknown state variable 'undeclared_flag'"),
-            "{err}"
-        );
-    }
-}
+#[path = "builder_test.rs"]
+mod tests;

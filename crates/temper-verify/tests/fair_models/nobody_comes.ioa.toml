@@ -1,0 +1,21 @@
+[automaton]
+name = "Wait"
+states = ["Idle", "A", "Out"]
+initial = "Idle"
+
+[[action]]
+name = "Begin"
+kind = "input"
+from = ["Idle"]
+to = "A"
+
+[[action]]
+name = "Exit"
+kind = "input"
+from = ["A"]
+to = "Out"
+
+[[liveness]]
+name = "GetsOut"
+eventually = "status == 'Idle' || status == 'Out'"
+fairness = {}

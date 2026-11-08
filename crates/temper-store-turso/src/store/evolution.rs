@@ -4,6 +4,7 @@ use crate::driver::params;
 use temper_runtime::persistence::{PersistenceError, storage_error};
 use tracing::instrument;
 
+use super::write_gate::WritePriority;
 use super::{DesignTimeEventRow, EvolutionRecordRow, FeatureRequestRow, TursoEventStore};
 use crate::TursoEvolutionRecordInsert;
 use crate::metrics::TursoQueryTimer;
@@ -28,7 +29,9 @@ impl TursoEventStore {
         developer_notes: Option<&str>,
     ) -> Result<(), PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.upsert_feature_request");
-        let conn = self.configured_connection().await?;
+        let conn = self
+            .write_connection("turso.upsert_feature_request", WritePriority::High)
+            .await?;
         let affected = conn.execute(
             "INSERT INTO feature_requests (id, tenant, category, description, frequency, trajectory_refs, disposition, developer_notes, updated_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, datetime('now')) \
@@ -98,7 +101,9 @@ impl TursoEventStore {
         developer_notes: Option<&str>,
     ) -> Result<bool, PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.update_feature_request");
-        let conn = self.configured_connection().await?;
+        let conn = self
+            .write_connection("turso.update_feature_request", WritePriority::High)
+            .await?;
         let affected = conn
             .execute(
                 "UPDATE feature_requests SET disposition = ?3, developer_notes = ?4, updated_at = datetime('now') \
@@ -138,7 +143,9 @@ impl TursoEventStore {
             data_json,
         } = record;
         let _query_timer = TursoQueryTimer::start("turso.insert_evolution_record");
-        let conn = self.configured_connection().await?;
+        let conn = self
+            .write_connection("turso.insert_evolution_record", WritePriority::High)
+            .await?;
         let execute_res = conn
             .execute(
             "INSERT INTO evolution_records (id, tenant, record_type, status, created_by, derived_from, data, timestamp) \
@@ -302,7 +309,9 @@ impl TursoEventStore {
         total_steps: Option<i64>,
     ) -> Result<(), PersistenceError> {
         let _query_timer = TursoQueryTimer::start("turso.insert_design_time_event");
-        let conn = self.configured_connection().await?;
+        let conn = self
+            .write_connection("turso.insert_design_time_event", WritePriority::Low)
+            .await?;
         conn.execute(
             "INSERT INTO design_time_events (kind, entity_type, tenant, summary, level, passed, step_number, total_steps) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",

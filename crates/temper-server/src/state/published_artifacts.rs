@@ -166,6 +166,13 @@ impl ServerState {
                 ));
             }
         };
+        // The public key is named by the content hash, so only bytes that hash to it are written there.
+        let bytes_hash = format!("sha256:{}", sha256_hex(&bytes));
+        if bytes_hash != content_hash {
+            return Err(format!(
+                "{source_display} records content '{content_hash}' but its bytes hash to '{bytes_hash}'; nothing was published"
+            ));
+        }
 
         for authorization in authorizations {
             let snapshot = self
@@ -208,6 +215,7 @@ impl ServerState {
         span.record("public_blob_endpoint_host", endpoint_host);
 
         let storage_key = public_storage_key(
+            tenant,
             namespace,
             &request.owner_ref_type,
             &request.owner_ref_id,
@@ -435,7 +443,11 @@ fn build_public_blob_put_headers(
     })
 }
 
+/// Where an artifact sits in the public store: `{namespace}/tenants/<sha256 of the tenant>/{owner_ref_type}/
+/// {owner_ref_id}/{label}-{hash}.{ext}`. Every segment is one path segment and the tenant's is at a fixed place, so
+/// tenants publishing to one store never share a key, whatever namespace, owner or label each names.
 fn public_storage_key(
+    tenant: &TenantId,
     namespace: &str,
     owner_ref_type: &str,
     owner_ref_id: &str,
@@ -450,8 +462,10 @@ fn public_storage_key(
     validate_path_segment("label", label)?;
     validate_path_segment("content_hash", hash)?;
     Ok(format!(
-        "{}/{}/{}/{}-{}.{}",
+        "{}/{}/{}/{}/{}/{}-{}.{}",
         namespace,
+        crate::blob_store::TENANT_NAMESPACE_SEGMENT,
+        sha256_hex(tenant.as_str().as_bytes()),
         owner_ref_type,
         owner_ref_id,
         label,

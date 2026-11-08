@@ -24,12 +24,23 @@ impl WasmModuleRegistry {
         Self::default()
     }
 
-    /// Register a module hash for a tenant.
-    pub fn register(&mut self, tenant: &TenantId, module_name: &str, sha256_hash: &str) {
+    /// Register a module hash for a tenant, returning the hash it replaced.
+    pub fn register(
+        &mut self,
+        tenant: &TenantId,
+        module_name: &str,
+        sha256_hash: &str,
+    ) -> Option<String> {
         self.modules.insert(
             (tenant.to_string(), module_name.to_string()),
             sha256_hash.to_string(),
-        );
+        )
+    }
+
+    /// Whether any tenant module or built-in still names this hash.
+    pub fn names_hash(&self, sha256_hash: &str) -> bool {
+        self.modules.values().any(|hash| hash == sha256_hash)
+            || self.builtins.values().any(|hash| hash == sha256_hash)
     }
 
     /// Register a built-in module available to all tenants.
@@ -46,11 +57,10 @@ impl WasmModuleRegistry {
             .map(|s| s.as_str())
     }
 
-    /// Remove a module from the registry.
-    pub fn remove(&mut self, tenant: &TenantId, module_name: &str) -> bool {
+    /// Remove a module from the registry, returning its hash.
+    pub fn remove(&mut self, tenant: &TenantId, module_name: &str) -> Option<String> {
         self.modules
             .remove(&(tenant.to_string(), module_name.to_string()))
-            .is_some()
     }
 
     /// List all modules for a tenant.
@@ -110,9 +120,30 @@ mod tests {
         let tenant = TenantId::new("alpha");
         registry.register(&tenant, "stripe_charge", "abc123");
 
-        assert!(registry.remove(&tenant, "stripe_charge"));
-        assert!(!registry.remove(&tenant, "stripe_charge"));
+        assert_eq!(
+            registry.remove(&tenant, "stripe_charge").as_deref(),
+            Some("abc123")
+        );
+        assert_eq!(registry.remove(&tenant, "stripe_charge"), None);
         assert_eq!(registry.get_hash(&tenant, "stripe_charge"), None);
+    }
+
+    #[test]
+    fn replacing_a_module_returns_the_old_hash_and_drops_its_name() {
+        let mut registry = WasmModuleRegistry::new();
+        let alpha = TenantId::new("alpha");
+        let beta = TenantId::new("beta");
+        assert_eq!(registry.register(&alpha, "build", "v1"), None);
+        registry.register(&beta, "build", "v1");
+
+        assert_eq!(
+            registry.register(&alpha, "build", "v2").as_deref(),
+            Some("v1")
+        );
+        assert!(registry.names_hash("v1"), "beta still runs v1");
+        registry.register(&beta, "build", "v2");
+        assert!(!registry.names_hash("v1"));
+        assert!(registry.names_hash("v2"));
     }
 
     #[test]

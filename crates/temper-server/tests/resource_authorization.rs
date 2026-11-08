@@ -39,10 +39,13 @@ fn customer_security_context(id: &str) -> SecurityContext {
             role: None,
             acting_for: None,
             agent_type: None,
+            label: None,
             attributes: Default::default(),
         },
         context_attrs: Default::default(),
         correlation_id: format!("resource-auth-{id}"),
+        cause: None,
+        credential: None,
     }
 }
 
@@ -68,14 +71,16 @@ fn json_request(
     request
 }
 
+/// Seed a File or FileVersion whose recorded content hash is its bytes' hash.
 async fn seed_file(
     store: &TursoEventStore,
     entity_type: &str,
     id: &str,
-    hash: &str,
     body: &[u8],
     source_file_id: Option<&str>,
 ) {
+    use sha2::Digest as _;
+    let hash = format!("sha256:{:x}", sha2::Sha256::digest(body));
     let mut fields = serde_json::json!({
         "content_hash": hash,
         "mime_type": "text/markdown",
@@ -124,22 +129,13 @@ permit(
         .authz
         .reload_tenant_policies("other-tenant", "")
         .expect("other tenant should default-deny");
-    seed_file(&store, "File", "file-a", "sha256:filea", b"file-a", None).await;
+    seed_file(&store, "File", "file-a", b"file-a", None).await;
     let oversized_text = vec![b'x'; 2 * 1024 * 1024 + 1];
-    seed_file(
-        &store,
-        "File",
-        "file-large",
-        "sha256:filelarge",
-        &oversized_text,
-        None,
-    )
-    .await;
+    seed_file(&store, "File", "file-large", &oversized_text, None).await;
     seed_file(
         &store,
         "FileVersion",
         "version-a",
-        "sha256:versiona",
         b"version-a",
         Some("file-a"),
     )
@@ -255,7 +251,7 @@ permit(
 
 #[tokio::test]
 async fn authorize_api_evaluates_the_claimed_resource_id_not_context_spoofing() {
-    let (state, _store, _temp) = state_with_turso("authorize-exact-resource").await;
+    let (state, store, _temp) = state_with_turso("authorize-exact-resource").await;
     state
         .authz
         .reload_tenant_policies(
@@ -322,7 +318,26 @@ permit(
         serde_json::from_slice::<serde_json::Value>(&denied_body).expect("denied response JSON")["allowed"],
         false
     );
+    assert!(
+        store
+            .query_decisions(TENANT, None)
+            .await
+            .unwrap()
+            .is_empty(),
+        "an offer check must not file a pending decision"
+    );
+    assert!(
+        store
+            .load_policy_denial_patterns(TENANT)
+            .await
+            .unwrap()
+            .is_empty(),
+        "an offer check must not record a denial pattern"
+    );
 }
 
 #[path = "resource_authorization/artifact_authorization.rs"]
 mod artifact_authorization;
+
+#[path = "resource_authorization/offer_checks.rs"]
+mod offer_checks;

@@ -17,7 +17,7 @@ use crate::predicate::{Arg, AssignOp, Expr, VarKind};
 /// Canonical effect produced by shared translation: an effect statement
 /// resolved against the declared variable types, or a post-commit dispatch.
 ///
-/// State effects (counters, bools, lists) are applied by the runtime and
+/// State effects (counters, bools, strings, lists) are applied by the runtime and
 /// modeled by the verifier; the rest only the runtime performs.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResolvedEffect {
@@ -30,10 +30,14 @@ pub enum ResolvedEffect {
     SubCounter { var: String, value: Arg },
     /// `var = value` on a bool.
     SetBool { var: String, value: Arg },
+    /// `var = 'literal'` on a string, including the empty string.
+    SetString { var: String, value: String },
     /// `append(var, value)`.
     ListAppend { var: String, value: Arg },
     /// `remove_at(var, index)`; out of range is a no-op.
     ListRemoveAt { var: String, index: Arg },
+    /// `remove(var, value)`: every element equal to `value`; none is a no-op.
+    ListRemove { var: String, value: Arg },
 
     // -- Runtime-only effects --
     /// Post-commit dispatch by name: an external trigger's dispatch record
@@ -50,11 +54,12 @@ pub enum ResolvedEffect {
         initial_action: String,
         store_id_in: Option<String>,
         id: Option<Arg>,
+        copy: Vec<String>,
     },
 }
 
 impl ResolvedEffect {
-    /// Whether this effect writes modeled state (counters, bools, lists).
+    /// Whether this effect writes modeled state (counters, bools, strings, lists).
     pub fn is_state_effect(&self) -> bool {
         matches!(
             self,
@@ -62,8 +67,10 @@ impl ResolvedEffect {
                 | ResolvedEffect::AddCounter { .. }
                 | ResolvedEffect::SubCounter { .. }
                 | ResolvedEffect::SetBool { .. }
+                | ResolvedEffect::SetString { .. }
                 | ResolvedEffect::ListAppend { .. }
                 | ResolvedEffect::ListRemoveAt { .. }
+                | ResolvedEffect::ListRemove { .. }
         )
     }
 }
@@ -125,6 +132,46 @@ pub fn translate_actions(automaton: &Automaton) -> Vec<ResolvedAction> {
         .collect()
 }
 
+/// Translate each `[[carry]]` into the move that applies it: from its `from`
+/// state to its target, under its guard, with `var = params.var` for each
+/// counter and flag it sets. The other values it sets reach the record as
+/// the move's params, as any move's params do.
+pub fn translate_carries(automaton: &Automaton) -> Vec<ResolvedAction> {
+    let kinds: BTreeMap<&str, VarKind> = automaton
+        .state
+        .iter()
+        .map(|s| (s.name.as_str(), s.var_type.kind()))
+        .collect();
+    automaton
+        .carry_moves()
+        .into_iter()
+        .map(|(name, carry)| ResolvedAction {
+            name,
+            from_states: vec![carry.from.clone()],
+            to_state: Some(carry.target().to_string()),
+            guard: carry.guard.clone(),
+            effects: carry
+                .set
+                .keys()
+                .filter_map(|var| {
+                    let value = Arg::Param(var.clone());
+                    match kinds.get(var.as_str()) {
+                        Some(VarKind::Counter) => Some(ResolvedEffect::SetCounter {
+                            var: var.clone(),
+                            value,
+                        }),
+                        Some(VarKind::Bool) => Some(ResolvedEffect::SetBool {
+                            var: var.clone(),
+                            value,
+                        }),
+                        _ => None,
+                    }
+                })
+                .collect(),
+        })
+        .collect()
+}
+
 /// Resolve one (already type-checked) effect statement.
 fn resolve_effect(effect: &Effect, kinds: &BTreeMap<&str, VarKind>) -> ResolvedEffect {
     match effect.clone() {
@@ -132,6 +179,12 @@ fn resolve_effect(effect: &Effect, kinds: &BTreeMap<&str, VarKind>) -> ResolvedE
             if kinds.get(var.as_str()) == Some(&VarKind::Bool) {
                 debug_assert_eq!(op, AssignOp::Set, "checked at load");
                 return ResolvedEffect::SetBool { var, value };
+            }
+            if kinds.get(var.as_str()) == Some(&VarKind::Str) {
+                let Arg::Lit(crate::predicate::Literal::Str(value)) = value else {
+                    unreachable!("string assignments are checked at load");
+                };
+                return ResolvedEffect::SetString { var, value };
             }
             match op {
                 AssignOp::Set => ResolvedEffect::SetCounter { var, value },
@@ -141,6 +194,7 @@ fn resolve_effect(effect: &Effect, kinds: &BTreeMap<&str, VarKind>) -> ResolvedE
         }
         Effect::Append { list, value } => ResolvedEffect::ListAppend { var: list, value },
         Effect::RemoveAt { list, index } => ResolvedEffect::ListRemoveAt { var: list, index },
+        Effect::Remove { list, value } => ResolvedEffect::ListRemove { var: list, value },
         Effect::Schedule {
             action,
             delay_seconds,
@@ -154,11 +208,13 @@ fn resolve_effect(effect: &Effect, kinds: &BTreeMap<&str, VarKind>) -> ResolvedE
             initial_action,
             store_id_in,
             id,
+            copy,
         } => ResolvedEffect::Spawn {
             entity_type,
             initial_action,
             store_id_in,
             id,
+            copy,
         },
     }
 }

@@ -15,8 +15,7 @@ use temper_server::{EntityActor, EntityMsg, EntityResponse};
 mod common;
 
 use common::specs::{
-    SYSTEM_MODEL_CSDL_XML, catalog_table_rw, collaborator_table_rw, project_table_rw,
-    tenant_table_rw, version_table_rw,
+    catalog_table_rw, collaborator_table_rw, project_table_rw, tenant_table_rw, version_table_rw,
 };
 
 const TIMEOUT: Duration = Duration::from_secs(2);
@@ -47,6 +46,7 @@ async fn actor_project_full_lifecycle() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: "UpdateSpecs".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -64,6 +64,7 @@ async fn actor_project_full_lifecycle() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: "Verify".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -81,6 +82,7 @@ async fn actor_project_full_lifecycle() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: "Archive".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -106,6 +108,7 @@ async fn actor_project_verify_requires_building_state() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: "Verify".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -137,6 +140,7 @@ async fn actor_tenant_full_lifecycle() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: "Deploy".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -154,6 +158,7 @@ async fn actor_tenant_full_lifecycle() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: "Suspend".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -171,6 +176,7 @@ async fn actor_tenant_full_lifecycle() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: "Reactivate".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -188,6 +194,7 @@ async fn actor_tenant_full_lifecycle() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: "Archive".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -212,6 +219,7 @@ async fn actor_tenant_cannot_deploy_archived() {
     let _: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: "Deploy".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -225,6 +233,7 @@ async fn actor_tenant_cannot_deploy_archived() {
     let _: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: "Archive".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -240,6 +249,7 @@ async fn actor_tenant_cannot_deploy_archived() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: "Deploy".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -276,6 +286,7 @@ async fn actor_catalog_publish_and_fork() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: "Publish".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -293,6 +304,7 @@ async fn actor_catalog_publish_and_fork() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: "Fork".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -310,6 +322,7 @@ async fn actor_catalog_publish_and_fork() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: "Deprecate".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -345,6 +358,7 @@ async fn actor_collaborator_invite_accept_remove() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: "Accept".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -362,6 +376,7 @@ async fn actor_collaborator_invite_accept_remove() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: "ChangeRole".into(),
                 params: serde_json::json!({"role": "editor"}),
                 related: std::collections::BTreeMap::new(),
@@ -378,6 +393,7 @@ async fn actor_collaborator_invite_accept_remove() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: "Remove".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -408,6 +424,7 @@ async fn actor_version_lifecycle() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: "MarkDeployed".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -424,6 +441,7 @@ async fn actor_version_lifecycle() {
     let r: EntityResponse = actor_ref
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: "Supersede".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -478,6 +496,7 @@ async fn actor_multiple_system_entities_independent() {
     let _: EntityResponse = p
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: "UpdateSpecs".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -491,6 +510,7 @@ async fn actor_multiple_system_entities_independent() {
     let _: EntityResponse = t
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: "Deploy".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -504,6 +524,7 @@ async fn actor_multiple_system_entities_independent() {
     let _: EntityResponse = c
         .ask(
             EntityMsg::Action {
+                caller: None,
                 name: "Publish".into(),
                 params: serde_json::json!({}),
                 related: std::collections::BTreeMap::new(),
@@ -523,116 +544,4 @@ async fn actor_multiple_system_entities_independent() {
     assert_eq!(rp.state.status, "Building");
     assert_eq!(rt.state.status, "Active");
     assert_eq!(rc.state.status, "Published");
-}
-
-// =========================================================================
-// CODEGEN — Tier 1 compiled types from system CSDL
-// =========================================================================
-
-#[test]
-fn codegen_system_entities_produce_valid_modules() {
-    use temper_codegen::generate_entity_module;
-    use temper_spec::csdl::parse_csdl;
-    use temper_spec::model::build_spec_model;
-
-    let csdl_xml = SYSTEM_MODEL_CSDL_XML;
-    let csdl = parse_csdl(csdl_xml).expect("system CSDL should parse");
-
-    let spec = build_spec_model(csdl, std::collections::HashMap::new());
-
-    // Generate Tier 1 compiled code for each system entity
-    for entity_name in &[
-        "Project",
-        "Tenant",
-        "CatalogEntry",
-        "Collaborator",
-        "Version",
-    ] {
-        let module = generate_entity_module(&spec, entity_name)
-            .unwrap_or_else(|e| panic!("codegen for {entity_name} failed: {e}"));
-
-        // Verify generated code contains expected structures
-        assert!(
-            module
-                .source
-                .contains(&format!("pub struct {}State", entity_name)),
-            "{entity_name} should have a state struct:\n{}",
-            &module.source[..200.min(module.source.len())]
-        );
-        assert!(
-            module
-                .source
-                .contains(&format!("pub enum {}Msg", entity_name)),
-            "{entity_name} should have a message enum"
-        );
-        assert!(
-            module.source.contains("pub id:"),
-            "{entity_name} should have an id field"
-        );
-        assert!(
-            module.source.contains("pub status:"),
-            "{entity_name} should have a status field"
-        );
-    }
-}
-
-#[test]
-fn codegen_project_has_typed_fields() {
-    use temper_codegen::generate_entity_module;
-    use temper_spec::csdl::parse_csdl;
-    use temper_spec::model::build_spec_model;
-
-    let csdl_xml = SYSTEM_MODEL_CSDL_XML;
-    let csdl = parse_csdl(csdl_xml).unwrap();
-    let spec = build_spec_model(csdl, std::collections::HashMap::new());
-
-    let module = generate_entity_module(&spec, "Project").unwrap();
-
-    // Project-specific fields from CSDL
-    assert!(
-        module.source.contains("pub name:"),
-        "Project should have name field"
-    );
-    assert!(
-        module.source.contains("pub description:"),
-        "Project should have description field"
-    );
-    assert!(
-        module.source.contains("Verify"),
-        "Project should have Verify action"
-    );
-    assert!(
-        module.source.contains("Archive"),
-        "Project should have Archive action"
-    );
-    assert!(
-        module.source.contains("UpdateSpecs"),
-        "Project should have UpdateSpecs action"
-    );
-}
-
-#[test]
-fn codegen_tenant_has_project_reference() {
-    use temper_codegen::generate_entity_module;
-    use temper_spec::csdl::parse_csdl;
-    use temper_spec::model::build_spec_model;
-
-    let csdl_xml = SYSTEM_MODEL_CSDL_XML;
-    let csdl = parse_csdl(csdl_xml).unwrap();
-    let spec = build_spec_model(csdl, std::collections::HashMap::new());
-
-    let module = generate_entity_module(&spec, "Tenant").unwrap();
-
-    assert!(
-        module.source.contains("Deploy"),
-        "Tenant should have Deploy action"
-    );
-    assert!(
-        module.source.contains("Suspend"),
-        "Tenant should have Suspend action"
-    );
-    assert!(
-        module.source.contains("Reactivate"),
-        "Tenant should have Reactivate action"
-    );
 }

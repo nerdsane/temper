@@ -1,0 +1,36 @@
+[automaton]
+name = "Kick"
+states = ["Unmade", "Sent"]
+initial = "Unmade"
+
+[[state]]
+name = "job"
+type = "string"
+initial = ""
+
+[[state]]
+name = "source"
+type = "string"
+initial = ""
+
+[[action]]
+name = "Go"
+kind = "input"
+from = ["Unmade"]
+to = "Sent"
+params = ["job", "source"]
+
+[[action.constraints]]
+kind = "param_nonempty"
+param = "job"
+
+[[action.triggers]]
+name = "join"
+kind = "entity"
+target_entity = "Job"
+target_action = "Join"
+[action.triggers.args]
+source = "source"
+[action.triggers.resolve_target]
+kind = "create_if_missing"
+id_field = "job"

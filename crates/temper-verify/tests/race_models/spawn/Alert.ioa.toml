@@ -1,0 +1,36 @@
+# Planted: Recover goes out before the spawned Incident has started, is refused, and the Incident then starts anyway.
+[automaton]
+name = "Alert"
+states = ["Firing", "Taken", "Recovered"]
+initial = "Firing"
+
+[[state]]
+name = "incident"
+type = "string"
+initial = ""
+
+[[action]]
+name = "TakeUp"
+kind = "input"
+from = ["Firing"]
+to = "Taken"
+effect = ["spawn('Incident', 'TakenUp', incident)"]
+
+[[action]]
+name = "Recover"
+kind = "input"
+from = ["Taken"]
+to = "Recovered"
+
+[[action.triggers]]
+name = "recover"
+kind = "entity"
+target_entity = "Incident"
+target_action = "Recover"
+[action.triggers.resolve_target]
+kind = "field"
+id_field = "incident"
+
+[[invariant]]
+name = "RecoveredEnds"
+assert = "status == 'Recovered' && !empty(incident) => !(Incident[incident].status in ['Looking'])"

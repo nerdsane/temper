@@ -13,10 +13,13 @@ fn admin_context() -> SecurityContext {
             role: None,
             acting_for: None,
             agent_type: None,
+            label: None,
             attributes: HashMap::new(),
         },
         context_attrs: HashMap::new(),
         correlation_id: "test-admin".to_string(),
+        cause: None,
+        credential: None,
     }
 }
 
@@ -28,10 +31,13 @@ fn customer_context(id: &str) -> SecurityContext {
             role: None,
             acting_for: None,
             agent_type: None,
+            label: None,
             attributes: HashMap::new(),
         },
         context_attrs: HashMap::new(),
         correlation_id: "test-customer".to_string(),
+        cause: None,
+        credential: None,
     }
 }
 
@@ -171,15 +177,20 @@ fn test_invalid_policy_returns_error() {
 }
 
 #[test]
-fn invalid_action_denies_through_instrumented_error_path() {
+fn unbuildable_request_entity_denies_through_instrumented_error_path() {
+    // Action ids are taken verbatim, so any action string names an action;
+    // a resource type that is not a Cedar type name cannot be built at all.
     let engine = AuthzEngine::permissive();
     let ctx = customer_context("cust-1");
     let attrs = HashMap::new();
 
-    let decision = engine.authorize(&ctx, "bad\"action", "Order", &attrs);
+    let decision = engine.authorize(&ctx, "read", "Order Item", &attrs);
     assert!(
-        matches!(decision, AuthzDecision::Deny(AuthzDenial::InvalidAction(_))),
-        "invalid action should deny with typed reason, got: {decision:?}"
+        matches!(
+            decision,
+            AuthzDecision::Deny(AuthzDenial::InvalidResource(_))
+        ),
+        "unbuildable resource should deny with typed reason even when every request is permitted, got: {decision:?}"
     );
 }
 
@@ -934,7 +945,7 @@ fn resource_role_cannot_satisfy_role_scoped_permit() {
 /// self-declare admin at the ingress.
 #[test]
 fn operator_credential_can_manage_identity_entities_under_app_policies() {
-    // An app bundle like katagami's: permits for its own entities, nothing for
+    // An app bundle like a downstream one: permits for its own entities, nothing for
     // TrustedIssuer or PrincipalGeneration.
     let engine = AuthzEngine::new("permit(principal, action, resource is DesignLanguage);")
         .expect("policy parses");
@@ -1135,4 +1146,57 @@ fn verified_and_unverified_operator_contexts_disagree_on_identity_entities() {
             );
         }
     }
+}
+
+/// ADR-0069 sub-decision 4: a route reshapes the tenant's HTTP surface, so
+/// only the platform manages `HttpEndpoint` rows, whatever an app permits.
+#[test]
+fn http_endpoint_routes_are_managed_only_by_the_platform() {
+    // An app whose Cedar lets everyone do everything, untyped.
+    let engine = AuthzEngine::permissive();
+    let attrs = HashMap::new();
+    let operator = agent_context("operator", "operator");
+    let manage = |ctx: &SecurityContext, action: &str| {
+        engine
+            .authorize(ctx, action, "HttpEndpoint", &attrs)
+            .is_allowed()
+    };
+    for action in [
+        "create", "Create", "update", "delete", "Pause", "Resume", "Delete",
+    ] {
+        // The known writers: the platform, temper-git's admin and a control plane's
+        // route script with the operator key.
+        assert!(
+            manage(&SecurityContext::system(), action),
+            "System may {action}"
+        );
+        assert!(manage(&admin_context(), action), "Admin may {action}");
+        assert!(manage(&operator, action), "the operator may {action}");
+        // An app's agent or person may not, even under a broad permit.
+        assert!(
+            !manage(&agent_context("app-agent", "contributor"), action),
+            "an agent may not {action}"
+        );
+        assert!(
+            !manage(&customer_context("human-x"), action),
+            "a person may not {action}"
+        );
+    }
+    // Reading routes and dispatching through one stay with the app's Cedar.
+    for action in ["read", "list", "HandleHttp", "http_call"] {
+        assert!(
+            manage(&agent_context("app-agent", "contributor"), action),
+            "{action} is the app's to decide"
+        );
+    }
+    // Under app Cedar that permits nothing about routes, the platform still
+    // manages them.
+    let app_only = AuthzEngine::new("permit(principal, action, resource is DesignLanguage);")
+        .expect("policy parses");
+    assert!(
+        app_only
+            .authorize(&operator, "create", "HttpEndpoint", &attrs)
+            .is_allowed(),
+        "the operator creates routes without an app permit"
+    );
 }

@@ -108,22 +108,7 @@ pub(super) async fn get_local_blob_bounded_observed(
 
 pub(super) fn local_blob_path(root: &Path, key: &str) -> Result<PathBuf, String> {
     let mut path = root.to_path_buf();
-    let mut saw_component = false;
-    for component in key.split('/') {
-        if component.is_empty()
-            || component == "."
-            || component == ".."
-            || component.contains('\\')
-            || component.starts_with(std::path::MAIN_SEPARATOR)
-        {
-            return Err(format!("invalid blob key '{key}'"));
-        }
-        saw_component = true;
-        path.push(component);
-    }
-    if !saw_component {
-        return Err("invalid empty blob key".to_string());
-    }
+    path.extend(super::checked_object_key(key)?.split('/'));
     Ok(path)
 }
 

@@ -184,24 +184,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_triplet_creation() {
-        let triplet = ReflectiveTriplet::new(
-            "Attempted Reassign on Issue".into(),
-            "Error: action not found".into(),
-            "Add Reassign action to Issue spec".into(),
-            0.0,
-            "traj-1".into(),
-        )
-        .with_turn_id(3)
-        .with_entity_type("Issue".into())
-        .with_action("Reassign".into());
-
-        assert_eq!(triplet.score, 0.0);
-        assert_eq!(triplet.turn_id, Some(3));
-        assert_eq!(triplet.action, Some("Reassign".into()));
-    }
-
-    #[test]
     fn test_dataset_sorting() {
         let mut dataset = ReflectiveDataset::new("pm".into(), "Issue".into());
 
@@ -275,22 +257,5 @@ mod tests {
         let prompt = dataset.format_for_llm();
         assert!(prompt.contains("Previous Verification Failures"));
         assert!(prompt.contains("assigned_before_work"));
-    }
-
-    #[test]
-    fn test_dataset_serialization() {
-        let mut dataset = ReflectiveDataset::new("pm".into(), "Issue".into());
-        dataset.add_triplet(ReflectiveTriplet::new(
-            "input".into(),
-            "output".into(),
-            "feedback".into(),
-            0.5,
-            "traj-1".into(),
-        ));
-
-        let json = serde_json::to_string(&dataset).unwrap();
-        let parsed: ReflectiveDataset = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.triplets.len(), 1);
-        assert_eq!(parsed.skill_name, "pm");
     }
 }

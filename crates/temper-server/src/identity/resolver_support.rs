@@ -2,16 +2,15 @@
 //!
 //! Split out of `resolver.rs` to keep both files under the repository's
 //! 500-line-per-file convention. These functions have no `IdentityResolver`
-//! state of their own: token hashing/shape detection, the authoritative
-//! dependency read that distinguishes a failed read from a confirmed-absent
-//! record, and small field/expiry parsing used while assembling a
+//! state of their own: token hashing/shape detection, the identity entity
+//! read that distinguishes a failed read from a confirmed-absent record, and small field/expiry parsing used while assembling a
 //! `ResolvedIdentity`. `pub(super)` scopes them to `crate::identity` and its
 //! descendants — visible to `resolver.rs`, not exported further.
 
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 
-use crate::entity_actor::{EntityState, recover_authoritative_entity_state_from_store};
+use crate::entity_actor::EntityState;
 use crate::identity::error::IdentityError;
 use crate::state::ServerState;
 use temper_runtime::tenant::TenantId;
@@ -38,92 +37,60 @@ pub(super) fn require_field<'a>(
         .ok_or(IdentityError::Invalid)
 }
 
-/// Read authoritative entity state, distinguishing a failed/corrupt read
-/// from a confirmed-absent record.
+/// An identity entity's current state, read like any other entity.
 ///
-/// `Ok(None)` means the read succeeded and the entity genuinely does not
-/// exist — either zero events, or the tenant has no governing transition
-/// table for this entity type at all. The latter is a configuration state
-/// (identity governance not installed for this tenant/deployment), not an
-/// outage: it must fall through exactly like a confirmed-absent record, the
-/// same way the ask-path's `entity_exists` guards already treat an
-/// unindexed entity in an ungoverned tenant as absent (see
-/// `IdentityResolver::resolve_jwt`/`current_generation`). `Err` means the
-/// read itself could not be completed for a genuine infrastructure reason —
-/// a poisoned spec-registry lock or a journal replay failure — and must
-/// never be classified as an absent or invalid credential; callers route it
-/// through [`classify_dependency_read`] to enforce that.
-pub(super) async fn authoritative_entity_state(
+/// `Ok(None)` means the entity confirmedly does not exist here: it has no
+/// events, it was deleted, or the tenant has no governing transition table
+/// for this type at all. The last is a configuration state (identity
+/// governance never installed for this tenant), not an outage, so it falls
+/// through like any other absent credential. `Err` means a read the answer
+/// depends on failed (a poisoned spec registry, a durable store read, or the
+/// actor ask), and callers route it through [`classify_dependency_read`] so it
+/// is never reported as an invalid credential.
+///
+/// The existence check comes first because reading spawns an actor on
+/// demand, and the id here comes from a caller's token. An entity this server
+/// has not loaded since it started (after a restart, or one written by another
+/// server) is found in the durable store once and then served from its actor.
+///
+/// [`classify_dependency_read`]: crate::identity::error::classify_dependency_read
+pub(super) async fn entity_state(
     state: &ServerState,
     tenant: &TenantId,
     entity_type: &str,
     entity_id: &str,
 ) -> Result<Option<EntityState>, String> {
-    let Some((store, backend)) = state.event_journal() else {
-        // In-memory (no-journal) deployments route through the actor-ask
-        // path, which spawns an actor from the governing transition table.
-        // That spawn fails with a generic "no transition table" error
-        // indistinguishable, as a string, from a real actor-ask failure —
-        // so the governance check is done directly here, the same way the
-        // journal branch below checks it, before ever asking the actor.
-        let governed = {
-            let registry = state
-                .registry
-                .read()
-                .map_err(|_| "spec registry lock poisoned".to_string())?;
-            registry.get_table(tenant, entity_type).is_some()
-        };
-        if !governed {
-            return Ok(None);
-        }
-        return state
-            .get_tenant_entity_state(tenant, entity_type, entity_id)
-            .await
-            .map(|response| Some(response.state));
-    };
-
-    // A poisoned registry lock is the registry's own unavailability — a
-    // genuine infrastructure failure, deliberately classified as a
-    // dependency failure. A missing governing transition table is not: it
-    // means identity governance was never installed for this tenant, a
-    // configuration state indistinguishable from "this credential does not
-    // exist here", so it falls through as a confirmed absence below.
-    let table = {
+    let governed = {
         let registry = state
             .registry
             .read()
             .map_err(|_| "spec registry lock poisoned".to_string())?;
-        registry.get_table(tenant, entity_type)
+        registry.get_table(tenant, entity_type).is_some()
     };
-    let Some(table) = table else {
+    if !governed {
         return Ok(None);
-    };
-    let initial_fields = serde_json::json!({});
-    match recover_authoritative_entity_state_from_store(
-        tenant.as_str(),
-        entity_type,
-        entity_id,
-        table.as_ref(),
-        &store,
-        backend,
-        &initial_fields,
-        None,
-    )
-    .await
+    }
+    if !state.entity_exists(tenant, entity_type, entity_id)
+        && !state
+            .load_entity_from_store(tenant, entity_type, entity_id)
+            .await?
     {
-        Ok(entity) if entity.total_event_count > 0 => Ok(Some(entity)),
-        Ok(_) => Ok(None),
-        Err(error) => {
+        return Ok(None);
+    }
+    state
+        .get_tenant_entity_state(tenant, entity_type, entity_id)
+        .await
+        .map(|response| Some(response.state))
+        .map_err(|error| {
             tracing::warn!(
                 tenant = %tenant,
                 entity_type,
                 entity_id,
                 %error,
-                "authoritative identity state replay failed; identity dependency unavailable"
+                "identity state read failed; identity dependency unavailable"
             );
-            Err(format!("authoritative replay failed: {error}"))
-        }
-    }
+            error
+        })
 }
 
 pub(super) fn parse_credential_expiry(
@@ -208,6 +175,9 @@ mod tests {
             last_snapshot_sequence_nr: 0,
             sequence_nr,
             processed_idempotency_keys: Default::default(),
+            last_event: Default::default(),
+            status_clock: Default::default(),
+            spawn_reservations: Default::default(),
         };
         let first = state(3, "Active", serde_json::json!({"agent_type_id": "type-a"}));
 

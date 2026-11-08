@@ -47,6 +47,7 @@ mod tests {
     use crate::actor::errors::ActorError;
     use crate::actor::traits::{Actor, Message};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Duration;
     use tokio::sync::Notify;
 
@@ -218,5 +219,171 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 1); // fresh state after restart
+    }
+
+    // --- A start refused with InitFailed is not restarted ---
+
+    struct RefusingActor {
+        starts: Arc<AtomicU32>,
+    }
+
+    impl Actor for RefusingActor {
+        type Msg = FaultyMsg;
+        type State = u32;
+
+        async fn pre_start(&self, _ctx: &mut ActorContext<Self>) -> Result<u32, ActorError> {
+            self.starts.fetch_add(1, Ordering::SeqCst);
+            Err(ActorError::InitFailed(
+                "its first write was not taken".into(),
+            ))
+        }
+
+        async fn handle(
+            &self,
+            _msg: FaultyMsg,
+            _state: &mut u32,
+            _ctx: &mut ActorContext<Self>,
+        ) -> Result<(), ActorError> {
+            Ok(())
+        }
+
+        async fn post_stop(&self, _state: u32, _ctx: &mut ActorContext<Self>) {}
+    }
+
+    #[tokio::test]
+    async fn a_refused_start_tells_the_asker_why_and_is_not_restarted() {
+        let starts = Arc::new(AtomicU32::new(0));
+        let system = ActorSystem::new("test");
+        let actor = system.spawn(
+            RefusingActor {
+                starts: starts.clone(),
+            },
+            "refusing",
+        );
+        match actor
+            .ask::<u32>(FaultyMsg::Ping, Duration::from_secs(5))
+            .await
+        {
+            Err(ActorError::InitFailed(reason)) => {
+                assert_eq!(reason, "its first write was not taken");
+            }
+            other => panic!("the asker is told why the actor did not start, got {other:?}"),
+        }
+        assert_eq!(
+            starts.load(Ordering::SeqCst),
+            1,
+            "a refused start is not restarted"
+        );
+        assert!(
+            actor.is_closed(),
+            "an actor that did not start takes no messages"
+        );
+        // On a multi-threaded runtime the start can be refused before the
+        // creator's first ask is sent; that ask is told why all the same.
+        match actor
+            .ask::<u32>(FaultyMsg::Ping, Duration::from_secs(5))
+            .await
+        {
+            Err(ActorError::InitFailed(reason)) => {
+                assert_eq!(reason, "its first write was not taken");
+            }
+            other => panic!("an ask sent after the refusal is told why, got {other:?}"),
+        }
+    }
+
+    // --- An ask is handled inside the asker's span ---
+
+    #[derive(Debug)]
+    struct WhichSpan;
+
+    impl Message for WhichSpan {}
+
+    struct SpanReporter;
+
+    impl Actor for SpanReporter {
+        type Msg = WhichSpan;
+        type State = ();
+
+        async fn pre_start(&self, _ctx: &mut ActorContext<Self>) -> Result<(), ActorError> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _msg: WhichSpan,
+            _state: &mut (),
+            ctx: &mut ActorContext<Self>,
+        ) -> Result<(), ActorError> {
+            ctx.reply(tracing::Span::current().id());
+            Ok(())
+        }
+
+        async fn post_stop(&self, _state: (), _ctx: &mut ActorContext<Self>) {}
+    }
+
+    #[tokio::test]
+    async fn an_ask_is_handled_inside_the_askers_span() {
+        let _guard = tracing::subscriber::set_default(tracing_subscriber::registry());
+        let system = ActorSystem::new("test");
+        let actor = system.spawn(SpanReporter, "span-reporter");
+        let asker = tracing::info_span!("asker");
+        let handled_in: Option<tracing::Id> = {
+            let ask = actor.ask(WhichSpan, Duration::from_secs(1));
+            tracing::Instrument::instrument(ask, asker.clone())
+                .await
+                .unwrap()
+        };
+        assert!(asker.id().is_some());
+        assert_eq!(handled_in, asker.id());
+    }
+
+    // --- An actor's first start runs inside the span that woke it ---
+
+    struct StartReporter {
+        started_in: Arc<std::sync::Mutex<Option<tracing::Id>>>,
+        started: Arc<Notify>,
+    }
+
+    impl Actor for StartReporter {
+        type Msg = WhichSpan;
+        type State = ();
+
+        async fn pre_start(&self, _ctx: &mut ActorContext<Self>) -> Result<(), ActorError> {
+            *self.started_in.lock().unwrap() = tracing::Span::current().id();
+            self.started.notify_one();
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _msg: WhichSpan,
+            _state: &mut (),
+            _ctx: &mut ActorContext<Self>,
+        ) -> Result<(), ActorError> {
+            Ok(())
+        }
+
+        async fn post_stop(&self, _state: (), _ctx: &mut ActorContext<Self>) {}
+    }
+
+    #[tokio::test]
+    async fn an_actor_starts_inside_the_span_that_woke_it() {
+        let _guard = tracing::subscriber::set_default(tracing_subscriber::registry());
+        let system = ActorSystem::new("test");
+        let started_in = Arc::new(std::sync::Mutex::new(None));
+        let started = Arc::new(Notify::new());
+        let waker = tracing::info_span!("waker");
+        let _actor = waker.in_scope(|| {
+            system.spawn(
+                StartReporter {
+                    started_in: started_in.clone(),
+                    started: started.clone(),
+                },
+                "start-reporter",
+            )
+        });
+        started.notified().await;
+        assert!(waker.id().is_some());
+        assert_eq!(*started_in.lock().unwrap(), waker.id());
     }
 }

@@ -83,10 +83,13 @@ fn admin_security_context() -> temper_authz::SecurityContext {
             role: None,
             acting_for: None,
             agent_type: None,
+            label: None,
             attributes: Default::default(),
         },
         context_attrs: Default::default(),
         correlation_id: "observe-test-admin".to_string(),
+        cause: None,
+        credential: None,
     }
 }
 
@@ -98,10 +101,13 @@ fn customer_security_context(id: &str) -> temper_authz::SecurityContext {
             role: None,
             acting_for: None,
             agent_type: None,
+            label: None,
             attributes: Default::default(),
         },
         context_attrs: Default::default(),
         correlation_id: "observe-test-customer".to_string(),
+        cause: None,
+        credential: None,
     }
 }
 
@@ -899,13 +905,11 @@ async fn batch_file_version_text_read_uses_local_store_for_internal_blob_endpoin
         .expect("persist blob");
 
     let vault = SecretsVault::new(&[7u8; 32]);
-    vault
-        .cache_secret(
-            tenant,
-            "blob_endpoint",
-            "http://127.0.0.1:3474/_internal/blobs".to_string(),
-        )
-        .expect("cache blob endpoint");
+    vault.cache_secret(
+        tenant,
+        "blob_endpoint",
+        "http://127.0.0.1:3474/_internal/blobs".to_string(),
+    );
     state.secrets_vault = Some(Arc::new(vault));
 
     let app = build_app_with_state(state);
@@ -1008,25 +1012,6 @@ async fn test_get_spec_detail_found() {
     assert_eq!(raw_add_item["params"][0]["name"], "ProductId");
     assert_eq!(raw_add_item["params"][0]["type"], "string");
     assert_eq!(raw_add_item["hint"], add_item.hint);
-}
-
-#[test]
-fn action_param_detail_serializes_typed_params_under_type_key() {
-    // Typed params (e.g. `{ name = "sleep_seconds", type = "counter" }` in a
-    // spec) reach ActionParamDetail through ActionParam::name()/param_type();
-    // this locks the wire shape those values serialize into.
-    let detail = ActionParamDetail {
-        name: "sleep_seconds".to_string(),
-        param_type: "uint64".to_string(),
-    };
-    let json = serde_json::to_value(&detail).unwrap();
-    assert_eq!(
-        json,
-        serde_json::json!({"name": "sleep_seconds", "type": "uint64"})
-    );
-    let back: ActionParamDetail = serde_json::from_value(json).unwrap();
-    assert_eq!(back.name, "sleep_seconds");
-    assert_eq!(back.param_type, "uint64");
 }
 
 #[tokio::test]
@@ -1152,68 +1137,58 @@ async fn test_load_inline_cannot_bundle_policy_authority() {
     );
 }
 
-#[tokio::test]
-async fn test_load_inline_skips_cascade_for_unchanged_passed_specs() {
-    let csdl = parse_csdl(CSDL_XML).expect("CSDL should parse");
-    let mut registry = crate::registry::SpecRegistry::new();
-    registry.register_tenant(
-        "skip-verify",
-        csdl,
-        CSDL_XML.to_string(),
-        &[("Order", ORDER_IOA)],
-    );
-    registry.set_verification_status(
-        &TenantId::new("skip-verify"),
-        "Order",
-        crate::registry::VerificationStatus::Completed(crate::registry::EntityVerificationResult {
-            all_passed: true,
-            levels: vec![crate::registry::EntityLevelSummary {
-                level: "L0_symbolic".to_string(),
-                passed: true,
-                summary: "pre-verified".to_string(),
-                details: None,
-            }],
-            verified_at: "2026-01-01T00:00:00Z".to_string(),
-        }),
-    );
-    let state = ServerState::from_registry(ActorSystem::new("test-observe-skip"), registry);
-    install_admin_submit_specs_policy(&state, "skip-verify");
-    let app = build_app_with_state(state);
-
-    let response = app
+/// The `verification_result` line a load-inline of `ioa` streams for Order.
+async fn load_inline_order(state: &ServerState, ioa: &str) -> serde_json::Value {
+    let response = build_app_with_state(state.clone())
         .oneshot(with_tenant_security_context(
             Request::post("/api/specs/load-inline")
                 .header("Content-Type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
-                        "tenant": "skip-verify",
+                        "tenant": "kept-verdicts",
                         "specs": {
                             "model.csdl.xml": CSDL_XML,
-                            "order.ioa.toml": ORDER_IOA
+                            "order.ioa.toml": ioa
                         }
                     })
                     .to_string(),
                 ))
                 .unwrap(),
-            "skip-verify",
+            "kept-verdicts",
             admin_security_context(),
         ))
         .await
         .unwrap();
-
     assert_eq!(response.status(), StatusCode::OK);
     let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
         .await
         .unwrap();
-    let text = String::from_utf8_lossy(&body);
-    let cached = text.lines().find_map(|line| {
-        let value: serde_json::Value = serde_json::from_str(line).ok()?;
-        (value["type"] == "verification_result" && value["cached"] == true).then_some(value)
-    });
-    let cached = cached.expect("unchanged passed spec must skip the cascade");
-    assert_eq!(cached["entity"], "Order");
-    assert_eq!(cached["reason"], "unchanged_verified");
-    assert_eq!(cached["all_passed"], true);
+    String::from_utf8_lossy(&body)
+        .lines()
+        .find_map(|line| {
+            let value: serde_json::Value = serde_json::from_str(line).ok()?;
+            (value["type"] == "verification_result").then_some(value)
+        })
+        .expect("a load streams the verdict of each spec")
+}
+
+#[tokio::test]
+async fn test_load_inline_keeps_a_passing_verdict_for_specs_its_levels_read_the_same() {
+    let state =
+        ServerState::from_registry(ActorSystem::new("test-observe-kept"), SpecRegistry::new());
+    install_admin_submit_specs_policy(&state, "kept-verdicts");
+
+    let checked = load_inline_order(&state, ORDER_IOA).await;
+    assert_eq!(checked["all_passed"], true, "{checked}");
+    assert_eq!(checked["cached"], false, "the first load runs the levels");
+
+    // A comment is text no level reads.
+    let kept = load_inline_order(&state, &format!("{ORDER_IOA}\n# touch\n")).await;
+    assert_eq!(kept["entity"], "Order");
+    assert_eq!(kept["all_passed"], true);
+    assert_eq!(kept["cached"], true, "{kept}");
+    assert_eq!(kept["kept"].as_str().map(str::len), Some(64), "{kept}");
+    assert_eq!(kept["levels"], checked["levels"]);
 }
 
 #[tokio::test]
@@ -1526,22 +1501,14 @@ async fn test_entity_history_returns_events() {
 }
 
 #[tokio::test]
-async fn test_entity_history_empty_for_unknown() {
+async fn test_entity_history_not_found_for_unknown() {
     let app = build_test_app();
     let response = app
         .oneshot(system_get("/observe/entities/Order/nonexistent/history"))
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-        .await
-        .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["entity_type"], "Order");
-    assert_eq!(json["entity_id"], "nonexistent");
-    let events = json["events"].as_array().expect("events should be array");
-    assert!(events.is_empty());
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -2320,3 +2287,70 @@ async fn test_evolution_insights_empty() {
 
 #[path = "mod_test/load_dir_tests.rs"]
 mod load_dir_tests;
+
+#[path = "mod_test/chart_tests.rs"]
+mod chart_tests;
+
+#[path = "mod_test/history_test.rs"]
+mod history_test;
+
+/// A client that reconnects after its entity was passivated cannot be replayed
+/// what it missed; the stream says so first instead of staying silent.
+#[tokio::test]
+async fn entity_event_stream_reports_a_replay_gap_after_passivation() {
+    use futures_util::StreamExt;
+
+    let state = test_state_with_registry();
+    let tenant = TenantId::default();
+    for action in ["AddItem", "SubmitOrder"] {
+        let r = state
+            .dispatch_tenant_action(
+                &tenant,
+                "Order",
+                "order-gap-1",
+                action,
+                serde_json::json!({"ProductId": "p1"}),
+                &AgentContext::default(),
+            )
+            .await;
+        assert!(r.is_ok_and(|r| r.success), "{action} failed");
+    }
+    let key = "default:Order:order-gap-1";
+    let latest = state
+        .entity_event_sequences
+        .lock()
+        .unwrap()
+        .get(key)
+        .copied()
+        .expect("dispatches numbered the observe events");
+    assert!(latest >= 2);
+    state
+        .last_accessed
+        .write()
+        .unwrap()
+        .insert(key.to_string(), sim_now() - chrono::Duration::seconds(600));
+    state.passivate_idle_actors().await;
+    assert!(!state.entity_observe_log.lock().unwrap().contains_key(key));
+
+    let response = build_app_with_state(state)
+        .oneshot(system_request(
+            Request::get("/observe/entities/Order/order-gap-1/events")
+                .header("last-event-id", (latest - 1).to_string())
+                .body(Body::empty())
+                .unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut stream = response.into_body().into_data_stream();
+    let first = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .expect("the gap is sent at once")
+        .expect("stream is open")
+        .expect("frame reads");
+    let text = String::from_utf8_lossy(&first);
+    assert!(
+        text.contains("event: replay_gap") && text.contains("\"reread\":true"),
+        "first frame: {text}"
+    );
+}

@@ -260,7 +260,7 @@ fn state_timeout_parses_all_fields() {
     assert_eq!(provisioning.state, "Provisioning");
     assert_eq!(provisioning.after_seconds, 180);
     assert_eq!(provisioning.on_timeout, "TimeoutFail");
-    assert_eq!(provisioning.max_occurrences, 1, "default should be 1");
+    assert_eq!(provisioning.max_occurrences, None);
     assert_eq!(provisioning.reset_on, vec!["Heartbeat".to_string()]);
     assert_eq!(
         provisioning.args["error_message"].to_string(),
@@ -269,11 +269,11 @@ fn state_timeout_parses_all_fields() {
 }
 
 #[test]
-fn state_timeout_max_occurrences_override() {
+fn state_timeout_max_occurrences_still_loads() {
     let auto = parse_toml_to_automaton(SESSION_SPEC_WITH_TIMEOUTS).unwrap();
     let running = &auto.state_timeouts[1];
     assert_eq!(running.state, "Running");
-    assert_eq!(running.max_occurrences, 3);
+    assert_eq!(running.max_occurrences, Some(3));
     assert!(
         running.reset_on.is_empty(),
         "reset_on omitted should default to empty"
@@ -415,7 +415,8 @@ fn old_predicate_syntax_fails_with_a_migration_hint() {
 
 #[test]
 fn an_invariant_the_verifier_cannot_model_fails_to_load() {
-    let spec = "[automaton]\nname = \"T\"\nstates = [\"A\"]\ninitial = \"A\"\n\n[[state]]\nname = \"title\"\ntype = \"string\"\ninitial = \"\"\n\n[[invariant]]\nname = \"HasTitle\"\nassert = \"title != ''\"\n";
+    // An integer that is not a counter: the model checker does not track it.
+    let spec = "[automaton]\nname = \"T\"\nstates = [\"A\"]\ninitial = \"A\"\n\n[[state]]\nname = \"score\"\ntype = \"int\"\ninitial = 0\n\n[[invariant]]\nname = \"Scored\"\nassert = \"score > 0\"\n";
     let err = crate::automaton::parse_automaton_with_liveness(
         spec,
         crate::automaton::LivenessEnforcement::WarnOnly,

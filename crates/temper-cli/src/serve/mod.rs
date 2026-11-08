@@ -8,13 +8,27 @@
 //! runs in the background so the observe UI can stream progress.
 
 mod actor_runtime;
+mod boot;
 mod bootstrap;
+mod data_dir;
+mod installed_apps;
+mod later;
 mod loader;
+mod local_sandbox;
 mod observe_ui;
 pub(crate) mod options;
+#[cfg(test)]
+mod pushed_boot_tests;
+mod restore;
+#[cfg(test)]
+mod serve_first_tests;
 mod storage;
+mod sync_copy;
+#[cfg(test)]
+mod unavailable_tenant_tests;
 
 use std::collections::{BTreeMap, HashMap};
+use std::future::IntoFuture;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::{path::Path, sync::Arc};
 
@@ -24,7 +38,7 @@ use temper_evolution::PostgresRecordStore;
 use temper_observe::ClickHouseStore;
 use temper_observe::otel::init_observability;
 use temper_platform::optimization::run_optimization_cycle;
-use temper_platform::router::build_platform_router;
+use temper_platform::router::build_platform_routes;
 use temper_platform::state::PlatformState;
 use temper_runtime::tenant::TenantId;
 use temper_server::registry::{EntityLevelSummary, EntityVerificationResult, VerificationStatus};
@@ -70,19 +84,32 @@ pub async fn run(
     discord_bot_token: Option<String>,
     tenant: String,
 ) -> Result<()> {
-    let _otel_guard = init_observability("temper-platform");
+    let otel_guard = init_observability("temper-platform");
     temper_authz::init_metrics();
     temper_store_postgres::init_metrics();
     temper_store_turso::init_metrics();
     let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
 
     // Phase 1: Storage backend
-    let (pg_pool, storage_stack) =
+    let (pg_pool, storage_stack, turso_synced_store) =
         bootstrap::init_storage(storage.clone(), storage_explicit).await?;
 
     // Phase 2: Registry (restore + disk apps)
-    let (registry, tenant_policy_seed) =
-        bootstrap::build_registry(pg_pool.as_ref(), storage_stack.as_ref(), &apps).await?;
+    let boot::Stored {
+        registry,
+        policy_seed: tenant_policy_seed,
+        mut later,
+    } = boot::read_stored(pg_pool.as_ref(), storage_stack.as_ref(), &apps).await?;
+    // build_registry already said which disk apps it skipped; the later phases
+    // (webhooks, hydration, tenant bootstrap, verification) skip them as well.
+    let apps: Vec<(String, String)> = apps
+        .into_iter()
+        .filter(|(tenant, _)| {
+            registry
+                .tenant_unavailable_reason(&temper_runtime::tenant::TenantId::new(tenant))
+                .is_none()
+        })
+        .collect();
 
     // Assemble platform state
     let mut state = PlatformState::with_registry(registry, api_key);
@@ -91,12 +118,16 @@ pub async fn run(
     if state.api_token.is_some() {
         println!("  API key: configured (Bearer token required)");
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let data_dir = Path::new(&home).join(".local/share/temper");
-    state.server.data_dir = data_dir.clone();
-
-    seed_cedar_policies(&state, tenant_policy_seed);
-    state.server.rebuild_reaction_dispatcher();
+    // Jev reads an app's changed modules at install when this server is given its URL and a key or pass; never printed.
+    if let Some(judge) = temper_platform::module_review::JevJudge::from_env() {
+        state.set_module_reviewer(std::sync::Arc::new(
+            temper_platform::module_review::ModuleReviewer::new(std::sync::Arc::new(judge)),
+        ));
+    }
+    // TEMPER_DATA_DIR puts this server's files (pushed app versions, blobs,
+    // caches) where they outlive the machine, such as a mounted volume.
+    state.server.data_dir = data_dir::data_dir();
+    state.server.files_need_object_store = storage::files_need_object_store();
 
     // Configure subprocess verification if requested.
     if verify_subprocess {
@@ -109,12 +140,19 @@ pub async fn run(
     // Phase 4: Webhooks
     state.server.webhook_dispatcher = bootstrap::load_webhooks(&apps);
 
-    // Phase 5: Persistence wiring
+    // Phase 5: Persistence wiring. The size limits are read even without a store,
+    // so a bad value stops every start, not only a persisted one.
+    let limits = storage::event_size_limits(
+        std::env::var("TEMPER_WARN_EVENT_BYTES").ok().as_deref(),
+        std::env::var("TEMPER_MAX_EVENT_BYTES").ok().as_deref(),
+    )?;
     if let Some(stack) = storage_stack {
         if let Some(pool) = stack.postgres_pool.clone() {
             state.server.pg_record_store = Some(Arc::new(PostgresRecordStore::new(pool)));
         }
-        state.server.set_storage_stack(stack);
+        state
+            .server
+            .set_storage_stack(stack.with_event_size_limits(limits));
     }
 
     // Phase 5b: Secrets vault
@@ -140,14 +178,6 @@ pub async fn run(
         println!("  Secrets vault: configured");
     }
 
-    // Phase 6: Entity hydration
-    bootstrap::hydrate_entities(&state, &apps).await;
-
-    // Phase 7: Recovery (Cedar policies + WASM modules + secrets)
-    bootstrap::recover_cedar_policies(&state).await;
-    bootstrap::recover_wasm_modules(&state).await;
-    bootstrap::recover_secrets(&state).await;
-
     // Seed secrets from env into the vault for all tenants.
     if let Some(ref vault) = state.server.secrets_vault {
         // ANTHROPIC_API_KEY — makes {secret:anthropic_api_key} resolve in LLM integrations.
@@ -165,13 +195,13 @@ pub async fn run(
         // determinism-ok: env var read at startup for configuration
         if std::env::var("BLOB_ENDPOINT").is_err() {
             let blob_url = format!("http://127.0.0.1:{port}/_internal/blobs");
-            let _ = vault.cache_platform_secret("blob_endpoint", blob_url);
+            vault.cache_platform_secret("blob_endpoint", blob_url);
         }
 
         // temper_api_url — points WASM modules at this server for TemperFS calls.
         {
             let api_url = format!("http://127.0.0.1:{port}");
-            let _ = vault.cache_platform_secret("temper_api_url", api_url);
+            vault.cache_platform_secret("temper_api_url", api_url);
         }
 
         // sandbox_url — local sandbox for tool execution.
@@ -184,52 +214,11 @@ pub async fn run(
             } else {
                 let sandbox_port = port + 10; // e.g., 3000 → 3010
                 let sandbox_url = format!("http://127.0.0.1:{sandbox_port}");
-
-                // Find the local sandbox script relative to the binary or os-apps.
-                let sandbox_script =
-                    std::path::Path::new("os-apps/temper-agent/sandbox/local_sandbox.py");
-                if sandbox_script.exists() {
-                    // Use /tmp/temper-sandbox as the base; create /workspace for tool_runner
-                    // which sends cwd="/workspace" by default (matching E2B's layout).
-                    let _ = std::fs::create_dir_all("/tmp/temper-sandbox");
-                    let _ = std::fs::create_dir_all("/workspace");
-
-                    // determinism-ok: subprocess spawn at startup for local dev sandbox
-                    let mut sandbox_cmd = std::process::Command::new("python3");
-                    sandbox_cmd
-                        .arg(sandbox_script)
-                        .arg("--port")
-                        .arg(sandbox_port.to_string())
-                        .arg("--workdir")
-                        .arg("/tmp/temper-sandbox")
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null());
-                    if bind != Ipv4Addr::UNSPECIFIED {
-                        // Keep the sandbox no more reachable than the API. Passed
-                        // only when non-default, so older sandbox scripts still start.
-                        sandbox_cmd.arg("--host").arg(bind.to_string());
-                    }
-                    match sandbox_cmd.spawn() {
-                        Ok(_child) => {
-                            println!("  Local sandbox: {sandbox_url} (auto-started)");
-                        }
-                        Err(e) => {
-                            eprintln!("  Warning: failed to start local sandbox: {e}");
-                            eprintln!(
-                                "  Run manually: python3 {sandbox_script:?} --port {sandbox_port}"
-                            );
-                        }
-                    }
-                } else {
-                    eprintln!("  Warning: local sandbox script not found at {sandbox_script:?}");
-                    eprintln!(
-                        "  Set SANDBOX_URL env var or ensure os-apps/temper-agent/sandbox/local_sandbox.py exists"
-                    );
-                }
+                local_sandbox::start(&state.server, sandbox_port, &sandbox_url);
 
                 sandbox_url
             };
-            let _ = vault.cache_platform_secret("sandbox_url", sandbox_url);
+            vault.cache_platform_secret("sandbox_url", sandbox_url);
         }
 
         // TEMPER_SECRET_<NAME> — any other secret the operator supplies. Runs
@@ -251,10 +240,16 @@ pub async fn run(
         println!();
     }
 
-    // Phase 8: Bootstrap system + agent tenants
-    bootstrap::bootstrap_tenants(&state, &apps).await;
-    // Phase 8b: Restore persisted apps + apply CLI `--app` requests.
-    bootstrap::bootstrap_installed_apps(&state, &os_app_installs).await?;
+    // Phases 6-8b: the server's own tenants: entities, Cedar, WASM, secrets,
+    // system and agent specs, installed apps and CLI `--app` requests.
+    boot::restore_own(
+        &state,
+        tenant_policy_seed,
+        &apps,
+        &os_app_installs,
+        &mut later,
+    )
+    .await?;
     if actor_runtime == ActorRuntimeBackend::Postgres {
         pg_actor_runtime_cancel = Some(
             actor_runtime::install_postgres_actor_runtime(
@@ -268,7 +263,7 @@ pub async fn run(
     }
 
     // Phase 9: Bind, start background tasks, serve
-    let router = build_platform_router(state.clone());
+    let router = sync_copy::serve_router(build_platform_routes(state.clone()), turso_synced_store);
     let listener = tokio::net::TcpListener::bind(SocketAddr::from((bind, port)))
         .await
         .with_context(|| format!("Failed to bind to {bind}:{port}"))?;
@@ -286,7 +281,6 @@ pub async fn run(
     }
     spawn_optimization_loop(&state);
     spawn_actor_passivation_loop(&state);
-    state.server.spawn_runtime_metrics_loop();
     temper_server::profiling::spawn_continuous_profiler();
     let _pg_actor_runtime_cancel = pg_actor_runtime_cancel;
 
@@ -302,7 +296,7 @@ pub async fn run(
     if let Some(ref token) = discord_token_resolved {
         // Seed into vault so WASM modules can also access it.
         if let Some(ref vault) = state.server.secrets_vault {
-            let _ = vault.cache_platform_secret("discord_bot_token", token.clone());
+            vault.cache_platform_secret("discord_bot_token", token.clone());
         }
         spawn_channel_transport_discord(
             &state,
@@ -316,49 +310,81 @@ pub async fn run(
         println!("    Set DISCORD_BOT_TOKEN env var or store 'discord_bot_token' in vault");
     }
 
-    // Spawn the HttpEndpoint reconciler (ADR-0056 Phase 2 slice 3b).
-    // Subscribes to entity state changes; rebuilds the per-tenant
-    // route table on every HttpEndpoint transition. Must run before
-    // axum::serve so the first request sees a populated table.
-    temper_server::http_endpoint::spawn_reconciler(state.server.clone());
-
-    // Prime the route tables for all existing tenants so
-    // HttpEndpoint rows already in the event store are routable on
-    // the first request (the reconciler only reacts to changes
-    // after startup).
-    {
-        let tenants: Vec<temper_runtime::tenant::TenantId> = {
-            let reg = state.server.registry.read().unwrap();
-            reg.tenant_ids().iter().map(|t| (*t).clone()).collect()
-        };
-        for tenant in tenants {
-            temper_server::http_endpoint::rebuild_tenant_table(&state.server, &tenant).await;
+    // Where this process reports its earliest due time, so a control plane
+    // that suspends it can wake it then. Both are needed; either alone is a
+    // misconfiguration, logged and otherwise ignored.
+    match (
+        std::env::var("TEMPER_WAKE_REPORT_URL").ok(), // determinism-ok: startup config
+        std::env::var("TEMPER_WAKE_REPORT_TOKEN").ok(), // determinism-ok: startup config
+    ) {
+        (Some(url), Some(token)) if !url.is_empty() && !token.is_empty() => {
+            match temper_server::wake::HttpWakeSink::new(url, token) {
+                Ok(sink) => state.server.set_wake_sink(std::sync::Arc::new(sink)),
+                Err(error) => tracing::error!(%error, "wake reports off"),
+            }
+        }
+        (None, None) => {}
+        _ => tracing::error!(
+            "wake reports off: TEMPER_WAKE_REPORT_URL and TEMPER_WAKE_REPORT_TOKEN are needed together"
+        ),
+    }
+    // How long the sandbox stays awake after an inbound request, in seconds:
+    // a timer due before then fires on its own and is not reported. The
+    // control plane sets it below the time its sandboxes really stay awake,
+    // for margin. Unset, every due time from now is reported.
+    if let Ok(awake) = std::env::var("TEMPER_WAKE_AWAKE_SECS") {
+        // determinism-ok: startup config
+        match awake.parse::<u64>() {
+            Ok(secs) => state
+                .server
+                .set_wake_awake(std::time::Duration::from_secs(secs)),
+            Err(error) => {
+                tracing::error!(%error, "TEMPER_WAKE_AWAKE_SECS is not a number of seconds; every due time is reported")
+            }
         }
     }
 
+    // Phase 10: route tables and the kernel runtime, before the first request.
+    boot::start_serving(&state, later).await;
+
     println!("Listening on http://{bind}:{actual_port}");
-    axum::serve(listener, router)
-        .await
-        .context("Server error")?;
+    // A stop signal ends the server. The kernel then logs and counts each
+    // write it still owes and holds only in memory, and telemetry is flushed
+    // so those reports leave the process before it exits.
+    tokio::select! {
+        served = axum::serve(listener, router).into_future() => served.context("Server error")?,
+        () = stop_signal() => {}
+    }
+    state.server.report_owed_writes_at_shutdown();
+    if let Some(guard) = otel_guard {
+        guard.shutdown();
+    }
 
     Ok(())
 }
 
-fn seed_cedar_policies(state: &PlatformState, tenant_policy_seed: BTreeMap<String, String>) {
-    for (tenant, policy_text) in &tenant_policy_seed {
-        if let Err(e) = state
-            .server
-            .authz
-            .reload_tenant_policies(tenant, policy_text)
-        {
-            eprintln!("  Warning: failed to load Cedar policies for tenant '{tenant}': {e}");
-            continue;
+/// Resolves when the process is asked to stop: Ctrl-C, or SIGTERM from the
+/// platform it runs on. A signal that cannot be watched never resolves.
+async fn stop_signal() {
+    let interrupt = async {
+        if tokio::signal::ctrl_c().await.is_err() {
+            std::future::pending::<()>().await;
         }
-    }
-    // Update in-memory text cache.
-    let mut policies = state.server.tenant_policies.write().unwrap(); // ci-ok: infallible lock
-    for (tenant, policy_text) in tenant_policy_seed {
-        policies.insert(tenant, policy_text);
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                terminate.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        () = interrupt => {}
+        () = terminate => {}
     }
 }
 
@@ -368,7 +394,7 @@ fn cache_platform_secret_if_present(
     value: Option<String>,
 ) {
     if let Some(value) = value {
-        let _ = vault.cache_platform_secret(secret_name, value);
+        vault.cache_platform_secret(secret_name, value);
     }
 }
 
@@ -396,23 +422,38 @@ fn spawn_optimization_loop(state: &PlatformState) {
     });
 }
 
+/// Shortest pause before the next passivation tick while idle actors are still
+/// waiting. A tick sheds at most `PASSIVATE_IDLE_ACTORS_PER_TICK` actors; an
+/// app that creates records faster than that per interval would otherwise
+/// grow the registry without end. A backlog is worked off in batches, each
+/// followed by four times its own duration, so snapshot writes take at most a
+/// fifth of the time (ARN-462). The pause never exceeds the configured
+/// interval, so a backlog is never drained slower than ticks already ran.
+const PASSIVATION_BACKLOG_PAUSE: std::time::Duration = std::time::Duration::from_secs(1);
+const PASSIVATION_BACKLOG_PAUSE_PER_TICK_TIME: u32 = 4;
+
 fn spawn_actor_passivation_loop(state: &PlatformState) {
     let interval_secs = std::env::var("TEMPER_PASSIVATION_CHECK_INTERVAL") // determinism-ok: read once at startup
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(60)
         .clamp(1, 86_400);
+    let interval = std::time::Duration::from_secs(interval_secs);
 
     let server = state.server.clone();
     tokio::spawn(async move {
         // determinism-ok: background task for resource management
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        ticker.tick().await; // consume immediate tick
-
+        let mut pause = interval;
         loop {
-            ticker.tick().await;
-            server.passivate_idle_actors().await;
+            tokio::time::sleep(pause).await; // determinism-ok: background resource management
+            let started = std::time::Instant::now(); // determinism-ok: paces a background task
+            let left = server.passivate_idle_actors().await;
+            pause = if left > 0 {
+                (started.elapsed() * PASSIVATION_BACKLOG_PAUSE_PER_TICK_TIME)
+                    .clamp(PASSIVATION_BACKLOG_PAUSE, interval)
+            } else {
+                interval
+            };
         }
     });
 }
@@ -470,13 +511,26 @@ fn emit_ephemeral_info(message: &str) {
 ///
 /// For each entity, runs the verification cascade in a blocking task and
 /// updates the registry while persisting workflow history/status to Postgres.
-async fn spawn_background_verification(state: &PlatformState, specs_dir: &str, tenant: &str) {
+/// The returned task commits the app's specs once every verification passes.
+async fn spawn_background_verification(
+    state: &PlatformState,
+    specs_dir: &str,
+    tenant: &str,
+) -> Option<tokio::task::JoinHandle<()>> {
     let specs_path = Path::new(specs_dir);
     let mut ioa_sources = match read_ioa_sources(specs_path) {
         Ok(sources) => sources,
         Err(e) => {
             eprintln!("Warning: failed to read IOA sources for background verification: {e}");
-            return;
+            return None;
+        }
+    };
+    // The CSDL the app's rows were stored with, committed with them.
+    let csdl_xml = match std::fs::read_to_string(specs_path.join("model.csdl.xml")) {
+        Ok(csdl_xml) => csdl_xml,
+        Err(e) => {
+            eprintln!("Warning: failed to read the CSDL for background verification: {e}");
+            return None;
         }
     };
 
@@ -518,6 +572,11 @@ async fn spawn_background_verification(state: &PlatformState, specs_dir: &str, t
         }
     }
 
+    // The app's whole spec set, committed once every changed spec verifies.
+    let app_sources: BTreeMap<String, String> = ioa_sources
+        .iter()
+        .map(|(entity, source)| (entity.clone(), source.clone()))
+        .collect();
     let source_count = ioa_sources.len();
     ioa_sources = ioa_sources_requiring_background_verification(ioa_sources, &verification_cache);
     let skipped_count = source_count.saturating_sub(ioa_sources.len());
@@ -527,13 +586,14 @@ async fn spawn_background_verification(state: &PlatformState, specs_dir: &str, t
         );
     }
 
+    let mut verifications = Vec::with_capacity(ioa_sources.len());
     for (entity_name, ioa_source) in ioa_sources {
         let registry = registry.clone();
         let server = server.clone();
         let tenant = tenant_str.clone();
         let entity = entity_name.clone();
 
-        tokio::spawn(async move {
+        verifications.push(tokio::spawn(async move {
             // Persist running status first, then update in-memory registry.
             if let Err(e) = server
                 .persist_spec_verification(&tenant, &entity, "running", None)
@@ -547,7 +607,7 @@ async fn spawn_background_verification(state: &PlatformState, specs_dir: &str, t
                     eprintln!(
                         "Warning: failed to persist running verification status for {tenant}/{entity}: {e}"
                     );
-                    return;
+                    return false;
                 }
             }
             {
@@ -573,7 +633,7 @@ async fn spawn_background_verification(state: &PlatformState, specs_dir: &str, t
                 eprintln!(
                     "Warning: failed to persist/emit verify_started for {tenant}/{entity}: {e}"
                 );
-                return;
+                return false;
             }
 
             println!("  [verify] Starting verification for {entity}...");
@@ -671,7 +731,7 @@ async fn spawn_background_verification(state: &PlatformState, specs_dir: &str, t
                             eprintln!(
                                 "Warning: failed to persist final verification status for {tenant}/{entity}: {e}"
                             );
-                            return;
+                            return false;
                         }
                     }
                     {
@@ -707,6 +767,7 @@ async fn spawn_background_verification(state: &PlatformState, specs_dir: &str, t
                     {
                         eprintln!("Warning: failed to persist/emit verify_done for {tenant}: {e}");
                     }
+                    all_passed
                 }
                 Err(e) => {
                     eprintln!("  [verify] {entity_clone}: verification failed: {e}");
@@ -739,7 +800,7 @@ async fn spawn_background_verification(state: &PlatformState, specs_dir: &str, t
                             eprintln!(
                                 "Warning: failed to persist failed verification status for {tenant}/{entity_clone}: {persist_err}"
                             );
-                            return;
+                            return false;
                         }
                     }
                     {
@@ -769,10 +830,29 @@ async fn spawn_background_verification(state: &PlatformState, specs_dir: &str, t
                             "Warning: failed to persist/emit verify_done panic event for {tenant}: {event_err}"
                         );
                     }
+                    false
                 }
             }
-        });
+        }));
     }
+
+    // Without a commit, restart recovery keeps the app's last committed specs.
+    Some(tokio::spawn(async move {
+        for verification in verifications {
+            if !verification.await.unwrap_or(false) {
+                return;
+            }
+        }
+        match server
+            .commit_spec_sources(&tenant_str, &app_sources, &csdl_xml, &[])
+            .await
+        {
+            Ok(Some(true) | None) => {}
+            Ok(Some(false)) => eprintln!("Warning: specs for {tenant_str} changed before commit"),
+            Err(e) if is_ephemeral_metadata_error(&e) => {}
+            Err(e) => eprintln!("Warning: failed to commit verified specs for {tenant_str}: {e}"),
+        }
+    }))
 }
 
 fn ioa_sources_requiring_background_verification(
@@ -792,70 +872,5 @@ fn ioa_sources_requiring_background_verification(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{cache_platform_secret_if_present, ioa_sources_requiring_background_verification};
-    use std::collections::{BTreeMap, HashMap};
-    use temper_server::secrets::vault::SecretsVault;
-
-    fn test_vault() -> SecretsVault {
-        SecretsVault::new(&[0x42; 32])
-    }
-
-    #[test]
-    fn cache_platform_secret_if_present_stores_present_value() {
-        let vault = test_vault();
-
-        cache_platform_secret_if_present(&vault, "exa_api_key", Some("exa-live".to_string()));
-
-        assert_eq!(
-            vault.get_platform_secret("exa_api_key"),
-            Some("exa-live".to_string())
-        );
-    }
-
-    #[test]
-    fn cache_platform_secret_if_present_skips_missing_value() {
-        let vault = test_vault();
-
-        cache_platform_secret_if_present(&vault, "exa_api_key", None);
-
-        assert_eq!(vault.get_platform_secret("exa_api_key"), None);
-    }
-
-    #[test]
-    fn background_verification_skips_cached_verified_hashes() {
-        let mut ioa_sources = HashMap::new();
-        ioa_sources.insert(
-            "Issue".to_string(),
-            "[automaton]\nname = \"Issue\"\n".to_string(),
-        );
-        ioa_sources.insert(
-            "Task".to_string(),
-            "[automaton]\nname = \"Task\"\n".to_string(),
-        );
-
-        let mut verification_cache = BTreeMap::new();
-        verification_cache.insert(
-            "Issue".to_string(),
-            (
-                temper_store_turso::spec_content_hash(
-                    ioa_sources.get("Issue").expect("Issue source"),
-                ),
-                true,
-            ),
-        );
-        verification_cache.insert(
-            "Task".to_string(),
-            (
-                temper_store_turso::spec_content_hash("different source"),
-                true,
-            ),
-        );
-
-        let pending =
-            ioa_sources_requiring_background_verification(ioa_sources, &verification_cache);
-
-        assert_eq!(pending.len(), 1);
-        assert!(pending.contains_key("Task"));
-    }
-}
+#[path = "mod_test.rs"]
+mod tests;

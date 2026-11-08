@@ -88,6 +88,15 @@ impl PolicyStore for SimStore {
     async fn update_policy_text(&self, _: &str, _: &str, _: &str, _: &str) -> Result<bool, String> {
         panic!("unexpected unconditional update")
     }
+    async fn replace_tenant_policies(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &str,
+    ) -> Result<(), String> {
+        panic!("unexpected whole-set replacement")
+    }
     async fn delete_policy(&self, _: &str, _: &str) -> Result<(), String> {
         panic!("unexpected delete")
     }

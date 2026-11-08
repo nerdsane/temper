@@ -21,8 +21,8 @@ async fn boundary_paths_delegate_to_production_host() {
             "http://127.0.0.1:8787/tdata/Orders('order-local-1')",
         ),
         (
-            "GET",
-            "http://127.0.0.1:8787/tdata/Files('file-local-1')/$value",
+            "PATCH",
+            "http://127.0.0.1:8787/tdata/Orders('order-local-1')",
         ),
         ("GET", "https://api.example.com/tdata/Orders"),
     ];

@@ -1,6 +1,6 @@
 //! Input checks for `temper verify`.
 use anyhow::{Context, Result};
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{collections::BTreeMap, fs, path::PathBuf};
 use temper_spec::csdl::CsdlDocument;
 
 /// Require declared IOA entities to have CSDL types and correctly qualified sets.
@@ -81,39 +81,20 @@ pub(super) fn validate_ioa_entities(
     Ok(())
 }
 
-/// Read all `.ioa.toml` files from the specs directory.
-pub(super) fn read_ioa_sources(specs_dir: &Path) -> Result<BTreeMap<String, String>> {
+/// Read each IOA spec by its automaton name; two specs of one name fail.
+pub(super) fn read_ioa_files(paths: &[PathBuf]) -> Result<BTreeMap<String, String>> {
     let mut sources = BTreeMap::new();
-
-    if !specs_dir.is_dir() {
-        return Ok(sources);
+    for path in paths {
+        let source = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read IOA file: {}", path.display()))?;
+        let entity_name = temper_spec::automaton::parse_automaton(&source)?
+            .automaton
+            .name;
+        anyhow::ensure!(
+            sources.insert(entity_name.clone(), source).is_none(),
+            "duplicate entity {entity_name}"
+        );
     }
-
-    for entry in fs::read_dir(specs_dir)
-        .with_context(|| format!("Failed to read specs directory: {}", specs_dir.display()))?
-    {
-        let entry = entry?;
-        let path = entry.path();
-
-        let file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
-
-        if file_name.ends_with(".ioa.toml") {
-            let source = fs::read_to_string(&path)
-                .with_context(|| format!("Failed to read IOA file: {}", path.display()))?;
-
-            let entity_name = temper_spec::automaton::parse_automaton(&source)?
-                .automaton
-                .name;
-            anyhow::ensure!(
-                sources.insert(entity_name.clone(), source).is_none(),
-                "duplicate entity {entity_name}"
-            );
-        }
-    }
-
     Ok(sources)
 }
 

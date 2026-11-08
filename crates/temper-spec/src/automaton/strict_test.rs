@@ -403,7 +403,7 @@ fn trigger_keys_belong_to_their_kind() {
 
 #[test]
 fn webhooks_name_the_entity_id_source() {
-    let webhook = "[[webhook]]\nname = \"cb\"\npath = \"cb\"\naction = \"Finish\"\nentity_id = \"query.state\"\n[webhook.extract]\ncode = \"query.code\"";
+    let webhook = "[[webhook]]\nname = \"cb\"\npath = \"cb\"\naction = \"Finish\"\nentity_id = \"query.state\"\nhmac_secret = \"{secret:CB}\"\nhmac_header = \"x-sig\"\n[webhook.extract]\ncode = \"query.code\"";
     let parsed = parse(&spec("", "", webhook)).expect("webhook");
     assert_eq!(parsed.webhooks[0].entity_id, "query.state");
     rejects(
@@ -429,13 +429,21 @@ fn webhooks_name_the_entity_id_source() {
         &spec("", "", &webhook.replace("\"query.code\"", "\"code\"")),
         "query.",
     );
+    // The body and headers are sources too (ADR-0182).
+    let from_body = parse(&spec(
+        "",
+        "",
+        &webhook.replace("\"query.state\"", "\"body.data.object.id\""),
+    ))
+    .expect("body source");
+    assert_eq!(from_body.webhooks[0].entity_id, "body.data.object.id");
     rejects(
         &spec(
             "",
             "",
-            &webhook.replace("\"query.state\"", "\"body.state\""),
+            &webhook.replace("\"query.state\"", "\"form.state\""),
         ),
-        "query.",
+        "query.<name>, header.<name>, body or body.<path>",
     );
 }
 
@@ -460,4 +468,71 @@ params=[{name="owner",type="string",source="authenticated_subject"}]
     let auto = super::parse_automaton(source).expect("trusted parameter source must parse");
     let json = serde_json::to_value(&auto.actions[0].params[0]).unwrap();
     assert_eq!(json["source"], "authenticated_subject");
+}
+
+/// `declaration` is the bound parameter's declaration; `strict` the automaton's.
+fn bound_label_spec(strict: bool, declaration: &str) -> String {
+    format!(
+        r#"
+[automaton]
+name="Post"
+states=["Draft","Posted"]
+initial="Draft"
+strict_action_params={strict}
+[[state]]
+name="author"
+type="string"
+initial=""
+[[action]]
+name="Publish"
+from=["Draft"]
+to="Posted"
+params=[{declaration}]
+"#
+    )
+}
+
+#[test]
+fn an_agent_label_source_parses_on_a_strict_string_parameter() {
+    let source = bound_label_spec(
+        true,
+        r#"{name="author",type="string",source="authenticated_agent_label"}"#,
+    );
+    let auto = super::parse_automaton(&source).expect("trusted parameter source must parse");
+    let json = serde_json::to_value(&auto.actions[0].params[0]).unwrap();
+    assert_eq!(json["source"], "authenticated_agent_label");
+}
+
+#[test]
+fn an_agent_label_source_needs_strict_params_and_a_string() {
+    for source in [
+        bound_label_spec(
+            false,
+            r#"{name="author",type="string",source="authenticated_agent_label"}"#,
+        ),
+        bound_label_spec(
+            true,
+            r#"{name="author",type="bool",source="authenticated_agent_label"}"#,
+        ),
+    ] {
+        let error = super::parse_automaton(&source).unwrap_err().to_string();
+        assert!(
+            error.contains("requires strict_action_params and string type"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn a_related_record_s_field_is_read_only_by_an_invariant() {
+    let invariant = r#"
+[[invariant]]
+name = "same_note"
+assert = "status == 'Done' => Owner[owner_id].owner_id == owner_id"
+"#;
+    parse(&spec("", "", invariant)).expect("an invariant may read a related field");
+    rejects(
+        &spec("", "guard = \"Owner[owner_id].owner_id == owner_id\"", ""),
+        "only an [[invariant]] may do",
+    );
 }

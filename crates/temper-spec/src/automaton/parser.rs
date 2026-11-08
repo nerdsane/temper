@@ -22,8 +22,10 @@ pub enum AutomatonParseError {
 /// Liveness enforcement mode (ADR-0050).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LivenessEnforcement {
-    /// Missing coverage logs `tracing::warn!` and the spec loads. Default
-    /// during rollout.
+    /// Missing coverage does not stop the spec loading. Default during
+    /// rollout. A parse logs it only at debug: every boot parses every stored
+    /// spec, more than once, so the install that brings a spec reports its
+    /// gaps ([`Automaton::validate_liveness_coverage`]).
     WarnOnly,
     /// Missing coverage produces `AutomatonParseError::Validation`.
     Enforce,
@@ -72,7 +74,7 @@ pub fn parse_automaton_with_liveness(
     // ADR-0049: wire each state_timeout's `state` into the target action's
     // `from` list so the action is actually enabled from that state.
     wire_state_timeout_from_states(&mut automaton);
-    // ADR-0046/0078: derive the WASM/adapter/webhook dispatch records from
+    // ADR-0046/0078: derive the WASM/adapter dispatch records from
     // external `[[action.triggers]]` blocks; translation emits a dispatch per
     // trigger (`translate::dispatch_effects`). Entity-kind triggers are handled
     // separately by the reaction dispatcher.
@@ -92,8 +94,8 @@ pub(crate) fn synthesized_trigger_name(action_name: &str, trigger_name: &str) ->
 
 /// ADR-0046/0078: derive the runtime's dispatch records
 /// (`automaton.integrations`) from external `[[action.triggers]]` blocks
-/// (wasm / adapter / webhook), copying module / adapter / url / method /
-/// config / on_success / on_failure. A record is named after its trigger
+/// (wasm / adapter), copying module / adapter / config / on_success /
+/// on_failure. A record is named after its trigger
 /// (logs, governance decisions) and dispatched by its synthesized
 /// `trigger` key. Entity-kind triggers dispatch through
 /// the reaction system and hook-kind triggers through the host's hook
@@ -106,7 +108,10 @@ fn expand_external_action_triggers(automaton: &mut Automaton) -> Result<(), Auto
         for trigger in &action.triggers {
             let synth_name = synthesized_trigger_name(&action.name, &trigger.name);
             match trigger.kind {
-                TriggerKind::Entity | TriggerKind::Hook => continue,
+                // Entity triggers dispatch through the reaction system, hook
+                // triggers through the host; validation refuses webhook
+                // triggers, which nothing sends (ADR-0182).
+                TriggerKind::Entity | TriggerKind::Hook | TriggerKind::Webhook => continue,
                 TriggerKind::Wasm => {
                     let Some(module) = trigger.module.as_ref() else {
                         continue;
@@ -135,42 +140,6 @@ fn expand_external_action_triggers(automaton: &mut Automaton) -> Result<(), Auto
                         on_success: trigger.on_success.clone(),
                         on_failure: trigger.on_failure.clone(),
                         llm: trigger.llm,
-                        config,
-                    });
-                }
-                TriggerKind::Webhook => {
-                    // ADR-0046 known gap: we synthesize the Integration record
-                    // but no runtime dispatcher keys on integration_type ==
-                    // "webhook" today (only "wasm" via wasm.rs:200 and
-                    // "adapter" via adapter.rs:96). A spec-declared webhook
-                    // trigger parses and installs but never fires HTTP. Real
-                    // outbound webhook delivery currently runs through
-                    // temper-server's separate WebhookDispatcher + webhooks.toml
-                    // path. A follow-up will add state/dispatch/webhook.rs
-                    // and collapse the two paths. The config-flattening below
-                    // stays so the Integration record is immediately usable
-                    // once that dispatcher lands.
-                    let mut config = trigger.config.clone();
-                    if let Some(url) = &trigger.url {
-                        config.insert("url".to_string(), url.clone());
-                    }
-                    if let Some(method) = &trigger.method {
-                        config.insert("method".to_string(), method.clone());
-                    }
-                    for (k, v) in &trigger.headers {
-                        config.insert(format!("header.{k}"), v.clone());
-                    }
-                    if let Some(body) = &trigger.body_template {
-                        config.insert("body_template".to_string(), body.clone());
-                    }
-                    synthesized.push(Integration {
-                        name: trigger.name.clone(),
-                        trigger: synth_name.clone(),
-                        integration_type: "webhook".to_string(),
-                        module: None,
-                        on_success: trigger.on_success.clone(),
-                        on_failure: trigger.on_failure.clone(),
-                        llm: false,
                         config,
                     });
                 }
@@ -227,7 +196,7 @@ fn check_liveness_coverage(
         }
         LivenessEnforcement::WarnOnly => {
             for v in &violations {
-                tracing::warn!(
+                tracing::debug!(
                     entity = %v.entity,
                     state = %v.state,
                     "liveness coverage missing (ADR-0050): non-terminal state has no state_timeout and is not in allow_indefinite_states"

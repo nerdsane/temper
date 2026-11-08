@@ -60,6 +60,22 @@ async fn passivated_actor_respawns_with_correct_state() {
         );
     }
 
+    assert!(
+        state
+            .entity_observe_log
+            .lock()
+            .unwrap()
+            .contains_key(&actor_key),
+        "a live entity keeps its observe replay buffer"
+    );
+    let sequence_before = state
+        .entity_event_sequences
+        .lock()
+        .unwrap()
+        .get(&actor_key)
+        .copied()
+        .expect("dispatches numbered the entity's observe events");
+
     state.passivate_idle_actors().await;
 
     assert!(
@@ -70,6 +86,33 @@ async fn passivated_actor_respawns_with_correct_state() {
             .contains_key(&actor_key),
         "actor should be removed from registry after passivation"
     );
+    assert!(
+        !state
+            .entity_observe_log
+            .lock()
+            .unwrap()
+            .contains_key(&actor_key),
+        "a passivated entity's observe buffer goes with its actor"
+    );
+    assert_eq!(
+        state
+            .entity_event_sequences
+            .lock()
+            .unwrap()
+            .get(&actor_key)
+            .copied(),
+        Some(sequence_before),
+        "the sequence counter stays, so later events still sort after old ones"
+    );
+
+    // A client that saw everything is told nothing is missing; one that saw
+    // less is told its replay has a gap, never a silent empty stream.
+    let caught_up =
+        state.entity_observe_replay(tenant.as_str(), "Order", &entity_id, sequence_before);
+    assert!(caught_up.events.is_empty() && !caught_up.missed);
+    let behind =
+        state.entity_observe_replay(tenant.as_str(), "Order", &entity_id, sequence_before - 1);
+    assert!(behind.missed, "the dropped buffer cannot serve this client");
 
     let snapshot = sim_store
         .load_snapshot(&actor_key)
@@ -85,6 +128,31 @@ async fn passivated_actor_respawns_with_correct_state() {
     assert_eq!(recovered.state.status, "Submitted");
     assert_eq!(recovered.state.item_count, 1);
     assert!(recovered.state.total_event_count >= 3); // Created + AddItem + SubmitOrder
+
+    // After the entity comes back, new events replay to a caught-up client,
+    // and a client from before the passivation still hears about the gap.
+    let confirmed = common::dispatch(
+        &state,
+        &tenant,
+        "Order",
+        &entity_id,
+        "ConfirmOrder",
+        serde_json::json!({}),
+    )
+    .await
+    .expect("ConfirmOrder should succeed");
+    assert!(confirmed.success);
+    let next = state.entity_observe_replay(tenant.as_str(), "Order", &entity_id, sequence_before);
+    assert!(!next.missed);
+    assert_eq!(
+        next.events.first().map(|event| event.seq),
+        Some(sequence_before + 1)
+    );
+    assert!(
+        state
+            .entity_observe_replay(tenant.as_str(), "Order", &entity_id, 1)
+            .missed
+    );
 }
 
 /// ARN-462: one passivation tick must not snapshot-and-stop every idle actor.
@@ -124,7 +192,7 @@ async fn passivate_tick_does_not_snapshot_every_idle_actor() {
         }
     }
 
-    state.passivate_idle_actors().await;
+    let left = state.passivate_idle_actors().await;
 
     let remaining = {
         let registry = state.actor_registry.read().unwrap();
@@ -146,12 +214,22 @@ async fn passivate_tick_does_not_snapshot_every_idle_actor() {
         passivated <= temper_server::state::PASSIVATE_IDLE_ACTORS_PER_TICK,
         "passivated {passivated} exceeds PASSIVATE_IDLE_ACTORS_PER_TICK"
     );
+    assert_eq!(
+        left, remaining,
+        "the tick reports the idle actors it left, so the loop comes back for them"
+    );
+
+    // The next ticks work the backlog off; nothing idle stays behind.
+    while state.passivate_idle_actors().await > 0 {}
+    assert!(
+        actor_keys
+            .iter()
+            .all(|key| !remaining_registry_has(&state, key)),
+        "every idle actor is passivated once the backlog is worked off"
+    );
 
     let mut snapshotted = 0usize;
     for key in &actor_keys {
-        if remaining_registry_has(&state, key) {
-            continue;
-        }
         let snapshot = sim_store
             .load_snapshot(key)
             .await
@@ -162,7 +240,7 @@ async fn passivate_tick_does_not_snapshot_every_idle_actor() {
         );
         snapshotted += 1;
     }
-    assert_eq!(snapshotted, passivated);
+    assert_eq!(snapshotted, IDLE_COUNT);
 }
 
 fn remaining_registry_has(state: &temper_server::ServerState, actor_key: &str) -> bool {

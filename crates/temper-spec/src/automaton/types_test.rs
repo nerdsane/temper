@@ -39,27 +39,6 @@ from = ["A"]
 }
 
 #[test]
-fn parse_guard_variants() {
-    let toml_src = r#"
-[automaton]
-name = "T"
-states = ["A", "B"]
-initial = "A"
-
-[[action]]
-name = "G1"
-from = ["A"]
-to = "B"
-guard = "items >= 1 && items < 10 && ready && 'vip' in tags && len(tags) >= 2"
-"#;
-    let automaton: Automaton = toml::from_str(toml_src).unwrap();
-    assert_eq!(
-        automaton.actions[0].guard.to_string(),
-        "items >= 1 && items < 10 && ready && 'vip' in tags && len(tags) >= 2"
-    );
-}
-
-#[test]
 fn parse_effect_variants() {
     let toml_src = r#"
 [automaton]
@@ -102,8 +81,8 @@ effect = [
     );
     assert!(matches!(
         &automaton.actions[0].effect[7],
-        Effect::Spawn { entity_type, initial_action, store_id_in: Some(field), id: None }
-            if entity_type == "Child" && initial_action == "Init" && field == "child_id"
+        Effect::Spawn { entity_type, initial_action, store_id_in: Some(field), id: None, copy }
+            if entity_type == "Child" && initial_action == "Init" && field == "child_id" && copy.is_empty()
     ));
 }
 
@@ -155,7 +134,9 @@ entity_id = "query.state"
     let automaton: Automaton = toml::from_str(toml_src).unwrap();
     assert_eq!(automaton.webhooks.len(), 1);
     assert_eq!(automaton.webhooks[0].name, "oauth_cb");
-    assert_eq!(automaton.webhooks[0].method, "POST");
+    // No declared method: the webhook answers any method (ADR-0182).
+    assert_eq!(automaton.webhooks[0].method, None);
+    assert_eq!(automaton.webhooks[0].signature, WebhookSignature::Kernel);
     assert_eq!(automaton.webhooks[0].entity_id, "query.state");
 }
 

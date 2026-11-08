@@ -6,7 +6,7 @@ use axum::response::Json;
 use temper_authz::AuthenticatedRequestContext;
 use tracing::instrument;
 
-use crate::authz::{require_authenticated_context, require_observe_auth};
+use crate::authz::{observe_tenant_scope, require_authenticated_context, require_observe_auth};
 use crate::observe::SimQueryParams;
 use crate::state::ServerState;
 
@@ -23,7 +23,9 @@ pub(crate) async fn handle_run_simulation(
     let authenticated = require_authenticated_context(authenticated.as_deref())?;
     require_observe_auth(&state, authenticated, "read_verification", "Verification")?;
 
-    let Some((_tenant_id, ioa_source)) = state.find_entity_ioa_source(&entity) else {
+    let Some(ioa_source) =
+        state.find_entity_ioa_source(observe_tenant_scope(authenticated), &entity)
+    else {
         tracing::warn!("entity spec not found for simulation");
         return Err(StatusCode::NOT_FOUND);
     };

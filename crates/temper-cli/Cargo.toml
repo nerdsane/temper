@@ -34,6 +34,7 @@ axum = { workspace = true }
 clap = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true }
+tracing = { workspace = true }
 tokio-postgres = { workspace = true }
 deadpool-postgres = { workspace = true }
 serde = { workspace = true }
@@ -42,7 +43,6 @@ anyhow = { workspace = true }
 quick-xml = { workspace = true }
 chrono = { workspace = true }
 sha2 = { workspace = true }
-tikv-jemallocator = { workspace = true }
 dirs = "6"
 dotenvy = { workspace = true }
 uuid = { workspace = true }
@@ -56,6 +56,14 @@ console = "0.16.2"
 indicatif = "0.18.4"
 dialoguer = "0.12.0"
 
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+tikv-jemallocator = { workspace = true }
+
+# jemalloc's sampling heap profiler is built in on Linux only; jemalloc_pprof,
+# which exports it, reads /proc/self/maps.
+[target.'cfg(target_os = "linux")'.dependencies]
+tikv-jemallocator = { workspace = true, features = ["profiling"] }
+
 [package.metadata.dist]
 # npm package name for the generated npm installer
 npm-package = "temper-mcp"
@@ -64,4 +72,10 @@ npm-package = "temper-mcp"
 pkg-url = "{ repo }/releases/download/{ name }-v{ version }/{ name }-{ target }{ archive-suffix }"
 
 [dev-dependencies]
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+tower = { workspace = true }
+temper-test-resource = { workspace = true }
 tempfile = "3"
+tracing-subscriber = { workspace = true }
+temper-wasm = { workspace = true }

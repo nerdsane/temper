@@ -1,0 +1,23 @@
+[automaton]
+name = "Lid"
+states = ["Unmade", "Open", "Shut"]
+initial = "Unmade"
+
+[[state]]
+name = "parent_id"
+type = "string"
+initial = ""
+
+[[action]]
+name = "Add"
+kind = "input"
+from = ["Unmade"]
+to = "Open"
+params = ["parent_id"]
+
+[[action]]
+name = "Shut"
+kind = "input"
+from = ["Open"]
+to = "Shut"
+guard = "Box[parent_id].status != 'Full'"

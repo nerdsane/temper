@@ -48,7 +48,7 @@ serde_json = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }
-uuid = { workspace = true }
+uuid = { workspace = true, features = ["v5"] }
 chrono = { workspace = true }
 opentelemetry = { workspace = true }
 reqwest = { workspace = true }
@@ -80,8 +80,21 @@ tempfile = "3"
 # the same pprof protobuf wire format, so the uploaded profile is unchanged
 # (ARN-169).
 pprof = { version = "0.14", features = ["prost-codec"] }
+# Profiles resolve their own frames so JIT-compiled wasm code keeps a name
+# (pprof drops frames it cannot symbolize). Same version pprof itself uses.
+backtrace = "0.3"
+
+# Heap profiles: jemalloc's sampled allocation profile, exported as pprof.
+# jemalloc_pprof reads /proc/self/maps, so it is Linux-only.
+[target.'cfg(target_os = "linux")'.dependencies]
+jemalloc_pprof = { version = "0.8", features = ["symbolize"] }
+tikv-jemalloc-ctl = { version = "0.6", features = ["use_std"] }
+flate2 = "1"
 
 [dev-dependencies]
+temper-test-resource = { workspace = true }
+opentelemetry-appender-tracing = { workspace = true }
+opentelemetry-otlp = { workspace = true, features = ["http-json"] }
 temper-actor-runtime = { workspace = true, features = ["test-utils"] }
 deadpool-postgres = { workspace = true }
 tokio-postgres = { workspace = true }

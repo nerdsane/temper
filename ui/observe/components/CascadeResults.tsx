@@ -95,7 +95,7 @@ function SmtPanel({ data }: { data: SmtDetails }) {
               <div key={name} className="flex items-center justify-between px-3 py-1.5">
                 <span className="font-mono text-[11px] text-[var(--color-text-secondary)]">{name}</span>
                 <span className={`font-mono text-[10px] ${holds ? G : B}`}>
-                  {holds ? "inductive" : "non-inductive"}
+                  {holds ? "inductive" : "not proved"}
                 </span>
               </div>
             ))}

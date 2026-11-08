@@ -402,10 +402,11 @@ async fn poll_status(
         .unwrap_or_default()
 }
 
-/// Inline, no `on_failure`: the failed integration must surface as
-/// `success: false` to the caller, not masquerade as success (ADR-0152).
+/// Inline, no `on_failure`: the action committed, so the caller is answered
+/// committed with the failed integration named, and the record is
+/// compensated through its `Fail` step as in the background (ADR-0184).
 #[tokio::test(flavor = "multi_thread")]
-async fn inline_failure_without_on_failure_returns_success_false() {
+async fn inline_failure_without_on_failure_is_answered_committed_and_compensated() {
     let mock_server = failing_mock().await;
     let spec = no_on_failure_spec_with_fail(&mock_server.uri());
     let state = build_state(&spec);
@@ -429,16 +430,19 @@ async fn inline_failure_without_on_failure_returns_success_false() {
         .expect("dispatch returns a response");
 
     assert!(
-        !response.success,
-        "an inline integration failure with no on_failure must report success: false, got {response:?}"
+        response.success,
+        "the committed action is answered committed, got {response:?}"
     );
     assert!(
-        response
-            .error
-            .as_deref()
-            .is_some_and(|e| e.contains("integration")),
-        "error should name the integration failure, got {:?}",
-        response.error
+        response.trigger_failures.len() == 1
+            && response.trigger_failures[0].contains("integration"),
+        "the failed integration is named, got {:?}",
+        response.trigger_failures
+    );
+    assert_eq!(
+        poll_status(&state, &tenant, "adapter-inline-nofail", "Failed").await,
+        "Failed",
+        "the record is compensated through its Fail step"
     );
 }
 

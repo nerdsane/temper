@@ -136,7 +136,7 @@ from = ["State1"]
 reaches = ["State3"]
 ```
 
-**`effect` is a list of statements** in the guard grammar (`counter_var += 1`, `ready = true`, `append(tags, params.tag)`, `schedule('Expire', 3600)`, ...; see `docs/predicates.md#effects`). Nothing is implied by an action's name — an `AddItem` with no `effect` changes only `status`. **`[[action.triggers]]`** is the only way an action causes work elsewhere (`kind = "entity" | "wasm" | "adapter" | "webhook" | "hook"`). `[[integration]]` blocks and `trigger`/`emit` effects fail to load; `temper migrate-predicates <files>` converts them.
+**`effect` is a list of statements** in the guard grammar (`counter_var += 1`, `ready = true`, `append(tags, params.tag)`, `schedule('Expire', 3600)`, ...; see `docs/predicates.md#effects`). Nothing is implied by an action's name — an `AddItem` with no `effect` changes only `status`. **`[[action.triggers]]`** is the only way an action causes work elsewhere (`kind = "entity" | "wasm" | "adapter" | "hook"`; `kind = "webhook"` is refused at load because nothing sends it, so make outbound HTTP calls with `kind = "wasm"` and `module = "http_fetch"`). `[[integration]]` blocks and `trigger`/`emit` effects fail to load; `temper migrate-predicates <files>` converts them.
 
 **IMPORTANT: Integrations use WASM modules, NOT webhooks.** If the app needs external API calls (payments, notifications, email, etc.), you MUST generate a WASM module. See "Generate WASM Integration Modules" below — do NOT skip that section.
 
@@ -473,10 +473,24 @@ hint = "Description."      # optional hint
 # Outgoing work — the only way an action reaches outside the entity
 [[action.triggers]]
 name = "notify_service"
-kind = "wasm"              # "entity" | "wasm" | "adapter" | "webhook" | "hook"
+kind = "wasm"              # "entity" | "wasm" | "adapter" | "hook"
 module = "notify_service"
 on_success = "NotifySucceeded"
 on_failure = "NotifyFailed"
+
+# Inbound webhook: another system's signed request becomes one action.
+# Served at /webhooks/{tenant}/{path}, any method unless `method` names one.
+# Cedar must permit Agent::"webhook:<name>" to run the action.
+[[webhook]]
+name = "stripe_paid"
+path = "stripe/paid"
+action = "Pay"
+signature = "stripe"       # kernel | hmac | github | stripe | standard_webhooks | token
+hmac_secret = "{secret:STRIPE_WEBHOOK_SECRET}"   # required
+entity_id = "body.data.object.client_reference_id"  # query.<name> | header.<name> | body | body.<path>
+
+[webhook.extract]
+amount_total = "body.data.object.amount_total"
 
 # Output actions (events, no state change)
 [[action]]
@@ -502,7 +516,7 @@ reaches = ["State3"]
 |---|---|
 | `x = 5`, `x = params.p`, `x += 1`, `x -= 1` | counter (`-=` stops at 0) |
 | `b = true`, `b = other_bool`, `b = params.p` | bool |
-| `append(tags, 'v')`, `append(tags, params.p)`, `remove_at(tags, params.i)` | list of strings |
+| `append(tags, 'v')`, `append(tags, params.p)`, `remove(tags, params.p)`, `remove_at(tags, params.i)` | list of strings |
 | `schedule('Action', 3600)`, `schedule_at('Action', field)` | a declared action on this entity |
 | `spawn('Type', 'Create', id_var)` (optional 4th arg: child id) | a new child entity |
 

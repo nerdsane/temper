@@ -1,6 +1,7 @@
 use temper_runtime::TenantId;
 use temper_server::ServerState;
 use temper_server::request_context::AgentContext;
+use tracing::Instrument;
 
 /// Dispatch callback to a registered target entity.
 ///
@@ -89,8 +90,18 @@ pub(super) fn handle_dispatch_callback(
     let entity_id = callback_entity_id.to_string();
     let action = callback_action.to_string();
 
-    tokio::spawn(async move {
-        // determinism-ok: async callback dispatch for governance decision resolution
+    // The callback is work the runtime starts on its own after the decision's
+    // move: a trace of its own, linked to that move (see `trace_context`).
+    let span = temper_server::runtime_work_span!(
+        temper_server::trace_context::cause(),
+        kind = "governance_callback",
+        "governance.dispatch_callback",
+        tenant = %tenant,
+        entity_set = %entity_set,
+        entity_id = %entity_id,
+        action = %action,
+    );
+    let callback = async move {
         let tid = TenantId::new(&tenant);
         let entity_type = resolve_callback_entity_type(&server, &tid, &entity_set);
         if let Err(e) = server
@@ -123,7 +134,8 @@ pub(super) fn handle_dispatch_callback(
                 "DispatchCallback: callback action dispatched successfully"
             );
         }
-    });
+    };
+    tokio::spawn(callback.instrument(span)); // determinism-ok: async callback dispatch for governance decision resolution
 
     Ok(())
 }

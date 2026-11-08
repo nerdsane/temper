@@ -92,9 +92,23 @@ const AGENT_SPECS: &[(&str, &str)] = &[
 /// Returns a list of `(entity_type, content_hash)` for all bootstrapped specs
 /// so the caller can persist them to the backing store.
 ///
-/// Panics if any spec fails to parse or verify (fatal startup error).
+/// Returns an error if any spec, the CSDL or the cross-invariants fail to
+/// parse or verify. The registry is shared by every tenant, so nothing here
+/// panics: a caller with built-in specs treats the error as fatal, a caller
+/// installing one tenant's app returns it to that install.
+/// What a bootstrap's CSDL is to the tenant's schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CsdlMode {
+    /// Merged into the schema the tenant already has.
+    MergedIntoExisting,
+    /// All of the tenant's schema: a type or set it leaves out leaves.
+    Whole,
+}
+
 pub(crate) struct BootstrapTenantSpecsOptions<'a> {
     pub(crate) merge: bool,
+    /// Whether `csdl_source` is merged into the tenant's schema or is all of it.
+    pub(crate) csdl_mode: CsdlMode,
     pub(crate) label: &'a str,
     pub(crate) verified_cache: &'a BTreeMap<String, (String, bool)>,
     pub(crate) cross_invariants_source: Option<&'a str>,
@@ -118,19 +132,10 @@ pub(crate) fn bootstrap_tenant_specs(
     csdl_source: &str,
     specs: &[(&str, &str)],
     options: BootstrapTenantSpecsOptions<'_>,
-) -> Vec<(String, String)> {
-    bootstrap_tenant_specs_inner(state, tenant, csdl_source, specs, options)
-}
-
-fn bootstrap_tenant_specs_inner(
-    state: &PlatformState,
-    tenant: &str,
-    csdl_source: &str,
-    specs: &[(&str, &str)],
-    options: BootstrapTenantSpecsOptions<'_>,
-) -> Vec<(String, String)> {
+) -> Result<Vec<(String, String)>, String> {
     let BootstrapTenantSpecsOptions {
         merge,
+        csdl_mode,
         label,
         verified_cache,
         cross_invariants_source,
@@ -145,7 +150,7 @@ fn bootstrap_tenant_specs_inner(
     // Validate all specs parse.
     for (entity_type, ioa_source) in specs {
         automaton::parse_automaton(ioa_source)
-            .unwrap_or_else(|e| panic!("{label} spec {entity_type} failed to parse: {e}"));
+            .map_err(|e| format!("{label} spec {entity_type} failed to parse: {e}"))?;
     }
 
     // Hash-gated verification: only run the cascade for specs whose
@@ -176,22 +181,25 @@ fn bootstrap_tenant_specs_inner(
                 .with_sim_seeds(3)
                 .with_prop_test_cases(20);
             let result = cascade.run();
-            assert!(
-                result.all_passed,
-                "{label} spec {entity_type} failed verification cascade"
-            );
+            if !result.all_passed {
+                return Err(format!(
+                    "{label} spec {entity_type} failed verification cascade"
+                ));
+            }
         }
         spec_hashes.push((entity_type.to_string(), hash));
     }
 
     // Parse CSDL schema.
-    let csdl =
-        parse_csdl(csdl_source).unwrap_or_else(|e| panic!("{label} CSDL failed to parse: {e}"));
+    let csdl = parse_csdl(csdl_source).map_err(|e| format!("{label} CSDL failed to parse: {e}"))?;
 
-    // Register tenant and mark specs as pre-verified.
+    // Register tenant and mark specs as pre-verified. Registration refuses
+    // bad input before it changes the registry, and the guard is released on
+    // that early return like any other, so other tenants keep reading it.
     let tenant_id = TenantId::new(tenant);
     {
         let mut registry = state.registry.write().unwrap(); // ci-ok: infallible lock
+        let whole = (merge && csdl_mode == CsdlMode::Whole).then(|| csdl.clone());
         registry
             .try_register_tenant_with_constraints(
                 tenant_id.clone(),
@@ -201,7 +209,11 @@ fn bootstrap_tenant_specs_inner(
                 cross_invariants_source.map(str::to_string),
                 merge,
             )
-            .unwrap_or_else(|e| panic!("failed to register {label} specs for '{tenant}': {e}"));
+            .map_err(|e| format!("failed to register {label} specs for '{tenant}': {e}"))?;
+        // A merge keeps every type the schema had; a whole schema replaces it.
+        if let Some(csdl) = whole {
+            registry.set_tenant_schema(&tenant_id, csdl, csdl_source.to_string());
+        }
         let now = temper_runtime::scheduler::sim_now().to_rfc3339();
         for (entity_type, _) in specs {
             registry.set_verification_status(
@@ -226,7 +238,7 @@ fn bootstrap_tenant_specs_inner(
         specs.iter().map(|(t, _)| *t).collect::<Vec<_>>()
     );
 
-    spec_hashes
+    Ok(spec_hashes)
 }
 
 /// Bootstrap the system tenant.
@@ -245,12 +257,15 @@ pub fn bootstrap_system_tenant(
         SYSTEM_SPECS,
         BootstrapTenantSpecsOptions {
             merge: false,
+            csdl_mode: CsdlMode::Whole,
             label: "System",
             verified_cache,
             cross_invariants_source: None,
             verification_mode: BootstrapSpecVerificationMode::FullCascade,
         },
     )
+    // Built-in specs compiled into this binary: a failure is a build defect.
+    .unwrap_or_else(|e| panic!("{e}"))
 }
 
 /// Bootstrap agent entity specs (Agent, Plan, Task, ToolCall) for a tenant.
@@ -271,12 +286,19 @@ pub fn bootstrap_agent_specs(
         AGENT_SPECS,
         BootstrapTenantSpecsOptions {
             merge,
+            csdl_mode: if merge {
+                CsdlMode::MergedIntoExisting
+            } else {
+                CsdlMode::Whole
+            },
             label: "Agent",
             verified_cache,
             cross_invariants_source: None,
             verification_mode: BootstrapSpecVerificationMode::FullCascade,
         },
     )
+    // Built-in specs compiled into this binary: a failure is a build defect.
+    .unwrap_or_else(|e| panic!("{e}"))
 }
 
 /// Platform IDENTITY specs — a strict subset of [`AGENT_SPECS`] that backs
@@ -295,20 +317,19 @@ const OPERATOR_CREDENTIAL_SPECS: &[(&str, &str)] = &[
     ("AgentCredential", AGENT_CREDENTIAL_IOA),
 ];
 
-/// Derive a minimal CSDL slice for `keep_types` from the authoritative
-/// [`AGENT_CSDL`].
+/// Derive a minimal CSDL slice for `keep_types` from one of the embedded,
+/// authoritative CSDL documents ([`AGENT_CSDL`], [`SYSTEM_CSDL`]).
 ///
 /// The slice is *derived*, never hand-copied: it keeps only the requested
 /// entity types, the bound actions whose binding parameter targets one of them,
 /// and the entity sets backed by them. Unrelated enum types, terms, and
 /// operation imports are dropped so the emitted slice is self-contained. This
-/// keeps a single source of truth (`AGENT_CSDL`) instead of a drifting mirror.
+/// keeps a single source of truth instead of a drifting mirror.
 ///
-/// Panics only if `AGENT_CSDL` fails to parse — a compile-time invariant of an
-/// embedded, test-covered constant (see `test_agent_csdl_parses`).
-fn agent_csdl_slice(keep_types: &[&str]) -> CsdlDocument {
-    let mut doc =
-        parse_csdl(AGENT_CSDL).unwrap_or_else(|e| panic!("Agent CSDL failed to parse: {e}"));
+/// Panics only if the embedded CSDL fails to parse — a compile-time invariant
+/// of an embedded, test-covered constant (see `test_agent_csdl_parses`).
+fn csdl_slice(csdl: &str, keep_types: &[&str]) -> CsdlDocument {
+    let mut doc = parse_csdl(csdl).unwrap_or_else(|e| panic!("embedded CSDL failed to parse: {e}"));
     let is_kept = |type_name: &str| {
         let bare = type_name.rsplit('.').next().unwrap_or(type_name);
         keep_types.contains(&bare)
@@ -352,8 +373,49 @@ fn bootstrap_agent_subset_specs(
     tenant: &str,
     specs: &[(&str, &str)],
 ) -> Result<(), RegistryError> {
+    bootstrap_subset_specs(state, tenant, AGENT_CSDL, specs)
+}
+
+/// The platform's `HttpEndpoint` type (ADR-0069), for a tenant.
+///
+/// ADR-0069 gives every tenant the type, as it does `Observation` and the other
+/// platform entities: a tenant's routes are its own `HttpEndpoint` rows. It sat
+/// only in `temper-system`, so a server built from scratch had nowhere to keep
+/// a route until an app happened to bring the type. Same merge and trust
+/// semantics as [`bootstrap_identity_specs`]: additive, cascade-free.
+pub fn bootstrap_http_endpoint_spec(
+    state: &PlatformState,
+    tenant: &str,
+) -> Result<(), RegistryError> {
+    // A tenant that already has the type, from an app such as temper-git under
+    // its own namespace, keeps it: a second copy would list HttpEndpoints twice
+    // and make that app's install look stale on every boot.
+    let has_type = state.registry.read().is_ok_and(|registry| {
+        registry
+            .get_table(&TenantId::new(tenant), "HttpEndpoint")
+            .is_some()
+    });
+    if has_type {
+        return Ok(());
+    }
+    bootstrap_subset_specs(
+        state,
+        tenant,
+        SYSTEM_CSDL,
+        &[("HttpEndpoint", HTTP_ENDPOINT_IOA)],
+    )
+}
+
+/// Register `specs`, with the slice of `csdl` they need, into a tenant without
+/// the verification cascade (see [`bootstrap_agent_subset_specs`]).
+fn bootstrap_subset_specs(
+    state: &PlatformState,
+    tenant: &str,
+    csdl: &str,
+    specs: &[(&str, &str)],
+) -> Result<(), RegistryError> {
     let keep: Vec<&str> = specs.iter().map(|(entity_type, _)| *entity_type).collect();
-    let csdl_doc = agent_csdl_slice(&keep);
+    let csdl_doc = csdl_slice(csdl, &keep);
     let csdl_xml = emit_csdl_xml(&csdl_doc);
 
     let tenant_id = TenantId::new(tenant);
@@ -424,6 +486,28 @@ pub async fn bootstrap_operator_credential_specs(
     bootstrap_agent_subset_specs(state, tenant, OPERATOR_CREDENTIAL_SPECS)
 }
 
+/// The tenant's stored verification results, from the platform store installs
+/// write to; empty when there is none or it cannot be read.
+pub(crate) async fn load_verification_cache(
+    state: &PlatformState,
+    tenant: &str,
+) -> BTreeMap<String, (String, bool)> {
+    let stack = state.server.storage_stack.as_ref();
+    if let Some(turso) = stack
+        .and_then(|stack| stack.turso.as_ref())
+        .and_then(|provider| provider.platform_store())
+    {
+        turso
+            .load_verification_cache(tenant)
+            .await
+            .unwrap_or_default()
+    } else if let Some(ps) = stack.and_then(|stack| stack.platform.clone()) {
+        ps.load_verification_cache(tenant).await.unwrap_or_default()
+    } else {
+        BTreeMap::new()
+    }
+}
+
 /// Persist built-in spec hashes and verification status to Turso.
 ///
 /// After bootstrap verifies specs (or skips via cache), this writes each
@@ -443,7 +527,7 @@ pub(crate) async fn persist_bootstrap_verification(
     verified_cache: &BTreeMap<String, (String, bool)>,
 ) {
     let hashes_to_persist = hashes_requiring_persistence(hashes, verified_cache);
-    let mut wrote_specs = false;
+    let mut written: Vec<(&str, &str, &str)> = Vec::new();
 
     for (entity_type, content_hash) in &hashes_to_persist {
         // Find the IOA source for this entity type.
@@ -461,7 +545,7 @@ pub(crate) async fn persist_bootstrap_verification(
             tracing::warn!("Failed to persist bootstrap spec {tenant}/{entity_type}: {e}");
             continue;
         }
-        wrote_specs = true;
+        written.push((entity_type.as_str(), content_hash.as_str(), csdl_source));
 
         // Mark as verified (bootstrap panics on failure, so all specs here passed).
         if let Err(e) = store
@@ -483,10 +567,12 @@ pub(crate) async fn persist_bootstrap_verification(
     }
 
     // `upsert_spec` marks rows as uncommitted while content is rewritten. Once
-    // bootstrap verification succeeds, promote the tenant's spec set back to a
-    // durable committed state so restart recovery can actually see the rows.
-    if wrote_specs && let Err(e) = store.commit_specs(tenant).await {
-        tracing::warn!("Failed to commit bootstrap specs for tenant '{tenant}': {e}");
+    // bootstrap verification succeeds, commit exactly the rows written here, so
+    // another install still verifying in this tenant is not committed with them.
+    match store.commit_spec_versions(tenant, &written, &[]).await {
+        Ok(true) => {}
+        Ok(false) => tracing::warn!("Bootstrap specs for tenant '{tenant}' changed before commit"),
+        Err(e) => tracing::warn!("Failed to commit bootstrap specs for tenant '{tenant}': {e}"),
     }
 }
 
@@ -601,6 +687,22 @@ pub async fn bootstrap_operator_credential(
     let key_hash = hash_token(api_key);
     let key_prefix = api_key.chars().take(8).collect::<String>();
 
+    // Issue is a self-transition on an Active credential, so re-issuing at
+    // every boot appended one more event to the journal identity resolution
+    // replays (61 on a production credential). A credential that is already
+    // active and linked to this operator is left as it is.
+    if operator_credential_is_current(state, &tenant_id, &key_hash, agent_type_id, instance_id)
+        .await
+    {
+        crate::operator_manage_policies::seed_operator_permits(state, tenant).await;
+        tracing::info!(
+            "Operator credential already current for tenant '{tenant}' (key_hash={}...)",
+            &key_hash[..8]
+        );
+        report_operator_credentials(state, &tenant_id, &key_hash, instance_id).await;
+        return Ok(());
+    }
+
     state
         .server
         .dispatch_tenant_action(
@@ -624,13 +726,175 @@ pub async fn bootstrap_operator_credential(
             format!("failed to issue operator AgentCredential for tenant '{tenant}': {e}")
         })?;
 
-    crate::operator_manage_policies::seed_operator_manage_policies(state, tenant).await;
+    crate::operator_manage_policies::seed_operator_permits(state, tenant).await;
 
     tracing::info!(
         "Operator credential bootstrapped for tenant '{tenant}' (key_hash={}...)",
         &key_hash[..8]
     );
+    report_operator_credentials(state, &tenant_id, &key_hash, instance_id).await;
     Ok(())
+}
+
+/// Count the tenant's Active operator credentials: this boot's key and every
+/// older one still Active. An older one still signs in, so more than one is
+/// worth knowing about; nothing is revoked here.
+async fn report_operator_credentials(
+    state: &PlatformState,
+    tenant_id: &temper_runtime::tenant::TenantId,
+    key_hash: &str,
+    instance_id: &str,
+) {
+    let Some(mut active) = state
+        .server
+        .active_credential_ids(tenant_id, instance_id)
+        .await
+    else {
+        tracing::warn!(tenant = %tenant_id, "operator credentials not countable: the store has no catalog");
+        return;
+    };
+    // This boot's credential counts even before the catalog has projected it.
+    if !active.iter().any(|id| id == key_hash) {
+        active.push(key_hash.to_string());
+    }
+    let others: Vec<&str> = active
+        .iter()
+        .filter(|id| *id != key_hash)
+        .map(|id| &id[..id.len().min(8)])
+        .collect();
+    temper_server::runtime_metrics::record_operator_credentials_active(
+        tenant_id.as_str(),
+        active.len() as u64,
+    );
+    if others.is_empty() {
+        tracing::info!(tenant = %tenant_id, active = 1, "operator credentials active");
+    } else {
+        tracing::warn!(
+            tenant = %tenant_id,
+            active = active.len(),
+            older_key_hashes = %others.join(","),
+            "operator credentials active: older operator keys still sign in"
+        );
+    }
+}
+
+/// Whether the operator credential for `key_hash` exists, is Active and is
+/// bound to this key and operator identity, so issuing it again would change
+/// nothing but the length of its journal.
+async fn operator_credential_is_current(
+    state: &PlatformState,
+    tenant_id: &temper_runtime::tenant::TenantId,
+    key_hash: &str,
+    agent_type_id: &str,
+    instance_id: &str,
+) -> bool {
+    // Bootstrap runs before this server has loaded any credential, so the
+    // store decides whether one exists.
+    if !state
+        .server
+        .ensure_entity_loaded(tenant_id, "AgentCredential", key_hash)
+        .await
+    {
+        return false;
+    }
+    let Ok(response) = state
+        .server
+        .get_tenant_entity_state(tenant_id, "AgentCredential", key_hash)
+        .await
+    else {
+        return false;
+    };
+    let fields = &response.state.fields;
+    let field = |name: &str| fields.get(name).and_then(serde_json::Value::as_str);
+    response.state.status == "Active"
+        && field("key_hash") == Some(key_hash)
+        && field("agent_type_id") == Some(agent_type_id)
+        && field("agent_instance_id") == Some(instance_id)
+        && field("expires_at").is_none_or(str::is_empty)
+}
+
+/// Revoke every Active or Rotated operator credential an earlier boot issued
+/// (`agent_instance_id` "operator", `created_by` "bootstrap") for a key other
+/// than `api_key`. Each boot issues one for the key it was given and keeps the
+/// ones before, so a Temper whose key changed keeps every old key's operator
+/// authority. Only a deployment that is the sole holder of its key asks for
+/// this (`TEMPER_RETIRE_OLD_OPERATOR_KEYS`): another holder of an older key
+/// would lose it. Credentials issued through the API are left alone. Answers
+/// how many it revoked; one it cannot read or revoke is logged and left for
+/// the next boot.
+pub async fn retire_other_operator_credentials(
+    state: &PlatformState,
+    api_key: &str,
+    tenant: &str,
+) -> usize {
+    let tenant_id = temper_runtime::tenant::TenantId::new(tenant);
+    let agent_ctx = temper_server::request_context::AgentContext::for_service("platform-bootstrap");
+    let current = temper_server::identity::hash_token(api_key);
+    let (tenant_id, agent_ctx, current) = (&tenant_id, &agent_ctx, current.as_str());
+    let mut retired = 0;
+    for id in state
+        .server
+        .list_entity_ids_lazy(tenant_id, "AgentCredential")
+        .await
+    {
+        if id == current {
+            continue;
+        }
+        if !state
+            .server
+            .ensure_entity_loaded(tenant_id, "AgentCredential", &id)
+            .await
+        {
+            continue;
+        }
+        let credential = match state
+            .server
+            .get_tenant_entity_state(tenant_id, "AgentCredential", &id)
+            .await
+        {
+            Ok(credential) => credential.state,
+            Err(e) => {
+                tracing::warn!("Could not read AgentCredential {id} to retire it: {e}");
+                continue;
+            }
+        };
+        let field = |name: &str| {
+            credential
+                .fields
+                .get(name)
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string()
+        };
+        let earlier_boot =
+            field("agent_instance_id") == "operator" && field("created_by") == "bootstrap";
+        if !earlier_boot || !matches!(credential.status.as_str(), "Active" | "Rotated") {
+            continue;
+        }
+        match state
+            .server
+            .dispatch_tenant_action(
+                tenant_id,
+                "AgentCredential",
+                &id,
+                "Revoke",
+                serde_json::json!({}),
+                agent_ctx,
+            )
+            .await
+        {
+            Ok(response) if response.success => retired += 1,
+            Ok(response) => tracing::warn!(
+                "Could not revoke earlier operator credential {id}: {:?}",
+                response.error
+            ),
+            Err(e) => tracing::warn!("Could not revoke earlier operator credential {id}: {e}"),
+        }
+    }
+    tracing::info!(
+        "Retired {retired} operator credential(s) of keys tenant '{tenant}' no longer holds"
+    );
+    retired
 }
 
 /// Outcome of [`bootstrap_trusted_issuer_from_env`].
@@ -638,7 +902,9 @@ pub async fn bootstrap_operator_credential(
 pub enum IssuerBootstrapOutcome {
     /// No issuer env vars were set — nothing to register (safe no-op).
     Skipped,
-    /// The trusted issuer was registered from the environment.
+    /// The tenant has the trusted issuer: registered or updated from the
+    /// environment, or kept as stored because the record holds its own keys
+    /// (`keys_rotated`) or is no longer Active.
     Registered,
 }
 
@@ -687,10 +953,12 @@ fn resolve_issuer_env_config(
 ///
 /// Returns:
 /// - `Ok(Skipped)` when none of the three env vars are set (safe no-op).
-/// - `Ok(Registered)` when the issuer was registered (idempotent: re-registering
-///   an existing issuer is a self-loop on `Active`).
+/// - `Ok(Registered)` when the tenant has the issuer. The environment registers
+///   it when absent and keeps applying its keys and audience to it at each
+///   start until `RotateIssuerKeys` runs on it (`keys_rotated`); from then on,
+///   and for a Suspended or Revoked issuer, the stored record is left as it is.
 /// - `Err(_)` when the config is *partial* (some but not all three vars set) or
-///   registration fails. A partial config is a misconfiguration, not a no-op —
+///   the stored issuer cannot be read or registration fails. A partial config is a misconfiguration, not a no-op —
 ///   registering half a trusted-issuer config would leave JWT verification
 ///   quietly inert — so the caller can fail readiness rather than log a
 ///   misleading success.
@@ -715,19 +983,58 @@ pub async fn bootstrap_trusted_issuer_from_env(
         None => return Ok(IssuerBootstrapOutcome::Skipped),
     };
 
+    let algorithms =
+        std::env::var("TEMPER_TRUSTED_ISSUER_ALGS").unwrap_or_else(|_| "ES256".to_string());
+    apply_environment_issuer(state, tenant, &issuer, &jwks_json, &audience, &algorithms).await
+}
+
+/// Register `issuer` with the environment's keys, or apply them to the stored
+/// issuer while it still takes its keys from the environment (see
+/// [`bootstrap_trusted_issuer_from_env`]).
+async fn apply_environment_issuer(
+    state: &PlatformState,
+    tenant: &str,
+    issuer: &str,
+    jwks_json: &str,
+    audience: &str,
+    algorithms: &str,
+) -> Result<IssuerBootstrapOutcome, String> {
     let tenant_id = temper_runtime::tenant::TenantId::new(tenant);
     // Registering a trusted issuer is System-only (system-platform Cedar policy);
     // the platform seeding itself acts as System.
     let agent_ctx = temper_server::request_context::AgentContext::system();
-    let algorithms =
-        std::env::var("TEMPER_TRUSTED_ISSUER_ALGS").unwrap_or_else(|_| "ES256".to_string());
+
+    if let Some(stored) = stored_trusted_issuer(state, &tenant_id, issuer).await? {
+        let keys_rotated = stored
+            .booleans
+            .get("keys_rotated")
+            .copied()
+            .unwrap_or(false);
+        if keys_rotated || stored.status != "Active" {
+            let field = |name: &str| stored.fields.get(name).and_then(serde_json::Value::as_str);
+            if field("jwks_json") != Some(jwks_json) || field("audience") != Some(audience) {
+                tracing::warn!(
+                    tenant,
+                    issuer = %issuer,
+                    status = %stored.status,
+                    keys_rotated,
+                    "TEMPER_TRUSTED_ISSUER_* differs from the stored issuer, which no longer takes its keys from the environment; keeping the stored issuer"
+                );
+            }
+            tracing::info!(
+                "Trusted issuer '{issuer}' for tenant '{tenant}' kept as stored ({}, keys_rotated={keys_rotated})",
+                stored.status
+            );
+            return Ok(IssuerBootstrapOutcome::Registered);
+        }
+    }
 
     state
         .server
         .dispatch_tenant_action(
             &tenant_id,
             "TrustedIssuer",
-            &issuer,
+            issuer,
             "RegisterIssuer",
             serde_json::json!({
                 "issuer": issuer,
@@ -748,32 +1055,48 @@ pub async fn bootstrap_trusted_issuer_from_env(
     Ok(IssuerBootstrapOutcome::Registered)
 }
 
+/// The tenant's stored issuer `issuer`, if it has one. Bootstrap runs before
+/// this server has loaded any issuer, so the store decides. A store that
+/// cannot be read is an error, not an absent issuer: registering over an
+/// issuer that could not be read would replace keys it holds itself.
+async fn stored_trusted_issuer(
+    state: &PlatformState,
+    tenant_id: &temper_runtime::tenant::TenantId,
+    issuer: &str,
+) -> Result<Option<temper_server::entity_actor::EntityState>, String> {
+    let present = if state
+        .server
+        .entity_exists(tenant_id, "TrustedIssuer", issuer)
+    {
+        state
+            .server
+            .ensure_entity_loaded(tenant_id, "TrustedIssuer", issuer)
+            .await
+    } else {
+        state
+            .server
+            .load_entity_from_store(tenant_id, "TrustedIssuer", issuer)
+            .await
+            .map_err(|e| format!("cannot read trusted issuer '{issuer}': {e}"))?
+    };
+    if !present {
+        return Ok(None);
+    }
+    state
+        .server
+        .get_tenant_entity_state(tenant_id, "TrustedIssuer", issuer)
+        .await
+        .map(|response| Some(response.state))
+        .map_err(|e| format!("cannot read trusted issuer '{issuer}': {e}"))
+}
+
+#[cfg(test)]
+#[path = "bootstrap/issuer_tests.rs"]
+mod issuer_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_system_specs_parse() {
-        for (entity_type, ioa_source) in SYSTEM_SPECS {
-            let result = automaton::parse_automaton(ioa_source);
-            assert!(
-                result.is_ok(),
-                "System spec {} failed to parse: {:?}",
-                entity_type,
-                result.err()
-            );
-        }
-    }
-
-    #[test]
-    fn test_system_csdl_parses() {
-        let result = parse_csdl(SYSTEM_CSDL);
-        assert!(
-            result.is_ok(),
-            "System CSDL failed to parse: {:?}",
-            result.err()
-        );
-    }
 
     #[test]
     fn test_bootstrap_registers_system_tenant() {
@@ -805,96 +1128,6 @@ mod tests {
     }
 
     #[test]
-    fn test_system_specs_verify() {
-        for (entity_type, ioa_source) in SYSTEM_SPECS {
-            let cascade = VerificationCascade::from_ioa(ioa_source)
-                .with_sim_seeds(3)
-                .with_prop_test_cases(50);
-            let result = cascade.run();
-            assert!(
-                result.all_passed,
-                "System spec {} failed verification",
-                entity_type
-            );
-        }
-    }
-
-    #[test]
-    fn test_project_initial_state() {
-        let automaton = automaton::parse_automaton(PROJECT_IOA).unwrap();
-        assert_eq!(automaton.automaton.initial, "Created");
-        assert_eq!(automaton.automaton.states.len(), 4);
-    }
-
-    #[test]
-    fn test_tenant_initial_state() {
-        let automaton = automaton::parse_automaton(TENANT_IOA).unwrap();
-        assert_eq!(automaton.automaton.initial, "Pending");
-        assert_eq!(automaton.automaton.states.len(), 5);
-    }
-
-    #[test]
-    fn test_entity_types_count() {
-        assert_eq!(SYSTEM_SPECS.len(), 13);
-    }
-
-    #[test]
-    fn test_observation_initial_state() {
-        let automaton = automaton::parse_automaton(OBSERVATION_IOA).unwrap();
-        assert_eq!(automaton.automaton.initial, "Open");
-        assert_eq!(automaton.automaton.states.len(), 4);
-    }
-
-    #[test]
-    fn test_problem_initial_state() {
-        let automaton = automaton::parse_automaton(PROBLEM_IOA).unwrap();
-        assert_eq!(automaton.automaton.initial, "Open");
-        assert_eq!(automaton.automaton.states.len(), 4);
-    }
-
-    #[test]
-    fn test_analysis_initial_state() {
-        let automaton = automaton::parse_automaton(ANALYSIS_IOA).unwrap();
-        assert_eq!(automaton.automaton.initial, "Open");
-        assert_eq!(automaton.automaton.states.len(), 4);
-    }
-
-    #[test]
-    fn test_evolution_decision_initial_state() {
-        let automaton = automaton::parse_automaton(EVOLUTION_DECISION_IOA).unwrap();
-        assert_eq!(automaton.automaton.initial, "Open");
-        assert_eq!(automaton.automaton.states.len(), 4);
-    }
-
-    #[test]
-    fn test_insight_initial_state() {
-        let automaton = automaton::parse_automaton(INSIGHT_IOA).unwrap();
-        assert_eq!(automaton.automaton.initial, "Open");
-        assert_eq!(automaton.automaton.states.len(), 4);
-    }
-
-    #[test]
-    fn test_feature_request_initial_state() {
-        let automaton = automaton::parse_automaton(FEATURE_REQUEST_IOA).unwrap();
-        assert_eq!(automaton.automaton.initial, "Open");
-        assert_eq!(automaton.automaton.states.len(), 5);
-    }
-
-    #[test]
-    fn test_governance_decision_initial_state() {
-        let automaton = automaton::parse_automaton(GOVERNANCE_DECISION_IOA).unwrap();
-        assert_eq!(automaton.automaton.initial, "Pending");
-        assert_eq!(automaton.automaton.states.len(), 4);
-    }
-
-    #[test]
-    fn test_http_endpoint_initial_state() {
-        let automaton = automaton::parse_automaton(HTTP_ENDPOINT_IOA).unwrap();
-        assert_eq!(automaton.automaton.initial, "Active");
-        assert_eq!(automaton.automaton.states.len(), 3);
-    }
-
-    #[test]
     fn test_bootstrap_registers_new_entities() {
         let state = PlatformState::new(None);
 
@@ -916,29 +1149,6 @@ mod tests {
     // ── Agent Spec Tests ────────────────────────────────────────────
 
     #[test]
-    fn test_agent_specs_parse() {
-        for (entity_type, ioa_source) in AGENT_SPECS {
-            let result = automaton::parse_automaton(ioa_source);
-            assert!(
-                result.is_ok(),
-                "Agent spec {} failed to parse: {:?}",
-                entity_type,
-                result.err()
-            );
-        }
-    }
-
-    #[test]
-    fn test_agent_csdl_parses() {
-        let result = parse_csdl(AGENT_CSDL);
-        assert!(
-            result.is_ok(),
-            "Agent CSDL failed to parse: {:?}",
-            result.err()
-        );
-    }
-
-    #[test]
     fn test_agent_spec_entity_names() {
         for (entity_type, ioa_source) in AGENT_SPECS {
             let automaton = automaton::parse_automaton(ioa_source).unwrap();
@@ -946,21 +1156,6 @@ mod tests {
                 automaton.automaton.name, *entity_type,
                 "Agent spec name mismatch: expected {entity_type}, got {}",
                 automaton.automaton.name
-            );
-        }
-    }
-
-    #[test]
-    fn test_agent_specs_verify() {
-        for (entity_type, ioa_source) in AGENT_SPECS {
-            let cascade = VerificationCascade::from_ioa(ioa_source)
-                .with_sim_seeds(3)
-                .with_prop_test_cases(50);
-            let result = cascade.run();
-            assert!(
-                result.all_passed,
-                "Agent spec {} failed verification",
-                entity_type
             );
         }
     }
@@ -1057,11 +1252,6 @@ initial = "Created"
     }
 
     #[test]
-    fn test_agent_specs_count() {
-        assert_eq!(AGENT_SPECS.len(), 10);
-    }
-
-    #[test]
     fn test_trusted_issuer_spec_is_registered() {
         assert!(
             AGENT_SPECS
@@ -1101,9 +1291,49 @@ initial = "Created"
         }
     }
 
+    /// A tenant whose app brought its own HttpEndpoint (temper-git's, under
+    /// another namespace) keeps it: no second `Temper.System` copy is added.
+    #[test]
+    fn http_endpoint_bootstrap_keeps_an_app_s_own_type() {
+        let state = PlatformState::new(None);
+        let app_csdl =
+            SYSTEM_CSDL.replace("Namespace=\"Temper.System\"", "Namespace=\"Temper.Git\"");
+        let app_doc = csdl_slice(&app_csdl, &["HttpEndpoint"]);
+        let app_xml = emit_csdl_xml(&app_doc);
+        state.registry.write().unwrap().register_tenant(
+            "git-tenant",
+            app_doc,
+            app_xml,
+            &[("HttpEndpoint", HTTP_ENDPOINT_IOA)],
+        );
+
+        bootstrap_http_endpoint_spec(&state, "git-tenant").expect("bootstrap");
+        bootstrap_http_endpoint_spec(&state, "fresh-tenant").expect("bootstrap");
+
+        let registry = state.registry.read().unwrap();
+        let namespaces = |tenant: &str| -> Vec<String> {
+            registry
+                .get_tenant(&TenantId::new(tenant))
+                .map(|config| {
+                    config
+                        .csdl
+                        .schemas
+                        .iter()
+                        .map(|s| s.namespace.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        assert_eq!(namespaces("git-tenant"), vec!["Temper.Git".to_string()]);
+        assert_eq!(
+            namespaces("fresh-tenant"),
+            vec!["Temper.System".to_string()]
+        );
+    }
+
     #[test]
     fn agent_csdl_slice_keeps_only_requested_identity_entities() {
-        let doc = agent_csdl_slice(&["TrustedIssuer", "PrincipalGeneration"]);
+        let doc = csdl_slice(AGENT_CSDL, &["TrustedIssuer", "PrincipalGeneration"]);
         let schema = doc
             .schemas
             .iter()
@@ -1148,6 +1378,45 @@ initial = "Created"
         // The derived slice must round-trip through the XML emitter/parser.
         let xml = emit_csdl_xml(&doc);
         parse_csdl(&xml).expect("emitted identity slice must re-parse");
+    }
+
+    #[tokio::test]
+    async fn bootstrap_persistence_commits_only_its_own_specs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = temper_store_turso::TursoEventStore::new(
+            &format!("file:{}", dir.path().join("specs.db").display()),
+            None,
+        )
+        .await
+        .expect("turso store");
+        // Another install in this tenant, still verifying.
+        PlatformStore::upsert_spec(&store, "t", "Note", "note v1", "<csdl/>", "sha256:note")
+            .await
+            .expect("seed a pending install");
+
+        let hashes = vec![("Agent".to_string(), "sha256:agent".to_string())];
+        persist_bootstrap_verification(
+            &store,
+            "t",
+            &[("Agent", "agent source")],
+            "<csdl/>",
+            &hashes,
+            &BTreeMap::new(),
+        )
+        .await;
+
+        let restorable: Vec<String> = PlatformStore::load_specs(&store)
+            .await
+            .expect("load specs")
+            .into_iter()
+            .filter(|row| row.tenant == "t")
+            .map(|row| row.entity_type)
+            .collect();
+        assert_eq!(
+            restorable,
+            vec!["Agent".to_string()],
+            "bootstrap must not commit another install's pending row"
+        );
     }
 
     #[tokio::test]

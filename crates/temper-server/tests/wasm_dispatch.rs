@@ -54,6 +54,30 @@ kind = "input"
 from = ["Pending"]
 to = "Failed"
 hint = "Callback from failed echo WASM module."
+
+[[action]]
+name = "Arm"
+kind = "input"
+from = ["Idle"]
+to = "Pending"
+hint = "Readies an entity for a relayed move."
+
+[[action]]
+name = "Relay"
+kind = "composite"
+from = ["Idle"]
+to = "Pending"
+hint = "Moves another entity through the relay module's sub-write."
+
+[[action.triggers]]
+name = "relay"
+kind = "wasm"
+module = "relay"
+on_failure = "EchoFailed"
+
+[[action.sub_writes]]
+target_entity = "EchoTest"
+action = "EchoSucceeded"
 "#;
 
 /// Minimal CSDL with EchoTest entity type.
@@ -235,7 +259,7 @@ async fn assert_wasm_authz_denial_artifacts(state: &ServerState, entity_id: &str
     let mut denied_invocation = None;
     for _ in 0..100 {
         let invocations = turso
-            .load_recent_wasm_invocations(1000)
+            .load_recent_wasm_invocations(TenantId::default().as_str(), 1000)
             .await
             .expect("query wasm invocations from Turso");
         denied_invocation = invocations
@@ -381,6 +405,99 @@ async fn persisted_wasm_modules_are_lazy_compiled_on_first_invoke() {
         state.wasm_engine.is_cached(&hash),
         "the first invoke should lazily compile the recovered module"
     );
+}
+
+fn module_version(version: u32) -> String {
+    format!(
+        r#"(module (memory (export "memory") 1)
+             (func (export "run") (param i32 i32) (result i32) i32.const {version}))"#
+    )
+}
+
+/// Each app release registers a new hash under the same module name. One
+/// deployment's main Temper kept every replaced version compiled until restart (one app
+/// builder alone is about 9 MB of machine code per version).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replaced_module_leaves_the_compiled_cache() {
+    let state = build_echo_test_state();
+    let tenant = TenantId::default();
+    let other = TenantId::new("other");
+    let compile = |version| {
+        state
+            .wasm_engine
+            .compile_and_cache(module_version(version).as_bytes())
+            .expect("module compiles")
+    };
+
+    let v1 = compile(1);
+    state.register_wasm_module(&tenant, "build", &v1);
+    state.register_wasm_module(&tenant, "build", &v1);
+    assert!(
+        state.wasm_engine.is_cached(&v1),
+        "registering the same version again keeps it"
+    );
+
+    let v2 = compile(2);
+    state.register_wasm_module(&tenant, "build", &v2);
+    assert!(
+        !state.wasm_engine.is_cached(&v1),
+        "the replaced version is dropped"
+    );
+    assert!(state.wasm_engine.is_cached(&v2));
+
+    state.register_wasm_module(&other, "build", &v2);
+    let v3 = compile(3);
+    state.register_wasm_module(&tenant, "build", &v3);
+    assert!(
+        state.wasm_engine.is_cached(&v2),
+        "another tenant still runs v2"
+    );
+
+    state.register_wasm_module(&other, "build", &v3);
+    assert!(
+        !state.wasm_engine.is_cached(&v2),
+        "dropped once nobody runs it"
+    );
+    assert!(state.wasm_engine.is_cached(&v3));
+
+    // A call prepared with v1 before the install runs the version registered
+    // now, and a v1 that a first-use compile cached after the install had
+    // dropped it is dropped again.
+    compile(1);
+    for prepared in [&v1, &v3] {
+        let to_invoke = state
+            .module_hash_to_invoke(&tenant, "build", prepared)
+            .await
+            .expect("a registered version");
+        assert_eq!(&to_invoke, &v3);
+    }
+    assert!(!state.wasm_engine.is_cached(&v1));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_module_whose_stored_bytes_do_not_match_its_hash_is_not_loaded() {
+    let state = build_echo_test_state_with_turso().await;
+    let tenant = TenantId::default();
+    let turso = state
+        .platform_turso_store()
+        .expect("turso backend required");
+    let hash = temper_wasm::WasmEngine::hash_module(ECHO_WASM);
+
+    turso
+        .upsert_wasm_module("default", "echo_integration", ECHO_WASM, &hash, "bundled")
+        .await
+        .expect("persist metadata-only echo module");
+    turso
+        .put_blob(&format!("wasm-modules/{hash}"), b"other bytes")
+        .await
+        .expect("persist other bytes under the module's key");
+
+    let refused = state
+        .ensure_wasm_module_cached(&tenant, "echo_integration", &hash)
+        .await
+        .expect_err("bytes that are not the module's are not loaded");
+    assert!(refused.contains("does not match its hash"), "{refused}");
+    assert!(!state.wasm_engine.is_cached(&hash));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -574,4 +691,142 @@ async fn wasm_authz_denial_records_governance_artifacts_blocking_mode() {
     assert!(response.success);
     assert_eq!(response.state.status, "Failed");
     assert_wasm_authz_denial_artifacts(&state, "echo-authz-blocking").await;
+}
+
+/// Runs `Relay` on `relay-<move>` with a module that answers with one sub-write, `move` on
+/// `target-<move>`, and returns both entities' final statuses.
+async fn relay_one_move(state: &ServerState, sub_write_action: &str) -> (String, String) {
+    let tenant = TenantId::default();
+    let payload = serde_json::json!({
+        "action": "callback",
+        "params": {"sub_writes": [{
+            "entity_type": "EchoTest",
+            "entity_id": format!("target-{sub_write_action}"),
+            "action": sub_write_action,
+            "params": {}
+        }]},
+        "success": true
+    })
+    .to_string();
+    let data = payload
+        .bytes()
+        .map(|byte| format!("\\{byte:02x}"))
+        .collect::<String>();
+    let wat = format!(
+        r#"(module
+            (import "env" "host_set_result" (func $result (param i32 i32)))
+            (memory (export "memory") 1)
+            (data (i32.const 0) "{data}")
+            (func (export "run") (param i32 i32) (result i32)
+                i32.const 0 i32.const {} call $result i32.const 0))"#,
+        payload.len()
+    );
+    let hash = state
+        .wasm_engine
+        .compile_and_cache(wat.as_bytes())
+        .expect("relay module should compile");
+    state
+        .wasm_module_registry
+        .write()
+        .expect("wasm registry lock") // ci-ok: infallible lock
+        .register(&tenant, "relay", &hash);
+
+    let target = format!("target-{sub_write_action}");
+    let relay = format!("relay-{sub_write_action}");
+    let armed = state
+        .dispatch_tenant_action(
+            &tenant,
+            "EchoTest",
+            &target,
+            "Arm",
+            serde_json::json!({}),
+            &AgentContext::system(),
+        )
+        .await
+        .expect("Arm should succeed");
+    assert_eq!(armed.state.status, "Pending");
+    let response = state
+        .dispatch_tenant_action_ext(
+            &tenant,
+            "EchoTest",
+            &relay,
+            "Relay",
+            serde_json::json!({}),
+            DispatchExtOptions {
+                agent_ctx: &AgentContext::system(),
+                await_integration: true,
+                await_reactions: true,
+            },
+        )
+        .await
+        .expect("Relay should return its integration result");
+    assert!(response.success);
+
+    let relay_status = wait_for_status(
+        state,
+        &tenant,
+        "EchoTest",
+        &relay,
+        &["Failed"],
+        Duration::from_secs(2),
+    )
+    .await;
+    let target_status = wait_for_status(
+        state,
+        &tenant,
+        "EchoTest",
+        &target,
+        &["Done", "Failed"],
+        Duration::from_secs(2),
+    )
+    .await;
+    (relay_status, target_status)
+}
+
+/// A module's composite answer is applied only through the moves its action declares. One it
+/// does not declare moves nothing, and the integration fails out loud: its `on_failure` runs and
+/// the invocation is recorded as failed, naming the move and the action that did not declare it.
+/// Before, the refusal returned past both, so the module looked successful and nothing moved.
+#[tokio::test(flavor = "multi_thread")]
+async fn composite_result_with_an_undeclared_sub_write_fails_the_integration() {
+    let state = build_echo_test_state_with_turso().await;
+    state
+        .authz
+        .reload_tenant_policies("default", "permit(principal, action, resource);")
+        .expect("policy should parse");
+
+    // The declared move lands, and the relay itself does not fail.
+    let (relay, target) = relay_one_move(&state, "EchoSucceeded").await;
+    assert_eq!((relay.as_str(), target.as_str()), ("Pending", "Done"));
+
+    // The same answer with a move the action does not declare.
+    let (relay, target) = relay_one_move(&state, "EchoFailed").await;
+    assert_eq!(
+        target, "Pending",
+        "an undeclared sub-write must move nothing"
+    );
+    assert_eq!(relay, "Failed", "the refused result must run on_failure");
+
+    let turso = state.platform_turso_store().expect("Turso backend");
+    let mut refused = None;
+    for _ in 0..50 {
+        let invocations = turso
+            .load_recent_wasm_invocations(TenantId::default().as_str(), 1000)
+            .await
+            .expect("query wasm invocations");
+        refused = invocations
+            .into_iter()
+            .find(|w| w.entity_id == "relay-EchoFailed" && w.module_name == "relay");
+        if refused.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let refused = refused.expect("the relay invocation should be recorded");
+    assert!(!refused.success, "a refused result is a failed invocation");
+    let error = refused.error.unwrap_or_default();
+    assert!(
+        error.contains("EchoTest.EchoFailed") && error.contains("EchoTest.Relay"),
+        "the error should name the undeclared move and the action: {error}"
+    );
 }

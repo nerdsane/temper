@@ -136,10 +136,10 @@ impl ServerState {
         };
 
         let mut agent = AgentContext::for_service("commons-rate-limit");
-        agent.idempotency_key = Some(format!(
+        agent.idempotency_key = Some(crate::idempotency::IdempotencyKey::Request(format!(
             "commons-rate-limit:{tenant}:{bucket_id}:{}:{tokens_after_consume}",
             refill_time.timestamp_millis(),
-        ));
+        )));
         let result = self
             .dispatch_tenant_action_core(
                 tenant,
@@ -152,6 +152,7 @@ impl ServerState {
                 }),
                 &agent,
                 false,
+                crate::state::write_record::WriteCaller::Kernel,
                 None,
             )
             .await

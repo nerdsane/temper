@@ -6,10 +6,12 @@
 //! `EntityActor::handle()`: same `evaluate()` call, same effect application,
 //! same event recording. No async, no persistence, no telemetry.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use futures_util::FutureExt;
 use std::sync::Arc;
 
-use temper_jit::table::{EvalContext, TransitionTable};
+use temper_jit::table::{EvalContext, Related, RelatedMap, TransitionTable};
 use temper_runtime::scheduler::{SimActorHandler, SpecInvariant};
 use temper_spec::predicate::{VarKind, unmodelable};
 
@@ -25,6 +27,7 @@ pub struct EntityActorHandler {
     table: Arc<TransitionTable>,
     state: EntityState,
     invariants: Vec<SpecInvariant>,
+    related: RelatedMap,
     terminal: Vec<String>,
     /// Custom effects from the last successful action (integration triggers).
     last_custom_effects: Vec<String>,
@@ -54,6 +57,7 @@ impl EntityActorHandler {
             table,
             state,
             invariants: Vec::new(),
+            related: RelatedMap::new(),
             terminal: Vec::new(),
             last_custom_effects: Vec::new(),
             last_scheduled_actions: Vec::new(),
@@ -70,7 +74,7 @@ impl EntityActorHandler {
 
     /// Build an [`EvalContext`] from the current entity state.
     fn eval_context(&self) -> EvalContext {
-        super::effects::build_eval_context(&self.state, &self.table, None)
+        super::effects::build_eval_context_with_xref(&self.state, &self.related, &self.table, None)
     }
 
     /// Attach spec invariants parsed from I/O Automaton TOML source.
@@ -135,6 +139,7 @@ impl SimActorHandler for EntityActorHandler {
             &serde_json::json!({}),
         );
 
+        self.related.clear();
         self.overflow_blobs.clear();
         self.last_custom_effects.clear();
         self.last_scheduled_actions.clear();
@@ -152,7 +157,7 @@ impl SimActorHandler for EntityActorHandler {
             &self.table,
             action,
             &params_value,
-            &std::collections::BTreeMap::new(),
+            &self.related,
             self.field_sync_mode,
             crate::blobs::BlobReadSource::Staged {
                 store: None,
@@ -178,6 +183,43 @@ impl SimActorHandler for EntityActorHandler {
             self.last_scheduled_actions.clear();
             Err(result.error.unwrap_or_else(|| "Unknown error".to_string()))
         }
+    }
+
+    fn entity_identity(&self) -> Option<(&str, &str)> {
+        Some((&self.state.entity_type, &self.state.entity_id))
+    }
+
+    fn refresh_related_statuses(&mut self, statuses: &BTreeMap<(String, String), String>) {
+        // Match dispatch: resolve every scalar/list reference from the prestate,
+        // including invariant-only reads. Missing records remain null.
+        let refs: BTreeSet<_> = self
+            .table
+            .rules
+            .iter()
+            .map(|rule| &rule.guard)
+            .chain(
+                self.table
+                    .invariants
+                    .iter()
+                    .map(|invariant| &invariant.assert),
+            )
+            .flat_map(|expr| expr.cross_refs())
+            .collect();
+        self.related = refs
+            .into_iter()
+            .map(|(entity_type, id_field)| {
+                let ids = super::related::reference_ids(
+                    &self.state.fields,
+                    &self.table.initial_values,
+                    &id_field,
+                );
+                let resolved = ids
+                    .into_iter()
+                    .map(|id| statuses.get(&(entity_type.clone(), id.to_owned())).cloned())
+                    .collect();
+                ((entity_type, id_field), Related::Statuses(resolved))
+            })
+            .collect();
     }
 
     fn current_status(&self) -> String {
@@ -223,19 +265,23 @@ impl SimActorHandler for EntityActorHandler {
 
     fn state_value(&self, name: &str) -> Option<serde_json::Value> {
         let state = &self.state;
-        if name == "items" && !state.counters.contains_key(name) {
-            return Some(serde_json::Value::from(state.item_count));
+        let declared = &self.table.initial_values;
+        if name == "items"
+            && !state.counters.contains_key(name)
+            && let Some(items) = super::effects::stored_item_count(state, declared)
+        {
+            return Some(serde_json::Value::from(items));
         }
-        if let Some(value) = state.counters.get(name) {
-            return Some(serde_json::Value::from(*value));
+        if let Some(value) = declared.counter(&state.counters, name) {
+            return Some(serde_json::Value::from(value));
         }
-        if let Some(value) = state.booleans.get(name) {
-            return Some(serde_json::Value::Bool(*value));
+        if let Some(value) = declared.boolean(&state.booleans, name) {
+            return Some(serde_json::Value::Bool(value));
         }
-        if let Some(value) = state.lists.get(name) {
-            return Some(serde_json::Value::from(value.clone()));
+        if let Some(value) = declared.list(&state.lists, name) {
+            return Some(serde_json::Value::from(value.to_vec()));
         }
-        state.fields.get(name).cloned()
+        declared.field(state.fields.get(name), name).cloned()
     }
 
     fn pending_callbacks(&self) -> Vec<String> {
@@ -246,3 +292,7 @@ impl SimActorHandler for EntityActorHandler {
 #[cfg(test)]
 #[path = "sim_handler_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "sim_invariants_test.rs"]
+mod invariant_tests;

@@ -45,8 +45,8 @@ fn traceidratio_one_exports_every_span() {
 
 /// Every supported sampler exports what it should, and under every one of
 /// them the name-based filter drops what it drops by default: the two names
-/// it drops outright, and the reduced-rate name on a trace ID outside the
-/// rate.
+/// it drops outright. A reduced-rate name inside a caller's trace is kept
+/// even on a trace ID outside the rate, so a kept trace has no hole.
 #[test]
 fn every_sampler_keeps_the_name_based_filter() {
     let cases: [(&str, &str, &[&str]); 9] = [
@@ -74,7 +74,9 @@ fn every_sampler_keeps_the_name_based_filter() {
         for (name, trace_id) in exported_spans(&run) {
             assert_ne!(name, "clock_time_get", "{case}");
             assert_ne!(name, "turso.configured_connection", "{case}");
-            assert_ne!(trace_id, child::REDUCED_RATE_DROPPED_TRACE_ID, "{case}");
+            if name == "wasm:workspace_fs.read" {
+                assert_eq!(trace_id, child::REDUCED_RATE_DROPPED_TRACE_ID, "{case}");
+            }
         }
         assert_eq!(warnings(&run), Vec::<String>::new(), "{case}");
     }

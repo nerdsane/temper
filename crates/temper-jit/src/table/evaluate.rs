@@ -104,6 +104,24 @@ impl TransitionTable {
         super::guard::check(&rule.guard, current_state, ctx, &self.initial_values)
     }
 
+    /// The states `action` may start from, in rule order without repeats.
+    /// Empty when a rule for it fires from any state, or no rule names it.
+    pub fn source_states(&self, action: &str) -> Vec<String> {
+        let mut states: Vec<String> = Vec::new();
+        for &i in self.rule_index.get(action).into_iter().flatten() {
+            let rule = &self.rules[i];
+            if rule.from_states.is_empty() {
+                return Vec::new();
+            }
+            for state in &rule.from_states {
+                if !states.contains(state) {
+                    states.push(state.clone());
+                }
+            }
+        }
+        states
+    }
+
     /// Effects to apply when **replaying** a durably-stored transition.
     ///
     /// A persisted event is a historical fact: its guard already passed at
@@ -115,15 +133,17 @@ impl TransitionTable {
     /// spurious guard "failure" must not silently drop committed history.
     ///
     /// Returns the effects of the first rule matching `action` whose
-    /// `from_states` admit `current_state` (the same rule the live dispatch
-    /// fired). Returns `None` when no such rule exists (unknown action / from
-    /// state) — the caller then relies solely on the stored `to_status`.
-    pub fn replay_effects(&self, current_state: &str, action: &str) -> Option<&[Effect]> {
+    /// `from_states` admit `from_status`, the status the event stored as its
+    /// start (the same rule the live dispatch fired, while the spec is
+    /// unchanged). Returns `None` when no such rule exists (unknown action /
+    /// from state). Either way the caller sets the status to the event's
+    /// stored `to_status` afterwards.
+    pub fn replay_effects(&self, from_status: &str, action: &str) -> Option<&[Effect]> {
         let indices = self.rule_index.get(action)?;
         for &i in indices {
             let rule = &self.rules[i];
             let state_ok =
-                rule.from_states.is_empty() || rule.from_states.iter().any(|s| s == current_state);
+                rule.from_states.is_empty() || rule.from_states.iter().any(|s| s == from_status);
             if state_ok {
                 return Some(&rule.effects);
             }
@@ -223,6 +243,12 @@ mod tests {
             GuardFailure {
                 expr: "items > 0".into(),
                 found: vec![("items".into(), "0".into())],
+                conditions: vec![super::super::refusal::GuardCondition {
+                    field: "items".into(),
+                    op: ">".into(),
+                    wants: 0.into(),
+                    value: 0.into(),
+                }],
             }
         );
     }
@@ -238,6 +264,17 @@ mod tests {
             r.guard_failure.is_none(),
             "from-state miss must not carry a GuardFailure"
         );
+    }
+
+    #[test]
+    fn source_states_lists_every_rule_start_once() {
+        let table = order_table();
+        assert_eq!(table.source_states("AddItem"), vec!["Draft".to_string()]);
+        assert_eq!(
+            table.source_states("CancelOrder"),
+            vec!["Draft".to_string(), "Submitted".into(), "Confirmed".into()]
+        );
+        assert!(table.source_states("DoSomethingUnknown").is_empty());
     }
 
     #[test]

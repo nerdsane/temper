@@ -16,7 +16,7 @@ use super::string_field;
 ///
 /// Git objects are persisted keyed by `{sanitized_repository_id}-{git_sha}`.
 /// This MUST stay byte-identical to `object_entity_id`, the writer, in the
-/// genesis app bundle at `wasm/scm_ingest_pack/src/lib.rs` (arni-labs/genesis);
+/// genesis app bundle at `wasm/scm_ingest_pack/src/lib.rs` (the genesis repository);
 /// any divergence makes the keyed lookup miss and reintroduces the bundle 404.
 /// The contract is exercised end-to-end by the genesis repo's
 /// `scripts/live-genesis-install-e2e-smoke.sh` push→bundle round-trip.

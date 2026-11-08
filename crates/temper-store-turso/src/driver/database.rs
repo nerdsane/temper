@@ -2,24 +2,41 @@
 
 use std::fmt::Debug;
 use std::future::Future;
+use std::pin::Pin;
 
-use super::{Connection, DriverError, DriverHandle};
+use super::{Connection, DriverError, DriverHandle, Lease, SyncCopy};
+
+type ConnectFuture<'a> = Pin<Box<dyn Future<Output = Result<Connection, DriverError>> + Send + 'a>>;
 
 trait DatabaseDriver: Debug + Send + Sync {
-    fn connect(&self) -> Result<Connection, DriverError>;
+    fn connect(&self) -> ConnectFuture<'_>;
+}
+
+fn local_connection(conn: turso::Connection) -> Result<Connection, DriverError> {
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    Ok(Connection::Local {
+        conn: Lease::new(std::sync::Arc::new(DriverHandle::new(conn)), None),
+        pool: None,
+    })
 }
 
 impl DatabaseDriver for turso::Database {
-    fn connect(&self) -> Result<Connection, DriverError> {
-        let conn = self.connect()?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        Ok(Connection::Local(DriverHandle::new(conn)))
+    fn connect(&self) -> ConnectFuture<'_> {
+        let conn = self.connect().map_err(DriverError::from);
+        Box::pin(std::future::ready(conn.and_then(local_connection)))
     }
 }
 
 impl DatabaseDriver for turso_serverless::Database {
-    fn connect(&self) -> Result<Connection, DriverError> {
-        Ok(Connection::Remote(self.connect()?))
+    fn connect(&self) -> ConnectFuture<'_> {
+        let conn = self.connect().map(Connection::Remote);
+        Box::pin(std::future::ready(conn.map_err(DriverError::from)))
+    }
+}
+
+impl DatabaseDriver for SyncCopy {
+    fn connect(&self) -> ConnectFuture<'_> {
+        Box::pin(SyncCopy::connect(self))
     }
 }
 
@@ -59,7 +76,32 @@ impl Database {
         }
     }
 
-    pub(crate) fn connect(&self) -> Result<Connection, DriverError> {
+    /// A local file read and written through `io`, which a test can count.
+    #[cfg(test)]
+    pub(crate) fn local_with_io(
+        path: &str,
+        io: std::sync::Arc<dyn turso::core::IO>,
+    ) -> impl Future<Output = Result<Self, DriverError>> + Send {
+        async move {
+            Ok(Self {
+                driver: Box::new(
+                    turso::Builder::new_local(path)
+                        .with_io_impl(io)
+                        .build()
+                        .await?,
+                ),
+            })
+        }
+    }
+
+    /// A local file whose commits are copied to its own Turso Cloud database.
+    pub(crate) fn synced(copy: SyncCopy) -> Self {
+        Self {
+            driver: Box::new(copy),
+        }
+    }
+
+    pub(crate) fn connect(&self) -> impl Future<Output = Result<Connection, DriverError>> + Send {
         self.driver.connect()
     }
 }

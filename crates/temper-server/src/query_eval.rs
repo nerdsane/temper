@@ -4,13 +4,11 @@
 //! to in-memory entity result sets. Uses the parsed AST from `temper-odata`.
 
 use temper_odata::query::types::{
-    BinaryOperator, FilterExpr, ODataValue, OrderByClause, OrderDirection, QueryOptions,
+    BinaryOperator, FilterExpr, MAX_EXPAND_DEPTH, ODataValue, OrderByClause, OrderDirection,
+    QueryOptions,
 };
 
 use crate::blobs::{BlobHydrationBudget, hydrate_blob_refs_for_tenant_with_budget};
-
-/// Maximum nesting depth for recursive $expand (prevents infinite loops).
-const MAX_EXPAND_DEPTH: u8 = 3;
 
 /// Apply all query options to a collection of entity JSON values.
 ///
@@ -109,6 +107,19 @@ fn evaluate_filter(entity: &serde_json::Value, expr: &FilterExpr) -> Option<bool
                         comparison_operand(entity, right),
                     ) {
                         (Some(left_val), Some(right_val)) => {
+                            let is_event_time = |expr: &FilterExpr| {
+                                matches!(expr,
+                                FilterExpr::Property(name) if matches!(name.as_str(), "first_event_at" | "last_event_at"))
+                            };
+                            let (left_val, right_val) =
+                                if is_event_time(left) || is_event_time(right) {
+                                    (
+                                        left_val.map(normalize_event_time),
+                                        right_val.map(normalize_event_time),
+                                    )
+                                } else {
+                                    (left_val, right_val)
+                                };
                             Some(compare_nullable(left_val.as_ref(), right_val.as_ref(), op))
                         }
                         _ => Some(false),
@@ -148,6 +159,10 @@ pub(crate) fn resolve_property(
     entity: &serde_json::Value,
     prop: &str,
 ) -> Option<serde_json::Value> {
+    if temper_spec::automaton::is_event_metadata_field(prop) {
+        // Old catalog rows have no provenance. App fields can never supply it.
+        return Some(entity.get(prop).cloned().unwrap_or(serde_json::Value::Null));
+    }
     if prop == "Status" {
         return entity
             .get("Status")
@@ -321,13 +336,48 @@ fn evaluate_function(entity: &serde_json::Value, name: &str, args: &[FilterExpr]
     }
 }
 
+// Fixed UTC precision orders instants correctly, including a whole second
+// before a fractional second. This applies only to the kernel's typed clock.
+fn normalize_event_time(value: serde_json::Value) -> serde_json::Value {
+    value
+        .as_str()
+        .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+        .map(|time| {
+            serde_json::Value::String(
+                time.with_timezone(&chrono::Utc)
+                    .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+            )
+        })
+        .unwrap_or(value)
+}
+
 /// Sort entities in place by the given orderby clauses.
 fn sort_entities(entities: &mut [serde_json::Value], orderby: &[OrderByClause]) {
     entities.sort_by(|a, b| {
         for clause in orderby {
             let a_val = resolve_property(a, &clause.property);
             let b_val = resolve_property(b, &clause.property);
+            let (a_val, b_val) =
+                if matches!(clause.property.as_str(), "first_event_at" | "last_event_at") {
+                    (
+                        a_val.map(normalize_event_time),
+                        b_val.map(normalize_event_time),
+                    )
+                } else {
+                    (a_val, b_val)
+                };
+            let kernel_metadata =
+                temper_spec::automaton::is_event_metadata_field(clause.property.as_str());
             let ordering = match (&a_val, &b_val) {
+                (Some(serde_json::Value::Null), Some(serde_json::Value::Null))
+                    if kernel_metadata =>
+                {
+                    std::cmp::Ordering::Equal
+                }
+                (Some(serde_json::Value::Null), _) if kernel_metadata => {
+                    std::cmp::Ordering::Greater
+                }
+                (_, Some(serde_json::Value::Null)) if kernel_metadata => std::cmp::Ordering::Less,
                 (Some(av), Some(bv)) => json_cmp(av, bv).unwrap_or(std::cmp::Ordering::Equal),
                 (Some(_), None) => std::cmp::Ordering::Less,
                 (None, Some(_)) => std::cmp::Ordering::Greater,
@@ -405,7 +455,9 @@ struct ExpansionContext<'a> {
 /// to determine the target entity type, then queries related entities
 /// (by convention: entities with a matching parent reference).
 ///
-/// Supports nested $expand up to [`MAX_EXPAND_DEPTH`] levels with cycle detection.
+/// Follows every nested `$expand` up to [`MAX_EXPAND_DEPTH`] levels, including
+/// ones that return to a type already expanded (a manager's manager). Items
+/// nested deeper are refused with a 400, never dropped.
 pub async fn expand_entity(
     entity: &mut serde_json::Value,
     expand_items: &[temper_odata::query::types::ExpandItem],
@@ -421,17 +473,16 @@ pub async fn expand_entity(
         security_ctx,
         hydration_budget,
     };
-    expand_entity_recursive(entity, expand_items, entity_type, &context, 0, &mut vec![]).await
+    expand_entity_recursive(entity, expand_items, entity_type, &context, 1).await
 }
 
-/// Recursive implementation of $expand with depth and cycle guards.
+/// Recursive implementation of $expand; `level` is 1 for the top-level items.
 async fn expand_entity_recursive(
     entity: &mut serde_json::Value,
     expand_items: &[temper_odata::query::types::ExpandItem],
     entity_type: &str,
     context: &ExpansionContext<'_>,
-    depth: u8,
-    visited: &mut Vec<String>,
+    level: usize,
 ) -> Result<(), axum::response::Response> {
     let ExpansionContext {
         state,
@@ -439,13 +490,19 @@ async fn expand_entity_recursive(
         security_ctx,
         hydration_budget,
     } = context;
-    if depth >= MAX_EXPAND_DEPTH {
-        return Ok(());
+    // The query parser already refuses a deeper `$expand`; items built in
+    // code meet the same bound and the same error here.
+    if level > MAX_EXPAND_DEPTH {
+        use axum::response::IntoResponse as _;
+        return Err(crate::response::odata_error(
+            axum::http::StatusCode::BAD_REQUEST,
+            "InvalidQuery",
+            &format!(
+                "$expand nests more than {MAX_EXPAND_DEPTH} levels, the most one read may follow"
+            ),
+        )
+        .into_response());
     }
-    if visited.contains(&entity_type.to_string()) {
-        return Ok(());
-    }
-    visited.push(entity_type.to_string());
     // Resolve all navigation targets up front (while holding registry lock briefly)
     let nav_infos: Vec<(
         &temper_odata::query::types::ExpandItem,
@@ -489,6 +546,8 @@ async fn expand_entity_recursive(
     for (item, info) in &nav_infos {
         let Some(info) = info else { continue };
         let mut related_entities = Vec::new();
+        let defaults =
+            crate::odata::read_defaults::ReadDefaults::for_entity(state, tenant, &info.target_type);
 
         if info.is_collection
             && let Err(response) = crate::odata::authz::authorize_read(
@@ -518,7 +577,8 @@ async fn expand_entity_recursive(
                             .get_tenant_entity_state(tenant, &info.target_type, fk)
                             .await
                     {
-                        let json = serde_json::to_value(&response.state).unwrap_or_default();
+                        let mut json = serde_json::to_value(&response.state).unwrap_or_default();
+                        defaults.apply(&mut json);
                         related_entities.push(json);
                     }
                 }
@@ -531,7 +591,9 @@ async fn expand_entity_recursive(
                             .get_tenant_entity_state(tenant, &info.target_type, related_id)
                             .await
                         {
-                            let json = serde_json::to_value(&response.state).unwrap_or_default();
+                            let mut json =
+                                serde_json::to_value(&response.state).unwrap_or_default();
+                            defaults.apply(&mut json);
                             let matches = json
                                 .get("fields")
                                 .and_then(|f| f.get(target_fk_field.as_str()))
@@ -551,7 +613,9 @@ async fn expand_entity_recursive(
                             .get_tenant_entity_state(tenant, &info.target_type, related_id)
                             .await
                         {
-                            let json = serde_json::to_value(&response.state).unwrap_or_default();
+                            let mut json =
+                                serde_json::to_value(&response.state).unwrap_or_default();
+                            defaults.apply(&mut json);
                             if matches_parent_reference(&json, entity_type, parent_id) {
                                 related_entities.push(json);
                             }
@@ -619,8 +683,7 @@ async fn expand_entity_recursive(
                     nested_expand,
                     &info.target_type,
                     context,
-                    depth + 1,
-                    visited,
+                    level + 1,
                 ))
                 .await?;
             }
@@ -640,7 +703,6 @@ async fn expand_entity_recursive(
             }
         }
     }
-    visited.pop();
     Ok(())
 }
 

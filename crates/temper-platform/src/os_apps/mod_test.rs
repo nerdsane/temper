@@ -14,7 +14,6 @@ use temper_server::request_context::AgentContext;
 use temper_spec::automaton;
 use temper_spec::csdl::parse_csdl;
 use temper_store_turso::TursoSpecVerificationUpdate;
-use temper_verify::cascade::VerificationCascade;
 
 fn test_admin_security_context(principal_id: &str) -> SecurityContext {
     SecurityContext {
@@ -24,36 +23,14 @@ fn test_admin_security_context(principal_id: &str) -> SecurityContext {
             role: None,
             acting_for: None,
             agent_type: None,
+            label: None,
             attributes: HashMap::new(),
         },
         context_attrs: HashMap::new(),
         correlation_id: "test-admin-context".to_string(),
+        cause: None,
+        credential: None,
     }
-}
-
-#[test]
-fn test_pm_specs_parse() {
-    let bundle = get_os_app("project-management").expect("PM app not found");
-    for (entity_type, ioa_source) in &bundle.specs {
-        let result = automaton::parse_automaton(ioa_source);
-        assert!(
-            result.is_ok(),
-            "PM spec {} failed to parse: {:?}",
-            entity_type,
-            result.err()
-        );
-    }
-}
-
-#[test]
-fn test_pm_csdl_parses() {
-    let bundle = get_os_app("project-management").expect("PM app not found");
-    let result = parse_csdl(bundle.csdl.as_ref().expect("PM should have CSDL"));
-    assert!(
-        result.is_ok(),
-        "PM CSDL failed to parse: {:?}",
-        result.err()
-    );
 }
 
 #[test]
@@ -65,63 +42,6 @@ fn test_pm_spec_entity_names() {
             &a.automaton.name, entity_type,
             "PM spec name mismatch: expected {entity_type}, got {}",
             a.automaton.name
-        );
-    }
-}
-
-#[test]
-fn test_pm_specs_verify() {
-    let bundle = get_os_app("project-management").expect("PM app not found");
-    for (entity_type, ioa_source) in &bundle.specs {
-        let cascade = VerificationCascade::from_ioa(ioa_source)
-            .with_sim_seeds(3)
-            .with_prop_test_cases(50);
-        let result = cascade.run();
-        assert!(
-            result.all_passed,
-            "PM spec {} failed verification",
-            entity_type
-        );
-    }
-}
-
-#[test]
-fn test_agent_orchestration_specs_parse() {
-    let bundle = get_os_app("agent-orchestration").expect("AO app not found");
-    for (entity_type, ioa_source) in &bundle.specs {
-        let result = automaton::parse_automaton(ioa_source);
-        assert!(
-            result.is_ok(),
-            "Agent Orchestration spec {} failed to parse: {:?}",
-            entity_type,
-            result.err()
-        );
-    }
-}
-
-#[test]
-fn test_agent_orchestration_csdl_parses() {
-    let bundle = get_os_app("agent-orchestration").expect("AO app not found");
-    let result = parse_csdl(bundle.csdl.as_ref().expect("AO should have CSDL"));
-    assert!(
-        result.is_ok(),
-        "Agent Orchestration CSDL failed to parse: {:?}",
-        result.err()
-    );
-}
-
-#[test]
-fn test_agent_orchestration_specs_verify() {
-    let bundle = get_os_app("agent-orchestration").expect("AO app not found");
-    for (entity_type, ioa_source) in &bundle.specs {
-        let cascade = VerificationCascade::from_ioa(ioa_source)
-            .with_sim_seeds(3)
-            .with_prop_test_cases(30);
-        let result = cascade.run();
-        assert!(
-            result.all_passed,
-            "Agent Orchestration spec {} failed verification",
-            entity_type
         );
     }
 }
@@ -216,19 +136,10 @@ fn test_manifest_dependencies_accept_pinned_genesis_refs_for_local_install_order
         Some("paw-fs")
     );
     assert_eq!(
-        local_os_app_dependency_name("katagami-commons").as_deref(),
-        Some("katagami-commons")
+        local_os_app_dependency_name("design-commons").as_deref(),
+        Some("design-commons")
     );
     assert_eq!(local_os_app_dependency_name("  "), None);
-}
-
-#[test]
-fn test_os_app_document_bootstrap_does_not_charge_workspace_file_count() {
-    let source = include_str!("mod.rs");
-    assert!(
-        !source.contains("action: \"IncrementFileCount\""),
-        "OS app document bootstrap must not charge Workspace for each file materialized"
-    );
 }
 
 #[test]
@@ -570,6 +481,7 @@ async fn test_install_plan_without_spec_phase_does_not_reclassify_specs() {
             content: false,
             seed: false,
         },
+        InstallOrigin::Request,
     )
     .await
     .expect("planned no-op install should succeed");
@@ -849,88 +761,16 @@ async fn test_reconcile_os_app_repairs_entity_set_map_from_matching_digest() {
     let _ = std::fs::remove_file(format!("{db_path}-shm"));
 }
 
-#[test]
-fn test_intent_discovery_specs_parse() {
-    let bundle = get_os_app("intent-discovery").expect("intent-discovery app not found");
-    for (entity_type, ioa_source) in &bundle.specs {
-        let result = automaton::parse_automaton(ioa_source);
-        assert!(
-            result.is_ok(),
-            "IntentDiscovery spec {} failed to parse: {:?}",
-            entity_type,
-            result.err()
-        );
-    }
-}
-
-#[test]
-fn test_intent_discovery_csdl_parses() {
-    let bundle = get_os_app("intent-discovery").expect("intent-discovery app not found");
-    let result = parse_csdl(
-        bundle
-            .csdl
-            .as_ref()
-            .expect("intent-discovery should have CSDL"),
-    );
-    assert!(
-        result.is_ok(),
-        "IntentDiscovery CSDL failed to parse: {:?}",
-        result.err()
-    );
-}
-
-#[test]
-fn test_intent_discovery_specs_verify() {
-    let bundle = get_os_app("intent-discovery").expect("intent-discovery app not found");
-    for (entity_type, ioa_source) in &bundle.specs {
-        let cascade = VerificationCascade::from_ioa(ioa_source)
-            .with_sim_seeds(3)
-            .with_prop_test_cases(40);
-        let result = cascade.run();
-        assert!(
-            result.all_passed,
-            "IntentDiscovery spec {} failed verification",
-            entity_type
-        );
-    }
-}
-
+mod bundle_refusal;
 mod directed_evolution;
-#[test]
-fn test_get_app_project_management() {
-    let bundle = get_os_app("project-management");
-    assert!(bundle.is_some());
-    let bundle = bundle.unwrap();
-    assert_eq!(bundle.specs.len(), 5);
-    assert!(bundle.csdl.is_some());
-    assert!(!bundle.csdl.as_ref().unwrap().is_empty());
-    assert!(!bundle.cedar_policies.is_empty());
-}
-
-#[test]
-fn test_agent_specs_parse() {
-    let bundle = get_os_app("temper-agent").expect("temper-agent app not found");
-    for (entity_type, ioa_source) in &bundle.specs {
-        let result = automaton::parse_automaton(ioa_source);
-        assert!(
-            result.is_ok(),
-            "Agent spec {} failed to parse: {:?}",
-            entity_type,
-            result.err()
-        );
-    }
-}
-
-#[test]
-fn test_agent_csdl_parses() {
-    let bundle = get_os_app("temper-agent").expect("temper-agent app not found");
-    let result = parse_csdl(bundle.csdl.as_ref().expect("temper-agent should have CSDL"));
-    assert!(
-        result.is_ok(),
-        "Agent CSDL failed to parse: {:?}",
-        result.err()
-    );
-}
+mod entity_owners;
+mod own_schema;
+#[path = "mod_test/policy_joint.rs"]
+mod policy_joint;
+mod policy_reinstall;
+mod spec_change;
+mod timer_strands;
+mod unchanged_replay;
 
 #[test]
 fn test_agent_spec_entity_names() {
@@ -941,22 +781,6 @@ fn test_agent_spec_entity_names() {
             &a.automaton.name, entity_type,
             "Agent spec name mismatch: expected {entity_type}, got {}",
             a.automaton.name
-        );
-    }
-}
-
-#[test]
-fn test_agent_specs_verify() {
-    let bundle = get_os_app("temper-agent").expect("temper-agent app not found");
-    for (entity_type, ioa_source) in &bundle.specs {
-        let cascade = VerificationCascade::from_ioa(ioa_source)
-            .with_sim_seeds(3)
-            .with_prop_test_cases(50);
-        let result = cascade.run();
-        assert!(
-            result.all_passed,
-            "Agent spec {} failed verification",
-            entity_type
         );
     }
 }
@@ -1017,16 +841,162 @@ fn test_find_wasm_modules_discovers_packaged_root_wasm() {
             startup_loading: WasmStartupLoading::default(),
             provenance: None,
             import_class: None,
+            source: None,
         },
     );
 
-    let modules = find_wasm_modules(&root, &configs);
+    let modules = find_wasm_modules(&AppFileSource::Listed(root.clone()), &configs)
+        .expect("wasm modules read");
     fs::remove_dir_all(&root).expect("remove temp app");
 
     assert_eq!(
         modules.get("demo_module").map(Vec::as_slice),
         Some(&b"\0asm-packaged"[..])
     );
+}
+
+/// Register a throwaway single-app catalog dir declaring one wasm module with
+/// the given criticality and NO compiled artifact on disk. Returns the unique
+/// app name so `get_os_app` / `install_os_app_with_plan` can resolve it.
+fn write_wasm_only_app_missing_artifact(criticality: &str) -> (String, std::path::PathBuf) {
+    let app_name = format!("arn61-missing-{}", uuid::Uuid::new_v4());
+    let apps_dir =
+        std::env::temp_dir().join(format!("temper-arn61-catalog-{}", uuid::Uuid::new_v4()));
+    let app_dir = apps_dir.join(&app_name);
+    fs::create_dir_all(&app_dir).expect("create app dir");
+    fs::write(
+        app_dir.join("app.toml"),
+        format!(
+            "name = \"{app_name}\"\n\n[[wasm_modules]]\nname = \"needs_binary\"\ncriticality = \"{criticality}\"\nstartup_loading = \"lazy\"\n"
+        ),
+    )
+    .expect("write app.toml");
+    // The catalog scan requires an APP.md guide alongside app.toml.
+    fs::write(
+        app_dir.join("APP.md"),
+        format!("# {app_name}\n\nTest app.\n"),
+    )
+    .expect("write APP.md");
+    add_os_apps_dir(apps_dir.clone());
+    (app_name, apps_dir)
+}
+
+/// ARN-61/ARN-273: an app declaring an `app-required` WASM module whose binary
+/// is absent from the bundle must FAIL activation loudly instead of installing
+/// and lazy-flapping 503s at request time.
+#[tokio::test]
+async fn test_install_fails_when_app_required_wasm_missing() {
+    let state = PlatformState::new(None);
+    let (app_name, apps_dir) = write_wasm_only_app_missing_artifact("app-required");
+
+    // Sanity: the module is declared but has no artifact in the resolved bundle.
+    let bundle = get_os_app(&app_name).expect("app should be in catalog");
+    assert!(bundle.wasm_module_configs.contains_key("needs_binary"));
+    assert!(!bundle.wasm_modules.contains_key("needs_binary"));
+
+    let result = install_os_app_with_plan(
+        &state,
+        "test-arn61-required",
+        &app_name,
+        OsAppInstallPlan {
+            specs: false,
+            policies: false,
+            wasm: true,
+            content: false,
+            seed: false,
+        },
+        InstallOrigin::Request,
+    )
+    .await;
+
+    fs::remove_dir_all(&apps_dir).ok();
+
+    let err = result.expect_err("missing app-required artifact must fail activation");
+    assert!(
+        err.contains("needs_binary") && err.contains("missing from the app bundle"),
+        "error should name the missing required module: {err}"
+    );
+}
+
+/// A refused install writes nothing: the check runs before any spec, policy or
+/// installed-app row is persisted, so the next boot does not replay a
+/// half-installed app.
+#[tokio::test]
+async fn test_refused_install_writes_no_policy_or_install_row() {
+    let db_path = format!("/tmp/temper-test-arn61-{}.db", uuid::Uuid::new_v4());
+    let turso = temper_store_turso::TursoEventStore::new(&format!("file:{db_path}"), None)
+        .await
+        .unwrap();
+    let mut state = PlatformState::new(None);
+    state
+        .server
+        .set_storage_stack(temper_server::StorageStack::from_turso(turso));
+    let (app_name, apps_dir) = write_wasm_only_app_missing_artifact("app-required");
+    let policies = apps_dir.join(&app_name).join("policies");
+    fs::create_dir_all(&policies).expect("create policies dir");
+    fs::write(
+        policies.join("app.cedar"),
+        "permit(principal, action, resource);\n",
+    )
+    .expect("write policy");
+    let tenant = "test-arn61-nothing-written";
+
+    let result = install_os_app(&state, tenant, &app_name).await;
+
+    let ps = state
+        .server
+        .storage_stack
+        .as_ref()
+        .and_then(|stack| stack.platform.clone())
+        .expect("platform store");
+    let row = ps.get_installed_app(tenant, &app_name).await;
+    let policy = state.server.authz.get_tenant_policy_text(tenant);
+    fs::remove_dir_all(&apps_dir).ok();
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = fs::remove_file(format!("{db_path}{suffix}"));
+    }
+
+    assert!(
+        result.is_err(),
+        "missing app-required artifact must fail activation"
+    );
+    assert!(
+        matches!(row, Ok(None)),
+        "a refused install must not record the app as installed: {row:?}"
+    );
+    assert!(
+        policy.is_none_or(|text| !text.contains("permit(principal, action, resource)")),
+        "a refused install must not load the app's policy"
+    );
+}
+
+/// A missing *optional* WASM artifact must NOT block activation — the install
+/// proceeds and simply skips the module.
+#[tokio::test]
+async fn test_install_proceeds_when_optional_wasm_missing() {
+    let state = PlatformState::new(None);
+    let (app_name, apps_dir) = write_wasm_only_app_missing_artifact("optional");
+
+    let result = install_os_app_with_plan(
+        &state,
+        "test-arn61-optional",
+        &app_name,
+        OsAppInstallPlan {
+            specs: false,
+            policies: false,
+            wasm: true,
+            content: false,
+            seed: false,
+        },
+        InstallOrigin::Request,
+    )
+    .await;
+
+    fs::remove_dir_all(&apps_dir).ok();
+
+    let result = result.expect("missing optional artifact must not block activation");
+    assert!(result.wasm_modules.is_empty());
+    assert!(result.wasm_skipped.contains(&"needs_binary".to_string()));
 }
 
 #[tokio::test]
@@ -1821,7 +1791,8 @@ mode = "commons"
     let manifest = read_app_manifest(&temp_dir).expect("manifest should parse");
     assert_eq!(manifest.mode, AppDeploymentMode::Commons);
 
-    let bundle = load_app_bundle(&temp_dir).expect("bundle should load policies");
+    let bundle = load_app_bundle(&AppFileSource::Listed(temp_dir.clone()))
+        .expect("bundle should load policies");
     assert_eq!(bundle.deployment_mode, AppDeploymentMode::Commons);
     assert_eq!(bundle.cedar_policies.len(), 2);
     let source_paths: Vec<&str> = bundle
@@ -1834,12 +1805,12 @@ mode = "commons"
         vec!["policies/base.cedar", "policies/commons/guardrail.cedar"]
     );
     assert_eq!(
-        os_app_policy_row_id("katagami-commons", "policies/palette_system.cedar"),
-        "katagami-commons-palette_system"
+        os_app_policy_row_id("design-commons", "policies/palette_system.cedar"),
+        "design-commons-palette_system"
     );
     assert_eq!(
-        os_app_policy_row_id("katagami-commons", "policies/commons/guardrail.cedar"),
-        "katagami-commons-commons-guardrail"
+        os_app_policy_row_id("design-commons", "policies/commons/guardrail.cedar"),
+        "design-commons-commons-guardrail"
     );
     assert!(
         bundle
@@ -1884,7 +1855,8 @@ startup_loading = "lazy"
     )
     .unwrap();
 
-    let bundle = load_app_bundle(&temp_dir).expect("bundle should load");
+    let bundle =
+        load_app_bundle(&AppFileSource::Listed(temp_dir.clone())).expect("bundle should load");
     assert!(bundle.wasm_modules.contains_key("echo"));
     assert!(bundle.cross_invariants_toml.is_none());
     let config = bundle
@@ -1920,7 +1892,8 @@ version = "1.0.0"
     )
     .unwrap();
 
-    let bundle = load_app_bundle(&temp_dir).expect("bundle should load");
+    let bundle =
+        load_app_bundle(&AppFileSource::Listed(temp_dir.clone())).expect("bundle should load");
     assert_eq!(
         bundle.cross_invariants_toml.as_deref(),
         Some("version = 1\ndefault_delete_policy = \"restrict\"\n")
@@ -2487,6 +2460,7 @@ fn test_required_wasm_config_without_artifact_is_not_registered_ready() {
             startup_loading: WasmStartupLoading::Lazy,
             provenance: None,
             import_class: None,
+            source: None,
         },
     );
     let bundle = AppBundle {
@@ -2546,9 +2520,9 @@ field = "file_id"
     )
     .unwrap();
 
-    let bundle = load_app_bundle(&temp_dir);
+    let bundle = load_app_bundle(&AppFileSource::Listed(temp_dir.clone()));
     assert!(
-        bundle.is_none(),
+        bundle.is_err(),
         "legacy reactions.toml should be rejected after the ADR-0046 hard cut"
     );
 
@@ -2595,10 +2569,12 @@ fn test_find_wasm_modules_respects_manifest_target() {
             startup_loading: WasmStartupLoading::default(),
             provenance: None,
             import_class: None,
+            source: None,
         },
     );
 
-    let modules = find_wasm_modules(&temp_dir, &configs);
+    let modules = find_wasm_modules(&AppFileSource::Listed(temp_dir.clone()), &configs)
+        .expect("wasm modules read");
     assert!(modules.contains_key("echo"), "echo module should be found");
     assert_eq!(
         modules["echo"], correct_bytes,
@@ -2639,10 +2615,12 @@ fn test_find_wasm_modules_prefers_packaged_sibling_over_target_output() {
             startup_loading: WasmStartupLoading::default(),
             provenance: None,
             import_class: None,
+            source: None,
         },
     );
 
-    let modules = find_wasm_modules(&temp_dir, &configs);
+    let modules = find_wasm_modules(&AppFileSource::Listed(temp_dir.clone()), &configs)
+        .expect("wasm modules read");
     assert_eq!(
         modules["echo"], packaged_bytes,
         "packaged sibling artifact should win over target output"
@@ -2675,10 +2653,12 @@ fn test_find_wasm_modules_finds_sibling_artifact() {
             startup_loading: WasmStartupLoading::default(),
             provenance: None,
             import_class: None,
+            source: None,
         },
     );
 
-    let modules = find_wasm_modules(&temp_dir, &configs);
+    let modules = find_wasm_modules(&AppFileSource::Listed(temp_dir.clone()), &configs)
+        .expect("wasm modules read");
     assert!(
         modules.contains_key("echo"),
         "echo module should be found at sibling path"
@@ -2699,7 +2679,8 @@ fn test_find_wasm_modules_ignores_undeclared_artifact() {
     fs::create_dir_all(&module_dir).unwrap();
     fs::write(module_dir.join("echo.wasm"), b"undeclared").unwrap();
 
-    let modules = find_wasm_modules(&temp_dir, &BTreeMap::new());
+    let modules = find_wasm_modules(&AppFileSource::Listed(temp_dir.clone()), &BTreeMap::new())
+        .expect("wasm modules read");
     assert!(
         modules.is_empty(),
         "WASM artifacts must be declared in app.toml before install"
@@ -2717,7 +2698,7 @@ fn test_find_adrs_discovers_markdown_in_sorted_order() {
     fs::write(adrs_dir.join("001-first.md"), "# first").unwrap();
     fs::write(adrs_dir.join("notes.txt"), "ignore").unwrap();
 
-    let adrs = find_adrs(&temp_dir);
+    let adrs = find_adrs(&AppFileSource::Listed(temp_dir.clone())).expect("adrs read");
     assert_eq!(adrs.len(), 2);
     assert_eq!(adrs[0].file_name, "001-first.md");
     assert_eq!(adrs[1].file_name, "002-second.md");
@@ -2886,6 +2867,31 @@ name = "Publish"
 kind = "input"
 from = ["Created", "Published"]
 to = "Published"
+"#,
+    )
+    .unwrap();
+
+    // The app declares the type its Soul spec runs, as an app that runs one must.
+    fs::write(
+        app_dir.join("specs/model.csdl.xml"),
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Test.SkillDoc" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="Soul">
+        <Key><PropertyRef Name="Id"/></Key>
+        <Property Name="Id" Type="Edm.String" Nullable="false"/>
+        <Property Name="Status" Type="Edm.String"/>
+        <Property Name="name" Type="Edm.String"/>
+        <Property Name="description" Type="Edm.String"/>
+        <Property Name="content_file_id" Type="Edm.String"/>
+      </EntityType>
+      <EntityContainer Name="SkillDoc">
+        <EntitySet Name="Souls" EntityType="Test.SkillDoc.Soul"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>
 "#,
     )
     .unwrap();
@@ -3424,3 +3430,105 @@ async fn test_local_stream_uploads_create_real_file_version_lineage() {
     let _ = fs::remove_file(format!("{db_path}-wal"));
     let _ = fs::remove_file(format!("{db_path}-shm"));
 }
+
+/// nerdsane/temper#418: a denial names the app's policy file and the statement
+/// in it that decided, not a positional `policyN`.
+#[tokio::test]
+async fn test_denial_names_the_app_policy_file_and_statement() {
+    let app_name = format!("labels-{}", uuid::Uuid::new_v4());
+    let apps_dir = std::env::temp_dir().join(format!("temper-labels-{}", uuid::Uuid::new_v4()));
+    let app_dir = apps_dir.join(&app_name);
+    fs::create_dir_all(app_dir.join("policies")).expect("create app dir");
+    fs::write(app_dir.join("app.toml"), format!("name = \"{app_name}\"\n")).expect("app.toml");
+    fs::write(app_dir.join("APP.md"), format!("# {app_name}\n")).expect("APP.md");
+    fs::write(
+        app_dir.join("policies").join("vault.cedar"),
+        "// Anyone may look.\npermit(principal, action, resource);\n\n// Nobody withdraws.\nforbid(principal, action == Action::\"Withdraw\", resource);\n",
+    )
+    .expect("policy");
+    add_os_apps_dir(apps_dir.clone());
+
+    let state = PlatformState::new(None);
+    let tenant = "test-policy-labels";
+    install_os_app(&state, tenant, &app_name)
+        .await
+        .expect("install");
+    let decision = state.server.authz.authorize_for_tenant(
+        tenant,
+        &test_admin_security_context("admin-1"),
+        "Withdraw",
+        "Vault",
+        &HashMap::from([("id".to_string(), serde_json::json!("v1"))]),
+    );
+    fs::remove_dir_all(&apps_dir).ok();
+
+    match decision {
+        temper_authz::AuthzDecision::Deny(temper_authz::AuthzDenial::PolicyDenied {
+            policy_ids,
+        }) => assert_eq!(policy_ids, vec![format!("{app_name}/vault.cedar#2")]),
+        other => panic!("expected the forbid to deny: {other:?}"),
+    }
+}
+
+fn write_policy_app(cedar: &str) -> (String, std::path::PathBuf) {
+    let app_name = format!("policy-app-{}", uuid::Uuid::new_v4());
+    let apps_dir = std::env::temp_dir().join(format!("temper-policy-app-{}", uuid::Uuid::new_v4()));
+    let app_dir = apps_dir.join(&app_name);
+    fs::create_dir_all(app_dir.join("policies")).expect("create app dir");
+    fs::write(app_dir.join("app.toml"), format!("name = \"{app_name}\"\n")).expect("app.toml");
+    fs::write(app_dir.join("APP.md"), format!("# {app_name}\n")).expect("APP.md");
+    fs::write(app_dir.join("policies").join("rules.cedar"), cedar).expect("policy");
+    add_os_apps_dir(apps_dir.clone());
+    (app_name, apps_dir)
+}
+
+/// nerdsane/temper#418: Cedar that does not compile refuses the install
+/// instead of being persisted while the tenant runs on its old set.
+#[tokio::test]
+async fn test_install_refuses_cedar_that_does_not_compile() {
+    let (app_name, apps_dir) = write_policy_app("permit(principal, action, resource\n");
+    let state = PlatformState::new(None);
+    let tenant = "test-policy-refused";
+    let result = install_os_app(&state, tenant, &app_name).await;
+    fs::remove_dir_all(&apps_dir).ok();
+
+    let error = result.expect_err("an install whose Cedar does not compile is refused");
+    assert!(error.contains("does not compile"), "{error}");
+    assert!(state.server.authz.get_tenant_policy_text(tenant).is_none());
+}
+
+/// nerdsane/temper#418: two installs into one tenant at once both keep their
+/// Cedar; each reads, merges and loads the tenant's set under one lock.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_concurrent_installs_into_one_tenant_keep_both_apps_cedar() {
+    let (first, first_dir) =
+        write_policy_app("permit(principal, action == Action::\"First\", resource);\n");
+    let (second, second_dir) =
+        write_policy_app("permit(principal, action == Action::\"Second\", resource);\n");
+    let state = PlatformState::new(None);
+    let tenant = "test-policy-concurrent";
+    let (a, b) = tokio::join!(
+        install_os_app(&state, tenant, &first),
+        install_os_app(&state, tenant, &second)
+    );
+    fs::remove_dir_all(&first_dir).ok();
+    fs::remove_dir_all(&second_dir).ok();
+    a.expect("first install");
+    b.expect("second install");
+
+    let text = state
+        .server
+        .authz
+        .get_tenant_policy_text(tenant)
+        .unwrap_or_default();
+    assert!(
+        text.contains("\"First\"") && text.contains("\"Second\""),
+        "{text}"
+    );
+}
+
+#[path = "mod_test/timer_install.rs"]
+mod timer_install;
+
+#[path = "mod_test/install_order.rs"]
+mod install_order;

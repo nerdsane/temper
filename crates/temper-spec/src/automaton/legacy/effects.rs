@@ -25,6 +25,10 @@ pub(crate) enum Effect {
         var: String,
         value: bool,
     },
+    SetString {
+        var: String,
+        value: String,
+    },
     Emit {
         event: String,
     },
@@ -61,6 +65,16 @@ pub(crate) fn parse_effect_value(
     effects: &mut Vec<Effect>,
 ) -> Result<(), AutomatonParseError> {
     match value {
+        // Some specs quoted the whole effect array as one string.
+        Value::String(text) if text.trim_start().starts_with('[') => {
+            let quoted: toml::Table = format!("v = {text}").parse().map_err(|e| {
+                AutomatonParseError::Validation(format!("invalid effect '{text}': {e}"))
+            })?;
+            match quoted.get("v") {
+                Some(inner @ Value::Array(_)) => parse_effect_value(inner, effects)?,
+                _ => return Err(invalid_effect_value(value)),
+            }
+        }
         Value::String(text) => effects.push(parse_string_effect(text)?),
         Value::Array(entries) => {
             for entry in entries {
@@ -131,6 +145,23 @@ fn parse_effect_fields(fields: &Table) -> Result<Option<Effect>, AutomatonParseE
             var,
             value: get("value").is_some_and(|s| s == "true"),
         }),
+        "set_string" => {
+            let required = |key: &str| {
+                fields
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        AutomatonParseError::Validation(format!(
+                            "set_string '{key}' must be a string"
+                        ))
+                    })
+            };
+            Some(Effect::SetString {
+                var: required("var")?,
+                value: required("value")?,
+            })
+        }
         "emit" | "emit_event" => get("event").map(|event| Effect::Emit { event }),
         "trigger" => get("name").map(|name| Effect::Trigger { name }),
         "list_append" => list_var(fields).map(|var| Effect::ListAppend { var }),

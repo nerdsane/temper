@@ -20,22 +20,35 @@ use super::CsdlDocument;
 /// This warns rather than rejects on purpose. Existing apps (Genesis among
 /// them) already declare these names, so failing registration would take them
 /// down; the fix is to name the collision loudly and let apps migrate.
-pub(super) fn warn_on_server_derived_csdl_properties(tenant: &str, csdl: &CsdlDocument) {
+///
+/// Each property is named `Namespace.Entity.Property`. The install that brings
+/// a CSDL reports these at warn; registration, which every boot repeats for
+/// every stored tenant, logs them only at debug.
+pub fn server_derived_csdl_properties(csdl: &CsdlDocument) -> Vec<String> {
+    let mut found = Vec::new();
     for schema in &csdl.schemas {
         for entity_type in &schema.entity_types {
             for property in &entity_type.properties {
                 if temper_spec::automaton::is_server_derived_field_name(&property.name) {
-                    tracing::warn!(
-                        tenant,
-                        namespace = %schema.namespace,
-                        entity = %entity_type.name,
-                        property = %property.name,
-                        "CSDL declares a server-derived field name; the actor will \
-                         overwrite it, so this property reads differently over OData \
-                         than through the entity actor"
-                    );
+                    found.push(format!(
+                        "{}.{}.{}",
+                        schema.namespace, entity_type.name, property.name
+                    ));
                 }
             }
         }
+    }
+    found
+}
+
+/// Log at debug what [`server_derived_csdl_properties`] finds in a tenant's
+/// CSDL as it registers.
+pub(super) fn debug_server_derived_csdl_properties(tenant: &str, csdl: &CsdlDocument) {
+    for property in server_derived_csdl_properties(csdl) {
+        tracing::debug!(
+            tenant,
+            property,
+            "CSDL declares a server-derived field name; the actor will overwrite it"
+        );
     }
 }

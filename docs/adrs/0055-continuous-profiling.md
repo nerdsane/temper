@@ -89,7 +89,7 @@ Master switch: `TEMPER_PROFILING_ENABLED` (default `false` until post-canary).
 
 Upload timeout: `TEMPER_PROFILING_UPLOAD_TIMEOUT_MS=5000`. If the Datadog Agent is slow, the profiler does not backpressure the application — it drops the upload and continues.
 
-Agent endpoint: defaults to `http://127.0.0.1:8126` (Railway's Datadog Agent). Overridable via `DD_AGENT_HOST` / `DD_TRACE_AGENT_PORT`.
+Agent endpoint: `TEMPER_PROFILING_INTAKE_URL`; else the Datadog Agent found the way Datadog's libraries find it (`DD_TRACE_AGENT_URL`, else `DD_AGENT_HOST` with `DD_TRACE_AGENT_PORT`, default 8126); else none, and nothing is captured for upload. The kernel names no address of its own.
 
 ### Sub-Decision 6: Observability of the profiler itself
 
@@ -171,3 +171,13 @@ Primary: set `TEMPER_PROFILING_ENABLED=false` at the service level. Profiler thr
 Secondary: remove the `datadog-profiling` dep via a revert PR. `runtime-id` on spans remains (harmless; it's just a tag).
 
 Tertiary: keep the runtime-id plumbing indefinitely even if the profiler is disabled — it's free insurance for any future profiling backend.
+
+## Update, 2026-11-07: what was built
+
+The fallback in Alternative 1 is what runs: `pprof-rs` with Temper's own uploader, in `crates/temper-server/src/profiling/`. Its module documentation is the current list of settings; the switches above were never built. In short:
+
+- `TEMPER_PROFILING_CONTINUOUS=true` alone starts the loop: every interval (default 300 s) a CPU window (default 30 s at 100 Hz) and a heap snapshot are uploaded in Datadog's native profile format. Set it to anything else and the next cycle uploads nothing.
+- Uploads go to the intake `TEMPER_PROFILING_INTAKE_URL` names, else to the Datadog Agent that `DD_TRACE_AGENT_URL` or `DD_AGENT_HOST` names, else nowhere; `TEMPER_PROFILING_INTAKE_HEADERS` adds headers, for example a forwarder's bearer token.
+- Heap profiles come from jemalloc's sampling profiler (`prof:true`, one sample per ~512 KiB), on Linux builds of temper-cli.
+- Frames in JIT-compiled wasm guest code are named from the module's name section (`temper_wasm::code_map`).
+- `TEMPER_PROFILING_ENABLED` now only serves the on-demand endpoints at `/_admin/profile/{cpu,wall,heap}`.

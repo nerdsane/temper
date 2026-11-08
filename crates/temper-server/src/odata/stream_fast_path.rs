@@ -126,3 +126,63 @@ fn stream_content_type(mime_type: &str) -> String {
         mime_type.to_string()
     }
 }
+
+/// How long a link to a File's bytes works by default (`redirect=1`). A reader is checked again for every new link.
+const FILE_LINK_SECS: u64 = 5 * 60;
+
+/// How long the link a `redirect` value asks for works: `1` (or `true`) five minutes, a number of seconds from 60 up
+/// to an hour (a film plays through one link, whose ranges a player asks for as it goes). `None` asks for no link.
+pub(crate) fn file_link_secs(value: &str) -> Option<u64> {
+    match value {
+        "1" | "true" => Some(FILE_LINK_SECS),
+        secs => secs
+            .parse::<u64>()
+            .ok()
+            .filter(|s| *s >= 60)
+            .map(|s| s.min(crate::blob_store::MAX_PRESIGN_SECS)),
+    }
+}
+
+/// A `302` to a short-lived object-store link to an authorized File's bytes, labelled with the type it was stored
+/// as. Only pictures, films and sounds open in place; anything else (an SVG included, which can run script) comes
+/// as a download. `None` when the File has no bytes yet or the tenant's store cannot sign one (a local store): the
+/// caller then serves the bytes itself.
+pub(crate) fn file_link_response(
+    state: &ServerState,
+    tenant: &TenantId,
+    entity_state: &serde_json::Value,
+    secs: u64,
+) -> Option<Response> {
+    let fields = entity_state.get("fields")?;
+    let content_hash = fields
+        .get("content_hash")?
+        .as_str()
+        .filter(|hash| !hash.is_empty())?;
+    let mime_type = fields
+        .get("mime_type")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("application/octet-stream");
+    let store = state.blob_store_for_tenant(tenant).ok()?;
+    let kind = mime_type.to_ascii_lowercase();
+    let opens_in_place = ["image/", "video/", "audio/"]
+        .iter()
+        .any(|prefix| kind.starts_with(prefix))
+        && !kind.starts_with("image/svg");
+    let url = store.presigned_get_url(
+        &crate::state::native_file_blob_key(content_hash),
+        secs,
+        &crate::blob_store::PresignedResponse {
+            content_type: Some(mime_type),
+            content_disposition: (!opens_in_place).then_some("attachment"),
+        },
+    )?;
+    let mut response = StatusCode::FOUND.into_response();
+    let headers = response.headers_mut();
+    headers.insert(axum::http::header::LOCATION, url.parse().ok()?);
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    Some(response)
+}

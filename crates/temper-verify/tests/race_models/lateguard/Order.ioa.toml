@@ -1,0 +1,50 @@
+# Planted: the trigger's guard reads the shelf the order moved to, on the order
+# as that move committed. By the time it is read the order has moved on, and
+# Confirm doesn't ask again. The guard reads `shelf` and not the order's status,
+# and Move commits from two statuses.
+[automaton]
+name = "Order"
+states = ["Unmade", "Placed", "Packed", "Confirmed"]
+initial = "Unmade"
+
+[[state]]
+name = "shelf"
+type = "string"
+initial = ""
+
+[[invariant]]
+name = "ConfirmedOrderIsOnAStockedShelf"
+assert = "status == 'Confirmed' => Shelf[shelf].status == 'Stocked'"
+
+[[action]]
+name = "Place"
+kind = "input"
+from = ["Unmade"]
+to = "Placed"
+
+[[action]]
+name = "Pack"
+kind = "input"
+from = ["Placed"]
+to = "Packed"
+
+[[action]]
+name = "Move"
+kind = "input"
+from = ["Placed", "Packed"]
+params = [{ name = "shelf", type = "string" }]
+
+[[action.triggers]]
+name = "in_stock"
+kind = "entity"
+target_entity = "Order"
+target_action = "Confirm"
+guard = "!empty(shelf) && Shelf[shelf].status == 'Stocked'"
+[action.triggers.resolve_target]
+kind = "same_id"
+
+[[action]]
+name = "Confirm"
+kind = "input"
+from = ["Placed", "Packed"]
+to = "Confirmed"

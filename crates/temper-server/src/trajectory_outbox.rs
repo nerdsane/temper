@@ -144,6 +144,8 @@ struct QueuedTrajectory {
     backend: &'static str,
     entry: TrajectoryEntry,
     health: CaptureHealth,
+    /// The trace of the span that queued this entry: its persist span continues it.
+    parent: opentelemetry::Context,
 }
 
 pub(crate) struct TrajectoryOutbox {
@@ -208,6 +210,7 @@ impl TrajectoryOutbox {
             backend,
             entry,
             health,
+            parent: crate::trace_context::capture(),
         };
         // In unit tests built via `for_tests`, skip the spawn so the bounded
         // depth/drop semantics can be exercised without a tokio runtime.
@@ -260,6 +263,7 @@ async fn persist_drained(item: QueuedTrajectory) {
     let entry = item.entry;
     let health = item.health;
     let span = tracing::info_span!(
+        parent: None,
         "trajectory_outbox.persist",
         tenant = %entry.tenant,
         entity_type = %entry.entity_type,
@@ -267,6 +271,8 @@ async fn persist_drained(item: QueuedTrajectory) {
         action = %entry.action,
         backend = backend,
     );
+    // The persist is part of the request that recorded the entry.
+    crate::trace_context::continue_in(&span, &item.parent);
 
     async move {
         let started_at = Instant::now();

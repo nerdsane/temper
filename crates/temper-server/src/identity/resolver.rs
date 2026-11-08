@@ -4,16 +4,20 @@
 //! linked `AgentType` is active, and returns a `ResolvedIdentity` that the
 //! security context uses as the authoritative agent identity.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use temper_runtime::scheduler::sim_now;
 use temper_runtime::tenant::TenantId;
 
 use crate::identity::error::{IdentityError, classify_dependency_read};
 use crate::identity::jwt;
+use crate::identity::principal_records::principal_records;
 use crate::identity::resolver_support::{
-    authoritative_entity_state, hash_token, looks_like_jwt, parse_credential_expiry, require_field,
+    entity_state, hash_token, looks_like_jwt, parse_credential_expiry, require_field,
     same_credential_authority,
 };
+use crate::identity::revocation::credential_revoked;
 use crate::state::ServerState;
 
 /// Maximum opaque credential size accepted by the identity boundary.
@@ -45,16 +49,32 @@ pub struct ResolvedIdentity {
     pub is_human: bool,
     /// Verified `role` claim (Cedar), when the issuer stamped one.
     pub role: Option<String>,
+    /// JWT agents only: the verified `agent_label` claim, the name of this
+    /// agent instance. Left out when empty; a person's token never gives one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// JWT path only: the statuses of the `principal_record` records that
+    /// describe the user behind the token, keyed by the Cedar principal
+    /// attribute each becomes (`<Type>` in person, `actingFor<Type>` for an
+    /// agent's user). Read through each record's actor on every request.
+    #[serde(default)]
+    pub principal_records: BTreeMap<String, serde_json::Value>,
+    /// JWT agents only: what the token was issued under, kept on the agent's
+    /// security context so a timer it sets can ask, when it fires, whether
+    /// the token would still be accepted
+    /// ([`temper_authz::SecurityContext::credential`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential: Option<temper_authz::IssuedCredential>,
 }
 
 /// Resolves bearer tokens to platform-assigned agent identities.
 ///
-/// Each protected request resolves both the credential and its linked agent
-/// type from authoritative state. Persistent deployments replay the complete
-/// durable journal with strict validation; in-memory deployments read their
-/// sole local actor state. Successful identities are deliberately not cached,
-/// so revocation and type deprecation take effect on the next request even
-/// when another server replica performed the mutation.
+/// Each protected request reads the credential and its linked agent type as
+/// the entities they are, through their actors, the same way sign-out
+/// generations and trusted issuers are read. Successful identities are not
+/// cached, so a revocation or type deprecation takes effect on the next
+/// request to this server. Freshness across several servers is a property of
+/// all entities, not of this one type (ADR-0157 amendment).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct IdentityResolver;
 
@@ -98,7 +118,7 @@ impl IdentityResolver {
         // for O(1) lookup — the Issue action must use the key_hash as the
         // entity ID when creating credentials.
         let credential = classify_dependency_read(
-            authoritative_entity_state(state, tenant, "AgentCredential", &key_hash).await,
+            entity_state(state, tenant, "AgentCredential", &key_hash).await,
             "AgentCredential read",
         )?;
 
@@ -128,7 +148,7 @@ impl IdentityResolver {
 
         // Look up linked AgentType entity.
         let agent_type = classify_dependency_read(
-            authoritative_entity_state(state, tenant, "AgentType", agent_type_id).await,
+            entity_state(state, tenant, "AgentType", agent_type_id).await,
             "AgentType read",
         )?;
 
@@ -152,7 +172,7 @@ impl IdentityResolver {
         // change between the two reads could assemble a mixed-time identity
         // that never existed.
         let credential_recheck = classify_dependency_read(
-            authoritative_entity_state(state, tenant, "AgentCredential", &key_hash).await,
+            entity_state(state, tenant, "AgentCredential", &key_hash).await,
             "AgentCredential recheck",
         )?;
         if !same_credential_authority(&credential, &credential_recheck) {
@@ -173,6 +193,9 @@ impl IdentityResolver {
             from_jwt: false,
             is_human: false,
             role: None,
+            label: None,
+            principal_records: BTreeMap::new(),
+            credential: None,
         };
 
         // Re-check after the linked AgentType lookup so a short-lived
@@ -186,7 +209,7 @@ impl IdentityResolver {
 
     /// JWT path: verify an ES256 token against its registered `TrustedIssuer`,
     /// then map verified claims to an identity. No caching — every call
-    /// re-reads authoritative state, matching the credential path.
+    /// re-reads current entity state, matching the credential path.
     async fn resolve_jwt(
         &self,
         state: &ServerState,
@@ -203,23 +226,29 @@ impl IdentityResolver {
         // `iss` is attacker-chosen and unverified, and entity reads spawn the
         // entity on demand — so reading it directly would let anyone presenting
         // a junk token persist an Active TrustedIssuer row with empty fields.
-        // Check existence first and never materialise one from a token.
+        // Check existence in the index first and never materialise one from a
+        // token. The index is made complete for the type once per process: an
+        // issuer registered through the API is in the store but not in the
+        // index after a restart (only the environment's issuer is registered
+        // again at boot), so the index alone would deny its tokens then.
+        state
+            .ensure_type_indexed(tenant, "TrustedIssuer")
+            .await
+            .map_err(|error| {
+                IdentityError::Unavailable(format!("TrustedIssuer index unavailable: {error}"))
+            })?;
         if !state.entity_exists(tenant, "TrustedIssuer", &issuer_id) {
             return Err(IdentityError::Invalid);
         }
-
-        let issuer_response = classify_dependency_read(
-            state
-                .get_tenant_entity_state(tenant, "TrustedIssuer", &issuer_id)
-                .await
-                .map(Some),
+        let issuer = classify_dependency_read(
+            entity_state(state, tenant, "TrustedIssuer", &issuer_id).await,
             "TrustedIssuer read",
         )?;
-        if issuer_response.state.status != "Active" {
+        if issuer.status != "Active" {
             return Err(IdentityError::Invalid);
         }
 
-        let fields = &issuer_response.state.fields;
+        let fields = &issuer.fields;
         let jwks_json = require_field(fields, "jwks_json")?;
         let audience = require_field(fields, "audience")?;
         let jwks: jwt::Jwks =
@@ -236,26 +265,28 @@ impl IdentityResolver {
         )
         .map_err(|_| IdentityError::Invalid)?;
 
-        // Sign-out-everywhere: reject a token whose generation is older than the
-        // principal's current generation (ARN-255 option A), keyed on the human
-        // `sub` so signing a human out also invalidates agents acting for them.
-        // A missing claim is treated as generation 0 — revocation must not be
-        // skippable by an issuer that fails to stamp it.
-        if let Some(sub) = claims.sub.as_deref() {
-            let token_gen = claims.auth_generation.unwrap_or(0);
-            // `?` propagates Unavailable when the read failed — see
-            // current_generation — and denies on Invalid when stale.
-            if token_gen < self.current_generation(state, tenant, sub).await? {
-                return Err(IdentityError::Invalid);
-            }
+        // "service" is the kernel's own role: the kernel treats a principal
+        // with it as internal (`EventOrigin::from_caller`, `names_a_caller`),
+        // so no token may claim it.
+        if claims.role.as_deref() == Some("service") {
+            return Err(IdentityError::Invalid);
         }
 
-        // Grant liveness: a revoked agent grant must stop working at the kernel,
-        // not just at the MCP front door. The same counter is keyed by
-        // `grant_id`; any bump (> 0) means revoked, since a grant is never
-        // re-issued under the same id.
-        if let Some(grant_id) = claims.grant_id.as_deref().filter(|g| !g.is_empty())
-            && self.current_generation(state, tenant, grant_id).await? > 0
+        // Refuse a token whose user signed out everywhere after it was issued
+        // (keyed on the human `sub`, so it stops the agents acting for them
+        // too) or whose grant was revoked: a revoked grant must stop working
+        // at the kernel, not just at the MCP front door. A missing
+        // `auth_generation` is generation 0, so an issuer that fails to stamp
+        // it cannot skip revocation. `?` propagates Unavailable when a
+        // generation read failed.
+        let credential = temper_authz::IssuedCredential {
+            subject: claims.sub.clone(),
+            auth_generation: claims.auth_generation.unwrap_or(0),
+            grant_id: claims.grant_id.clone().filter(|grant| !grant.is_empty()),
+        };
+        if credential_revoked(state, tenant, &credential)
+            .await?
+            .is_some()
         {
             return Err(IdentityError::Invalid);
         }
@@ -277,6 +308,15 @@ impl IdentityResolver {
                     from_jwt: true,
                     is_human: false,
                     role: claims.role.clone(),
+                    label: claims.agent_label.clone().filter(|label| !label.is_empty()),
+                    principal_records: principal_records(
+                        state,
+                        tenant,
+                        None,
+                        claims.sub.as_deref().filter(|sub| !sub.is_empty()),
+                    )
+                    .await?,
+                    credential: Some(credential),
                 }
             }
             None => {
@@ -285,6 +325,7 @@ impl IdentityResolver {
                     return Err(IdentityError::Invalid);
                 }
                 ResolvedIdentity {
+                    principal_records: principal_records(state, tenant, Some(&sub), None).await?,
                     agent_instance_id: sub,
                     agent_type_id: String::new(),
                     agent_type_name: String::new(),
@@ -293,39 +334,11 @@ impl IdentityResolver {
                     from_jwt: true,
                     is_human: true,
                     role: claims.role.clone(),
+                    label: None,
+                    credential: None,
                 }
             }
         };
         Ok(identity)
-    }
-
-    /// Current monotonic generation for a principal/grant key.
-    ///
-    /// `Err(Unavailable)` means the read failed and the caller must DENY
-    /// (fail closed) as a dependency failure, never as a stale/never-revoked
-    /// token. `Ok(0)` means the counter has never been bumped (never
-    /// revoked) without materialising a row.
-    async fn current_generation(
-        &self,
-        state: &ServerState,
-        tenant: &TenantId,
-        key: &str,
-    ) -> Result<i64, IdentityError> {
-        if !state.entity_exists(tenant, "PrincipalGeneration", key) {
-            return Ok(0);
-        }
-        let response = classify_dependency_read(
-            state
-                .get_tenant_entity_state(tenant, "PrincipalGeneration", key)
-                .await
-                .map(Some),
-            "PrincipalGeneration read",
-        )?;
-        Ok(response
-            .state
-            .counters
-            .get("generation")
-            .map(|c| *c as i64)
-            .unwrap_or(0))
     }
 }

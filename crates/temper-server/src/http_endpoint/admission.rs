@@ -26,6 +26,20 @@ pub struct AdmissionAction {
     /// String parameters: literals or entire `{capture}` placeholders.
     #[serde(default)]
     pub params: BTreeMap<String, String>,
+    /// Decide whether the caller may make this move and answer with the record,
+    /// without making it: for a route that only reads, so a read writes nothing
+    /// to the record's journal and does not wait for a write. It decides who may
+    /// on the record as it is now; it does not ask whether the record's state
+    /// allows the move. Takes no params.
+    #[serde(default)]
+    pub check: bool,
+}
+
+/// One admission action declared as a check, resolved against the request.
+struct CheckedMove {
+    entity_set: String,
+    entity_id: String,
+    action: String,
 }
 
 pub(super) fn resolve(value: &str, captures: &BTreeMap<String, String>) -> Result<String, String> {
@@ -45,13 +59,25 @@ pub(super) fn resolve(value: &str, captures: &BTreeMap<String, String>) -> Resul
     }
 }
 
+/// The most of one admission action's answer held for the module. Its reason is memory: it is held per request
+/// before the module runs. An answer is the record as a read shows it (bindings/mod.rs), so only a record whose own
+/// fields approach this reaches it.
+const ANSWER_BUDGET_BYTES: usize = 8 * 1024 * 1024;
+
 pub(crate) async fn admit(
     state: &ServerState,
     authenticated: &AuthenticatedRequestContext,
+    endpoint_id: &str,
     captures: &BTreeMap<String, String>,
     actions: Vec<AdmissionAction>,
 ) -> Result<BTreeMap<String, Value>, Response<Body>> {
+    // A refusal here answers before the module runs, so this log is the only place that says why.
     let invalid = |message: &str| {
+        tracing::warn!(
+            endpoint_id,
+            reason = message,
+            "endpoint admission refused the request"
+        );
         odata_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "InvalidEndpoint",
@@ -73,6 +99,9 @@ pub(crate) async fn admit(
             })
         }) {
             return Err(invalid("invalid CSDL identifier in admission"));
+        }
+        if gate.check && !gate.params.is_empty() {
+            return Err(invalid("an admission check takes no params"));
         }
         let id = match resolve(&gate.entity_id, captures) {
             Ok(v) => v,
@@ -108,35 +137,59 @@ pub(crate) async fn admit(
             // Reject the whole declaration before ANY action can be queued.
             return Err(requires_completion());
         }
+        let check = gate.check.then(|| CheckedMove {
+            entity_set: gate.entity_set.clone(),
+            entity_id: id.clone(),
+            action: gate.action.clone(),
+        });
         prepared.push((
             gate.name,
             path,
             Bytes::from(Value::Object(params).to_string()),
+            check,
         ));
     }
     let mut admitted = BTreeMap::new();
-    for (name, path, params) in prepared {
-        // Do not inherit a user idempotency key: admission is evaluated on EVERY
-        // request, even when the remote application receives a repeated key.
-        let response = crate::odata::handle_odata_post(
-            State(state.clone()),
-            Some(Extension(authenticated.clone())),
-            HeaderMap::new(),
-            Path(path),
-            Query(BTreeMap::new()),
-            params,
-        )
-        .await
-        .into_response();
+    for (name, path, params, check) in prepared {
+        let response = match check {
+            Some(check) => {
+                crate::odata::check_bound_action(
+                    state,
+                    authenticated,
+                    &check.entity_set,
+                    &check.entity_id,
+                    &check.action,
+                )
+                .await
+            }
+            // Do not inherit a user idempotency key: admission is evaluated on EVERY
+            // request, even when the remote application receives a repeated key.
+            // Boxed: the OData handler's future is among the largest in the
+            // kernel; inlined, every future above this route call would carry it.
+            None => Box::pin(crate::odata::handle_odata_post(
+                State(state.clone()),
+                Some(Extension(authenticated.clone())),
+                HeaderMap::new(),
+                Path(path.clone()),
+                Query(BTreeMap::new()),
+                params,
+            ))
+            .await
+            .into_response(),
+        };
         if response.status() == StatusCode::ACCEPTED {
             return Err(requires_completion());
         }
         if !response.status().is_success() {
-            return Err(response);
+            return Err(log_refusal_response(endpoint_id, &name, &path, response).await);
         }
-        let bytes = match to_bytes(response.into_body(), 8 * 1024 * 1024).await {
+        let bytes = match to_bytes(response.into_body(), ANSWER_BUDGET_BYTES).await {
             Ok(v) => v,
-            Err(_) => return Err(invalid("admission response exceeds budget")),
+            Err(_) => {
+                return Err(invalid(&format!(
+                    "the answer of {path} exceeds {ANSWER_BUDGET_BYTES} bytes"
+                )));
+            }
         };
         let value = match serde_json::from_slice(&bytes) {
             Ok(v) => v,
@@ -152,3 +205,39 @@ fn requires_completion() -> Response {
         "endpoint admission requires completed OData actions; queued PostgreSQL actions are not supported")
         .into_response()
 }
+
+async fn log_refusal_response(
+    endpoint_id: &str,
+    name: &str,
+    path: &str,
+    response: Response,
+) -> Response {
+    let status = response.status();
+    let (parts, body) = response.into_parts();
+    // OData refusals can contain stored field values. Keep their original body,
+    // even when it is larger than a successful admission answer's budget.
+    let body = match to_bytes(body, usize::MAX).await {
+        Ok(body) => body,
+        Err(error) => {
+            tracing::warn!(endpoint_id, admission = %name, %path, %status, %error,
+                "endpoint admission refusal body could not be read");
+            // Keep the status, headers and body failure instead of turning an
+            // unreadable refusal into a successful read of an empty body.
+            let body =
+                Body::from_stream(futures_util::stream::once(
+                    async move { Err::<Bytes, _>(error) },
+                ));
+            return Response::from_parts(parts, body);
+        }
+    };
+    let reason = String::from_utf8_lossy(&body);
+    if status.is_server_error() {
+        tracing::warn!(endpoint_id, admission = %name, %path, %status, %reason, "endpoint admission action failed");
+    } else {
+        tracing::info!(endpoint_id, admission = %name, %path, %status, %reason, "endpoint admission action refused");
+    }
+    Response::from_parts(parts, Body::from(body))
+}
+
+#[cfg(test)]
+mod tests;

@@ -49,7 +49,7 @@ fn private_identity_survives_reconnect_but_cannot_cross_service_or_tenant() {
         fs::metadata(&path).unwrap().permissions().mode() & 0o777,
         0o600
     );
-    assert!(load_identity(&path, "https://foresight.example", "default").is_err());
+    assert!(load_identity(&path, "https://app.example", "default").is_err());
     assert!(load_identity(&path, &identity.server, "another-tenant").is_err());
     assert!(save_identity(&consent_fixture(), &path, &identity).is_err());
 }

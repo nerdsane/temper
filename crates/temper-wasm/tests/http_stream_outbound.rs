@@ -109,6 +109,7 @@ async fn outbound_streaming_injects_internal_auth_headers() {
                 workflow_root_entity_id: Some("cq-1".to_string()),
                 workflow_run_id: Some("CurationQuery:cq-1".to_string()),
                 http_request: None,
+                trigger_principal: None,
             }),
     );
 
@@ -309,4 +310,43 @@ async fn outbound_streaming_1mib_roundtrip() {
     }
     writer.await.unwrap();
     assert_eq!(received, TOTAL, "received bytes must match sent total");
+}
+
+/// The echo handler answers as soon as the request headers arrive, before it
+/// reads the body. A success head must not end the request body: everything
+/// the guest writes afterwards still reaches the server.
+#[tokio::test]
+async fn outbound_streaming_body_continues_after_early_success_head() {
+    let base = spawn_echo_server().await;
+    let host = ProductionWasmHost::new(BTreeMap::new());
+
+    let handles = host
+        .http_stream_begin_outbound(HttpRequestHead {
+            method: "POST".into(),
+            url: format!("{base}/echo"),
+            headers: vec![("content-type".into(), "application/octet-stream".into())],
+        })
+        .await
+        .unwrap();
+
+    let head = host
+        .http_stream_response_head(handles.response_body)
+        .await
+        .unwrap();
+    assert_eq!(head.status, 200);
+
+    host.http_stream_try_write(handles.request_body, b"written after the head".to_vec())
+        .await
+        .expect("a success head must leave the request body open");
+    host.http_stream_close(handles.request_body).await.unwrap();
+
+    let mut echoed = Vec::new();
+    loop {
+        let chunk = host.http_stream_read(handles.response_body).await.unwrap();
+        if chunk.is_empty() {
+            break;
+        }
+        echoed.extend_from_slice(&chunk);
+    }
+    assert_eq!(echoed, b"written after the head");
 }

@@ -12,7 +12,13 @@
 //! The translator returns `None` for expressions it cannot handle, signalling
 //! the caller to fall back to the existing in-memory filter path.
 
+use std::collections::BTreeSet;
+
 use temper_odata::query::types::{BinaryOperator, FilterExpr, ODataValue, UnaryOperator};
+
+mod equality;
+
+pub(super) use equality::equality_field_predicates;
 
 const MAX_INDEXABLE_FIELD_VALUE_BYTES: usize = 2000;
 
@@ -22,6 +28,8 @@ pub(super) struct TranslatedFilter {
     pub where_clause: String,
     /// Ordered parameter values corresponding to `?3`, `?4`, etc.
     pub params: Vec<String>,
+    /// Missing index entries may be stored values the index deliberately omitted.
+    pub missing_default_fields: BTreeSet<String>,
 }
 
 /// Try to translate an OData filter expression into a SQL WHERE clause.
@@ -34,11 +42,14 @@ pub(super) fn try_translate_filter(filter: &FilterExpr) -> Option<TranslatedFilt
     let mut ctx = TranslateCtx {
         params: Vec::new(),
         next_param: 3, // ?1 = tenant, ?2 = entity_type (prepended by query_field_index)
+        defaults: serde_json::json!({}),
+        missing_default_fields: BTreeSet::new(),
     };
     let clause = translate_expr(filter, &mut ctx)?;
     Some(TranslatedFilter {
         where_clause: clause,
         params: ctx.params,
+        missing_default_fields: ctx.missing_default_fields,
     })
 }
 
@@ -50,87 +61,32 @@ pub(super) fn try_translate_filter(filter: &FilterExpr) -> Option<TranslatedFilt
 /// this predicate as a candidate narrowing step and still re-evaluate the
 /// original filter after materialization.
 pub(super) fn try_translate_candidate_filter(filter: &FilterExpr) -> Option<TranslatedFilter> {
+    try_translate_candidate_filter_with_defaults(filter, &serde_json::json!({}))
+}
+
+/// Include rows without an indexed value when the declaration matches the filter.
+/// The original predicate is checked again after read defaults are materialized.
+pub(super) fn try_translate_candidate_filter_with_defaults(
+    filter: &FilterExpr,
+    defaults: &serde_json::Value,
+) -> Option<TranslatedFilter> {
     let mut ctx = TranslateCtx {
         params: Vec::new(),
         next_param: 3, // ?1 = tenant, ?2 = entity_type (prepended by query_field_index)
+        defaults: defaults.clone(),
+        missing_default_fields: BTreeSet::new(),
     };
     let clause = translate_candidate_expr(filter, &mut ctx)?;
     Some(TranslatedFilter {
         where_clause: clause,
         params: ctx.params,
+        missing_default_fields: ctx.missing_default_fields,
     })
-}
-
-/// Detect whether `filter` is a pure conjunction (`AND`-tree) of
-/// `Property eq <scalar literal>` leaves — the shape of resolution lookups such
-/// as `Path eq '..' and WorkspaceId eq '..'` and the directory variant
-/// `Name eq '..' and WorkspaceId eq '..' and ParentId eq null`.
-///
-/// Returns the matched `(field, rendered_value)` pairs when the WHOLE
-/// expression has that shape, or `None` for anything else (`Or`, `Ne`, ranges,
-/// functions, unary, bare property/literal, or a non-scalar literal).
-///
-/// Used by the query plane to decide when an EMPTY native projection page for
-/// an exact-match resolution is untrustworthy and must be reconciled against
-/// authoritative state — a just-committed entity may not yet have its
-/// asynchronously-projected row (ARN-89). `null`-equality leaves count as
-/// equality here; the authoritative read re-evaluates the original filter, so
-/// null semantics stay correct.
-pub(super) fn equality_field_predicates(
-    filter: &FilterExpr,
-) -> Option<Vec<(String, serde_json::Value)>> {
-    let mut pairs = Vec::new();
-    collect_equality_field_predicates(filter, &mut pairs).then_some(pairs)
-}
-
-/// Convert an OData literal to the JSON value the entity stores it as, so the
-/// read-side key hash matches the write-side hash component-for-component.
-/// `null` maps to `Value::Null` (a distinct, indexable key value).
-fn odata_value_to_json(value: &ODataValue) -> Option<serde_json::Value> {
-    use serde_json::Value;
-    Some(match value {
-        ODataValue::Null => Value::Null,
-        ODataValue::Boolean(b) => Value::Bool(*b),
-        ODataValue::Int(i) => Value::Number((*i).into()),
-        ODataValue::Float(f) => Value::Number(serde_json::Number::from_f64(*f)?),
-        ODataValue::String(s) => Value::String(s.clone()),
-        ODataValue::Guid(g) => Value::String(g.to_string()),
-        ODataValue::DateTimeOffset(dt) => Value::String(dt.to_rfc3339()),
-    })
-}
-
-fn collect_equality_field_predicates(
-    expr: &FilterExpr,
-    out: &mut Vec<(String, serde_json::Value)>,
-) -> bool {
-    match expr {
-        FilterExpr::BinaryOp {
-            left,
-            op: BinaryOperator::And,
-            right,
-        } => {
-            collect_equality_field_predicates(left, out)
-                && collect_equality_field_predicates(right, out)
-        }
-        FilterExpr::BinaryOp {
-            left,
-            op: BinaryOperator::Eq,
-            right,
-        } => {
-            let Some((field_name, value)) = property_literal_pair(left, right) else {
-                return false;
-            };
-            let Some(json) = odata_value_to_json(value) else {
-                return false;
-            };
-            out.push((field_name.to_string(), json));
-            true
-        }
-        _ => false,
-    }
 }
 
 struct TranslateCtx {
+    defaults: serde_json::Value,
+    missing_default_fields: BTreeSet<String>,
     params: Vec<String>,
     next_param: usize,
 }
@@ -266,6 +222,9 @@ fn translate_comparison(
         _ => return None, // cross-field or complex expressions
     };
 
+    if temper_spec::automaton::is_event_metadata_field(field_name.as_str()) {
+        return None;
+    }
     let sql_op = match op {
         BinaryOperator::Eq => "=",
         BinaryOperator::Ne => "!=",
@@ -298,22 +257,44 @@ fn translate_comparison(
         };
     }
 
+    let missing_may_match = op == BinaryOperator::Eq
+        && ctx
+            .defaults
+            .get(&field_name)
+            .is_some_and(|initial| match value {
+                ODataValue::String(value) => initial.as_str() == Some(value.as_str()),
+                // A stored boolean may predate its fields mirror and differ
+                // from the active declaration (for example after a spec edit).
+                ODataValue::Boolean(_) => initial.as_bool().is_some(),
+                _ => false,
+            });
     let text_value = odata_value_to_text(value)?;
+    if missing_may_match {
+        ctx.missing_default_fields.insert(field_name.clone());
+    }
     let field_param = ctx.add_param(field_name);
     let value_param = ctx.add_param(text_value);
 
-    Some(format!(
+    let predicate = format!(
         "entity_id IN (SELECT entity_id FROM entity_field_index \
          WHERE tenant = ?1 AND entity_type = ?2 \
          AND field_name = {field_param} AND field_value {sql_op} {value_param})"
-    ))
+    );
+    if missing_may_match {
+        Some(format!(
+            "({predicate} OR entity_id NOT IN (SELECT entity_id FROM entity_field_index \
+            WHERE tenant = ?1 AND entity_type = ?2 AND field_name = {field_param}))"
+        ))
+    } else {
+        Some(predicate)
+    }
 }
 
 fn is_status_property(field_name: &str) -> bool {
     field_name == "Status" || field_name == "status"
 }
 
-fn candidate_filter_is_lossless(expr: &FilterExpr) -> bool {
+pub(super) fn candidate_filter_is_lossless(expr: &FilterExpr) -> bool {
     match expr {
         FilterExpr::BinaryOp { left, op, right } => match op {
             BinaryOperator::And | BinaryOperator::Or => {
@@ -334,6 +315,9 @@ fn lossless_eq_comparison(left: &FilterExpr, right: &FilterExpr) -> bool {
     let Some((field_name, value)) = property_literal_pair(left, right) else {
         return false;
     };
+    if temper_spec::automaton::is_event_metadata_field(field_name) {
+        return false;
+    }
     if is_status_property(field_name) {
         return matches!(value, ODataValue::Null | ODataValue::String(_));
     }
@@ -400,6 +384,9 @@ fn translate_function(name: &str, args: &[FilterExpr], ctx: &mut TranslateCtx) -
                 FilterExpr::Property(name) => name.clone(),
                 _ => return None,
             };
+            if temper_spec::automaton::is_event_metadata_field(field_name.as_str()) {
+                return None;
+            }
             let search_value = match &args[1] {
                 FilterExpr::Literal(ODataValue::String(s)) => s.clone(),
                 _ => return None,

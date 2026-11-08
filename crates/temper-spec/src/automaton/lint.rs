@@ -8,6 +8,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::{ActionKind, Automaton, Effect, FieldInvariant};
 
 mod absorbing;
+mod lost_params;
+mod trigger_args;
+
+pub use lost_params::lint_lost_params;
+pub use trigger_args::lint_trigger_target_args;
 
 /// Severity of a lint finding.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -50,6 +55,13 @@ impl BundleLintFinding {
             message: message.into(),
         }
     }
+
+    fn warning(entity: impl Into<String>, code: &str, message: impl Into<String>) -> Self {
+        Self {
+            severity: LintSeverity::Warning,
+            ..Self::error(entity, code, message)
+        }
+    }
 }
 
 impl LintFinding {
@@ -76,6 +88,12 @@ impl LintFinding {
 /// - parser: syntax and structural parseability
 /// - lint: semantic completeness / consistency
 pub fn lint_automaton(automaton: &Automaton) -> Vec<LintFinding> {
+    lint_automaton_for_type(automaton, &automaton.automaton.name)
+}
+
+/// Run semantic lint checks under the loader's registered entity type name.
+/// Entity-trigger targets use that name; timer targets always stay local.
+pub fn lint_automaton_for_type(automaton: &Automaton, registered_type: &str) -> Vec<LintFinding> {
     let mut findings = Vec::new();
 
     for action in &automaton.actions {
@@ -90,9 +108,32 @@ pub fn lint_automaton(automaton: &Automaton) -> Vec<LintFinding> {
         }
     }
 
+    for timeout in &automaton.state_timeouts {
+        if let Some(count) = timeout.max_occurrences {
+            findings.push(LintFinding::warning(
+                "state_timeout_max_occurrences_ignored",
+                format!(
+                    "state_timeout for '{}' sets max_occurrences = {count}, which has no effect: \
+                     the timer is armed on every entry into the state",
+                    timeout.state
+                ),
+            ));
+        }
+    }
+
     lint_field_invariants(automaton, &mut findings);
     absorbing::lint(automaton, &mut findings);
+    findings.extend(lint_install_refusals(automaton, registered_type));
 
+    findings
+}
+
+/// The findings an install or upgrade refuses. A stored spec that has them
+/// still restores at boot, with a warning, because it was installed before the
+/// check existed.
+pub fn lint_install_refusals(automaton: &Automaton, registered_type: &str) -> Vec<LintFinding> {
+    let mut findings = lint_trigger_target_args(automaton, registered_type);
+    findings.extend(lint_lost_params(automaton));
     findings
 }
 
@@ -186,11 +227,19 @@ fn lint_spawn_effect(
     let Effect::Spawn {
         entity_type,
         initial_action,
+        copy,
         ..
     } = effect
     else {
         return;
     };
+    lint_spawn_copy(
+        automata.get(entity_name),
+        entity_name,
+        action,
+        copy,
+        findings,
+    );
 
     let Some(target_automaton) = automata.get(entity_type) else {
         findings.push(BundleLintFinding::error(
@@ -227,7 +276,11 @@ fn lint_spawn_effect(
         target_action,
         findings,
     );
-    let available_params = available_spawn_params(action, parent_snake);
+    let mut available_params = available_spawn_params(action, parent_snake);
+    available_params.extend(copy.iter().cloned());
+    // A param the spawn leaves unset that names one of the child's declared
+    // variables reads as that variable's initial value, so it needs no mapping.
+    available_params.extend(target_automaton.state.iter().map(|var| var.name.clone()));
     lint_spawn_param_mapping(
         entity_name,
         &action.name,
@@ -237,6 +290,37 @@ fn lint_spawn_effect(
         target_action,
         findings,
     );
+}
+
+/// A `copy(...)` name nothing on the parent can hold (no declared variable and
+/// no action parameter) would silently hand the child nothing.
+fn lint_spawn_copy(
+    parent: Option<&Automaton>,
+    entity_name: &str,
+    action: &super::Action,
+    copy: &[String],
+    findings: &mut Vec<BundleLintFinding>,
+) {
+    let Some(parent) = parent else {
+        return;
+    };
+    for name in copy {
+        let declared = parent.state.iter().any(|var| &var.name == name);
+        let a_param = parent
+            .actions
+            .iter()
+            .any(|a| a.params.iter().any(|p| p.name() == name));
+        if !declared && !a_param {
+            findings.push(BundleLintFinding::warning(
+                entity_name.to_string(),
+                "spawn_copy_field_unknown",
+                format!(
+                    "action '{}' copies '{name}' into its spawned child, but no variable or action parameter of '{entity_name}' holds it",
+                    action.name
+                ),
+            ));
+        }
+    }
 }
 
 fn target_action<'a>(automaton: &'a Automaton, action_name: &str) -> Option<&'a super::Action> {

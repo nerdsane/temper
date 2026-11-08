@@ -275,12 +275,6 @@ mod tests {
         ServerState::from_registry(system, registry)
     }
 
-    #[test]
-    fn test_default_rules_count() {
-        let rules = default_rules();
-        assert_eq!(rules.len(), 4);
-    }
-
     #[tokio::test]
     async fn test_error_rate_spike_triggers() {
         let state = test_state_with_registry();

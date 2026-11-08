@@ -1,0 +1,48 @@
+[automaton]
+name = "Alarm"
+states = ["New", "Taken", "Cleared"]
+initial = "New"
+
+[[state]]
+name = "probe"
+type = "string"
+initial = ""
+
+[[state]]
+name = "why"
+type = "string"
+initial = ""
+
+[[invariant]]
+name = "ClearedAlarmEndsItsProbe"
+assert = "status == 'Cleared' && probe != '' => Probe[probe].status != 'Open'"
+
+[[action]]
+name = "Raise"
+kind = "input"
+from = ["New"]
+to = "Taken"
+effect = ["spawn('Probe', 'Open', probe)"]
+
+[[action]]
+name = "Clear"
+kind = "input"
+from = ["Taken"]
+to = "Cleared"
+params = ["why"]
+
+[[action.constraints]]
+kind = "param_nonempty"
+param = "why"
+
+[[action.triggers]]
+name = "end_probe"
+kind = "entity"
+target_entity = "Probe"
+target_action = "End"
+guard = "probe != ''"
+[action.triggers.args]
+why = "why"
+[action.triggers.resolve_target]
+kind = "field"
+id_field = "probe"

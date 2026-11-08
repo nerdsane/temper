@@ -27,16 +27,23 @@ mod validate;
 pub use field_invariant::FieldInvariant;
 pub use lint::{
     BundleLintFinding, LintFinding, LintSeverity, lint_automata_bundle, lint_automaton,
+    lint_automaton_for_type, lint_install_refusals, lint_lost_params, lint_trigger_target_args,
 };
 pub use metadata::{LivenessViolation, SpecMetadata};
 pub use parser::{
     LivenessEnforcement, LivenessViolationReporter, parse_automaton, parse_automaton_with_liveness,
     set_liveness_violation_reporter, to_state_machine,
 };
-pub use translate::{ResolvedAction, ResolvedEffect, dispatch_effects, translate_actions};
+pub use translate::{
+    ResolvedAction, ResolvedEffect, dispatch_effects, translate_actions, translate_carries,
+};
 pub use trigger_graph::{TriggerEdge, TriggerGraph};
 pub use types::*;
 
 #[cfg(test)]
 #[path = "strict_test.rs"]
 mod strict_test;
+
+#[cfg(test)]
+#[path = "principal_record_test.rs"]
+mod principal_record_test;

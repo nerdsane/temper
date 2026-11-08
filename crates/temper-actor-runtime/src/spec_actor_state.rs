@@ -30,6 +30,13 @@ impl SpecActorState {
         for (k, v) in &self.lists {
             ctx.lists.insert(k.clone(), v.clone());
         }
+        if let Some(fields) = self.fields.as_object() {
+            ctx.fields.extend(
+                fields
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.clone())),
+            );
+        }
         ctx
     }
 }

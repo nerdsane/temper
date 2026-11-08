@@ -185,6 +185,7 @@ from = ["Active"]
                 initial_action: "Init".into(),
                 store_id_in: Some("child_id".into()),
                 id: None,
+                copy: Vec::new(),
             },
             ResolvedEffect::AddCounter {
                 var: "count".into(),

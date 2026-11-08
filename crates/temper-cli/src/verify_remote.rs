@@ -11,11 +11,16 @@ use temper_spec::automaton::{LintSeverity, lint_automata_bundle, lint_automaton}
 
 use crate::util::to_pascal_case;
 
+/// The server's longest budget for one check: a person at a terminal can wait
+/// for it, where the server's 30 s default is for callers that cannot.
+const REMOTE_BUDGET_MS: u64 = 120_000;
+
 #[derive(Serialize)]
 struct ValidateIoaRequest<'a> {
     ioa_source: &'a str,
     sim_seeds: u64,
     prop_test_cases: u32,
+    budget_ms: u64,
 }
 
 /// Lint local IOA specs, then ask a running Temper server to run its cascade.
@@ -48,6 +53,7 @@ pub async fn run(
                 ioa_source,
                 sim_seeds,
                 prop_test_cases,
+                budget_ms: REMOTE_BUDGET_MS,
             })
             .send()
             .await

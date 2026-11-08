@@ -1,0 +1,190 @@
+name: Linux binary
+
+# Every merge to main builds the Linux temper binary once and publishes it with its sha256, so a deploy never builds
+# Temper itself (a deployment can run it from a prebuilt image and a shared binaries volume). The release
+# is `main-<first 12 of the commit>`, a prerelease holding `temper-x86_64-linux` and `temper-x86_64-linux.sha256`.
+# When the repository variable BINARY_DISPATCH_REPO and the secret BINARY_DISPATCH_TOKEN are both set, it then sends
+# that repository a repository_dispatch `temper-binary` with the tag, sha256 and commit, so a downstream image build
+# can start from it.
+#
+# Built on ubuntu-22.04 so its glibc is no newer than the sandbox image's. Tagged releases stay with release.yml.
+#
+# Each release also lists the repository files its build depends on (`temper-x86_64-linux.inputs`: every file git
+# tracks in each crate cargo's dep-info for the binary names, every Cargo.toml, Cargo.lock, the toolchain file and this
+# workflow). A push that changes none of the files its
+# previous commit's release lists builds nothing: it publishes that release's binary again under its own tag, same
+# bytes and same sha256, so a change that touches no build input (a document) is live as soon as the binary it already
+# runs is named for it. That binary's /version still names the commit it was built from.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: linux-binary-${{ github.sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # apt normally finishes in 6 to 18 seconds (66 steps on main, 27 Oct). That day a stalled
+  # Ubuntu mirror held two runners in apt-get update for their jobs' whole 60 minutes and
+  # took a pull request out of the merge queue. A request that stalls for 30 s is retried,
+  # and an install step still running after 5 minutes is failed, so a stalled mirror costs
+  # minutes and a re-run, not an hour of the queue.
+  APT_OPTS: -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30
+
+jobs:
+  build:
+    name: Build and publish
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Whether the push changes what the binary is built from
+        id: kept
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          echo "kept=false" >> "$GITHUB_OUTPUT"
+          case "$BEFORE" in
+            "" | 0000000000000000000000000000000000000000) echo "no commit before this push: build"; exit 0 ;;
+          esac
+          git cat-file -e "$BEFORE^{commit}" 2> /dev/null || { echo "$BEFORE is not in this checkout: build"; exit 0; }
+          prev="main-${BEFORE:0:12}"
+          dir="$(mktemp -d)"
+          gh release download "$prev" -D "$dir" -p 'temper-x86_64-linux*' 2> /dev/null || { echo "$prev has no binary: build"; exit 0; }
+          [ -s "$dir/temper-x86_64-linux.inputs" ] || { echo "$prev lists no build inputs: build"; exit 0; }
+          (cd "$dir" && sha256sum -c --quiet temper-x86_64-linux.sha256) || { echo "$prev's binary does not match its sha256: build"; exit 0; }
+          git diff --name-only "$BEFORE" "$GITHUB_SHA" > "$dir/changed"
+          if grep -Fxf "$dir/changed" "$dir/temper-x86_64-linux.inputs" > "$dir/hit"; then
+            echo "the push changes build inputs:"; head -20 "$dir/hit"; exit 0
+          fi
+          mkdir -p out
+          cp "$dir/temper-x86_64-linux" "$dir/temper-x86_64-linux.sha256" "$dir/temper-x86_64-linux.inputs" out/
+          echo "the push changes no file $prev was built from ($(wc -l < "$dir/changed") changed): its binary stands"
+          echo "kept=true" >> "$GITHUB_OUTPUT"
+          echo "from=$prev" >> "$GITHUB_OUTPUT"
+
+      - name: Install system dependencies
+        if: steps.kept.outputs.kept != 'true'
+        timeout-minutes: 5  # a stalled mirror, see APT_OPTS
+        run: sudo apt-get $APT_OPTS update && sudo apt-get $APT_OPTS install -y libz3-dev
+
+      - name: Read the pinned toolchain
+        if: steps.kept.outputs.kept != 'true'
+        id: toolchain
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      - name: Install pinned Rust toolchain
+        if: steps.kept.outputs.kept != 'true'
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+
+      - name: Cache Rust build
+        if: steps.kept.outputs.kept != 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-binary
+
+      - name: Build temper
+        if: steps.kept.outputs.kept != 'true'
+        # /version answers this build-time commit (temper-platform router.rs); without it a
+        # Temper started without a commit in its environment says "unknown".
+        env:
+          GIT_COMMIT_SHA: ${{ github.sha }}
+        run: cargo build --release --locked -p temper-cli
+
+      - name: Check the binary serves
+        if: steps.kept.outputs.kept != 'true'
+        run: |
+          set -euo pipefail
+          bin=target/release/temper
+          ldd "$bin"
+          if ldd "$bin" | grep -q 'not found'; then exit 1; fi
+          dir="$(mktemp -d)"
+          TURSO_URL="file:$dir/smoke.db" TEMPER_API_KEY="$(openssl rand -hex 16)" "$bin" serve --port 3999 --tenant default --storage turso --no-observe > "$dir/serve.log" 2>&1 &
+          pid=$!
+          for _ in $(seq 1 120); do
+            if curl -fsS http://127.0.0.1:3999/healthz > /dev/null 2>&1; then break; fi
+            kill -0 "$pid" 2> /dev/null || { tail -40 "$dir/serve.log"; exit 1; }
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:3999/healthz > /dev/null || { tail -40 "$dir/serve.log"; exit 1; }
+          version="$(curl -fsS http://127.0.0.1:3999/version)"
+          kill "$pid"
+          echo "temper serves /healthz; /version: $version"
+          case "$version" in *"\"$GITHUB_SHA\""*) ;; *) echo "::warning::the binary does not name its commit $GITHUB_SHA" ;; esac
+
+      - name: Publish the binary and its sha256
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEPT: ${{ steps.kept.outputs.kept }}
+          FROM: ${{ steps.kept.outputs.from }}
+        run: |
+          set -euo pipefail
+          tag="main-${GITHUB_SHA:0:12}"
+          if [ "$KEPT" = true ]; then
+            notes="Stands for $GITHUB_SHA: no file $FROM was built from changed, so this is $FROM's binary, published again by linux-binary.yml."
+          else
+            mkdir -p out
+            cp target/release/temper out/temper-x86_64-linux
+            (cd out && sha256sum temper-x86_64-linux > temper-x86_64-linux.sha256)
+            # The build's inputs: every file git tracks in each crate cargo's dep-info names a file of, since a crate can
+            # read files cargo does not record (sqlx::migrate! reads its migrations directory), plus what cargo reads first.
+            root="$PWD/"
+            perl -pe 's/^[^:]*:\s*//; s/\\ /\x01/g; s/\s+/\n/g; s/\x01/ /g' target/release/temper.d |
+              sed -n "s|^$root||p" > out/read
+            while IFS= read -r file; do
+              dir="$(dirname "$file")"
+              while [ "$dir" != . ] && [ ! -f "$dir/Cargo.toml" ]; do dir="$(dirname "$dir")"; done
+              [ "$dir" = . ] || echo "$dir"
+            done < out/read | sort -u > out/crates
+            echo "$(wc -l < out/crates) crates"
+            { cat out/read; tr '\n' '\0' < out/crates | xargs -0 -r git ls-files --;
+              git ls-files '*Cargo.toml' Cargo.lock rust-toolchain.toml rust-toolchain .cargo .github/workflows/linux-binary.yml; } |
+              sort -u > out/temper-x86_64-linux.inputs
+            rm out/read out/crates
+            echo "$(wc -l < out/temper-x86_64-linux.inputs) build inputs"
+            notes="Built from $GITHUB_SHA on ubuntu-22.04 by linux-binary.yml."
+          fi
+          sha="$(cut -d' ' -f1 out/temper-x86_64-linux.sha256)"
+          echo "sha256 $sha"
+          if gh release view "$tag" > /dev/null 2>&1; then
+            echo "$tag is already published"
+          else
+            gh release create "$tag" out/temper-x86_64-linux out/temper-x86_64-linux.sha256 out/temper-x86_64-linux.inputs \
+              --target "$GITHUB_SHA" --prerelease --title "temper $tag (Linux x86_64)" \
+              --notes "$notes sha256 $sha"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+          echo "### temper $tag" >> "$GITHUB_STEP_SUMMARY"
+          echo "sha256 \`$sha\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Tell the downstream repository
+        env:
+          GH_TOKEN: ${{ secrets.BINARY_DISPATCH_TOKEN }}
+          REPO: ${{ vars.BINARY_DISPATCH_REPO }}
+        run: |
+          set -euo pipefail
+          if [ -z "$GH_TOKEN" ] || [ -z "$REPO" ]; then
+            echo "BINARY_DISPATCH_REPO or BINARY_DISPATCH_TOKEN is not set: no repository is told"
+            exit 0
+          fi
+          gh api "repos/$REPO/dispatches" -f event_type=temper-binary \
+            -f "client_payload[tag]=${{ steps.publish.outputs.tag }}" \
+            -f "client_payload[sha256]=${{ steps.publish.outputs.sha256 }}" \
+            -f "client_payload[commit]=$GITHUB_SHA"
+          echo "told $REPO: temper-binary ${{ steps.publish.outputs.tag }}"

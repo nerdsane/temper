@@ -22,6 +22,9 @@ struct QueuedSnapshotWrite {
     sequence_nr: u64,
     snapshot: Vec<u8>,
     enqueued_at: Instant,
+    /// The trace of the action that produced this snapshot (the newest one when
+    /// writes coalesce): the write's span continues it.
+    parent: opentelemetry::Context,
 }
 
 #[derive(Debug, Default)]
@@ -107,6 +110,7 @@ impl SnapshotWriteQueue {
                 sequence_nr,
                 snapshot,
                 enqueued_at: Instant::now(),
+                parent: crate::trace_context::capture(),
             },
         );
         crate::runtime_metrics::record_snapshot_write_queue_depth(pending.writes.len() as u64);
@@ -169,11 +173,13 @@ impl SnapshotWriteQueue {
 
     async fn apply(&self, write: QueuedSnapshotWrite) {
         let span = tracing::info_span!(
+            parent: None,
             "dispatch.phase.snapshot.queued",
             otel.name = "dispatch.phase.snapshot.queued",
             persistence_id = %write.persistence_id,
             sequence_nr = write.sequence_nr,
         );
+        crate::trace_context::continue_in(&span, &write.parent);
 
         async move {
             let started_at = Instant::now();
@@ -304,6 +310,15 @@ mod tests {
             &self,
             _persistence_id: &str,
             _from_sequence: u64,
+        ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
+            Ok(Vec::new())
+        }
+
+        async fn read_events_page(
+            &self,
+            _persistence_id: &str,
+            _before_sequence: Option<u64>,
+            _limit: usize,
         ) -> Result<Vec<PersistenceEnvelope>, PersistenceError> {
             Ok(Vec::new())
         }

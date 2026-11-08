@@ -1,0 +1,218 @@
+name: revert on red
+
+# When the post-merge run of CI fails on the default branch, re-run its failed
+# jobs once. If the re-run fails too, raise the alarm: a comment on the pull
+# request that landed the commit which turned the branch red, carrying the
+# exact revert to open, and a Datadog event. This workflow pushes nothing and
+# opens no pull request: the shipper opens the revert and lands it through the
+# branch guard like any other change.
+#
+# Secrets: DD_API_KEY, and DD_SITE (default datadoghq.com), for the Datadog
+# event. Without DD_API_KEY the pull request comment is the only alarm.
+#
+# To try it: run this workflow by hand with the id of a failed run. dry_run (the
+# default) prints every decision, the alarm and the revert, checks the Datadog
+# key, and re-runs, comments and sends nothing.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Id of a failed push run of CI on the default branch
+        required: true
+      dry_run:
+        description: Print the decisions and the alarm; change nothing
+        type: boolean
+        default: true
+
+permissions:
+  contents: read        # check out the branch and try the revert locally
+  pull-requests: write  # comment on the pull request that landed the commit
+  actions: write        # re-run the failed jobs once
+
+concurrency:
+  group: revert-on-red-${{ github.event.workflow_run.head_sha || inputs.run_id }}
+
+env:
+  WORKFLOW_FILE: ci.yml  # the post-merge workflow this watches
+  # Whether that workflow's concurrency group cancels in-progress runs. If it
+  # does, a re-run could cancel a newer run, so the re-run is skipped then.
+  CANCELS_IN_PROGRESS: "true"
+
+jobs:
+  revert-on-red:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == github.event.repository.default_branch &&
+       github.event.workflow_run.conclusion == 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Re-run once, then raise the alarm
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ github.event.repository.default_branch }}
+          RUN_ID: ${{ inputs.run_id || github.event.workflow_run.id }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+          DD_API_KEY: ${{ secrets.DD_API_KEY }}
+          DD_SITE: ${{ secrets.DD_SITE }}
+        run: |
+          set -euo pipefail
+          repo=$GITHUB_REPOSITORY
+          dry=$DRY_RUN
+          site=${DD_SITE:-datadoghq.com}
+          note() { printf '%s\n' "$*" | tee -a "$GITHUB_STEP_SUMMARY"; }
+
+          # The failed run, and the other push runs of the workflow on BASE.
+          run=$(gh api "repos/$repo/actions/runs/$RUN_ID")
+          get() { jq -r "$1" <<<"$run"; }
+          sha=$(get .head_sha); attempt=$(get .run_attempt); number=$(get .run_number)
+          run_url=$(get .html_url); name=$(get .name)
+          if [[ $(get .workflow_id) != "$(gh api "repos/$repo/actions/workflows/$WORKFLOW_FILE" --jq .id)" ||
+                $(get .event) != push || $(get .head_branch) != "$BASE" || $(get .conclusion) != failure ]]; then
+            note "Run $run_url is not a failed push run of $WORKFLOW_FILE on $BASE; nothing to do."
+            exit 1
+          fi
+          # Every run on BASE (push, schedule, dispatch share it); pushes alone for the culprit.
+          all=$(gh api "repos/$repo/actions/workflows/$WORKFLOW_FILE/runs?branch=$BASE&per_page=100" \
+            --jq '[.workflow_runs[] | select(.event != "pull_request")
+                   | {n: .run_number, event, status, conclusion, sha: .head_sha, url: .html_url}] | sort_by(-.n)')
+          runs=$(jq -c 'map(select(.event == "push"))' <<<"$all")
+          later_green=$(jq -r --argjson n "$number" 'map(select(.n > $n and .conclusion == "success"))[0].url // empty' <<<"$all")
+          newer_running=$(jq -r --argjson n "$number" 'map(select(.n > $n and .status != "completed"))[0].url // empty' <<<"$all")
+          # The failure is confirmed only when the attempt before this one failed too.
+          previous_attempt=none
+          if (( attempt > 1 )); then
+            previous_attempt=$(gh api "repos/$repo/actions/runs/$RUN_ID/attempts/$((attempt - 1))" --jq .conclusion)
+          fi
+          # Earlier runs that finished green or red, newest first; cancelled runs tested nothing.
+          earlier=$(jq -c --argjson n "$number" 'map(select(.n < $n and (.conclusion == "success" or .conclusion == "failure")))' <<<"$runs")
+          green=$(jq -c 'map(select(.conclusion == "success"))[0] // {n: 0}' <<<"$earlier")
+          # If BASE was already red before this run, the oldest failure since the last green run.
+          streak=$(jq -c '[foreach .[] as $r (true; . and $r.conclusion == "failure"; if . then $r else empty end)] | last // empty' <<<"$earlier")
+          untested=$(jq -r --argjson n "$number" --argjson g "$(jq .n <<<"$green")" \
+            'map(select(.n > $g and .n < $n and .conclusion == "cancelled")) | reverse | .[] | "- `\(.sha[0:12])`: its run was cancelled (\(.url))"' <<<"$runs")
+
+          pull_of() {  # the pull request merged into BASE that landed a commit, as JSON
+            gh api "repos/$repo/commits/$1/pulls" | jq -c --arg base "$BASE" \
+              'map(select(.merged_at != null and .base.ref == $base))[0] // {} | {number, author: .user.login, head: .head.ref, title}'
+          }
+          landed=$(pull_of "$sha")
+          pr=$(jq -r '.number // empty' <<<"$landed"); author=$(jq -r '.author // empty' <<<"$landed")
+          pr_head=$(jq -r '.head // empty' <<<"$landed"); pr_title=$(jq -r '.title // empty' <<<"$landed")
+          message=$(gh api "repos/$repo/commits/$sha" --jq .commit.message)
+          parents=$(gh api "repos/$repo/commits/$sha" --jq '.parents | length')
+
+          landing() { if [[ -n $1 ]]; then echo "#$1"; else echo "${2:0:12}"; fi; }  # pull request, else commit
+          alarm() {  # kind, culprit sha, its pull request (may be empty), title, text: once per kind and culprit
+            local kind=$1 culprit=$2 target=$3 title=$4 text=$5
+            local marker="<!-- revert-on-red $kind $culprit -->" seen="<!-- revert-on-red ($kind) $culprit -->"
+            # A red-since alarm adds nothing once the revert alarm for the same commit is up.
+            [[ $kind == red-since ]] && seen="<!-- revert-on-red (red-since|revert) $culprit -->"
+            if [[ $dry == true ]]; then
+              note "Dry run: would comment on ${target:+#}${target:-no pull request} and send the Datadog event \"$title\":"
+              note "$text"
+              if [[ -n ${DD_API_KEY:-} ]]; then
+                note "Datadog key valid for $site: $(curl -sS -H "DD-API-KEY: $DD_API_KEY" "https://api.$site/api/v1/validate" | jq -r '.valid // false')"
+              else
+                note "No DD_API_KEY secret, so there would be no Datadog event."
+              fi
+              return
+            fi
+            if [[ -n $target ]]; then
+              if gh api "repos/$repo/issues/$target/comments" --paginate --jq '.[].body' | grep -E "$seen" >/dev/null; then
+                note "This alarm for \`${culprit:0:12}\` was already raised on #$target."
+                return
+              fi
+              gh api "repos/$repo/issues/$target/comments" -f body="$text"$'\n\n'"$marker" >/dev/null
+              note "Commented on #$target."
+            fi
+            if [[ -z ${DD_API_KEY:-} ]]; then note "No DD_API_KEY secret, so no Datadog event."; return; fi
+            if jq -n --arg title "$title" --arg text "$text" --arg repo "$repo" --arg base "$BASE" --arg sha "$culprit" \
+                '{title: $title, text: ("%%%\n" + $text + "\n%%%"), alert_type: "error",
+                  aggregation_key: ("revert-on-red:" + $repo + ":" + $sha),
+                  tags: ["source:revert-on-red", "repo:" + $repo, "branch:" + $base, "commit:" + $sha[0:12]]}' |
+               curl -fsS -o /dev/null -X POST "https://api.$site/api/v1/events" \
+                 -H "DD-API-KEY: $DD_API_KEY" -H 'Content-Type: application/json' --data @-; then
+              note "Sent a Datadog event."
+            else
+              note "Could not send the Datadog event."
+            fi
+          }
+
+          note "## $name failed on $BASE"
+          note "Run $run_url (attempt $attempt) at \`$sha\`${pr:+, from #$pr}."
+          decision=alarm
+          if [[ -n $later_green ]]; then
+            decision=stop; note "A later run on $BASE is green ($later_green), so there is nothing to revert."
+          elif [[ $previous_attempt != failure ]]; then
+            decision=stop
+            if [[ $CANCELS_IN_PROGRESS == true && -n $newer_running ]]; then
+              note "First failure, but a newer run on $BASE is in progress ($newer_running). A re-run now could cancel it through its concurrency group, so its result decides."
+            else
+              note "First failure: re-running the failed jobs once. If they fail again, this raises the alarm."
+              [[ $dry == true ]] || gh api -X POST "repos/$repo/actions/runs/$RUN_ID/rerun-failed-jobs" >/dev/null
+            fi
+          elif [[ $pr_head == revert-on-red/* || $pr_title == 'Revert "'* ]] || grep -q '^This reverts commit ' <<<"$message"; then
+            decision=final; note "This commit is a revert, and reverts are never reverted."
+            alarm still-red "$sha" "$pr" "$repo $BASE is still red after a revert" \
+              "${author:+@$author }**$name is still red on \`$BASE\` after this revert landed**: $run_url failed, and so did a re-run of its failed jobs. A revert is not reverted automatically; this needs a person."
+          elif [[ -n $streak ]]; then
+            decision=final
+            first_sha=$(jq -r .sha <<<"$streak"); first_url=$(jq -r .url <<<"$streak")
+            first=$(pull_of "$first_sha"); first_pr=$(jq -r '.number // empty' <<<"$first")
+            first_author=$(jq -r '.author // empty' <<<"$first")
+            note "$BASE was already red before this commit, since $first_url, so reverting this commit would not turn it green."
+            alarm red-since "$first_sha" "$first_pr" "$repo $BASE has been red since $(landing "$first_pr" "$first_sha")" \
+              "${first_author:+@$first_author }**$name has been red on \`$BASE\` since this landed**: $first_url failed, and the latest run, $run_url, failed again after a re-run. That first failure was never re-run, so it may have been a flake. Re-run its failed jobs: if they fail again, revert-on-red raises the alarm with the revert to open. If they pass, re-run the failed jobs of $run_url instead, and the alarm goes to the commit that broke it."
+          fi
+
+          if [[ $decision == final || ( $decision == stop && $dry != true ) ]]; then exit 0; fi
+          [[ $decision == alarm ]] || note "Dry run: below is the alarm a confirmed failure would raise."
+
+          # Try the revert on the current BASE, so the alarm can say whether it applies.
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --quiet --no-tags --depth=2 origin "$sha"
+          mainline=(); (( parents > 1 )) && mainline=(-m 1)
+          if git revert --no-commit "${mainline[@]}" "$sha" >/dev/null 2>&1; then
+            if git diff --cached --quiet; then
+              state="Reverting it changes nothing on \`$BASE\` now; it may already be reverted. Otherwise, to open the revert pull request:"
+            else
+              state="The revert applies cleanly on \`$BASE\` at \`$(git rev-parse --short=12 HEAD)\` ($(git diff --cached --shortstat | sed 's/^ //')). To open the revert pull request:"
+            fi
+          else
+            conflicts=$(git diff --name-only --diff-filter=U | paste -sd, - | sed 's/,/, /g')
+            state="The revert does not apply cleanly on \`$BASE\` now${conflicts:+; it conflicts in $conflicts}. Fix forward, or run this, resolve the conflicts, commit, and run the last two lines:"
+          fi
+          git revert --abort >/dev/null 2>&1 || git reset --quiet --hard HEAD
+
+          branch=revert-on-red/${sha:0:12}
+          title="$repo $BASE is red after $(landing "$pr" "$sha")"
+          text="${author:+@$author }**$name failed on \`$BASE\` after this landed, and again after a re-run of its failed jobs**: $run_url
+
+          - Commit: \`$sha\`${mainline[*]:+ (a merge commit; revert it against its first parent)}
+          - Last green run on \`$BASE\`: $(jq -r '.url // "none found"' <<<"$green")
+          ${untested:+
+          These pushes were not tested on their own, so the failure may come from one of them instead:
+          $untested
+          }
+          $state
+
+          \`\`\`sh
+          git fetch https://github.com/$repo.git $BASE && git switch -c $branch FETCH_HEAD &&
+          git revert --no-edit ${mainline[*]:+-m 1 }$sha &&
+          git push https://github.com/$repo.git HEAD:refs/heads/$branch &&
+          gh pr create --repo $repo --base $BASE --head $branch --fill
+          \`\`\`
+
+          The revert lands through the usual checks. If a fix is quicker, land that instead."
+          alarm revert "$sha" "$pr" "$title" "$text"

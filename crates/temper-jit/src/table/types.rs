@@ -75,6 +75,10 @@ pub struct TransitionTable {
     /// Declared defaults used by strict actors and pre-state constraints.
     #[serde(default)]
     pub initial_values: super::action_contract::InitialValues,
+    /// The `[[invariant]]`s every move is checked against
+    /// ([`super::invariant`]).
+    #[serde(default)]
+    pub invariants: Vec<super::invariant::MoveInvariant>,
     /// Pre-built index: action name → indices into `rules`.
     ///
     /// Eliminates the O(N) linear scan + Vec allocation in [`evaluate_ctx()`].
@@ -179,6 +183,8 @@ impl<'de> Deserialize<'de> for TransitionTable {
             keys: Vec<DeclaredKey>,
             #[serde(default)]
             vectors: Vec<DeclaredVector>,
+            #[serde(default)]
+            invariants: Vec<super::invariant::MoveInvariant>,
         }
 
         let raw = TransitionTableRaw::deserialize(deserializer)?;
@@ -194,6 +200,7 @@ impl<'de> Deserialize<'de> for TransitionTable {
             strict_action_params: raw.strict_action_params,
             action_contracts: raw.action_contracts,
             initial_values: raw.initial_values,
+            invariants: raw.invariants,
             rule_index: BTreeMap::new(),
         };
         table.rebuild_index();
@@ -219,7 +226,7 @@ pub struct TransitionRule {
 /// An effect applied after a transition fires.
 ///
 /// Mirrors [`temper_spec::automaton::ResolvedEffect`] plus the status change.
-/// Values are [`Arg`]s; resolve them with [`super::effect_args`].
+/// Counter, bool and list values are [`Arg`]s; resolve them with [`super::effect_args`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Effect {
     /// Change the entity status.
@@ -232,10 +239,14 @@ pub enum Effect {
     SubCounter { var: String, value: Arg },
     /// `var = value` on a bool.
     SetBool { var: String, value: Arg },
+    /// `var = 'literal'` on a string, including the empty string.
+    SetString { var: String, value: String },
     /// `append(var, value)`.
     ListAppend { var: String, value: Arg },
     /// `remove_at(var, index)`; out of range is a no-op.
     ListRemoveAt { var: String, index: Arg },
+    /// `remove(var, value)`: every element equal to `value`; none is a no-op.
+    ListRemove { var: String, value: Arg },
     /// Post-commit dispatch by name: an external trigger's dispatch record
     /// or a platform hook (e.g. "DispatchCallback").
     ///
@@ -254,6 +265,8 @@ pub enum Effect {
         initial_action: String,
         store_id_in: Option<String>,
         id: Option<Arg>,
+        /// Parent fields handed to the child's initial action.
+        copy: Vec<String>,
     },
 }
 
@@ -296,12 +309,15 @@ impl TransitionTable {
         names
     }
 
-    /// Related-entity references `(entity_type, id_field)` the guards of
-    /// `action` read, deduplicated in rule order.
-    pub fn guard_related_refs(&self, action: &str) -> Vec<(String, String)> {
+    /// Related-entity references `(entity_type, id_field)` whose statuses a
+    /// move of `action` reads: those its guards read, then those the type's
+    /// invariants read, deduplicated in that order.
+    pub fn related_refs(&self, action: &str) -> Vec<(String, String)> {
         let mut refs = Vec::new();
-        for rule in self.rules_for(Some(action)) {
-            for reference in rule.guard.cross_refs() {
+        let guards = self.rules_for(Some(action)).map(|rule| &rule.guard);
+        let invariants = self.invariants.iter().map(|invariant| &invariant.assert);
+        for expr in guards.chain(invariants) {
+            for reference in expr.cross_refs() {
                 if !refs.contains(&reference) {
                     refs.push(reference);
                 }
@@ -371,6 +387,7 @@ mod tests {
             strict_action_params: false,
             action_contracts: BTreeMap::new(),
             initial_values: Default::default(),
+            invariants: Vec::new(),
             rule_index: BTreeMap::new(),
         };
         table.rebuild_index();

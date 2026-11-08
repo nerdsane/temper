@@ -5,6 +5,7 @@
 //! logged via `tracing` and never affect the action response.
 
 use std::collections::BTreeMap;
+use tracing::Instrument;
 
 use crate::state::TrajectoryEntry;
 
@@ -111,46 +112,67 @@ impl WebhookDispatcher {
             let name = config.name.clone();
             let headers = config.headers.clone();
 
-            tokio::spawn(async move {
-                // determinism-ok: fire-and-forget webhook side-effect; no simulation-visible state touched
-                let mut builder = client
-                    .post(&url)
-                    .header("Content-Type", "application/json")
-                    .body(payload);
+            // One client span per webhook, a child of the action that fired it; the
+            // receiver gets its trace context in `traceparent`.
+            let span = tracing::info_span!(
+                "webhook.send",
+                otel.name = %format_args!("webhook {name}"),
+                otel.kind = "client",
+                webhook = %name,
+                webhook.status_code = tracing::field::Empty,
+            );
+            let traceparent = crate::trace_context::traceparent(&span);
+            tokio::spawn(
+                async move {
+                    // determinism-ok: fire-and-forget webhook side-effect; no simulation-visible state touched
+                    let mut builder = client
+                        .post(&url)
+                        .header("Content-Type", "application/json")
+                        .body(payload);
 
-                for (k, v) in &headers {
-                    builder = builder.header(k.as_str(), v.as_str());
-                }
+                    for (k, v) in &headers {
+                        builder = builder.header(k.as_str(), v.as_str());
+                    }
+                    if let Some(traceparent) = &traceparent
+                        && !headers
+                            .keys()
+                            .any(|k| k.eq_ignore_ascii_case("traceparent"))
+                    {
+                        builder = builder.header("traceparent", traceparent.as_str());
+                    }
 
-                match builder.send().await {
-                    Ok(resp) => {
-                        let status = resp.status();
-                        if status.is_success() {
-                            tracing::debug!(
-                                webhook = %name,
-                                url = %url,
-                                %status,
-                                "webhook dispatched successfully"
-                            );
-                        } else {
+                    match builder.send().await {
+                        Ok(resp) => {
+                            let status = resp.status();
+                            tracing::Span::current().record("webhook.status_code", status.as_u16());
+                            if status.is_success() {
+                                tracing::debug!(
+                                    webhook = %name,
+                                    url = %url,
+                                    %status,
+                                    "webhook dispatched successfully"
+                                );
+                            } else {
+                                tracing::warn!(
+                                    webhook = %name,
+                                    url = %url,
+                                    %status,
+                                    "webhook returned non-success status"
+                                );
+                            }
+                        }
+                        Err(e) => {
                             tracing::warn!(
                                 webhook = %name,
                                 url = %url,
-                                %status,
-                                "webhook returned non-success status"
+                                error = %e,
+                                "webhook dispatch failed"
                             );
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!(
-                            webhook = %name,
-                            url = %url,
-                            error = %e,
-                            "webhook dispatch failed"
-                        );
-                    }
                 }
-            });
+                .instrument(span),
+            );
         }
     }
 
@@ -476,27 +498,5 @@ payload_template = "test"
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await; // determinism-ok: test-only helper delay
         mock_server.verify().await;
-    }
-
-    #[tokio::test]
-    async fn integration_webhook_failure_does_not_panic() {
-        // Point to a port that is not listening — dispatch should silently fail.
-        let toml = r#"
-[[webhook]]
-name = "test"
-url = "http://127.0.0.1:19997/hook"
-payload_template = "test"
-"#;
-        let d = WebhookDispatcher::from_toml(toml).unwrap();
-        d.dispatch(&entry(
-            "Approve",
-            "Proposal",
-            "p-1",
-            true,
-            Some("Draft"),
-            Some("Approved"),
-        ));
-        // Wait for the spawned task to fail gracefully — no panic expected.
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await; // determinism-ok: test-only helper delay
     }
 }

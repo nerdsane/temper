@@ -41,8 +41,6 @@ pub enum EnvironmentSecretSkip {
     ValueTooLarge,
     /// The server already holds a platform secret of that name.
     AlreadySet,
-    /// The platform layer has no room for another secret.
-    BudgetExhausted,
 }
 
 impl EnvironmentSecretSkip {
@@ -55,7 +53,6 @@ impl EnvironmentSecretSkip {
             Self::ValueNotUnicode => "the value is not valid UTF-8",
             Self::ValueTooLarge => "the value is larger than the maximum size of a secret",
             Self::AlreadySet => "the server already sets a secret of that name",
-            Self::BudgetExhausted => "the maximum number of platform secrets is reached",
         }
     }
 }
@@ -161,10 +158,7 @@ fn seed_one(
     if vault.get_platform_secret(&secret).is_some() {
         return Err(EnvironmentSecretSkip::AlreadySet);
     }
-    // The only failure of the platform cache is its budget.
-    vault
-        .cache_platform_secret(&secret, value)
-        .map_err(|_| EnvironmentSecretSkip::BudgetExhausted)?;
+    vault.cache_platform_secret(&secret, value);
     Ok(secret)
 }
 

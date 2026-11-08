@@ -1,0 +1,52 @@
+[automaton]
+name = "Worker"
+states = ["Idle", "Asking", "Working", "Done"]
+initial = "Idle"
+
+[[state]]
+name = "task"
+type = "string"
+initial = ""
+
+[[action]]
+name = "Pick"
+kind = "input"
+from = ["Idle"]
+to = "Asking"
+params = [{ name = "task", type = "string" }]
+
+[[action.triggers]]
+name = "assign"
+kind = "entity"
+target_entity = "Task"
+target_action = "Assign"
+[action.triggers.args]
+worker = "Id"
+[action.triggers.resolve_target]
+kind = "field"
+id_field = "task"
+
+[[action]]
+name = "Got"
+kind = "input"
+from = ["Asking"]
+to = "Working"
+
+[[action]]
+name = "Finish"
+kind = "input"
+from = ["Working"]
+to = "Done"
+
+[[action.triggers]]
+name = "finish"
+kind = "entity"
+target_entity = "Task"
+target_action = "Complete"
+[action.triggers.resolve_target]
+kind = "field"
+id_field = "task"
+
+[[invariant]]
+name = "WorkingMeansAssigned"
+assert = "status == 'Working' => Task[task].status == 'Assigned'"

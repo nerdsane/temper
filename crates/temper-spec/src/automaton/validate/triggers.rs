@@ -1,4 +1,4 @@
-//! `[[action.triggers]]` and `[[webhook]]` checks (ADR-0046, ADR-0181).
+//! `[[action.triggers]]` and `[[state_timeout]] args` checks (ADR-0046, ADR-0181).
 
 use std::collections::BTreeSet;
 
@@ -24,7 +24,8 @@ fn state_names(automaton: &Automaton) -> BTreeSet<&str> {
 /// - The statuses the guard pins are declared states.
 /// - Each `args` value is a literal or a declared state variable, `Id`, or a
 ///   parameter of the source action (parameters are stored as fields).
-/// - For `Wasm`/`Adapter`/`Webhook` kinds: `on_success`/`on_failure` reference
+/// - `Webhook` kind is refused: nothing sends it (ADR-0182).
+/// - For `Wasm`/`Adapter` kinds: `on_success`/`on_failure` reference
 ///   actions declared on the same source entity.
 /// - Trigger names within a single action must be unique.
 pub(super) fn validate_action_triggers(
@@ -99,18 +100,15 @@ pub(super) fn validate_action_triggers(
                     }
                 }
                 TriggerKind::Webhook => {
-                    if trigger.url.as_deref().is_none_or(str::is_empty) {
-                        return Err(AutomatonParseError::Validation(format!(
-                            "trigger '{}' on action '{}' is kind=\"webhook\" but missing 'url'",
-                            trigger.name, action.name
-                        )));
-                    }
-                    if trigger.method.as_deref().is_none_or(str::is_empty) {
-                        return Err(AutomatonParseError::Validation(format!(
-                            "trigger '{}' on action '{}' is kind=\"webhook\" but missing 'method'",
-                            trigger.name, action.name
-                        )));
-                    }
+                    // ADR-0182: no dispatcher sends a kind = "webhook"
+                    // trigger, so it would install and never make its
+                    // request. Refused here instead of silently ignored.
+                    return Err(AutomatonParseError::Validation(format!(
+                        "trigger '{}' on action '{}' is kind = \"webhook\", which no dispatcher sends: \
+                         it would install and never make its request. Make the call with \
+                         kind = \"wasm\" and module = \"http_fetch\" (config = {{ url = ..., method = ... }})",
+                        trigger.name, action.name
+                    )));
                 }
             }
 
@@ -134,13 +132,19 @@ pub(super) fn validate_action_triggers(
 
             // on_success / on_failure must reference actions declared on this
             // source entity (they dispatch on the source after module/HTTP).
-            if let Some(ref cb) = trigger.on_success
-                && !action_names.contains(&cb.as_str())
-            {
-                return Err(AutomatonParseError::Validation(format!(
-                    "trigger '{}' on action '{}' on_success references unknown action '{cb}'",
-                    trigger.name, action.name
-                )));
+            for (i, cb) in trigger.on_success.iter().enumerate() {
+                if !action_names.contains(&cb.as_str()) {
+                    return Err(AutomatonParseError::Validation(format!(
+                        "trigger '{}' on action '{}' on_success references unknown action '{cb}'",
+                        trigger.name, action.name
+                    )));
+                }
+                if trigger.on_success[..i].contains(cb) {
+                    return Err(AutomatonParseError::Validation(format!(
+                        "trigger '{}' on action '{}' on_success names '{cb}' twice",
+                        trigger.name, action.name
+                    )));
+                }
             }
             if let Some(ref cb) = trigger.on_failure
                 && !action_names.contains(&cb.as_str())
@@ -182,30 +186,12 @@ fn check_args(
     Ok(())
 }
 
-/// `[[state_timeout]] args` read declared state variables, and `[[webhook]]`
-/// sources are `query.<name>`.
-pub(super) fn validate_timeouts_and_webhooks(
-    automaton: &Automaton,
-) -> Result<(), AutomatonParseError> {
+/// `[[state_timeout]] args` read declared state variables.
+pub(super) fn validate_timeout_args(automaton: &Automaton) -> Result<(), AutomatonParseError> {
     let state_names = state_names(automaton);
     for st in &automaton.state_timeouts {
-        check_args(
-            &format!("state_timeout for '{}' args", st.state),
-            &st.args,
-            &state_names,
-        )?;
-    }
-    for webhook in &automaton.webhooks {
-        let sources = std::iter::once(("entity_id", &webhook.entity_id))
-            .chain(webhook.extract.iter().map(|(k, v)| (k.as_str(), v)));
-        for (key, source) in sources {
-            if Webhook::query_param(source).is_none() {
-                return Err(AutomatonParseError::Validation(format!(
-                    "webhook '{}': {key} = \"{source}\" must be query.<name> (the query string is the only source)",
-                    webhook.name
-                )));
-            }
-        }
+        let scope = format!("state_timeout for '{}'", st.state);
+        check_args(&format!("{scope} args"), &st.args, &state_names)?;
     }
     Ok(())
 }

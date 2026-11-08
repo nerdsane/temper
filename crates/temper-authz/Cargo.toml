@@ -9,9 +9,13 @@ description = "Cedar-based authorization engine for Temper entity services"
 [dependencies]
 temper-runtime = { workspace = true }
 cedar-policy = { workspace = true }
+cedar-policy-core = { workspace = true }
 stacker = "0.1.23"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 opentelemetry = { workspace = true }
+
+[dev-dependencies]
+opentelemetry_sdk = { workspace = true, features = ["testing"] }

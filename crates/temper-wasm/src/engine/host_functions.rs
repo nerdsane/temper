@@ -21,23 +21,33 @@ use super::{HostState, WasmError};
 /// pinning the entity actor until passivation.
 const MIN_HOST_CALL_OUTER_TIMEOUT: Duration = Duration::from_millis(1);
 
+/// The invocation a host call belongs to and where it goes, for the line its
+/// outer deadline logs. `url` is empty for a call on an open stream.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct HostCallSite<'a> {
+    pub(crate) context_json: &'a str,
+    pub(crate) url: &'a str,
+}
+
 /// Run an async host-side future from a synchronous WASM FFI context with an
 /// outer deadline derived from the current invocation budget.
 ///
 /// Returns `Err(())` on outer timeout (logged via `tracing::warn`); the
 /// caller should translate this to the WASM ABI's error sentinel (`-1`).
 ///
-/// The `label` is used in the timeout log line so operators can tell which
-/// host function hit the deadline without attaching a debugger.
+/// The `label` and `site` are used in the timeout log line so operators can tell
+/// which host function, module, record and host hit the deadline without
+/// attaching a debugger.
 pub(crate) fn run_host_call_with_timeout<T, F>(
     label: &'static str,
+    site: HostCallSite<'_>,
     deadline: Duration,
     fut: F,
 ) -> Result<T, ()>
 where
     F: Future<Output = T>,
 {
-    run_host_call_with_timeout_impl(label, deadline.max(MIN_HOST_CALL_OUTER_TIMEOUT), fut)
+    run_host_call_with_timeout_impl(label, site, deadline.max(MIN_HOST_CALL_OUTER_TIMEOUT), fut)
 }
 
 /// Implementation seam for `run_host_call_with_timeout` that accepts the
@@ -46,6 +56,7 @@ where
 /// because `block_in_place` requires the multi-threaded runtime).
 fn run_host_call_with_timeout_impl<T, F>(
     label: &'static str,
+    site: HostCallSite<'_>,
     deadline: Duration,
     fut: F,
 ) -> Result<T, ()>
@@ -61,8 +72,23 @@ where
     match outcome {
         Ok(value) => Ok(value),
         Err(_elapsed) => {
+            let context = serde_json::from_str::<serde_json::Value>(site.context_json).ok();
+            let of = |name: &str| {
+                context
+                    .as_ref()
+                    .and_then(|context| context.get(name))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned()
+            };
             tracing::warn!(
                 host_fn = label,
+                wasm_module = %of("wasm_module"),
+                tenant = %of("tenant"),
+                entity_type = %of("entity_type"),
+                entity_id = %of("entity_id"),
+                action = %of("trigger_action"),
+                url = %crate::host_trait::telemetry_url(site.url),
                 timeout_secs = deadline.as_secs(),
                 timeout_ms = deadline.as_millis() as u64,
                 "WASM host call exceeded outer deadline; returning error to guest"
@@ -72,13 +98,26 @@ where
     }
 }
 
-fn redact_url_for_log(url: &str) -> String {
-    let without_fragment = url.split('#').next().unwrap_or(url);
-    without_fragment
-        .split('?')
-        .next()
-        .unwrap_or(without_fragment)
-        .to_string()
+/// Longest error phrase an outbound-failure log line carries.
+const OUTBOUND_ERROR_KIND_MAX_CHARS: usize = 120;
+
+/// Log an outbound host call that failed before the guest got a response.
+///
+/// The guest sees only `-1`, so this line is the one record of why. It names
+/// the method, host and path as telemetry may show them, and the error's
+/// leading phrase (the text before its first `": "`), which says what kind of
+/// failure it was. It never logs the query, headers, body or the rest of the
+/// error, which can quote a response body.
+fn log_outbound_call_failure(host_fn: &'static str, method: &str, url: &str, error: &str) {
+    let phrase = error.split(": ").next().unwrap_or(error).trim();
+    let error_kind: String = phrase.chars().take(OUTBOUND_ERROR_KIND_MAX_CHARS).collect();
+    tracing::warn!(
+        host_fn,
+        http.method = %method.to_ascii_uppercase(),
+        url = %crate::host_trait::telemetry_url(url),
+        error_kind = %error_kind,
+        "WASM host outbound call failed; returning error to guest"
+    );
 }
 
 /// Outcome of resolving an entity-state field against a `HostState`.
@@ -757,11 +796,13 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let _guest_span = caller.data().guest_spans.enter_active();
                 let host = caller.data().host.clone();
                 let deadline = caller.data().remaining_host_call_timeout();
-                let Ok(result) =
-                    run_host_call_with_timeout("host_http_call", deadline, async move {
-                        host.http_call(&method, &url, &headers, &body).await
-                    })
-                else {
+                let target = (method.clone(), url.clone());
+                let Ok(result) = run_host_call_with_timeout(
+                    "host_http_call",
+                    caller.data().call_site(&target.1),
+                    deadline,
+                    async move { host.http_call(&method, &url, &headers, &body).await },
+                ) else {
                     return -1;
                 };
 
@@ -786,7 +827,10 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                         }
                         resp_bytes.len() as i32
                     }
-                    Err(_) => -1,
+                    Err(error) => {
+                        log_outbound_call_failure("host_http_call", &target.0, &target.1, &error);
+                        -1
+                    }
                 }
             },
         )
@@ -832,8 +876,16 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let _guest_span = caller.data().guest_spans.enter_active();
                 let host = caller.data().host.clone();
                 let deadline = caller.data().remaining_host_call_timeout();
-                let Ok(result) =
-                    run_host_call_with_timeout("host_http_call_batch", deadline, async move {
+                // A batch fails as one call; its first request names where it went.
+                let target = requests
+                    .first()
+                    .map(|request| (request.method.clone(), request.url.clone()))
+                    .unwrap_or_default();
+                let Ok(result) = run_host_call_with_timeout(
+                    "host_http_call_batch",
+                    caller.data().call_site(&target.1),
+                    deadline,
+                    async move {
                         host.http_call_batch(
                             &requests
                                 .iter()
@@ -846,8 +898,8 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                                 .collect::<Vec<_>>(),
                         )
                         .await
-                    })
-                else {
+                    },
+                ) else {
                     return -1;
                 };
 
@@ -881,7 +933,15 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                         }
                         response_bytes.len() as i32
                     }
-                    Err(_) => -1,
+                    Err(error) => {
+                        log_outbound_call_failure(
+                            "host_http_call_batch",
+                            &target.0,
+                            &target.1,
+                            &error,
+                        );
+                        -1
+                    }
                 }
             },
         )
@@ -965,11 +1025,13 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let _guest_span = caller.data().guest_spans.enter_active();
                 let host = caller.data().host.clone();
                 let deadline = caller.data().remaining_host_call_timeout();
-                let Ok(result) =
-                    run_host_call_with_timeout("host_connect_call", deadline, async move {
-                        host.connect_call(&url, &headers, &body).await
-                    })
-                else {
+                let target_url = url.clone();
+                let Ok(result) = run_host_call_with_timeout(
+                    "host_connect_call",
+                    caller.data().call_site(&target_url),
+                    deadline,
+                    async move { host.connect_call(&url, &headers, &body).await },
+                ) else {
                     return -1;
                 };
 
@@ -994,7 +1056,11 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                         }
                         json_bytes.len() as i32
                     }
-                    Err(_) => -1,
+                    Err(error) => {
+                        // A Connect call is always a POST.
+                        log_outbound_call_failure("host_connect_call", "POST", &target_url, &error);
+                        -1
+                    }
                 }
             },
         )
@@ -1122,12 +1188,16 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let _guest_span = caller.data().guest_spans.enter_active();
                 let host = caller.data().host.clone();
                 let deadline = caller.data().remaining_host_call_timeout();
-                let Ok(result) =
-                    run_host_call_with_timeout("host_http_call_stream", deadline, async move {
+                let target = (method.clone(), url.clone());
+                let Ok(result) = run_host_call_with_timeout(
+                    "host_http_call_stream",
+                    caller.data().call_site(&target.1),
+                    deadline,
+                    async move {
                         host.http_call_binary(&method, &url, &headers, &body_bytes)
                             .await
-                    })
-                else {
+                    },
+                ) else {
                     return -1;
                 };
 
@@ -1144,7 +1214,15 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                         }
                         status as i32
                     }
-                    Err(_) => -1,
+                    Err(error) => {
+                        log_outbound_call_failure(
+                            "host_http_call_stream",
+                            &target.0,
+                            &target.1,
+                            &error,
+                        );
+                        -1
+                    }
                 }
             },
         )
@@ -1886,10 +1964,11 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                     headers,
                 };
                 let method_for_log = head.method.clone();
-                let url_for_log = redact_url_for_log(&head.url);
+                let url_for_log = crate::host_trait::telemetry_url(&head.url);
                 let deadline = caller.data().remaining_host_call_timeout();
                 let Ok(result) = run_host_call_with_timeout(
                     "host_http_stream_begin_outbound",
+                    caller.data().call_site(&url_for_log),
                     deadline,
                     async move { host.http_stream_begin_outbound(head).await },
                 ) else {
@@ -1949,11 +2028,12 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let host = caller.data().host.clone();
                 let sh = crate::http_stream::StreamHandle(handle as u32);
                 let deadline = caller.data().remaining_host_call_timeout();
-                let Ok(result) =
-                    run_host_call_with_timeout("host_http_stream_read", deadline, async move {
-                        host.http_stream_read_bounded(sh, buf_cap as usize).await
-                    })
-                else {
+                let Ok(result) = run_host_call_with_timeout(
+                    "host_http_stream_read",
+                    caller.data().call_site(""),
+                    deadline,
+                    async move { host.http_stream_read_bounded(sh, buf_cap as usize).await },
+                ) else {
                     return -4;
                 };
                 match result {
@@ -2011,6 +2091,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let deadline = caller.data().remaining_host_call_timeout();
                 let Ok(result) = run_host_call_with_timeout(
                     "host_http_stream_try_write",
+                    caller.data().call_site(""),
                     deadline,
                     async move { host.http_stream_try_write(sh, buf).await },
                 ) else {
@@ -2046,11 +2127,12 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let host = caller.data().host.clone();
                 let sh = crate::http_stream::StreamHandle(handle as u32);
                 let deadline = caller.data().remaining_host_call_timeout();
-                let Ok(result) =
-                    run_host_call_with_timeout("host_http_stream_close", deadline, async move {
-                        host.http_stream_close(sh).await
-                    })
-                else {
+                let Ok(result) = run_host_call_with_timeout(
+                    "host_http_stream_close",
+                    caller.data().call_site(""),
+                    deadline,
+                    async move { host.http_stream_close(sh).await },
+                ) else {
                     return -4;
                 };
                 match result {
@@ -2108,6 +2190,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let deadline = caller.data().remaining_host_call_timeout();
                 let Ok(result) = run_host_call_with_timeout(
                     "host_http_stream_response_head",
+                    caller.data().call_site(""),
                     deadline,
                     async move { host.http_stream_response_head(sh).await },
                 ) else {
@@ -2195,6 +2278,7 @@ pub(super) fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), 
                 let deadline = caller.data().remaining_host_call_timeout();
                 let Ok(result) = run_host_call_with_timeout(
                     "host_http_stream_send_response_head",
+                    caller.data().call_site(""),
                     deadline,
                     async move { host.http_stream_send_response_head(sh, head).await },
                 ) else {
@@ -2384,8 +2468,12 @@ mod tests {
     /// Fast futures complete normally and the returned value is passed through.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_host_call_returns_fast_future_result() {
-        let result =
-            run_host_call_with_timeout_impl("test_fast", Duration::from_secs(5), async { 42i32 });
+        let result = run_host_call_with_timeout_impl(
+            "test_fast",
+            HostCallSite::default(),
+            Duration::from_secs(5),
+            async { 42i32 },
+        );
         assert_eq!(result, Ok(42));
     }
 
@@ -2394,11 +2482,15 @@ mod tests {
     /// not deadlock against the runtime that owns it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_host_call_survives_runtime_spawned_work() {
-        let result =
-            run_host_call_with_timeout_impl("test_spawned", Duration::from_secs(5), async {
+        let result = run_host_call_with_timeout_impl(
+            "test_spawned",
+            HostCallSite::default(),
+            Duration::from_secs(5),
+            async {
                 let handle = tokio::spawn(async { "ok" });
                 handle.await.unwrap_or("err")
-            });
+            },
+        );
         assert_eq!(result, Ok("ok"));
     }
 
@@ -2411,6 +2503,7 @@ mod tests {
         let start = std::time::Instant::now();
         let result = run_host_call_with_timeout_impl(
             "test_hang",
+            HostCallSite::default(),
             Duration::from_millis(100),
             std::future::pending::<()>(),
         );
@@ -2423,14 +2516,73 @@ mod tests {
         );
     }
 
+    /// The line an outer deadline logs says which module, record and host it was,
+    /// and never a URL's query.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_outer_deadline_line_names_the_module_record_and_host() {
+        #[derive(Clone, Default)]
+        struct Lines(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Lines {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let lines = Lines::default();
+        let writer = lines.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _logs = tracing::subscriber::set_default(subscriber);
+
+        let context = serde_json::json!({
+            "tenant": "acme",
+            "entity_type": "Order",
+            "entity_id": "o-1",
+            "trigger_action": "Ship",
+            "wasm_module": "shipping",
+        })
+        .to_string();
+        let site = HostCallSite {
+            context_json: &context,
+            url: "https://api.example.test/v1/labels?token=hidden",
+        };
+        let result = run_host_call_with_timeout_impl(
+            "test_named",
+            site,
+            Duration::from_millis(5),
+            std::future::pending::<()>(),
+        );
+        assert_eq!(result, Err(()));
+        let text = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
+        for said in [
+            "exceeded outer deadline",
+            "wasm_module=shipping",
+            "tenant=acme",
+            "entity_type=Order",
+            "entity_id=o-1",
+            "action=Ship",
+            "url=api.example.test/v1/labels",
+        ] {
+            assert!(text.contains(said), "missing {said}: {text}");
+        }
+        assert!(!text.contains("hidden"), "{text}");
+    }
+
     /// Default public entrypoint resolves fast futures without touching the
     /// production-length deadline.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_host_call_public_wrapper_passes_fast_futures() {
-        let result =
-            run_host_call_with_timeout("test_public_fast", Duration::from_secs(5), async {
-                "hello"
-            });
+        let result = run_host_call_with_timeout(
+            "test_public_fast",
+            HostCallSite::default(),
+            Duration::from_secs(5),
+            async { "hello" },
+        );
         assert_eq!(result, Ok("hello"));
     }
 }

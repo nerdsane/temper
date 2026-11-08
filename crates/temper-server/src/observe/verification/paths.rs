@@ -7,7 +7,7 @@ use serde::Deserialize;
 use temper_authz::AuthenticatedRequestContext;
 use tracing::instrument;
 
-use crate::authz::{require_authenticated_context, require_observe_auth};
+use crate::authz::{observe_tenant_scope, require_authenticated_context, require_observe_auth};
 use crate::state::ServerState;
 
 /// Query parameters for path extraction.
@@ -28,7 +28,9 @@ pub(crate) async fn handle_get_paths(
     let authenticated = require_authenticated_context(authenticated.as_deref())?;
     require_observe_auth(&state, authenticated, "read_verification", "Verification")?;
 
-    let Some((_tenant_id, ioa_source)) = state.find_entity_ioa_source(&entity) else {
+    let Some(ioa_source) =
+        state.find_entity_ioa_source(observe_tenant_scope(authenticated), &entity)
+    else {
         tracing::warn!("entity spec not found for path extraction");
         return Err(StatusCode::NOT_FOUND);
     };

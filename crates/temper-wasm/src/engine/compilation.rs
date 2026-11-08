@@ -64,11 +64,13 @@ impl WasmEngine {
             (Some(pre), None)
         };
         tracing::info!(%hash, size = wasm_bytes.len(), "WASM module compiled and cached");
+        let code = crate::code_map::CodeRange::register(&module, hash);
         Ok(Arc::new(CachedModule {
             hash: hash.to_owned(),
             module,
             instance_pre,
             instance_pre_wasi,
+            _code: code,
         }))
     }
 }

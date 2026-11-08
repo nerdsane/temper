@@ -2,27 +2,26 @@
 //!
 //! This module provides metric recording helpers called from hot paths
 //! (entity actor replay, entity ops).  The periodic canary loop and
-//! sampler live in `state::runtime_metrics` via `spawn_runtime_metrics_loop`.
+//! sampler live in `state::runtime_metrics`, started by `ServerState::start_runtime`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use opentelemetry::metrics::{Counter, Gauge, Histogram};
 use opentelemetry::{KeyValue, global};
 
-use crate::state::ServerState;
-
 pub(crate) mod blob_transport;
 mod handler_deadlines;
+mod overdue_timers;
+pub(crate) mod owed_writes;
 mod snapshot_writes;
 pub use handler_deadlines::*;
+pub use overdue_timers::*;
 pub use snapshot_writes::*;
 
 struct RuntimeMetrics {
     process_resident_memory_bytes: Gauge<u64>,
-    active_actors: Gauge<u64>,
-    indexed_entities: Gauge<u64>,
     projection_backfill_snapshot_misses_total: Counter<u64>,
     event_replay_duration: Histogram<f64>,
     blob_io_wait_duration_ms: Histogram<f64>,
@@ -37,12 +36,28 @@ struct RuntimeMetrics {
     dispatch_ask_error_total: Counter<u64>,
     // --- ADR-0049: state-entry timeouts -----------------------------------
     state_timeout_fired_total: Counter<u64>,
+    reaction_withheld_total: Counter<u64>,
     state_timeout_cancelled_total: Counter<u64>,
     state_timeout_reset_total: Counter<u64>,
+    // A timer acts with its setter's current standing.
+    timer_fire_withheld_total: Counter<u64>,
+    // A machine's move that left its record unchanged and wrote nothing.
+    unrecorded_moves_total: Counter<u64>,
+    // Events written to a journal, the moves that were recorded.
+    events_written_total: Counter<u64>,
+    // A scheduled action that came due when its record could not take it.
+    scheduled_fires_lapsed_total: Counter<u64>,
+    // A scheduled action armed while an earlier arm of it, due at another time,
+    // still waits on the same record.
+    schedule_arms_beside_waiting_total: Counter<u64>,
     scheduler_overdue_on_replay_total: Counter<u64>,
     scheduler_pending_timers: Gauge<u64>,
     // ADR-0056: re-arm on actor hydration.
     state_timeout_armed_on_hydration_total: Counter<u64>,
+    state_timer_record_unreadable_total: Counter<u64>,
+    operator_credentials_active: Gauge<u64>,
+    // nerdsane/temper#351: params an action does not declare.
+    undeclared_action_params_total: Counter<u64>,
     // ADR-0056 Sub-Decision 3: silent-exit regression guard.
     integration_silent_exit_total: Counter<u64>,
     // ADR-0152: background integration failure that could not be compensated.
@@ -87,7 +102,7 @@ struct RuntimeMetrics {
     handler_deadline_exceeded_total: Counter<u64>,
     wasm_epoch_tick_interval_ms: Histogram<f64>,
     handler_kill_latency_ms: Histogram<f64>,
-    // --- Katagami (consumer-side outcome) ---------------------------------
+    // --- Consumer-side outcome ---------------------------------------
     curation_job_duration_ms: Histogram<f64>,
     curation_job_outcome_total: Counter<u64>,
 }
@@ -100,16 +115,6 @@ fn metrics() -> &'static RuntimeMetrics {
             process_resident_memory_bytes: meter
                 .u64_gauge("process_resident_memory_bytes")
                 .with_description("Resident set size (RSS) memory usage in bytes.")
-                .build(),
-            active_actors: meter
-                .u64_gauge("temper_active_actors")
-                .with_description("Number of currently active spawned entity actors.")
-                .build(),
-            indexed_entities: meter
-                .u64_gauge("temper_indexed_entities")
-                .with_description(
-                    "Number of entities currently present in the in-memory query-plane index, reported globally and by tenant.",
-                )
                 .build(),
             projection_backfill_snapshot_misses_total: meter
                 .u64_counter("temper_projection_backfill_snapshot_misses_total")
@@ -180,6 +185,10 @@ fn metrics() -> &'static RuntimeMetrics {
                      stopped, send_failed, panicked, init_failed, max_restarts_exceeded).",
                 )
                 .build(),
+            reaction_withheld_total: meter
+                .u64_counter("temper_reaction_withheld_total")
+                .with_description("Reactions withheld because Cedar refused the move on their target.")
+                .build(),
             state_timeout_fired_total: meter
                 .u64_counter("temper_state_timeout_fired_total")
                 .with_description("ADR-0049: state_timeout declarations that fired.")
@@ -192,6 +201,50 @@ fn metrics() -> &'static RuntimeMetrics {
                 .u64_counter("temper_state_timeout_reset_total")
                 .with_description("ADR-0049: timers re-armed via reset_on.")
                 .build(),
+            state_timer_record_unreadable_total: meter
+                .u64_counter("temper_state_timer_record_unreadable_total")
+                .with_description(
+                    "Records a timer walk could not read; each is tried again without its type.",
+                )
+                .build(),
+            timer_fire_withheld_total: meter
+                .u64_counter("temper_timer_fire_withheld_total")
+                .with_description(
+                    "Timer fires whose move was not made because the timer's setter may no \
+                     longer read the record.",
+                )
+                .build(),
+            unrecorded_moves_total: meter
+                .u64_counter("temper_unrecorded_moves_total")
+                .with_description(
+                    "Moves a timer, reaction or callback made that left their record unchanged, \
+                     so no event, row or trajectory entry was written for them.",
+                )
+                .build(),
+            events_written_total: meter
+                .u64_counter("temper_events_written_total")
+                .with_description(
+                    "Events written to a record's journal, by tenant, entity type, action and how \
+                     the move came about (request, timer, reaction): what grows the journal, and \
+                     where it comes from. Beside temper_unrecorded_moves_total, the moves left \
+                     out of it.",
+                )
+                .build(),
+            scheduled_fires_lapsed_total: meter
+                .u64_counter("temper_scheduled_fires_lapsed_total")
+                .with_description(
+                    "Scheduled actions that came due when their action had no transition from \
+                     the record's status, so nothing fired and nothing was recorded.",
+                )
+                .build(),
+            schedule_arms_beside_waiting_total: meter
+                .u64_counter("temper_schedule_arms_beside_waiting_total")
+                .with_description(
+                    "Scheduled actions armed while an earlier commit's arm of the same action, \
+                     due at another time, still waits on the record: a spec that wants both, or \
+                     a retry whose two chains never merge.",
+                )
+                .build(),
             scheduler_overdue_on_replay_total: meter
                 .u64_counter("temper_scheduler_overdue_on_replay_total")
                 .with_description(
@@ -203,25 +256,45 @@ fn metrics() -> &'static RuntimeMetrics {
                 .u64_gauge("temper_scheduler_pending_timers")
                 .with_description("ADR-0049: live in-memory timer count per entity type.")
                 .build(),
+            operator_credentials_active: meter
+                .u64_gauge("temper_operator_credentials_active")
+                .with_description(
+                    "Active operator AgentCredentials per tenant, counted at boot; more than \
+                     one means an older operator key still signs in.",
+                )
+                .build(),
             state_timeout_armed_on_hydration_total: meter
                 .u64_counter("temper_state_timeout_armed_on_hydration_total")
                 .with_description(
                     "ADR-0056: timers re-armed when an actor hydrated into a state with a \
-                     declared [[state_timeout]] but no live in-memory timer. `elapsed_bucket` \
-                     tag distinguishes overdue (fired immediately) from budgeted (armed with \
-                     remaining delay).",
+                     declared [[state_timeout]] but no live in-memory timer, at boot, or by a \
+                     timer's own task when its record moved. `elapsed_bucket` tag: overdue \
+                     (its deadline passed with no timer waiting; fired immediately), repeating \
+                     (a timer whose fire resets it, due with no timer waiting: one look, fired \
+                     immediately), on_time (re-armed by the task that woke for that deadline; \
+                     fired immediately), budgeted (armed with remaining delay).",
+                )
+                .build(),
+            undeclared_action_params_total: meter
+                .u64_counter("temper_undeclared_action_params_total")
+                .with_description(
+                    "nerdsane/temper#351: body keys an action of a non-strict spec does not \
+                     declare, by entity type and action. `kind` is undeclared (sent by a caller), \
+                     kernel (added by the kernel to a callback) or ambiguous (both spellings of a \
+                     param, different values); `mode` is report (kept) or enforce (dropped, or \
+                     refused from outside).",
                 )
                 .build(),
             integration_silent_exit_total: meter
                 .u64_counter("temper_integration_silent_exit_total")
                 .with_description(
-                    "ADR-0056: inline WASM trigger-integration invocations that returned \
-                     successfully without causing any state transition on the triggering \
-                     entity. Under healthy operation this counter is permanently zero; any \
+                    "ADR-0056: WASM trigger invocations that succeeded but sent no answer: \
+                     the module named no move, did not answer empty, and wrote nothing as a \
+                     composite. An answer that keeps the record's status is a move and is not \
+                     counted. Under healthy operation this counter is permanently zero; any \
                      nonzero reading is a regression of the consumer-side \
-                     exit-dispatches-an-action invariant (openpaw ADR-0039 Sub-Decision 3a) \
-                     or a transient persist failure that slipped past the retry layer \
-                     (ADR-0056 Sub-Decision 2). Alerts on this counter are critical-severity.",
+                     exit-dispatches-an-action invariant (the consumer's own guard). \
+                     Alerts on this counter are critical-severity.",
                 )
                 .build(),
             integration_failure_dropped_total: meter
@@ -410,7 +483,7 @@ fn metrics() -> &'static RuntimeMetrics {
             curation_job_duration_ms: meter
                 .f64_histogram("temper_curation_job_duration_ms")
                 .with_unit("ms")
-                .with_description("End-to-end CurationJob latency (Katagami).")
+                .with_description("End-to-end CurationJob latency.")
                 .build(),
             curation_job_outcome_total: meter
                 .u64_counter("temper_curation_job_outcome_total")
@@ -420,20 +493,11 @@ fn metrics() -> &'static RuntimeMetrics {
     })
 }
 
-/// Record actor and entity counts from the current server state snapshot.
-pub fn record_server_state_metrics(state: &ServerState) {
-    if let Ok(registry) = state.actor_registry.read() {
-        record_active_actor_count(registry.len());
-        record_actor_mailbox_metrics(&registry);
-    }
-    if let Ok(index) = state.entity_index.read() {
-        record_active_entity_counts(&index);
-    }
-}
-
 /// Walk the actor registry and emit per-actor mailbox depth + per-entity-type
-/// aggregate utilization gauges (ADR-0048 observability baseline).
-fn record_actor_mailbox_metrics(
+/// aggregate utilization gauges (ADR-0048 observability baseline). The walk is
+/// O(actors), so the periodic sampler in `state::runtime_metrics` runs it, never
+/// a spawn: run on every spawn it made each create cost more as records grew.
+pub(crate) fn record_actor_mailbox_metrics(
     registry: &BTreeMap<String, temper_runtime::actor::ActorRef<crate::entity_actor::EntityMsg>>,
 ) {
     // actor_key format is "{tenant}:{entity_type}:{entity_id}"; we aggregate
@@ -454,30 +518,6 @@ fn record_actor_mailbox_metrics(
         if count > 0 {
             record_actor_mailbox_utilization(&entity_type, sum_util / count as f64);
         }
-    }
-}
-
-/// Record current active actor count.
-pub fn record_active_actor_count(count: usize) {
-    metrics().active_actors.record(count as u64, &[]);
-}
-
-/// Record active entity counts by tenant and global total.
-pub fn record_active_entity_counts(index: &BTreeMap<String, BTreeSet<String>>) {
-    let mut by_tenant: BTreeMap<String, u64> = BTreeMap::new();
-    for (index_key, ids) in index {
-        if let Some((tenant, _entity_type)) = index_key.split_once(':') {
-            *by_tenant.entry(tenant.to_string()).or_insert(0) += ids.len() as u64;
-        }
-    }
-
-    let total: u64 = by_tenant.values().copied().sum();
-    metrics().indexed_entities.record(total, &[]);
-
-    for (tenant, count) in by_tenant {
-        metrics()
-            .indexed_entities
-            .record(count, &[KeyValue::new("tenant", tenant)]);
     }
 }
 
@@ -546,6 +586,15 @@ pub enum ConcurrencyRetryOutcome {
     /// Replay caught the entity in a state where the action is no longer legal
     /// (e.g., the entity reached a terminal state during the race).
     ActionIllegal,
+    /// Replay found the action's own event in the journal: an earlier attempt
+    /// landed although the store answered with a concurrency violation.
+    AlreadyWritten,
+    /// The action is a state timer's fire, and replay found the record past
+    /// the sequence its timer was armed at: dropped, not evaluated again.
+    TimerSuperseded,
+    /// The action was decided on the record as its caller read it, and replay
+    /// found the record changed: refused, so the caller decides it again.
+    RecordChanged,
 }
 
 impl ConcurrencyRetryOutcome {
@@ -555,6 +604,9 @@ impl ConcurrencyRetryOutcome {
             ConcurrencyRetryOutcome::Success => "success",
             ConcurrencyRetryOutcome::Exhausted => "exhausted",
             ConcurrencyRetryOutcome::ActionIllegal => "action_illegal",
+            ConcurrencyRetryOutcome::AlreadyWritten => "already_written",
+            ConcurrencyRetryOutcome::TimerSuperseded => "timer_superseded",
+            ConcurrencyRetryOutcome::RecordChanged => "record_changed",
         }
     }
 }
@@ -651,6 +703,19 @@ pub fn record_dispatch_error(
 // ADR-0049: state-entry timeouts.
 // ============================================================================
 
+/// Record a reaction Cedar refused on its target. Identity belongs in the
+/// warning, not these bounded labels; app_id comes from the meter resource.
+pub fn record_reaction_withheld(tenant: &str, entity_type: &str, action: &str) {
+    metrics().reaction_withheld_total.add(
+        1,
+        &[
+            KeyValue::new("tenant", tenant.to_string()),
+            KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("action", action.to_string()),
+        ],
+    );
+}
+
 /// Record that a state_timeout fired for a specific (entity, state, action).
 pub fn record_state_timeout_fired(tenant: &str, entity_type: &str, state: &str, action: &str) {
     metrics().state_timeout_fired_total.add(
@@ -676,6 +741,18 @@ pub fn record_state_timeout_cancelled(tenant: &str, entity_type: &str, state: &s
     );
 }
 
+/// Record a record of a timed type that a timer walk (boot or install) could
+/// not read. The walk finishes its type and tries the record again without it.
+pub fn record_state_timer_record_unreadable(tenant: &str, entity_type: &str) {
+    metrics().state_timer_record_unreadable_total.add(
+        1,
+        &[
+            KeyValue::new("tenant", tenant.to_string()),
+            KeyValue::new("entity_type", entity_type.to_string()),
+        ],
+    );
+}
+
 /// Record a state_timeout re-arm triggered by a reset_on action.
 pub fn record_state_timeout_reset(
     tenant: &str,
@@ -694,9 +771,82 @@ pub fn record_state_timeout_reset(
     );
 }
 
-/// Record a state_timeout re-armed by the hydration hook (ADR-0056). `bucket`
-/// is `"overdue"` when the timer fired immediately because elapsed >=
-/// after_seconds, or `"budgeted"` when armed with remaining delay.
+/// Record a move a machine made that left its record unchanged, so nothing
+/// was written for it (`entity_actor::unrecorded`).
+pub fn record_unrecorded_move(tenant: &str, entity_type: &str, action: &str) {
+    metrics().unrecorded_moves_total.add(
+        1,
+        &[
+            KeyValue::new("tenant", tenant.to_string()),
+            KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("action", action.to_string()),
+        ],
+    );
+}
+
+/// Record an event of `action` written to a journal of `entity_type` in
+/// `tenant`. `via` is how the move came about: `request`, `timer`, `reaction`,
+/// or `unknown` for an event that does not say.
+pub fn record_event_written(tenant: &str, entity_type: &str, action: &str, via: &str) {
+    metrics().events_written_total.add(
+        1,
+        &[
+            KeyValue::new("tenant", tenant.to_string()),
+            KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("action", action.to_string()),
+            KeyValue::new("via", via.to_string()),
+        ],
+    );
+}
+
+/// Record a scheduled action that came due when its action had no transition
+/// from its record's status, so it did not fire (`scheduled_fire_lapsed`).
+pub fn record_scheduled_fire_lapsed(tenant: &str, entity_type: &str, action: &str) {
+    metrics().scheduled_fires_lapsed_total.add(
+        1,
+        &[
+            KeyValue::new("tenant", tenant.to_string()),
+            KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("action", action.to_string()),
+        ],
+    );
+}
+
+/// Record a scheduled action armed while an earlier commit's arm of it, due at
+/// another time, still waits on the same record. Counted when the move is
+/// applied, so a commit that then fails is counted too.
+pub fn record_schedule_arm_beside_waiting(tenant: &str, entity_type: &str, action: &str) {
+    metrics().schedule_arms_beside_waiting_total.add(
+        1,
+        &[
+            KeyValue::new("tenant", tenant.to_string()),
+            KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("action", action.to_string()),
+        ],
+    );
+}
+
+/// Record a timer fire, a state timer's or a scheduled action's, whose move
+/// was not made because its setter may no longer read the record.
+pub fn record_timer_fire_withheld(tenant: &str, entity_type: &str, action: &str) {
+    metrics().timer_fire_withheld_total.add(
+        1,
+        &[
+            KeyValue::new("tenant", tenant.to_string()),
+            KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("action", action.to_string()),
+        ],
+    );
+}
+
+/// Record a state_timeout re-armed by the hydration hook (ADR-0056), at boot,
+/// or by a timer's own task. `bucket` is `"overdue"` when the timer fires
+/// immediately because its deadline passed with no timer waiting for it,
+/// `"repeating"` when the same holds for a timer whose fire resets it, which
+/// owes one look and lost no deadline, `"on_time"` when it fires immediately
+/// at the deadline its task woke for
+/// (the record took an action that does not reset the timer), or
+/// `"budgeted"` when armed with remaining delay.
 pub fn record_state_timeout_armed_on_hydration(
     tenant: &str,
     entity_type: &str,
@@ -714,9 +864,27 @@ pub fn record_state_timeout_armed_on_hydration(
     );
 }
 
-/// Record a silent integration exit — an inline trigger invocation that
-/// returned successfully without causing a state transition on the
-/// triggering entity. Emits `temper_integration_silent_exit_total` (ADR-0056
+/// Count body keys an action does not declare (`temper_undeclared_action_params_total`).
+pub fn record_undeclared_action_params(
+    entity_type: &str,
+    action: &str,
+    kind: &'static str,
+    mode: &'static str,
+    keys: u64,
+) {
+    metrics().undeclared_action_params_total.add(
+        keys,
+        &[
+            KeyValue::new("entity_type", entity_type.to_string()),
+            KeyValue::new("action", action.to_string()),
+            KeyValue::new("kind", kind),
+            KeyValue::new("mode", mode),
+        ],
+    );
+}
+
+/// Record a silent integration exit: a trigger invocation that succeeded but
+/// sent no answer to the triggering entity. Emits `temper_integration_silent_exit_total` (ADR-0056
 /// Sub-Decision 3).
 pub fn record_integration_silent_exit(
     tenant: &str,
@@ -768,6 +936,13 @@ pub fn record_scheduler_overdue_on_replay(tenant: &str, entity_type: &str) {
             KeyValue::new("entity_type", entity_type.to_string()),
         ],
     );
+}
+
+/// Report how many Active operator credentials a tenant has (counted at boot).
+pub fn record_operator_credentials_active(tenant: &str, count: u64) {
+    metrics()
+        .operator_credentials_active
+        .record(count, &[KeyValue::new("tenant", tenant.to_string())]);
 }
 
 /// Report the current in-memory pending-timer count per entity type.
@@ -956,7 +1131,7 @@ pub fn record_event_store_append_wait(backend: &str, operation: &str, elapsed: D
 // existing `record_cedar_evaluation` helper. No duplicate metric here.
 
 // ============================================================================
-// Katagami.
+// Consumer-side outcome.
 // ============================================================================
 
 pub fn record_curation_job_duration(job_type: &str, duration: Duration) {

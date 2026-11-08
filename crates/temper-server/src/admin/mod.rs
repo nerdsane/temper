@@ -18,7 +18,9 @@ use temper_runtime::tenant::TenantId;
 use temper_spec::automaton::Admission;
 
 use crate::authz::require_tenant_match;
-use crate::profiling::{CpuProfileQuery, cpu_profile_handler, wall_profile_handler};
+use crate::profiling::{
+    CpuProfileQuery, cpu_profile_handler, heap_profile_handler, wall_profile_handler,
+};
 use crate::state::ServerState;
 
 /// Build the `/admin` sub-router.
@@ -28,10 +30,11 @@ pub fn build_admin_router() -> Router<ServerState> {
             "/admission/{tenant}/{entity_type}",
             patch(override_admission),
         )
-        // ADR-0055: on-demand CPU and wall-clock profile capture.
+        // ADR-0055: on-demand CPU, wall-clock and heap profile capture.
         // Gated by TEMPER_PROFILING_ENABLED at request time.
         .route("/profile/cpu", get(capture_cpu_profile))
         .route("/profile/wall", get(capture_wall_profile))
+        .route("/profile/heap", get(capture_heap_profile))
 }
 
 fn require_admin_operation(
@@ -166,6 +169,23 @@ async fn capture_wall_profile(
     wall_profile_handler(query).await
 }
 
+async fn capture_heap_profile(
+    State(state): State<ServerState>,
+    Extension(authenticated): Extension<AuthenticatedRequestContext>,
+) -> Response {
+    if let Err(status) = require_admin_operation(
+        &state,
+        &authenticated,
+        "capture_profile",
+        "Profiler",
+        "heap",
+        BTreeMap::new(),
+    ) {
+        return status.into_response();
+    }
+    heap_profile_handler().await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,10 +235,13 @@ mod tests {
                         role: None,
                         acting_for: None,
                         agent_type: None,
+                        label: None,
                         attributes: Default::default(),
                     },
                     context_attrs: Default::default(),
                     correlation_id: "admin-side-channel-test".to_string(),
+                    cause: None,
+                    credential: None,
                 },
             ));
         request

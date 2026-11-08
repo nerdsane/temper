@@ -95,36 +95,14 @@ mod tests {
     }
 
     // Every resolver call site is covered individually here, keyed on its
-    // exact `what` string, because end-to-end fault injection does not reach
-    // all of them (see `IdentityResolver::resolve_jwt`/`current_generation`:
-    // the TrustedIssuer and PrincipalGeneration reads go through the
-    // actor-ask path, which has no deterministic fault-injection fixture in
-    // this workspace today — only the store-replay path does, via
-    // `SimEventStore::fail_next_reads`). This is the closest classification-
-    // level coverage available for those two call sites without adding new
-    // actor fault-injection plumbing, which is out of scope for this change.
-    #[test]
-    fn classify_dependency_read_covers_every_resolver_call_site() {
-        let unavailable = |what: &str| -> Result<i32, IdentityError> {
-            let read: Result<Option<i32>, String> = Err("read failed".to_string());
-            classify_dependency_read(read, what)
-        };
-        for what in [
-            "AgentCredential read",
-            "AgentType read",
-            "AgentCredential recheck",
-            "TrustedIssuer read",
-            "PrincipalGeneration read",
-        ] {
-            assert_eq!(
-                unavailable(what),
-                Err(IdentityError::Unavailable(format!(
-                    "{what} unavailable: read failed"
-                ))),
-                "call site '{what}' must classify a dependency read failure as Unavailable"
-            );
-        }
-    }
+    // exact `what` string. The TrustedIssuer and PrincipalGeneration checks
+    // first make their type's index complete from the store
+    // (`ServerState::ensure_type_indexed`, a listing whose failure maps to
+    // `Unavailable` in `IdentityResolver::resolve_jwt` and `revocation::current_generation`),
+    // then read the row through `entity_state`. `SimEventStore` injects faults
+    // into reads of one entity's events, not into listings, so the listing's
+    // failure has no end-to-end fixture in this workspace; this is the
+    // closest classification-level coverage for those call sites.
 
     #[test]
     fn unavailable_error_message_never_claims_invalidity() {

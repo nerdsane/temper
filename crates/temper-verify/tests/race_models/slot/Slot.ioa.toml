@@ -1,0 +1,32 @@
+# Planted: Claim is taken while the slot is held, so a second Rollout gets it too.
+[automaton]
+name = "Slot"
+states = ["Free", "Held"]
+initial = "Free"
+
+[[state]]
+name = "holder"
+type = "string"
+initial = ""
+
+[[action]]
+name = "Claim"
+kind = "input"
+from = ["Free", "Held"]
+to = "Held"
+params = [{ name = "holder", type = "string" }]
+
+[[action.triggers]]
+name = "granted"
+kind = "entity"
+target_entity = "Rollout"
+target_action = "Granted"
+[action.triggers.resolve_target]
+kind = "field"
+id_field = "holder"
+
+[[action]]
+name = "Free"
+kind = "input"
+from = ["Held"]
+to = "Free"

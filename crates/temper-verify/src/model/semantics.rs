@@ -6,16 +6,29 @@ use temper_spec::predicate::{
     Arg, Env, Expr, Literal, Operand, ParamKind, Set, Truth, Val, VarKind, eval,
 };
 
-use super::types::{ModelEffect, ParamValue, ResolvedTransition, TemperModel, TemperModelState};
+use super::types::{
+    Fields, ModelEffect, ModelString, ParamValue, ResolvedTransition, TemperModel, TemperModelState,
+};
+
+use super::assignments::string_literals;
+use super::count_bounds::count_ranges;
+pub(crate) use super::expansion::Expansion;
+use super::heap::{Heap, step_room};
+use super::parameters::{any_inputs, checks_inputs, inputs_allow};
+pub use super::strings::{
+    apply_string_params, canonical_names, canonical_state, canonical_strings, canonical_values,
+    string_values,
+};
 
 /// Parameter assignments explored per step for one transition, at most
-/// (TigerStyle budget: `successors` materializes every assignment).
+/// (numeric/list parameters; joint string products also consume expansion work).
 pub const MAX_PARAM_ASSIGNMENTS: usize = 4096;
 
-/// A model state as a predicate environment. Status, counters, booleans and
-/// lists are modeled; declared counters, booleans and lists missing from the
-/// state read as their zero value. String and numeric variables, entity
-/// fields and related-entity statuses are not modeled and read as unknown.
+/// A model state as a predicate environment. Status, counters, booleans,
+/// lists and tracked strings are modeled; declared counters, booleans and
+/// lists missing from the state read as their zero value. Untracked string
+/// and numeric variables, entity fields and related entities are not modeled
+/// and read as unknown.
 pub struct ModelEnv<'a> {
     /// Declared state variable types.
     pub kinds: &'a BTreeMap<String, VarKind>,
@@ -36,12 +49,16 @@ impl Env for ModelEnv<'_> {
             Some(VarKind::Bool) => {
                 Val::Bool(self.state.booleans.get(name).copied().unwrap_or(false))
             }
-            Some(VarKind::List) => self
+            Some(VarKind::List) => self.state.lists.get(name).map_or_else(
+                || Val::Values(Vec::new()),
+                |items| Val::Values(items.iter().map(|s| s.val()).collect()),
+            ),
+            Some(VarKind::Str) => self
                 .state
-                .lists
+                .strings
                 .get(name)
-                .map_or(Val::Strs(&[]), |items| Val::Strs(items)),
-            Some(VarKind::Str | VarKind::Num) | None => Val::Unknown,
+                .map_or(Val::Unknown, |value| value.val()),
+            Some(VarKind::Num) | None => Val::Unknown,
         }
     }
 
@@ -88,106 +105,277 @@ pub fn guard_may_hold(
 /// chosen for it. The caller has checked `t`'s status and guard.
 ///
 /// A parameter is an unknown value, so each candidate is explored:
-/// counts `0..=bound`, both booleans, and for list elements every literal a
-/// guard or invariant compares that list against plus one fresh string.
-/// Assignments that grow a counter past its bound (or a list past the
-/// default bound) are pruned, as in bounded exploration.
+/// counts up to as far as the move's effects can carry them inside the
+/// bounds (`count_bounds`), both booleans, and for list elements held values,
+/// relevant literals and concrete fresh equality symbols.
+/// Assignments that grow a counter or a list past its bound are pruned, as
+/// in bounded exploration.
 pub fn successors(
     model: &TemperModel,
     t: &ResolvedTransition,
     state: &TemperModelState,
-) -> Vec<(BTreeMap<String, ParamValue>, TemperModelState)> {
-    let mut out = Vec::new();
-    for params in param_assignments(model, t) {
-        let mut next = state.clone();
-        if let Some(to) = &t.to_state {
-            next.status = to.clone();
-        }
-        apply_effects(&t.effects, &mut next, &t.name, &params);
-        if within_bounds(model, state, &next) {
-            out.push((params, next));
-        }
+) -> Vec<(Fields<ParamValue>, TemperModelState)> {
+    successors_among(model, t, state, &string_values(std::iter::once(state)))
+}
+
+/// [`successors`], with `values` the tracked strings in scope: the state's
+/// own, or every entity's in a joint state. A string parameter may take any
+/// of them (a value copied from somewhere), `''`, a literal the spec
+/// compares its variable with, or one value new to the scope, as far as the
+/// action's constraints allow.
+pub fn successors_among(
+    model: &TemperModel,
+    t: &ResolvedTransition,
+    state: &TemperModelState,
+    values: &BTreeSet<ModelString>,
+) -> Vec<(Fields<ParamValue>, TemperModelState)> {
+    successors_budgeted(model, t, state, values, &Expansion::for_model(model))
+}
+
+pub(crate) fn successors_budgeted(
+    model: &TemperModel,
+    t: &ResolvedTransition,
+    state: &TemperModelState,
+    values: &BTreeSet<ModelString>,
+    budget: &Expansion,
+) -> Vec<(Fields<ParamValue>, TemperModelState)> {
+    successors_with(model, t, state, values, budget, |_| {})
+}
+
+/// The inputs [`successors_budgeted`] would make a step of, without the steps.
+/// Only a step that grows a counter or list can go past a bound, so only such
+/// a step needs building to tell; a step whose triggers read values of their
+/// own is built too, so each way those values decide the triggers is kept.
+pub(crate) fn inputs_within_bounds(
+    model: &TemperModel,
+    t: &ResolvedTransition,
+    state: &TemperModelState,
+    values: &BTreeSet<ModelString>,
+    budget: &Expansion,
+) -> Vec<Fields<ParamValue>> {
+    let grows = t.effects.iter().any(|effect| {
+        matches!(
+            effect,
+            ModelEffect::SetCounter { .. }
+                | ModelEffect::AddCounter { .. }
+                | ModelEffect::ListAppend { .. }
+        )
+    });
+    if grows || !t.after_params.is_empty() {
+        return successors_budgeted(model, t, state, values, budget)
+            .into_iter()
+            .map(|(params, _)| params)
+            .collect();
     }
+    let mut out = Vec::new();
+    any_inputs(model, t, state, values, budget, |params| {
+        if checks_inputs(model, t) && !inputs_allow(model, t, state, &params) {
+            budget.give(params.heap());
+            return false;
+        }
+        if !budget.reserve(&mut out) {
+            return true;
+        }
+        out.push(params);
+        false
+    });
     out
 }
 
-/// The cartesian product of each parameter's candidate values.
-fn param_assignments(
+/// [`successors`], adding to `cut` each counter and list a step it leaves
+/// out would take past its bound, with that bound, and each count parameter
+/// whose range was widened, with the largest value tried.
+pub(crate) fn successors_noting_cuts(
     model: &TemperModel,
     t: &ResolvedTransition,
-) -> Vec<BTreeMap<String, ParamValue>> {
-    let count_bound = model
-        .counter_bounds
-        .values()
-        .copied()
-        .max()
-        .unwrap_or(0)
-        .max(model.default_max_counter);
-    let mut assignments = vec![BTreeMap::new()];
-    for (name, kind) in &t.params {
-        let candidates: Vec<ParamValue> = match kind {
-            ParamKind::Count => (0..=count_bound).map(ParamValue::Count).collect(),
-            ParamKind::Bool => vec![ParamValue::Bool(false), ParamValue::Bool(true)],
-            ParamKind::Str => {
-                let mut values: BTreeSet<String> = BTreeSet::new();
-                for effect in &t.effects {
-                    if let ModelEffect::ListAppend {
-                        var,
-                        value: Arg::Param(p),
-                    } = effect
-                        && p == name
-                        && let Some(literals) = model.list_literals.get(var)
-                    {
-                        values.extend(literals.iter().cloned());
-                    }
-                }
-                values
-                    .into_iter()
-                    .map(ParamValue::Str)
-                    .chain(std::iter::once(ParamValue::Fresh))
-                    .collect()
-            }
-        };
-        assert!(
-            assignments.len() * candidates.len() <= MAX_PARAM_ASSIGNMENTS,
-            "transition '{}' has more than {MAX_PARAM_ASSIGNMENTS} parameter assignments",
-            t.name
-        );
-        assignments = assignments
-            .into_iter()
-            .flat_map(|assignment| {
-                candidates.iter().map(move |value| {
-                    let mut next = assignment.clone();
-                    next.insert(name.clone(), value.clone());
-                    next
-                })
-            })
-            .collect();
+    state: &TemperModelState,
+    cut: &mut BTreeMap<String, usize>,
+) -> Vec<(Fields<ParamValue>, TemperModelState)> {
+    for (name, range) in count_ranges(model, t) {
+        // A value past the range takes these counters past their bounds:
+        // that step is left out, as any other step that goes past is.
+        cut.extend(range.past);
+        if range.widened {
+            cut.insert(format!("params.{name}"), range.largest);
+        }
     }
-    assignments
+    let values = string_values(std::iter::once(state));
+    successors_with(
+        model,
+        t,
+        state,
+        &values,
+        &Expansion::for_model(model),
+        |next| {
+            cut.extend(outgrown(model, state, next));
+        },
+    )
+}
+
+/// [`successors_budgeted`], passing each step past the bounds to `left_out`.
+fn successors_with(
+    model: &TemperModel,
+    t: &ResolvedTransition,
+    state: &TemperModelState,
+    values: &BTreeSet<ModelString>,
+    budget: &Expansion,
+    mut left_out: impl FnMut(&TemperModelState),
+) -> Vec<(Fields<ParamValue>, TemperModelState)> {
+    let mut out = Vec::new();
+    any_inputs(model, t, state, values, budget, |params| {
+        if checks_inputs(model, t) && !inputs_allow(model, t, state, &params) {
+            let bytes = params.heap();
+            drop(params);
+            budget.give(bytes);
+            return false;
+        }
+        let room = step_room(state, t);
+        if !budget.hold(room) {
+            return true;
+        }
+        let mut next = state.clone();
+        if let Some(to) = &t.to_state {
+            next.status = *to;
+        }
+        apply_effects(&t.effects, &mut next, &t.name, &params);
+        apply_string_params(&t.string_params, &mut next, &params);
+        canonical_state(&mut next);
+        debug_assert!(next.heap() <= room, "step estimate covers the built record");
+        budget.give(room - next.heap());
+        if within_bounds(model, state, &next) {
+            // The input map remains charged while it is moved into the result.
+            // Reserve the result vector before keeping the charged state.
+            if !budget.reserve(&mut out) {
+                return true;
+            }
+            out.push((params, next));
+        } else {
+            left_out(&next);
+            let bytes = next.heap() + params.heap();
+            drop(next);
+            drop(params);
+            budget.give(bytes);
+        }
+        false
+    });
+    if t.after_params.is_empty() {
+        out
+    } else {
+        super::trigger_guard::with_after_values(model, t, out, budget)
+    }
+}
+
+/// The transition the runtime takes for action `name` in `status`: the first
+/// with that name whose source states include `status` (temper-jit
+/// `evaluate_ctx`). A later transition with the same name never fires from
+/// `status`; when this one's guard fails, the action is refused.
+pub fn rule_for<'a>(
+    model: &'a TemperModel,
+    name: &str,
+    status: &str,
+) -> Option<&'a ResolvedTransition> {
+    model.transitions.iter().find(|t| {
+        t.name == name && (t.from_states.is_empty() || t.from_states.iter().any(|s| s == status))
+    })
+}
+
+/// `state` after transition `t` with `params`, with no renumbering of new
+/// strings (the caller renumbers, over one entity or a joint state).
+pub fn step(
+    t: &ResolvedTransition,
+    state: &TemperModelState,
+    params: &Fields<ParamValue>,
+) -> TemperModelState {
+    let mut next = state.clone();
+    if let Some(to) = &t.to_state {
+        next.status = *to;
+    }
+    apply_effects(&t.effects, &mut next, &t.name, params);
+    apply_string_params(&t.string_params, &mut next, params);
+    next
+}
+
+/// The transition with more parameter assignments than one step explores
+/// ([`MAX_PARAM_ASSIGNMENTS`]), and how many it has. Stepping it would stop
+/// at the assertion in `param_assignments`, so a caller asks this first.
+pub fn oversized_transition(model: &TemperModel) -> Option<(&str, usize)> {
+    model.transitions.iter().find_map(|t| {
+        // Counted, not built: a parameter can write a counter with a large
+        // bound, and building its candidates would allocate that many.
+        let ranges = count_ranges(model, t);
+        let assignments = t.params.iter().fold(1usize, |n, (name, kind)| {
+            let choices = match kind {
+                ParamKind::Count => ranges[name.as_str()].largest.saturating_add(1),
+                ParamKind::Bool => 2,
+                ParamKind::Str if t.string_params.iter().any(|p| p.name == *name) => 1,
+                ParamKind::Str => string_literals(model, t, name).len() + 1,
+            };
+            n.saturating_mul(choices)
+        });
+        (assignments > MAX_PARAM_ASSIGNMENTS).then_some((t.name.as_str(), assignments))
+    })
+}
+
+/// The largest value counter `var` is explored up to.
+pub(crate) fn counter_bound(model: &TemperModel, var: &str) -> usize {
+    model
+        .counter_bounds
+        .get(var)
+        .copied()
+        .unwrap_or(model.default_max_counter)
+}
+
+/// The longest list `var` is explored up to.
+pub(crate) fn list_bound(model: &TemperModel, var: &str) -> usize {
+    model
+        .list_bounds
+        .get(var)
+        .copied()
+        .unwrap_or(model.default_max_counter)
 }
 
 /// Whether `next` stays within the exploration bounds, or at least grew no
 /// counter or list beyond them.
-fn within_bounds(model: &TemperModel, before: &TemperModelState, next: &TemperModelState) -> bool {
+pub(crate) fn within_bounds(
+    model: &TemperModel,
+    before: &TemperModelState,
+    next: &TemperModelState,
+) -> bool {
     let counters_ok = next.counters.iter().all(|(var, value)| {
-        let bound = model
-            .counter_bounds
-            .get(var)
-            .copied()
-            .unwrap_or(model.default_max_counter);
-        *value <= bound || *value <= before.counters.get(var).copied().unwrap_or(0)
+        *value <= counter_bound(model, var)
+            || *value <= before.counters.get(var).copied().unwrap_or(0)
     });
     let lists_ok = next.lists.iter().all(|(var, items)| {
-        items.len() <= model.default_max_counter
+        items.len() <= list_bound(model, var)
             || items.len() <= before.lists.get(var).map_or(0, Vec::len)
     });
     counters_ok && lists_ok
 }
 
+/// The counters and lists `next` holds past the bound they are explored to
+/// that grew from `before`, each with that bound: why [`within_bounds`]
+/// leaves a step out.
+fn outgrown<'a>(
+    model: &'a TemperModel,
+    before: &'a TemperModelState,
+    next: &'a TemperModelState,
+) -> impl Iterator<Item = (String, usize)> + 'a {
+    let counters = next.counters.iter().filter_map(move |(var, value)| {
+        let bound = counter_bound(model, var);
+        let grew = *value > before.counters.get(var).copied().unwrap_or(0);
+        (*value > bound && grew).then(|| (var.to_string(), bound))
+    });
+    let lists = next.lists.iter().filter_map(move |(var, items)| {
+        let bound = list_bound(model, var);
+        let grew = items.len() > before.lists.get(var).map_or(0, Vec::len);
+        (items.len() > bound && grew).then(|| (var.to_string(), bound))
+    });
+    counters.chain(lists)
+}
+
 /// Apply model effects to the provided state, reading `params.p` from
-/// `params`. Mirrors the runtime: `-=` stops at 0 and `remove_at` out of
-/// range is a no-op.
+/// `params`. Mirrors the runtime: `-=` stops at 0, `remove_at` out of
+/// range is a no-op and `remove` of an absent value is a no-op.
 ///
 /// `action_name` is used to generate deterministic fresh list elements.
 /// Third interpreter. Production apply is `temper-server` `entity_actor/effects.rs`.
@@ -195,7 +383,7 @@ pub fn apply_effects(
     effects: &[ModelEffect],
     state: &mut TemperModelState,
     action_name: &str,
-    params: &BTreeMap<String, ParamValue>,
+    params: &Fields<ParamValue>,
 ) {
     let count = |arg: &Arg, state: &TemperModelState| -> usize {
         match arg {
@@ -212,15 +400,15 @@ pub fn apply_effects(
         match effect {
             ModelEffect::SetCounter { var, value } => {
                 let value = count(value, state);
-                state.counters.insert(var.clone(), value);
+                state.counters.insert(*var, value);
             }
             ModelEffect::AddCounter { var, value } => {
                 let delta = count(value, state);
-                *state.counters.entry(var.clone()).or_insert(0) += delta;
+                *state.counters.get_or_insert_with(*var, || 0) += delta;
             }
             ModelEffect::SubCounter { var, value } => {
                 let delta = count(value, state);
-                let entry = state.counters.entry(var.clone()).or_insert(0);
+                let entry = state.counters.get_or_insert_with(*var, || 0);
                 *entry = entry.saturating_sub(delta);
             }
             ModelEffect::SetBool { var, value } => {
@@ -230,19 +418,43 @@ pub fn apply_effects(
                     Arg::Param(name) => matches!(params.get(name), Some(ParamValue::Bool(true))),
                     Arg::Lit(_) => false,
                 };
-                state.booleans.insert(var.clone(), value);
+                state.booleans.insert(*var, value);
+            }
+            ModelEffect::SetString { var, value } => {
+                if let Some(current) = state.strings.get_mut(var) {
+                    *current = ModelString::Literal(*value);
+                }
             }
             ModelEffect::ListAppend { var, value } => {
-                let entry = state.lists.entry(var.clone()).or_default();
-                let element = match value {
-                    Arg::Lit(Literal::Str(text)) => text.clone(),
-                    Arg::Param(name) => match params.get(name) {
-                        Some(ParamValue::Str(text)) => text.clone(),
-                        _ => format!("{action_name}#{}", entry.len() + 1),
-                    },
-                    _ => format!("{action_name}#{}", entry.len() + 1),
+                let placeholder = || {
+                    format!(
+                        "{action_name}#{}",
+                        state.lists.get(var).map_or(1, |v| v.len() + 1)
+                    )
+                    .into()
                 };
-                entry.push(element);
+                let element = match value {
+                    Arg::Lit(Literal::Str(text)) => text.as_str().into(),
+                    Arg::Param(name) => match params.get(name) {
+                        Some(ParamValue::Str(value)) => *value,
+                        _ => placeholder(),
+                    },
+                    _ => placeholder(),
+                };
+                state.lists.get_or_insert_with(*var, Vec::new).push(element);
+            }
+            ModelEffect::ListRemove { var, value } => {
+                let element = match value {
+                    Arg::Lit(Literal::Str(text)) => Some(text.as_str().into()),
+                    Arg::Param(name) => match params.get(name) {
+                        Some(ParamValue::Str(value)) => Some(*value),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let (Some(element), Some(entry)) = (element, state.lists.get_mut(var)) {
+                    entry.retain(|item| *item != element);
+                }
             }
             ModelEffect::ListRemoveAt { var, index } => {
                 let index = count(index, state);
@@ -281,89 +493,5 @@ pub fn collect_list_contains_pairs(expr: &Expr, pairs: &mut BTreeSet<(String, St
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn kinds() -> BTreeMap<String, VarKind> {
-        [
-            ("items", VarKind::Counter),
-            ("ready", VarKind::Bool),
-            ("tags", VarKind::List),
-            ("goal", VarKind::Str),
-        ]
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v))
-        .collect()
-    }
-
-    fn state(status: &str) -> TemperModelState {
-        TemperModelState {
-            status: status.to_string(),
-            counters: BTreeMap::new(),
-            booleans: BTreeMap::new(),
-            lists: BTreeMap::new(),
-        }
-    }
-
-    fn g(source: &str) -> Expr {
-        temper_spec::predicate::parse(source).unwrap()
-    }
-
-    #[test]
-    fn declared_variables_missing_from_state_read_as_zero_values() {
-        let s = state("A");
-        let k = kinds();
-        assert!(evaluate_guard(&g("items == 0 && items < 3"), &k, &s));
-        assert!(evaluate_guard(&g("!ready && len(tags) == 0"), &k, &s));
-        assert!(!evaluate_guard(&g("items >= 2"), &k, &s));
-    }
-
-    #[test]
-    fn evaluates_modeled_state() {
-        let mut s = state("Draft");
-        s.counters.insert("items".into(), 2);
-        s.booleans.insert("ready".into(), true);
-        s.lists.insert("tags".into(), vec!["vip".into()]);
-        let k = kinds();
-        assert!(evaluate_guard(
-            &g("status == 'Draft' && items >= 2 && ready && 'vip' in tags"),
-            &k,
-            &s
-        ));
-        assert!(!evaluate_guard(&g("status in ['Closed']"), &k, &s));
-    }
-
-    #[test]
-    fn unmodeled_values_are_free_for_exploration_and_absent_for_enablement() {
-        let s = state("A");
-        let k = kinds();
-        for unknown in [
-            "P[p].status == 'Done'",
-            "goal != ''",
-            "!(P[p].status == 'Done')",
-        ] {
-            let guard = g(unknown);
-            assert!(guard_may_hold(&guard, &k, &s), "{unknown} may hold");
-            assert!(
-                !evaluate_guard(&guard, &k, &s),
-                "{unknown} is not guaranteed"
-            );
-        }
-        // A local condition that is false decides, whatever the unknown is.
-        let guard = g("items > 5 && P[p].status == 'Done'");
-        assert!(!guard_may_hold(&guard, &k, &s));
-        // A local condition that is true decides a disjunction.
-        let guard = g("items == 0 || P[p].status == 'Done'");
-        assert!(evaluate_guard(&guard, &k, &s));
-    }
-
-    #[test]
-    fn collects_list_membership_atoms_through_any_connective() {
-        let mut pairs = BTreeSet::new();
-        collect_list_contains_pairs(&g("!('a' in tags) || ready => 'b' in tags"), &mut pairs);
-        assert_eq!(
-            pairs.into_iter().collect::<Vec<_>>(),
-            vec![("tags".into(), "a".into()), ("tags".into(), "b".into())]
-        );
-    }
-}
+#[path = "semantics_test.rs"]
+mod tests;

@@ -418,3 +418,89 @@ param = "parent_id"
     assert!(actual.state.fields.get("unrelated").is_none());
     assert!(actual.state.fields.get("parent_type").is_none());
 }
+
+#[tokio::test]
+async fn spawn_copy_hands_parent_fields_to_the_child_initializer() {
+    // A cron-job entity spawns a Session with the job's prompt and model;
+    // copy(...) carries them, as copy_fields did before the effect grammar.
+    let parent = r#"
+[automaton]
+name = "Job"
+states = ["Draft", "Configured", "Fired"]
+initial = "Draft"
+[[action]]
+name = "Configure"
+from = ["Draft"]
+to = "Configured"
+params = ["system_prompt", "model"]
+[[action]]
+name = "Fire"
+from = ["Configured"]
+to = "Fired"
+params = ["run", "model"]
+effect = ["spawn('Session', 'Start', session_id, params.run, copy(system_prompt, model))"]
+"#;
+    let child = r#"
+[automaton]
+name = "Session"
+states = ["Draft", "Ready"]
+initial = "Draft"
+[[action]]
+name = "Start"
+from = ["Draft"]
+to = "Ready"
+params = ["system_prompt", "model"]
+"#;
+    let (state, _) = common::build_single_tenant_state(
+        0,
+        "spawn-copy",
+        "default",
+        &[("Job", parent), ("Session", child)],
+    );
+    state
+        .authz
+        .reload_tenant_policies("default", "permit(principal, action, resource);")
+        .unwrap();
+    let tenant = TenantId::default();
+    state
+        .get_or_create_tenant_entity(&tenant, "Job", "job", json!({}))
+        .await
+        .unwrap();
+    for (action, params) in [
+        (
+            "Configure",
+            json!({"system_prompt":"be brief","model":"m-1"}),
+        ),
+        // Fire sets a new model; the child must get it, not the old field.
+        ("Fire", json!({"run":"session-1","model":"m-2"})),
+    ] {
+        state
+            .dispatch_tenant_action(&tenant, "Job", "job", action, params, &Default::default())
+            .await
+            .unwrap();
+    }
+    let session = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if let Ok(actual) = state
+                .get_tenant_entity_state(&tenant, "Session", "session-1")
+                .await
+                && actual.state.status == "Ready"
+            {
+                break actual;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("spawned session did not start");
+    assert_eq!(session.state.fields["system_prompt"], "be brief");
+    assert_eq!(
+        session.state.fields["model"], "m-2",
+        "a value the spawning action sets wins over the copied field"
+    );
+    let job = state
+        .get_tenant_entity_state(&tenant, "Job", "job")
+        .await
+        .unwrap();
+    assert_eq!(job.state.fields["session_id"], "session-1");
+}

@@ -37,15 +37,25 @@ assert = "status != 'Ready'"
         "expected cross-entity approximation note, got {:?}",
         result.approximation_notes
     );
+    // The other record may make the guard true, so Ready is not out of reach.
     assert!(
-        result
-            .unreachable_states
-            .iter()
-            .any(|state| state == "Ready"),
-        "single-entity reachability must not walk through abstract cross-entity edge"
+        result.unreachable_states.is_empty(),
+        "{:?}",
+        result.unreachable_states
     );
     assert!(
         result.all_passed,
-        "abstract cross-entity edge should not fail a local never-state proof"
+        "an invariant L0 cannot prove does not fail L0: {:?}",
+        result.not_proved
+    );
+    // The cross-entity guard may hold, so the edge to Ready may fire (L1
+    // takes it): L0 must not call the never-Ready invariant inductive.
+    assert!(
+        result
+            .inductive_invariants
+            .iter()
+            .any(|(name, proved)| name == "NeverLocallyReady" && !proved),
+        "{:?}",
+        result.inductive_invariants
     );
 }

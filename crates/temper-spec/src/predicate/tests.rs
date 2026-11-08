@@ -37,6 +37,7 @@ fn parses_every_operand_form() {
         "len(tags) > 0",
         "'urgent' in tags",
         "Workspace[workspace_id].status not in ['Frozen']",
+        "Install[app_id].commit == commit",
         "kind == 'external' => !empty(url)",
         "url == null",
         "retries == -1",
@@ -138,7 +139,7 @@ fn rejects_malformed_input() {
         "status",
         "len(items",
         "a b",
-        "Parent[pid].name == 'x'",
+        "Parent[pid] == 'x'",
         "empty == 1",
         "x not 1",
         "'unterminated",
@@ -357,15 +358,22 @@ mod effects {
             "items = limit",
             "ready = true",
             "ready = params.ok",
+            "goal = 'literal'",
+            "goal = ''",
             "append(tags, 'vip')",
             "append(tags, params.tag)",
             "remove_at(tags, 0)",
             "remove_at(tags, params.i)",
+            "remove(tags, 'vip')",
+            "remove(tags, params.tag)",
             "schedule('Expire', 3600)",
             "schedule_at('Expire', expires_at)",
             "spawn('Task', 'Create', last_task_id)",
             "spawn('Task', 'Create')",
             "spawn('Task', 'Create', last_task_id, params.task_id)",
+            "spawn('Session', 'Configure', last_session_id, copy(system_prompt, model))",
+            "spawn('Task', 'Create', copy(title))",
+            "spawn('Task', 'Create', last_task_id, params.task_id, copy(title))",
         ] {
             let effect = parse_effect(source).unwrap_or_else(|e| panic!("{source}: {e}"));
             assert_eq!(effect.to_string(), source);
@@ -398,6 +406,11 @@ mod effects {
         for (source, message) in [
             ("items", "expected '=', '+=', '-=' or '('"),
             ("emit('Shipped')", "unknown effect 'emit'"),
+            ("spawn('T', 'A', copy(a, a))", "copy names 'a' twice"),
+            (
+                "spawn('T', 'A', f, params.id, other)",
+                "spawn takes a field, an id and copy(...) at most",
+            ),
             ("trigger('notify')", "unknown effect 'trigger'"),
             ("schedule('A')", "expected ','"),
             ("schedule('A', -1)", "expected a delay"),
@@ -414,10 +427,15 @@ mod effects {
     }
 
     #[test]
-    fn predicates_reject_assignment_and_params() {
+    fn predicates_reject_assignment_and_read_params() {
         let error = parse("items = 1").unwrap_err().to_string();
         assert!(error.contains("compare with '=='"), "{error}");
-        assert!(parse("params.x == 1").is_err());
+        let guard = parse("params.x == 1 && params.y && params.x > 0").expect("params parse");
+        assert_eq!(guard.params_read(), ["x", "y"]);
+        assert_eq!(
+            parse(&guard.to_string()).expect("printed guard parses"),
+            guard
+        );
     }
 
     #[test]
@@ -425,8 +443,11 @@ mod effects {
         let effects: Vec<Effect> = [
             "items += params.n",
             "ready = params.ok",
+            "goal = 'literal'",
+            "goal = ''",
             "append(tags, params.tag)",
             "remove_at(tags, params.n)",
+            "remove(tags, params.tag)",
         ]
         .iter()
         .map(|s| parse_effect(s).unwrap())
@@ -447,10 +468,12 @@ mod effects {
             ("items = ready", "a counter takes"),
             ("ready = 1", "a bool takes"),
             ("tags = 'a'", "use append() or remove_at()"),
-            ("goal = 'a'", "only counters and bools"),
+            ("goal = true", "string literal"),
             ("append(items, 'a')", "'items' is not a list"),
             ("append(tags, 1)", "lists hold strings"),
             ("remove_at(tags, 'a')", "the index is"),
+            ("remove(items, 'a')", "'items' is not a list"),
+            ("remove(tags, 1)", "lists hold strings"),
         ] {
             let effect = parse_effect(source).unwrap();
             let error = check_effects(&[effect], &vars()).unwrap_err();

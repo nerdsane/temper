@@ -1,0 +1,22 @@
+[automaton]
+name = "Case"
+states = ["Unmade", "Opened", "Closed"]
+initial = "Unmade"
+
+[[state]]
+name = "parent_id"
+type = "string"
+initial = ""
+
+[[action]]
+name = "Close"
+kind = "input"
+from = ["Opened"]
+to = "Closed"
+
+[[action]]
+name = "Open"
+kind = "input"
+from = ["Unmade"]
+to = "Opened"
+params = ["parent_id"]

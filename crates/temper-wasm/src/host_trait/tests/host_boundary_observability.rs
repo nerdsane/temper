@@ -162,7 +162,207 @@ fn session_invocation_context() -> WasmInvocationContext {
         workflow_root_entity_id: Some("ms-1".to_string()),
         workflow_run_id: Some("ManagedSession:ms-1".to_string()),
         http_request: None,
+        trigger_principal: None,
     }
+}
+
+/// The shapes a secret in a URL takes. None may reach a span, a log line or the module's error.
+const KEYS: [&str; 6] = [
+    // A keyed address: a 64-hex key as a path segment.
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    // A Slack webhook's last segment.
+    "aB3dE6gH9jK2mN5pQ8sT1vW4",
+    // A long key with no digit.
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJ",
+    // A key whose tilde joins two individually short runs.
+    "0123456789abcdef~fedcba9876543210",
+    // A period joins two individually short runs into one path key.
+    "0123456789abcdef.fedcba9876543210",
+    // 32 hex, which also parses as a UUID with its hyphens left out.
+    "fedcba9876543210fedcba9876543210",
+];
+
+fn assert_no_key(key: &str, spans: &CapturedSpans, events: &CapturedEvents, also: &str) {
+    assert!(!also.contains(key), "the module was told {key}: {also}");
+    for span in spans.lock().expect("span capture lock poisoned").iter() {
+        for (name, value) in &span.fields {
+            assert!(
+                !value.contains(key),
+                "span {} field {name} holds {key}: {value}",
+                span.name
+            );
+        }
+    }
+    for event in events.lock().expect("event capture lock poisoned").iter() {
+        for (name, value) in &event.fields {
+            assert!(
+                !value.contains(key),
+                "log {} field {name} holds {key}: {value}",
+                event.name
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_key_in_a_called_url_reaches_no_span_log_or_error() {
+    for key in KEYS {
+        let (spans, events, _guard) = capture_spans_and_events();
+        let host = ProductionWasmHost::new(BTreeMap::new());
+
+        // A call that answers.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let up = listener.local_addr().expect("address");
+        let answering = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.expect("accept");
+                let mut request = [0u8; 4096];
+                let _ = socket.read(&mut request).await;
+                let _ = socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
+                    )
+                    .await;
+            }
+        });
+        let url = format!("http://{up}/{key}/build?token={key}#{key}");
+        assert_eq!(
+            host.http_call("POST", &url, &[], "{}")
+                .await
+                .expect("answered")
+                .0,
+            200
+        );
+        assert_eq!(
+            host.http_call_binary("POST", &url, &[], b"{}")
+                .await
+                .expect("answered")
+                .0,
+            200
+        );
+        answering.await.expect("server");
+
+        // A call that fails: reqwest's error names the URL it was sent to.
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let down = closed.local_addr().expect("address");
+        drop(closed);
+        let url = format!("http://{down}/{key}/build?token={key}");
+        let refused = host
+            .http_call("POST", &url, &[], "{}")
+            .await
+            .expect_err("refused");
+        let refused_binary = host
+            .http_call_binary("POST", &url, &[], b"{}")
+            .await
+            .expect_err("refused");
+
+        let captured = spans.lock().expect("span capture lock poisoned").clone();
+        let url_field = captured
+            .iter()
+            .find(|span| span.name == "wasm.host.http_call")
+            .and_then(|span| span.fields.get("http.url"))
+            .expect("the call's span names its URL");
+        assert!(url_field.ends_with("/<redacted>/build"), "{url_field}");
+        assert!(url_field.starts_with("127.0.0.1:"), "{url_field}");
+        assert_no_key(key, &spans, &events, &format!("{refused} {refused_binary}"));
+    }
+}
+
+/// The stream path is where the interface builder's key was seen, on 1 Nov 2026.
+#[tokio::test]
+async fn a_key_in_a_streamed_call_reaches_no_span_log_or_response_head() {
+    for key in KEYS {
+        let (spans, events, _guard) = capture_spans_and_events();
+        let host = ProductionWasmHost::new(BTreeMap::new());
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let down = closed.local_addr().expect("address");
+        drop(closed);
+        let handles = host
+            .http_stream_begin_outbound(crate::http_stream::HttpRequestHead {
+                method: "POST".to_string(),
+                url: format!("http://{down}/{key}/build?token={key}"),
+                headers: Vec::new(),
+            })
+            .await
+            .expect("open outbound exchange");
+        host.http_stream_try_write(handles.request_body, b"{}".to_vec())
+            .await
+            .expect("queue the request");
+        let head = host
+            .http_stream_response_head(handles.response_body)
+            .await
+            .expect("receive the transport failure");
+        assert_eq!(head.status, 0);
+
+        let url_field = spans
+            .lock()
+            .expect("span capture lock poisoned")
+            .iter()
+            .find(|span| span.name == "wasm.host.http_stream")
+            .and_then(|span| span.fields.get("http.url").cloned())
+            .expect("the call's span names its URL");
+        assert!(url_field.ends_with("/<redacted>/build"), "{url_field}");
+        assert_no_key(key, &spans, &events, &format!("{:?}", head.headers));
+    }
+}
+
+#[test]
+fn a_url_in_telemetry_keeps_what_a_reader_needs() {
+    use crate::host_trait::telemetry_url as seen;
+    // Words and ids a reader joins on stay.
+    assert_eq!(
+        seen("https://api.storage.example/artifact-storage/v1/token"),
+        "api.storage.example/artifact-storage/v1/token"
+    );
+    assert_eq!(
+        seen("http://h/tdata/Records('q1w2e3r4t5y6.u7i8o9p0a1s2d')/Items.Kept"),
+        "h/tdata/Records('q1w2e3r4t5y6.u7i8o9p0a1s2d')/Items.Kept"
+    );
+    assert_eq!(
+        seen("http://h/x/01a19923-dd62-7fd4-9e8c-ea29db7c3dba/y"),
+        "h/x/01a19923-dd62-7fd4-9e8c-ea29db7c3dba/y"
+    );
+    // A key goes, wherever in the path it sits, and only the key.
+    assert_eq!(
+        seen("https://user:pw@h/services/T000/B000/aB3dE6gH9jK2mN5pQ8sT1vW4?x=1#y"),
+        "h/services/T000/B000/<redacted>"
+    );
+    assert_eq!(
+        seen("http://h/bot123456789:AAE-abcdefghijklmnopqrstuvwxyz012345/sendMessage"),
+        "h/bot123456789:<redacted>/sendMessage"
+    );
+    assert_eq!(
+        seen("https://h/0123456789abcdef.fedcba9876543210/build"),
+        "h/<redacted>/build"
+    );
+    // Entity expressions do not exempt an individual key-shaped component.
+    assert_eq!(
+        seen("https://h/tdata/Entities('0123456789abcdef0123456789abcdef.short')/Kept"),
+        "h/tdata/Entities('<redacted>')/Kept"
+    );
+    assert_eq!(seen("http://h"), "h");
+    for suffix in [
+        "/build?account=user@0123456789abcdef0123456789abcdef",
+        "/build#user@0123456789abcdef0123456789abcdef",
+        "/user@0123456789abcdef0123456789abcdef/build",
+    ] {
+        let expected = if suffix.starts_with("/user@") {
+            "h/user@<redacted>/build"
+        } else {
+            "h/build"
+        };
+        assert_eq!(seen(&format!("https://user:pw@h{suffix}")), expected);
+        assert_eq!(seen(&format!("https://h{suffix}")), expected);
+    }
+    assert_eq!(seen("https://h?account=user@secret"), "h");
+    assert_eq!(seen("https://h#user@secret"), "h");
 }
 
 #[test]

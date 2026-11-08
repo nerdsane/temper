@@ -1,0 +1,30 @@
+[automaton]
+name = "Run"
+states = ["Unmade", "Going", "Ended"]
+initial = "Unmade"
+
+[[state]]
+name = "parent_id"
+type = "string"
+initial = ""
+
+[[action]]
+name = "Begin"
+kind = "input"
+from = ["Unmade"]
+to = "Going"
+
+[[action]]
+name = "TimedOut"
+kind = "input"
+from = ["Going"]
+to = "Ended"
+
+[[action.triggers]]
+name = "ended"
+kind = "entity"
+target_entity = "Pass"
+target_action = "RunEnded"
+[action.triggers.resolve_target]
+kind = "field"
+id_field = "parent_id"

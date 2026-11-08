@@ -1,0 +1,32 @@
+# Five counters and four flags written by one move from its parameters (the
+# shape of an app feed that hung an app check on 15 Oct 2026): every state the
+# model check reaches has 2^4 * 3^5 = 3888 successors to compute, and the
+# unbudgeted cascade runs for minutes.
+#
+# Not named *.ioa.toml on purpose: repository-wide spec discovery would verify
+# it with no budget.
+state = [
+  { name = "offered", type = "counter", initial = 0 },
+  { name = "kept", type = "counter", initial = 0 },
+  { name = "calls", type = "counter", initial = 0 },
+  { name = "tokens", type = "counter", initial = 0 },
+  { name = "next", type = "counter", initial = 0 },
+  { name = "has_pending", type = "bool", initial = false },
+  { name = "keep_it", type = "bool", initial = false },
+  { name = "read_done", type = "bool", initial = false },
+  { name = "finished", type = "bool", initial = false },
+]
+# Now's guard is always true. The model check leaves out a field no guard or
+# rule reads, so without it the counters and flags would not multiply the states.
+# It is a guard, not an invariant, so L0 has nothing to prove across Stepped's
+# 3888 choices and the budget is spent in the model check.
+action = [
+  { name = "Now", kind = "input", from = ["Resting"], to = "Running", guard = "offered >= 0 && kept >= 0 && calls >= 0 && tokens >= 0 && next >= 0 && (has_pending || !has_pending) && (keep_it || !keep_it) && (read_done || !read_done) && (finished || !finished)", effect = ["offered = 0", "kept = 0", "calls = 0", "tokens = 0", "next = 0", "finished = false"] },
+  { name = "Stepped", kind = "input", from = ["Running"], params = ["has_pending", "keep_it", "read_done", "finished", "offer", "keep", "call", "token", "advance"], effect = ["has_pending = params.has_pending", "keep_it = params.keep_it", "read_done = params.read_done", "finished = params.finished", "offered += params.offer", "kept += params.keep", "calls += params.call", "tokens += params.token", "next += params.advance"] },
+  { name = "Rest", kind = "input", from = ["Running"], to = "Resting" },
+]
+
+[automaton]
+name = "HeavyFeed"
+states = ["Resting", "Running"]
+initial = "Resting"
