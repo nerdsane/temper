@@ -70,13 +70,3 @@ The published Rust and TypeScript SDKs also retain their single-pair form:
 `{allowed, reason}` without a decision ID. Both SDKs expose a batch method.
 MCP does not call this check route; its decision IDs come from refused mutations
 and remain available for human resolution.
-
-Katagami migration: replace the per-move calls in `authorizedRecord` with one
-record entry containing all offered kernel action names. `authorizedRecords`
-can put every page record into the same request. Preserve the current resource
-attributes; zip the ordered action answers back onto the offers. Do not treat a
-failed HTTP call as permission. Follow with staging verification on a test
-person's app: one Factory-sized read makes one authorize request, matches its
-prior offers, adds no pending decision, and both the site `mcp read_app` span and
-the person Temper's authorize span meet Rita's 1 s bar in Datadog. That staging
-measurement requires the subsequent site release; local timings do not prove it.

@@ -115,7 +115,7 @@ effect = [{ type = "spawn", entity_type = "Child", entity_id_source = "child_key
 
 #[test]
 fn copy_fields_become_a_spawn_copy_list() {
-    // TemperPaw's CronJob and Computer hand parent fields to the spawned
+    // Cron-job and computer entities hand parent fields to the spawned
     // child; the conversion keeps that instead of refusing the spec.
     let (source, _) = migrate(
         r#"

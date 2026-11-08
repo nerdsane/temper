@@ -296,7 +296,7 @@ async fn a_push_naming_a_path_outside_the_app_is_refused() {
 
 /// An install checks at main's level: each spec parses, and the installer's
 /// joint proofs warn. A spec whose own invariant an unguarded move breaks
-/// (an L1 counterexample, the shape of paw-fs's `UsageBelowQuota`) installs
+/// (an L1 counterexample, the shape of a quota invariant such as `UsageBelowQuota`) installs
 /// with 200, as it does on main; the per-spec L0-L3 check is the caller's,
 /// before it sends.
 #[tokio::test]
@@ -509,7 +509,7 @@ async fn a_push_waits_for_the_host_install_turn() {
     );
 }
 
-/// Katagami's control plane reads these lines to know an app is served or
+/// A control plane reads these lines to know an app is served or
 /// waiting; their words are fixed.
 #[test]
 fn the_install_and_waiting_lines_read_as_the_control_plane_reads_them() {
@@ -534,7 +534,7 @@ fn the_install_and_waiting_lines_read_as_the_control_plane_reads_them() {
 }
 
 /// The app's files with one spec in the old syntax this kernel refuses: a
-/// bool written as a string, as TemperPaw's paw-patrol has it.
+/// bool written as a string, as some existing apps have it.
 /// The sentinel spec `tenant` has registered with the server.
 fn registered_spec(state: &PlatformState, tenant: &str) -> String {
     state

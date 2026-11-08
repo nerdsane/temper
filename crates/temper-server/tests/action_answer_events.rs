@@ -1,6 +1,6 @@
 //! An action's answer is the record as a read shows it, without its recent events. Each event keeps its params in
 //! full, so fifty moves that each carry a large text made the answer tens of megabytes: an HttpEndpoint admission
-//! reads that answer within 8 MiB, and refused the route with a 500 (the Factory's repository route, 30 Oct 2026).
+//! reads that answer within 8 MiB, and refused the route with a 500 (an app's repository route, 30 Oct 2026).
 
 use axum::{
     Extension,

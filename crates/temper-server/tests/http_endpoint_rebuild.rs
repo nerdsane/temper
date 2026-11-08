@@ -101,12 +101,12 @@ async fn a_rebuild_keeps_the_route_of_a_row_that_does_not_answer() {
     let (_guard, _clock, _ids) = install_deterministic_context(20);
     let (state, store) = build(20);
     let tenant = TenantId::default();
-    create(&state, &tenant, "he-judge", "/katagami/judge").await;
-    create(&state, &tenant, "he-pass-guest", "/katagami/pass/guest").await;
+    create(&state, &tenant, "he-judge", "/app/judge").await;
+    create(&state, &tenant, "he-pass-guest", "/app/pass/guest").await;
     rebuild_tenant_table(&state, &tenant).await;
     assert_eq!(
         paths(&state, &tenant).await,
-        ["/katagami/judge", "/katagami/pass/guest"]
+        ["/app/judge", "/app/pass/guest"]
     );
 
     // The judge's row is busy far longer than any rebuild waits, and another route is registered meanwhile.
@@ -115,11 +115,11 @@ async fn a_rebuild_keeps_the_route_of_a_row_that_does_not_answer() {
         &store,
         &tenant,
         "he-judge",
-        "/katagami/judge",
+        "/app/judge",
         Duration::from_secs(600),
     )
     .await;
-    create(&state, &tenant, "he-pass-files", "/katagami/pass/files").await;
+    create(&state, &tenant, "he-pass-files", "/app/pass/files").await;
     let started = tokio::time::Instant::now();
     rebuild_tenant_table_after(&state, &tenant, Some("he-pass-files")).await;
     assert!(
@@ -128,11 +128,7 @@ async fn a_rebuild_keeps_the_route_of_a_row_that_does_not_answer() {
     );
     assert_eq!(
         paths(&state, &tenant).await,
-        [
-            "/katagami/judge",
-            "/katagami/pass/files",
-            "/katagami/pass/guest"
-        ],
+        ["/app/judge", "/app/pass/files", "/app/pass/guest"],
         "a row the rebuild could not read keeps its route; the new one is added"
     );
 }
@@ -142,8 +138,8 @@ async fn the_row_that_changed_keeps_no_route_when_it_cannot_be_read() {
     let (_guard, _clock, _ids) = install_deterministic_context(23);
     let (state, store) = build(23);
     let tenant = TenantId::default();
-    create(&state, &tenant, "he-judge", "/katagami/judge").await;
-    create(&state, &tenant, "he-pass-guest", "/katagami/pass/guest").await;
+    create(&state, &tenant, "he-judge", "/app/judge").await;
+    create(&state, &tenant, "he-pass-guest", "/app/pass/guest").await;
     rebuild_tenant_table(&state, &tenant).await;
 
     // The guest pass's row changed and is busy past the rebuild's wait: its old route is what the change is about.
@@ -152,12 +148,12 @@ async fn the_row_that_changed_keeps_no_route_when_it_cannot_be_read() {
         &store,
         &tenant,
         "he-pass-guest",
-        "/katagami/pass/guest",
+        "/app/pass/guest",
         Duration::from_secs(600),
     )
     .await;
     rebuild_tenant_table_after(&state, &tenant, Some("he-pass-guest")).await;
-    assert_eq!(paths(&state, &tenant).await, ["/katagami/judge"]);
+    assert_eq!(paths(&state, &tenant).await, ["/app/judge"]);
 }
 
 #[tokio::test(start_paused = true)]
@@ -165,8 +161,8 @@ async fn a_rebuild_waits_for_a_row_that_answers_late_and_drops_a_paused_one() {
     let (_guard, _clock, _ids) = install_deterministic_context(21);
     let (state, store) = build(21);
     let tenant = TenantId::default();
-    create(&state, &tenant, "he-judge", "/katagami/judge").await;
-    create(&state, &tenant, "he-pass-guest", "/katagami/pass/guest").await;
+    create(&state, &tenant, "he-judge", "/app/judge").await;
+    create(&state, &tenant, "he-pass-guest", "/app/pass/guest").await;
 
     // At boot the table is empty, so there is no route to keep: a row that answers in seconds is waited for.
     let write = busy(
@@ -174,7 +170,7 @@ async fn a_rebuild_waits_for_a_row_that_answers_late_and_drops_a_paused_one() {
         &store,
         &tenant,
         "he-judge",
-        "/katagami/judge",
+        "/app/judge",
         Duration::from_secs(3),
     )
     .await;
@@ -193,7 +189,7 @@ async fn a_rebuild_waits_for_a_row_that_answers_late_and_drops_a_paused_one() {
     );
     assert_eq!(
         paths(&state, &tenant).await,
-        ["/katagami/judge", "/katagami/pass/guest"],
+        ["/app/judge", "/app/pass/guest"],
         "the late row was waited for"
     );
 
@@ -213,7 +209,7 @@ async fn a_rebuild_waits_for_a_row_that_answers_late_and_drops_a_paused_one() {
     rebuild_tenant_table(&state, &tenant).await;
     assert_eq!(
         paths(&state, &tenant).await,
-        ["/katagami/judge"],
+        ["/app/judge"],
         "a paused row leaves the table"
     );
 }
@@ -223,12 +219,12 @@ async fn a_rebuild_loads_an_idle_row_again() {
     let (_guard, _clock, _ids) = install_deterministic_context(22);
     let (state, _store) = build(22);
     let tenant = TenantId::default();
-    create(&state, &tenant, "he-judge", "/katagami/judge").await;
-    create(&state, &tenant, "he-pass-guest", "/katagami/pass/guest").await;
+    create(&state, &tenant, "he-judge", "/app/judge").await;
+    create(&state, &tenant, "he-pass-guest", "/app/pass/guest").await;
     rebuild_tenant_table(&state, &tenant).await;
     assert_eq!(
         paths(&state, &tenant).await,
-        ["/katagami/judge", "/katagami/pass/guest"]
+        ["/app/judge", "/app/pass/guest"]
     );
 
     // The judge's row goes idle and its actor stops, as an idle row's does in production.
@@ -244,15 +240,11 @@ async fn a_rebuild_loads_an_idle_row_again() {
         "the idle row's actor stopped"
     );
 
-    create(&state, &tenant, "he-pass-files", "/katagami/pass/files").await;
+    create(&state, &tenant, "he-pass-files", "/app/pass/files").await;
     rebuild_tenant_table(&state, &tenant).await;
     assert_eq!(
         paths(&state, &tenant).await,
-        [
-            "/katagami/judge",
-            "/katagami/pass/files",
-            "/katagami/pass/guest"
-        ],
+        ["/app/judge", "/app/pass/files", "/app/pass/guest"],
         "the idle row was loaded again and read"
     );
     assert!(

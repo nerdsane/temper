@@ -136,8 +136,8 @@ fn test_manifest_dependencies_accept_pinned_genesis_refs_for_local_install_order
         Some("paw-fs")
     );
     assert_eq!(
-        local_os_app_dependency_name("katagami-commons").as_deref(),
-        Some("katagami-commons")
+        local_os_app_dependency_name("design-commons").as_deref(),
+        Some("design-commons")
     );
     assert_eq!(local_os_app_dependency_name("  "), None);
 }
@@ -1805,12 +1805,12 @@ mode = "commons"
         vec!["policies/base.cedar", "policies/commons/guardrail.cedar"]
     );
     assert_eq!(
-        os_app_policy_row_id("katagami-commons", "policies/palette_system.cedar"),
-        "katagami-commons-palette_system"
+        os_app_policy_row_id("design-commons", "policies/palette_system.cedar"),
+        "design-commons-palette_system"
     );
     assert_eq!(
-        os_app_policy_row_id("katagami-commons", "policies/commons/guardrail.cedar"),
-        "katagami-commons-commons-guardrail"
+        os_app_policy_row_id("design-commons", "policies/commons/guardrail.cedar"),
+        "design-commons-commons-guardrail"
     );
     assert!(
         bundle

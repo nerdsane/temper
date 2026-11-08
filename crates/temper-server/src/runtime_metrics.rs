@@ -102,7 +102,7 @@ struct RuntimeMetrics {
     handler_deadline_exceeded_total: Counter<u64>,
     wasm_epoch_tick_interval_ms: Histogram<f64>,
     handler_kill_latency_ms: Histogram<f64>,
-    // --- Katagami (consumer-side outcome) ---------------------------------
+    // --- Consumer-side outcome ---------------------------------------
     curation_job_duration_ms: Histogram<f64>,
     curation_job_outcome_total: Counter<u64>,
 }
@@ -293,7 +293,7 @@ fn metrics() -> &'static RuntimeMetrics {
                      composite. An answer that keeps the record's status is a move and is not \
                      counted. Under healthy operation this counter is permanently zero; any \
                      nonzero reading is a regression of the consumer-side \
-                     exit-dispatches-an-action invariant (openpaw ADR-0039 Sub-Decision 3a). \
+                     exit-dispatches-an-action invariant (the consumer's own guard). \
                      Alerts on this counter are critical-severity.",
                 )
                 .build(),
@@ -483,7 +483,7 @@ fn metrics() -> &'static RuntimeMetrics {
             curation_job_duration_ms: meter
                 .f64_histogram("temper_curation_job_duration_ms")
                 .with_unit("ms")
-                .with_description("End-to-end CurationJob latency (Katagami).")
+                .with_description("End-to-end CurationJob latency.")
                 .build(),
             curation_job_outcome_total: meter
                 .u64_counter("temper_curation_job_outcome_total")
@@ -1131,7 +1131,7 @@ pub fn record_event_store_append_wait(backend: &str, operation: &str, elapsed: D
 // existing `record_cedar_evaluation` helper. No duplicate metric here.
 
 // ============================================================================
-// Katagami.
+// Consumer-side outcome.
 // ============================================================================
 
 pub fn record_curation_job_duration(job_type: &str, duration: Duration) {

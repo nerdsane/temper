@@ -690,7 +690,7 @@ async fn file_point_lookup_with_status_ne_uses_lossless_equality_candidates() {
     let mut state = build_order_state("query-plane-file-status-ne");
     state.set_storage_stack(StorageStack::from_turso(store.clone()));
     let tenant = TenantId::default();
-    let target_path = "/proofs/katagami-temper-write-live.txt";
+    let target_path = "/proofs/app-temper-write-live.txt";
     let workspace_id = "ws-proof";
 
     for index in 0usize..120 {

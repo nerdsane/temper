@@ -118,13 +118,10 @@ pub async fn run(
     if state.api_token.is_some() {
         println!("  API key: configured (Bearer token required)");
     }
-    // Jev reads an app's changed modules at install when this server has a key or pass for it; never printed.
-    if std::env::var(temper_platform::module_review::JEV_KEY_ENV)
-        .is_ok_and(|key| !key.trim().is_empty())
-    {
-        let judge = std::sync::Arc::new(temper_platform::module_review::JevJudge::from_env());
+    // Jev reads an app's changed modules at install when this server is given its URL and a key or pass; never printed.
+    if let Some(judge) = temper_platform::module_review::JevJudge::from_env() {
         state.set_module_reviewer(std::sync::Arc::new(
-            temper_platform::module_review::ModuleReviewer::new(judge),
+            temper_platform::module_review::ModuleReviewer::new(std::sync::Arc::new(judge)),
         ));
     }
     // TEMPER_DATA_DIR puts this server's files (pushed app versions, blobs,

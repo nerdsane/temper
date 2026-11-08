@@ -177,7 +177,7 @@ async fn an_object_store_key_stays_under_its_tenant_prefix() {
     }
 }
 
-/// A Katagami app whose vault key was lost (Run probe, 21 Oct 2026) restored its data with no readable
+/// An app whose vault key was lost (21 Oct 2026) restored its data with no readable
 /// `blob_endpoint`, and a File put then answered 204 while its bytes went to this disk and the app's database.
 #[tokio::test]
 async fn a_server_that_keeps_files_only_in_an_object_store_refuses_them_without_one() {

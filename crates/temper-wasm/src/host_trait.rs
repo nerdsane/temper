@@ -2364,8 +2364,8 @@ fn datadog_span_id_decimal(span_id: &str) -> Option<String> {
 }
 
 /// What a span or a log keeps of a URL a module called: its host and path, with no credentials, query or fragment, and
-/// with any key-shaped run in the path taken out. A path can hold a key: Katagami's interface builder is reached at
-/// `https://host/<64 hex>/build`, and on 1 Nov 2026 that key was in Datadog on the span of every interface build.
+/// with any key-shaped run in the path taken out. A path can hold a key: some services are reached at
+/// `https://host/<64 hex>/build`, and a span must never carry that key.
 pub(crate) fn telemetry_url(url: &str) -> String {
     let after_scheme = url.find("://").map(|idx| &url[idx + 3..]).unwrap_or(url);
     // Credentials only belong to the authority; an @ in the path, query or

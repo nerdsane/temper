@@ -414,9 +414,9 @@ fn module_version(version: u32) -> String {
     )
 }
 
-/// Each app release registers a new hash under the same module name. Katagami's
-/// main Temper kept every replaced version compiled until restart (16 Oct 2026:
-/// apps_build alone is about 9 MB of machine code per version).
+/// Each app release registers a new hash under the same module name. One
+/// deployment's main Temper kept every replaced version compiled until restart (one app
+/// builder alone is about 9 MB of machine code per version).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_replaced_module_leaves_the_compiled_cache() {
     let state = build_echo_test_state();

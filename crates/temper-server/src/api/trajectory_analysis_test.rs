@@ -1533,7 +1533,7 @@ async fn app_with_pinned_trajectory(
     (app, store)
 }
 
-/// The kernel-vocabulary pin katagami stamps: the entity, then a truncated
+/// The kernel-vocabulary pin a consumer stamps: the entity, then a truncated
 /// digest.
 fn entity_qualified_pin(digest_len: usize) -> String {
     let registered = registered_spec_version();

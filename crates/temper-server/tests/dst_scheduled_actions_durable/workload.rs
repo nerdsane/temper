@@ -75,7 +75,7 @@ name = "Run"
 from = ["Planned"]
 
 # A run that reports progress and checks on itself at one deadline, as a
-# KatagamiAppRun does: launching and every report schedule the same Check.
+# an app-run entity does: launching and every report schedule the same Check.
 [[action]]
 name = "Launch"
 from = ["Idle"]

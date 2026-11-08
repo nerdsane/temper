@@ -11,8 +11,8 @@ use std::collections::BTreeSet;
 use super::source::cut;
 use super::types::SpecSource;
 
-/// Spec text one ask carries, in bytes. The largest excerpt seen is 53 KB: the Factory's `pipeline` module, which 46
-/// of its type's 112 actions run (Rita's apps, 26 Oct 2026; the spec is 122 KB, 55 KB without its comments). The next
+/// Spec text one ask carries, in bytes. The largest excerpt seen is 53 KB: a release pipeline's module, which 46
+/// of its type's 112 actions run (a census of real apps, 26 Oct 2026; the spec is 122 KB, 55 KB without its comments). The next
 /// largest are 16 KB and below.
 pub const SPEC_BYTES: usize = 64 * 1024;
 

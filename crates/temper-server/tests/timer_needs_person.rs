@@ -5,7 +5,7 @@
 //! by reactions kept no one in its journal, so once its timer row was gone
 //! nothing could name who its timer fires as: it waited forever, or fired as
 //! the state-timer service, whose move binding its caller was refused on every
-//! fire, unseen (the Arni Labs line's Rollout, 31 Oct 2026).
+//! fire, unseen (a release app's Rollout, 31 Oct 2026).
 //!
 //! The fixtures (specs, a server over a store that survives it, reads) are in
 //! `timer_needs_person/`; the tests are grouped by what they check.

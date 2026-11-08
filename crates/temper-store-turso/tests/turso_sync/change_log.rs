@@ -180,8 +180,8 @@ async fn the_background_trim_clears_a_long_confirmed_log_in_budgeted_calls() {
     assert_eq!(count(&b, "pushed").await, 1);
 }
 
-/// Writes between two trims: with the trims a second apart, about the
-/// Factory's growth of 56 change log rows a second.
+/// Writes between two trims: with the trims a second apart, about a
+/// busy app's growth of 56 change log rows a second.
 const WRITES_PER_TICK: u64 = 20;
 
 /// Trims in the run: enough for the batches to reach their size.
@@ -194,7 +194,7 @@ async fn the_trim_outpaces_the_log_while_every_commit_is_slow() {
     };
     let (_dir, path) = machine();
     let (a, copy) = confirmed_log(&server, &path, 20_000).await;
-    // One commit on a Tensorlake drive, whatever its rows (roll3, staging
+    // One commit on a sandbox host's network drive, whatever its rows (a load test, staging
     // canary, 26 Oct 2026).
     copy.simulate_slow_trim(Duration::ZERO, Duration::from_millis(170));
     let rows_before = copy.change_log_rows().await.expect("rows");

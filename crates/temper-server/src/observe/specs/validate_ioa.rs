@@ -26,7 +26,7 @@ pub const DEFAULT_BUDGET_MS: u64 = 30_000;
 /// The most time a caller may give one check.
 pub const MAX_BUDGET_MS: u64 = 120_000;
 /// The most states one check's model check may generate. A state reached
-/// twice counts twice: Katagami's own KatagamiApp generates 5.3M (381k
+/// twice counts twice: a large app-run entity generates 5.3M (381k
 /// distinct) in 14 s. A spec of cheap steps reaches this with about 1.4M
 /// distinct states and 1.1 GB, the most one check holds.
 const MAX_BUDGET_STATES: usize = 10_000_000;

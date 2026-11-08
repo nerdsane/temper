@@ -74,7 +74,7 @@ fn a_module_reads_the_record_without_what_its_past_moves_were_told() {
         "{} bytes for a record of three million bytes of old parameters",
         record.to_string().len()
     );
-    // What a module reads of past moves (TemperPaw's emit_ots_trajectory): their names and times, oldest first.
+    // What a module reads of past moves (an agent app's trajectory emitter): their names and times, oldest first.
     let moves: Vec<_> = record["events"]
         .as_array()
         .unwrap()

@@ -595,8 +595,8 @@ async fn load_verified_cache(
 pub(super) enum EarlierOperatorKeys {
     /// Keep them: another holder may still use an older key.
     Keep,
-    /// Revoke them: this deployment is the only holder of its key (a Katagami
-    /// app's Temper, keyed by its control plane), so a key it no longer holds
+    /// Revoke them: this deployment is the only holder of its key (an app's
+    /// Temper, keyed by its control plane), so a key it no longer holds
     /// stops working. Set by `TEMPER_RETIRE_OLD_OPERATOR_KEYS=1`.
     Retire,
 }
@@ -666,7 +666,7 @@ pub(super) async fn bootstrap_tenants(
     {
         eprintln!("  Warning: failed to bootstrap operator credential for tenant 'default': {e}");
     }
-    // A deployment that is the only holder of its key (a Katagami app's Temper,
+    // A deployment that is the only holder of its key (an app's Temper,
     // keyed by its control plane) retires the credentials earlier boots issued
     // for other keys, so a key it no longer holds stops working.
     if earlier_operator_keys == EarlierOperatorKeys::Retire

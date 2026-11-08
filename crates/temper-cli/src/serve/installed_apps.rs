@@ -266,7 +266,7 @@ pub(super) async fn replay_recorded_installs(
 
 /// Everything the install of an app given on the command line said, as one compact JSON object on one line before the
 /// line that says it installed or failed: its warnings and the modules Jev reviewed, or why it was refused, whole
-/// (`refused`). A reader of a start's output that sees the verdict already has it (Katagami's start wrapper keeps both
+/// (`refused`). A reader of a start's output that sees the verdict already has it (a start wrapper keeps both
 /// lines and passes this one on as it is).
 fn print_install_notes(app_name: &str, line: &serde_json::Value) {
     use std::io::Write as _;

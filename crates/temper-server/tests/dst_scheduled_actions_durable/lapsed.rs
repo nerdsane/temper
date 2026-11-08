@@ -2,7 +2,7 @@
 //! comes due after its run is done does not fire.
 //!
 //! `Launch` and each `Progress` schedule `Check` at the same deadline, as a
-//! KatagamiAppRun's Launched and Progressed do. Before arming was idempotent
+//! an app-run entity's Launched and Progressed do. Before arming was idempotent
 //! every report added a row, and all of them fired at the deadline; after the
 //! run was done each was refused and recorded (on 2 Nov 2026, 20 at once for
 //! one run). One run here finishes before the deadline, another is still

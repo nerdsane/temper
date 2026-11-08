@@ -263,10 +263,10 @@ mod tests {
 
     #[test]
     fn namespace_to_app_candidates_adds_platform_aware_variants() {
-        let paw = namespace_to_app_candidates("OpenPaw.Foresight");
-        assert!(paw.contains(&"open-paw-foresight".to_string()));
-        assert!(paw.contains(&"foresight".to_string()));
-        assert!(paw.contains(&"paw-foresight".to_string()));
+        let paw = namespace_to_app_candidates("OpenPaw.Forecast");
+        assert!(paw.contains(&"open-paw-forecast".to_string()));
+        assert!(paw.contains(&"forecast".to_string()));
+        assert!(paw.contains(&"paw-forecast".to_string()));
 
         let temper = namespace_to_app_candidates("Temper.ProjectManagement");
         assert!(temper.contains(&"temper-project-management".to_string()));

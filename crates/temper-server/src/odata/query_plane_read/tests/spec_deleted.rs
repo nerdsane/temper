@@ -10,7 +10,7 @@ use super::*;
 use temper_runtime::persistence::EventStore;
 
 /// The Order spec with a `Discard` action into `Deleted`, the way an app spec
-/// ends a record (Katagami's Member moves Removing to Deleted on `Removed`).
+/// ends a record (a Member entity moves Removing to Deleted on `Removed`).
 fn order_spec_with_discard() -> String {
     let spec = ORDER_IOA
         .replacen(

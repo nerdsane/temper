@@ -7,7 +7,7 @@
 //! intake, so profiles stay fresh without anyone catching the hot window.
 //!
 //! CPU sampling uses `setitimer(ITIMER_PROF)`, not `perf_event_open`, so it
-//! runs where perf events are refused (Railway). Frames in JIT-compiled wasm
+//! runs where perf events are refused (some container hosts). Frames in JIT-compiled wasm
 //! guest code are named through [`temper_wasm::code_map`].
 //!
 //! # Settings

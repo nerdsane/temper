@@ -226,7 +226,7 @@ mod tests {
     fn a_row_takes_its_maker_from_the_creation_event() {
         let kept = with_first_origin(
             r#"{"status":"Open","last_event_by":"bo"}"#,
-            Some(r#"{"action":"Create","via":"request","by":"ann","for":"rita","agent_type":"claude","label":"five-miles","role":"member"}"#),
+            Some(r#"{"action":"Create","via":"request","by":"ann","for":"alice","agent_type":"claude","label":"five-miles","role":"member"}"#),
         )
         .unwrap();
         let Kept::Written(state) = kept else {
@@ -235,7 +235,7 @@ mod tests {
         let state: Value = serde_json::from_str(&state).unwrap();
         assert_eq!(state["first_event_via"], "request");
         assert_eq!(state["first_event_by"], "ann");
-        assert_eq!(state["first_event_for"], "rita");
+        assert_eq!(state["first_event_for"], "alice");
         assert_eq!(state["first_event_agent_type"], "claude");
         assert_eq!(state["first_event_label"], "five-miles");
         assert_eq!(state["last_event_by"], "bo");

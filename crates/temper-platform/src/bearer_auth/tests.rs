@@ -796,7 +796,7 @@ async fn a_cors_preflight_is_answered_without_a_credential_and_nothing_else_is()
         .clone()
         .oneshot(
             HttpRequest::options("/tdata/Files('af-x')/$value")
-                .header("origin", "https://unikon.dev")
+                .header("origin", "https://app.example.test")
                 .header("access-control-request-method", "PUT")
                 .header(
                     "access-control-request-headers",
@@ -821,7 +821,7 @@ async fn a_cors_preflight_is_answered_without_a_credential_and_nothing_else_is()
             .body(Body::empty())
             .unwrap(),
         HttpRequest::put("/tdata/Files('af-x')/$value")
-            .header("origin", "https://unikon.dev")
+            .header("origin", "https://app.example.test")
             .body(Body::empty())
             .unwrap(),
     ] {

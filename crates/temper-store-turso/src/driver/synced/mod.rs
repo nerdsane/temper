@@ -341,8 +341,8 @@ impl SyncCopy {
                     // crash that rolls the file back to its last checkpoint
                     // loses only writes answered "not confirmed", and the next
                     // start restores a file behind its remote. Unsynced stores
-                    // keep Turso's FULL. Rita's choice on 27 Oct 2026: on a
-                    // Tensorlake drive FULL fell behind at 20 moves a second.
+                    // keep Turso's FULL. Chosen on 27 Oct 2026: on a
+                    // sandbox host's network drive FULL fell behind at 20 moves a second.
                     conn.execute("PRAGMA synchronous = NORMAL", ()).await?;
                     let conn = Lease::new(Arc::new(DriverHandle::new(conn)), in_use);
                     return Ok(Connection::Local { conn, pool });
@@ -413,7 +413,7 @@ impl SyncCopy {
 /// How long a checkpoint waits for the calls in flight before it gives way.
 /// Every new call waits behind it meanwhile, so it stays well inside the
 /// 10 s a request may wait for its answer; and a write holds its connection
-/// for one commit, about 1 s at worst on a Tensorlake drive (fsync p99 on the
+/// for one commit, about 1 s at worst on a sandbox host's network drive (fsync p99 on the
 /// staging canary, 26 Oct 2026).
 const CHECKPOINT_TURN_BUDGET: Duration = Duration::from_secs(1);
 

@@ -1,6 +1,6 @@
 //! An exact-match read that finds nothing re-reads only the rows the field
 //! index cannot answer for (ARN-89), not every row that holds no value for the
-//! filtered field. Katagami's art-style notice asks `creator_sub eq '<sub>'` of
+//! filtered field. A catalogue's art-style notice asks `creator_sub eq '<sub>'` of
 //! 582 ArtStyles on every connector call; 527 have no `creator_sub`, and each
 //! empty answer loaded all 527 in full (about 600 ms).
 

@@ -141,7 +141,7 @@ impl Fixture {
             .server
             .policy_store()
             .expect("policy store")
-            .save_policy(&self.tenant, policy_id, cedar_text, "rita")
+            .save_policy(&self.tenant, policy_id, cedar_text, "alice")
             .await
             .expect("save row");
         self.state
@@ -157,7 +157,7 @@ impl Fixture {
             .insert(self.tenant.clone(), live_text.to_string());
     }
 
-    /// A fresh process on the same database, booted the way TemperPaw boots.
+    /// A fresh process on the same database, booted the way an embedding server boots.
     async fn restart(&self) -> PlatformState {
         let store = TursoEventStore::new(&self.db_url, None)
             .await
@@ -254,7 +254,7 @@ async fn an_upgrade_after_a_whole_set_replacement_loads_at_restart() {
     // PUT stores the live text as the only enabled row, the app's rows disabled.
     let store = fx.state.server.policy_store().expect("policy store");
     store
-        .replace_tenant_policies(&fx.tenant, "primary", &fx.live_text(), "rita")
+        .replace_tenant_policies(&fx.tenant, "primary", &fx.live_text(), "alice")
         .await
         .expect("replace the whole set");
 

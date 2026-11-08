@@ -75,7 +75,7 @@ pub(super) async fn register_bundle_modules(
 
     // All at once: each one asks the object store whether it holds these bytes,
     // about 100 ms a module on an app's Temper and most of them unchanged, so
-    // asked in turn Arni Labs' 12 take 1.2 s. Asking is what repairs a lost object.
+    // asked in turn an app's 12 take 1.2 s. Asking is what repairs a lost object.
     let stored = join_all(to_store.iter().map(
         |(module_name, wasm_bytes, hash, replace_uploaded_module)| async move {
             let started = Instant::now();

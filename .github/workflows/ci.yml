@@ -76,12 +76,12 @@ jobs:
   # What this run tests. Schedule and a plain dispatch: everything (lane "full"). A push or a pull
   # request: only the packages its changes can reach (lane "pr"), see scripts/ci/affected.py. A
   # push's changes are what it moved main by. Changes land by pushing to main (trunk-based
-  # development, Rita, 3 Nov 2026; there is no merge queue), and every test runs once, on that push
-  # (Rita, 31 Oct 2026: "CI 2 times is insane"): a pull request only compiles and lints (Compile &
+  # development; there is no merge queue), and every test runs once, on that push, so tests
+  # never run twice for one change: a pull request only compiles and lints (Compile &
   # Lint, Integrity, Instrumentation Hygiene, the SDK's type check), so its author sees a broken
   # build in about four minutes, and every job that runs tests is skipped on it (output
   # tests=false). To run on a branch, before pushing it to main, exactly what that push will:
-  #   gh workflow run ci.yml -R arni-labs/temper --ref <branch> -f changed="$(git diff --name-only origin/main...)"
+  #   gh workflow run ci.yml --ref <branch> -f changed="$(git diff --name-only origin/main...)"
   # Jobs with nothing to do are skipped here rather than started; a skipped job satisfies
   # a required check. The DST cells always start, because a matrix job skipped before it
   # expands reports none of the cell names the branch rules require.
@@ -911,7 +911,7 @@ jobs:
   # ─────────────────────────────────────────────────────
   # Focused tests: a dispatch given tests runs only the tests its filterset selects, so a
   # fix can be shown failing on the old code and passing on the new without a whole run.
-  #   gh workflow run ci.yml -R arni-labs/temper --ref <branch> \
+  #   gh workflow run ci.yml --ref <branch> \
   #     -f tests='test(=module::name)' -f packages=temper-server
   # The tests get what Tests and the Postgres job give theirs: PostgreSQL (both database
   # names), Redis, tursodb and the GEPA modules. Any test a lane runs can run here, dst_

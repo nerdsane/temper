@@ -358,7 +358,7 @@ permit(
 };
 "#;
         store
-            .save_policy("default", "katagami-curation-wasm", policy, "test")
+            .save_policy("default", "curation-wasm", policy, "test")
             .await
             .expect("save granular policy");
 
@@ -424,7 +424,7 @@ permit(
         store
             .save_policy(
                 "default",
-                "katagami-curation-wasm",
+                "curation-wasm",
                 r#"
 permit(
   principal is Agent,

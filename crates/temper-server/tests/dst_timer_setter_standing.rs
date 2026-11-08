@@ -101,7 +101,7 @@ const WAIT: Duration = Duration::from_secs(600);
 const HORIZON: Duration = Duration::from_secs(4 * 3600);
 
 /// The agent a user may act through.
-const AGENT: &str = "katagami-mcp";
+const AGENT: &str = "app-mcp";
 
 /// Which timer a record is set going with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -1,5 +1,5 @@
 //! Each change refused for its size is logged once, where the size check refuses,
-//! so a count of those lines (by app, through Katagami's collector) is the count of
+//! so a count of those lines (by app, through a log collector) is the count of
 //! refused changes: a create, an action and a batch alike. Its own test binary, so
 //! no test on another thread shares the log callsite while this one listens.
 

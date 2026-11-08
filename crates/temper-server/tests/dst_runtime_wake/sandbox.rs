@@ -6,7 +6,7 @@
 //! runs and its timers fire on their own. Suspended, nothing of the process
 //! runs and only the wall clock moves on, until the next request: one from
 //! the workload, or the control plane's wake for the due time it holds. As
-//! katagami-control's `Wake` does, the control plane sends it [`WAKE_LEAD`]
+//! a control plane's wake does, the control plane sends it [`WAKE_LEAD`]
 //! seconds before that time, and it reaches the process up to [`MOST_LAG`]
 //! seconds after it is sent. The control plane holds the newest report it
 //! took, by `(reported_at, seq)`, and wakes the process once for it.
@@ -37,7 +37,7 @@ use super::{AWAKE, CSDL, JITTER, JOB, SUSPEND_AFTER, TENANT, act, job, settle};
 const RUN: i64 = 8 * 3600;
 
 /// How long before the due time it holds the control plane sends its wake:
-/// katagami-control's `Wake` asks a second early.
+/// a control plane's wake asks a second early.
 const WAKE_LEAD: i64 = 1;
 
 /// The most a wake takes to reach the process after the control plane sends

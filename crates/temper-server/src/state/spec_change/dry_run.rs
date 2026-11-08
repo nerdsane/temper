@@ -28,7 +28,7 @@ impl ServerState {
     /// moves and invariants, and its related records' references read
     /// ([`read_names`]), so the dry run ends the same way for each of them.
     /// A record is read whole from its journal, and a store read took 0.35
-    /// to 0.8 s on a busy app drive (the Factory, 26 Oct 2026): one read
+    /// to 0.8 s on a busy app drive (26 Oct 2026): one read
     /// per record would hold an install for minutes. A group whose first
     /// record cannot be read is tried with the next.
     pub(super) async fn try_carry(

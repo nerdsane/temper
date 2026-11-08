@@ -23,8 +23,8 @@ Writes key=value lines to $GITHUB_OUTPUT (stdout when unset):
   shards    JSON matrix of Tests shards for the pr lane
   specs     true when Spec Verification runs: the full lane, or a changed spec file
   tests     false on a pull request: it only compiles and lints, and the push to
-            main that lands it runs every test once (Rita, 31 Oct 2026: "CI 2
-            times is insane"); true for every other event
+            main that lands it runs every test once, so no test runs twice
+            for one change; true for every other event
 """
 
 import fnmatch

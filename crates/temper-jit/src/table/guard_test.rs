@@ -187,8 +187,8 @@ fn failure_splits_field_comparisons_into_typed_conditions() {
     );
     // An absent field reads as null.
     assert_eq!(
-        conditions("owner == 'sesh'", "Open", &ctx).1,
-        vec![condition("owner", "==", json!("sesh"), json!(null))]
+        conditions("owner == 'alice'", "Open", &ctx).1,
+        vec![condition("owner", "==", json!("alice"), json!(null))]
     );
 }
 

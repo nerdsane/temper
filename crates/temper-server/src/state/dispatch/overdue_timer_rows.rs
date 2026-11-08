@@ -2,7 +2,7 @@
 //! scheduled actions. It reads the rows, not the timers armed in this process,
 //! so a row that no process armed, or whose fire never landed, still counts.
 //! Without it the kernel saw an overdue timer only when something touched its
-//! record: 20 Factory Releases sat in Queued for two days unseen.
+//! record: 20 release records sat in Queued for two days unseen.
 //!
 //! A repeating timer whose fire changes nothing writes nothing, so its row stays
 //! at the time of its first look and this process holds when it looks next. Such

@@ -1,6 +1,6 @@
 //! Live heap stays flat while an app keeps writing.
 //!
-//! Incident i8 (15 Oct 2026): an app with 25 feeds, each rewriting about 40 KB
+//! Seen 15 Oct 2026: an app with 25 feeds, each rewriting about 40 KB
 //! of state every few seconds, grew its Temper by about 50 MB every 30 seconds
 //! until the kernel killed it at about 400 MB. Every dispatched action carries
 //! an idempotency key, and each one left a full copy of the entity's state,

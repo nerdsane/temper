@@ -11,7 +11,7 @@
 //! An install checks at main's level, as a TrustBundle install does: each
 //! spec must parse, and the installer's joint proofs become warnings. The
 //! per-spec L0-L3 cascade is not run here; a caller runs it before it
-//! sends (Katagami's apps_build, through `POST /api/specs/validate-ioa`).
+//! sends (an app builder, through `POST /api/specs/validate-ioa`).
 
 use super::*;
 use crate::os_apps::{

@@ -117,7 +117,7 @@ pub const SOURCE_ANNOTATION: &str = "source";
 
 /// `text` with every statement annotated `@source("{label}#{n}")`, `n` the
 /// statement's 1-based position in `text`, so a denial reads
-/// `katagami-commons/art_style.cedar#2` instead of a positional `policy1874`.
+/// `commons/art_style.cedar#2` instead of a positional `policy1874`.
 /// The annotation travels with the text into every store and reload; Cedar
 /// keeps it on the parsed policy. A statement that already has a source
 /// annotation keeps it. Every other byte stays as it was.

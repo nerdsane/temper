@@ -421,7 +421,7 @@ param = "parent_id"
 
 #[tokio::test]
 async fn spawn_copy_hands_parent_fields_to_the_child_initializer() {
-    // TemperPaw's CronJob spawns a Session with the job's prompt and model;
+    // A cron-job entity spawns a Session with the job's prompt and model;
     // copy(...) carries them, as copy_fields did before the effect grammar.
     let parent = r#"
 [automaton]

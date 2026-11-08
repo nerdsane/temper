@@ -19,7 +19,7 @@ it from working for the systems that actually send webhooks:
 1. **Only Temper's own signature.** The receiver checked a hex HMAC of
    `METHOD\nPATH?QUERY\nBODY`. Stripe signs `<t>.<body>`, GitHub signs the body,
    Standard Webhooks (Svix) signs `<id>.<timestamp>.<body>`. None of them can
-   produce Temper's format, so none could call an app directly; Katagami built
+   produce Temper's format, so none could call an app directly; one downstream deployment built
    its own verifier in front of the kernel instead.
 2. **Only the query string.** The entity id and every parameter had to be
    `query.<name>`. Providers put the ids in the JSON body
@@ -94,8 +94,8 @@ consequence of the receiver.
 
 ### Negative
 - A spec stored before this change with an unsigned webhook or a
-  `kind = "webhook"` trigger no longer loads. No such spec exists in Temper,
-  TemperPaw or Katagami (Katagami's app builder already refuses `[[webhook]]`).
+  `kind = "webhook"` trigger no longer loads. No such spec exists in Temper
+  or its known deployments (their app builders already refuse `[[webhook]]`).
 - An OAuth redirect cannot be signed by its provider, so it still needs a
   relay that signs with the kernel scheme.
 

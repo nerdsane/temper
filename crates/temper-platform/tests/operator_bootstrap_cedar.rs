@@ -355,7 +355,7 @@ async fn recovered_granular_row_still_allows_verified_operator() {
 }
 
 /// The operator key reads its tenant's installs (`read_app_installs`), which
-/// is how Katagami finds the folder an app is served from; a developer key
+/// is how a control plane finds the folder an app is served from; a developer key
 /// does not.
 #[tokio::test]
 async fn http_app_installs_read_allows_operator_and_denies_developer() {

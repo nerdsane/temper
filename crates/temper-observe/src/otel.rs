@@ -28,7 +28,7 @@
 //! startup as a warning and the default applies.
 
 /// A copy of the caller's W3C `traceparent`, sent beside it on every call one Temper makes and read first by the
-/// Temper that answers. A proxy that puts its own span into `traceparent` (Tensorlake's sandbox ingress does, and
+/// Temper that answers. A proxy that puts its own span into `traceparent` (a sandbox host's ingress does, and
 /// never sends that span to us) leaves this copy alone, so the answering Temper still names the caller's span as
 /// its parent and the trace has no gap.
 pub const TRACEPARENT_COPY: &str = "x-temper-traceparent";

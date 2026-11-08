@@ -42,7 +42,7 @@ fn request_in(path: &str, body: serde_json::Value, session: Option<&str>) -> Req
                     attributes: Default::default(),
                 },
                 context_attrs: Default::default(),
-                correlation_id: "factory-sized-offers".to_string(),
+                correlation_id: "many-sized-offers".to_string(),
                 cause: None,
                 credential: None,
             },
@@ -163,7 +163,7 @@ async fn factory_sized_checks_enqueue_nothing_but_a_refused_move_records_one_att
         .await
         .unwrap();
 
-    // A Factory-sized offer page: 50 allowed moves and 50 denied moves,
+    // A busy app's offer page: 50 allowed moves and 50 denied moves,
     // including a real spec action we will then dispatch on this same record.
     let mut actions = (0..99).map(|i| format!("Move{i}")).collect::<Vec<_>>();
     actions.push("AddItem".to_string());
