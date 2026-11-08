@@ -221,29 +221,6 @@ async fn replay(
                         "{}",
                         temper_platform::os_apps::installed_line(&app_name, &tenant, &result)
                     );
-                    // The version just served from the boot catalog becomes the
-                    // app's first pushed version when it has none, so every
-                    // later boot serves it until the next push, whatever the
-                    // catalog holds then (see `adopt_catalog_app`).
-                    match temper_platform::genesis_install::adopt_catalog_app(
-                        state, &tenant, &app_name,
-                    )
-                    .await
-                    {
-                        Ok(Some(digest)) => tracing::info!(
-                            tenant = %tenant,
-                            app = %app_name,
-                            %digest,
-                            "adopted the boot catalog's version as the first pushed version"
-                        ),
-                        Ok(None) => {}
-                        Err(error) => tracing::error!(
-                            tenant = %tenant,
-                            app = %app_name,
-                            %error,
-                            "the served version was not adopted; the next boot serves the catalog's"
-                        ),
-                    }
                 }
             },
             Err(e) => {
@@ -289,7 +266,7 @@ pub(super) async fn replay_recorded_installs(
 
 /// Everything the install of an app given on the command line said, as one compact JSON object on one line before the
 /// line that says it installed or failed: its warnings and the modules Jev reviewed, or why it was refused, whole
-/// (`refused`). A reader of a start's output that sees the verdict already has it (Katagami's start wrapper keeps both
+/// (`refused`). A reader of a start's output that sees the verdict already has it (a start wrapper keeps both
 /// lines and passes this one on as it is).
 fn print_install_notes(app_name: &str, line: &serde_json::Value) {
     use std::io::Write as _;

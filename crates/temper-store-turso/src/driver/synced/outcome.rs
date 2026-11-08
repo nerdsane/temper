@@ -80,7 +80,7 @@ impl PushOutcome {
     /// The metric carries no Temper or environment of its own: the process's
     /// OpenTelemetry resource does (`deployment.environment.name` from
     /// `DD_ENV`, and whatever `OTEL_RESOURCE_ATTRIBUTES` names, such as the
-    /// `app_id` and `temper_id` a Katagami install sets), as for every other
+    /// `app_id` and `temper_id` a control plane's install sets), as for every other
     /// metric this process sends.
     pub(super) fn record(&self) {
         let attributes = match self {

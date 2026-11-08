@@ -27,9 +27,8 @@
 #                  (Cedar install_app) and read their installs
 #   REGISTRY_URL   the Genesis registry that Temper is configured with
 #                  (TEMPER_GENESIS_REGISTRY_URL; it installs from no other)
-#   APP_REF        default temperpaw/paw-media@fd62a5dc415a752625b7564abc237a1843838668,
-#                  the pinned gate app: 20 specs across paw-media, paw-agent
-#                  and paw-fs, all in the current spec syntax
+#   APP_REF        the app to install, <owner>/<app>@<commit>, pinned so
+#                  every run installs the same specs
 #   TENANT_PREFIX  default kgtiming; never a person's tenant
 #   TENANT         unset by default; one tenant for every run (see above)
 #   RUNS           default 3
@@ -68,7 +67,7 @@ esac
 : "${TEMPER_URL:?set TEMPER_URL}"
 : "${TEMPER_API_KEY:?set TEMPER_API_KEY}"
 : "${REGISTRY_URL:?set REGISTRY_URL}"
-APP_REF="${APP_REF:-temperpaw/paw-media@fd62a5dc415a752625b7564abc237a1843838668}"
+: "${APP_REF:?set APP_REF}"
 TENANT_PREFIX="${TENANT_PREFIX:-kgtiming}"
 TENANT="${TENANT:-}"
 RUNS="${RUNS:-3}"

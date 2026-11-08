@@ -15,8 +15,7 @@ mod carrying;
 mod replays;
 mod then;
 
-/// A place an app's Temper is brought to, after `KatagamiAppPlace` before
-/// katagami #1130.
+/// A place an app's Temper is brought to, modelled on a downstream app-place entity.
 const PLACE: &str = r#"
 [automaton]
 name = "Place"
@@ -139,7 +138,7 @@ fn leaves_and_closes(carries: &str) -> String {
     ))
 }
 
-/// katagami #1130's change: each Bring carries a count higher than the last.
+/// The change under test: each Bring carries a count higher than the last.
 fn counts_brings() -> String {
     PLACE
         .replace(
@@ -356,7 +355,7 @@ async fn records_that_differ_only_in_what_an_invariant_reads_are_tried_apart() {
     assert!(!refused.contains("p1"), "p1 is small: {refused}");
 }
 
-/// katagami #1130's shape: a new counter, and a constraint on an existing
+/// The shape under test: a new counter, and a constraint on an existing
 /// action that reads it. A missing declared counter reads as its initial
 /// value (temper #167), so the stored place can still Bring.
 #[tokio::test]

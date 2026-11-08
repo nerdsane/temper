@@ -1,6 +1,6 @@
 //! One change larger than the server's event size limit is refused before
 //! anything is written, in words that tell the caller what to keep elsewhere;
-//! a change over the warning size is still written. Incident i8: an app wrote
+//! a change over the warning size is still written. Seen 15 Oct 2026: an app wrote
 //! 40 to 90 KB into every step until its Temper ran out of memory.
 
 use super::*;

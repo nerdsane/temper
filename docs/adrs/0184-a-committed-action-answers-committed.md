@@ -51,5 +51,5 @@ A composite action's effect is its integration's sub-writes (ADR-0140), so when 
 ## Consequences
 
 - An OData caller waiting on an action gets 200 whenever the action committed, and reads `@temper.triggerFailures` to learn which triggers failed.
-- A spec that relied on a later trigger not running after an earlier one failed must move that step to a reaction on the earlier trigger's answer. A sweep of the specs on disk found one such spec, a paw-patrol `Effort.Merge` copy, which hangs its deploy reaction on the merge itself rather than on the merge check's answer.
+- A spec that relied on a later trigger not running after an earlier one failed must move that step to a reaction on the earlier trigger's answer. A sweep of the specs on disk found one such spec, an `Effort.Merge` copy in one app, which hangs its deploy reaction on the merge itself rather than on the merge check's answer.
 - Composite actions are unchanged.

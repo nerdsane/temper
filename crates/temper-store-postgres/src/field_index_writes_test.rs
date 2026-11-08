@@ -192,7 +192,7 @@ fn a_projection_writes_only_the_index_rows_it_changes() {
             ("adds a field", vec![("Assignee", json!("ana"))], "Open", 1),
             ("removes a field", vec![("Field19", Value::Null)], "Open", 1),
             ("changes status", vec![], "Closed", 0),
-            // The Factory's usual move: a new status and a field or two.
+            // A busy app's usual move: a new status and a field or two.
             (
                 "changes status and sets two fields",
                 vec![("Field04", json!("four")), ("Field05", json!("five"))],

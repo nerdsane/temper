@@ -12,8 +12,8 @@ use crate::storage::WriteHealth;
 /// `/healthz`: whether this server answers, and whether its store takes writes.
 ///
 /// It answers 503 while the store's appends fail, from the first failed append
-/// until one lands. Tensorlake's supervisor restarts a process after six failed
-/// asks ten seconds apart (`katagami-control`'s `HEALTH_FAILURE_THRESHOLD`), so
+/// until one lands. A sandbox host's supervisor restarts a process after six failed
+/// asks ten seconds apart (a control plane's failure threshold), so
 /// a store that failed inside this process is started again; nothing else
 /// recovers it. A refusal for room answers 200 with the refusal in the body: a
 /// restart makes no room (growing the disk does), and while it starts this

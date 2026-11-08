@@ -215,30 +215,52 @@ fn expected_caller(salt: &str, address: &str) -> String {
 
 #[test]
 fn the_caller_is_the_salted_hash_of_the_address() {
-    let salted = |request: &Request<Body>| {
-        KeyUse::from_request(request, Outcome::Refused, OPERATOR, Some("pepper")).caller
+    let salted = |request: &Request<Body>, client_header: Option<&str>| {
+        KeyUse::from_request(
+            request,
+            Outcome::Refused,
+            OPERATOR,
+            Some("pepper"),
+            client_header,
+        )
+        .caller
     };
 
     let from_peer = request_from([198, 51, 100, 7], &[]);
     assert_eq!(
-        salted(&from_peer),
+        salted(&from_peer, None),
         expected_caller("pepper", "198.51.100.7")
     );
     assert_ne!(
-        salted(&from_peer),
+        salted(&from_peer, None),
         expected_caller("other-salt", "198.51.100.7")
     );
 
-    let forwarded = request_from(
-        [10, 0, 0, 1],
-        &[("x-forwarded-for", "203.0.113.9, 10.0.0.1")],
+    // With no header named, what a caller writes into address headers is not read.
+    let sent_headers = request_from(
+        [198, 51, 100, 7],
+        &[
+            ("x-real-ip", "192.0.2.4"),
+            ("x-forwarded-for", "203.0.113.9"),
+        ],
     );
     assert_eq!(
-        salted(&forwarded),
+        salted(&sent_headers, None),
+        expected_caller("pepper", "198.51.100.7")
+    );
+
+    // The named header's last entry is the one the proxy appended; earlier
+    // entries are whatever the caller sent.
+    let forwarded = request_from(
+        [10, 0, 0, 1],
+        &[("x-forwarded-for", "192.0.2.77, 203.0.113.9")],
+    );
+    assert_eq!(
+        salted(&forwarded, Some("x-forwarded-for")),
         expected_caller("pepper", CLIENT_ADDRESS)
     );
 
-    let behind_railway = request_from(
+    let behind_a_proxy = request_from(
         [10, 0, 0, 1],
         &[
             ("x-real-ip", "192.0.2.4"),
@@ -246,17 +268,17 @@ fn the_caller_is_the_salted_hash_of_the_address() {
         ],
     );
     assert_eq!(
-        salted(&behind_railway),
+        salted(&behind_a_proxy, Some("x-real-ip")),
         expected_caller("pepper", "192.0.2.4")
     );
 
     let not_an_address = request_from([198, 51, 100, 7], &[("x-forwarded-for", "unknown")]);
     assert_eq!(
-        salted(&not_an_address),
+        salted(&not_an_address, Some("x-forwarded-for")),
         expected_caller("pepper", "198.51.100.7")
     );
 
-    let unsalted = KeyUse::from_request(&from_peer, Outcome::Accepted, OPERATOR, None);
+    let unsalted = KeyUse::from_request(&from_peer, Outcome::Accepted, OPERATOR, None, None);
     assert_eq!(unsalted.caller, "unsalted");
     assert_eq!(unsalted.route, "unmatched");
     assert_eq!(unsalted.at_endpoint(Some("/repo.git")).route, "/repo.git");

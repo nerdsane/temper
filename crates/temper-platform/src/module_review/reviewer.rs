@@ -14,7 +14,7 @@ use super::types::{Judge, JudgeUnavailable, ModuleReview, ModuleSource, SpecSour
 
 /// How long one module's review may take, all its questions included: three rounds (rate, part, line) at Jev's usual
 /// answer of under three seconds. A start and a Genesis install wait for their review, and a supervisor may give a new
-/// version little time to serve (Katagami gives 20 seconds), so past this the review says Jev did not answer instead of
+/// version little time to serve (20 seconds is a usual budget), so past this the review says Jev did not answer instead of
 /// waiting on.
 const MODULE_DEADLINE: Duration = Duration::from_secs(10);
 

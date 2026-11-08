@@ -33,7 +33,7 @@ fn another_spec_s_hash_names_another_version() {
 
 #[test]
 fn an_entity_qualified_prefix_names_the_registered_spec() {
-    // The pin katagami stamps: the entity, then a short digest.
+    // The pin a consumer stamps: the entity, then a short digest.
     let prefix = &REGISTERED[..MIN_PIN_DIGEST_HEX];
     assert_eq!(
         classify(&format!("Order@sha256:{prefix}")),

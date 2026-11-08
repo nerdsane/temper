@@ -281,7 +281,7 @@ fn the_callers_sampling_and_tracestate_reach_the_server_span() {
     }
 }
 
-/// Tensorlake's sandbox ingress keeps the trace id but puts its own span, which
+/// A sandbox host's ingress keeps the trace id but puts its own span, which
 /// never reaches us, into `traceparent`. The caller's copy still names the
 /// caller's span, so that is the server span's parent; an unusable copy is
 /// ignored.

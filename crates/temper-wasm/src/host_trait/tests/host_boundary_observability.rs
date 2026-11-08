@@ -168,7 +168,7 @@ fn session_invocation_context() -> WasmInvocationContext {
 
 /// The shapes a secret in a URL takes. None may reach a span, a log line or the module's error.
 const KEYS: [&str; 6] = [
-    // Katagami's interface builder's address.
+    // A keyed address: a 64-hex key as a path segment.
     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     // A Slack webhook's last segment.
     "aB3dE6gH9jK2mN5pQ8sT1vW4",
@@ -318,12 +318,12 @@ fn a_url_in_telemetry_keeps_what_a_reader_needs() {
     use crate::host_trait::telemetry_url as seen;
     // Words and ids a reader joins on stay.
     assert_eq!(
-        seen("https://api.tensorlake.ai/artifact-storage/v1/token"),
-        "api.tensorlake.ai/artifact-storage/v1/token"
+        seen("https://api.storage.example/artifact-storage/v1/token"),
+        "api.storage.example/artifact-storage/v1/token"
     );
     assert_eq!(
-        seen("http://h/tdata/KatagamiAppSurfaces('a4n0fypl22sn.sumxn1gvgq7dh')/KatagamiApps.Kept"),
-        "h/tdata/KatagamiAppSurfaces('a4n0fypl22sn.sumxn1gvgq7dh')/KatagamiApps.Kept"
+        seen("http://h/tdata/AppSurfaces('c5m1hqtr33pk.vonwk2hzjr8bf')/Apps.Kept"),
+        "h/tdata/AppSurfaces('c5m1hqtr33pk.vonwk2hzjr8bf')/Apps.Kept"
     );
     assert_eq!(
         seen("http://h/x/01a19923-dd62-7fd4-9e8c-ea29db7c3dba/y"),

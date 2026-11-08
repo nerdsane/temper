@@ -14,7 +14,7 @@
 //! on a new kernel, whose models may read differently, finds the second.
 //! Only a change to both walks again. A proven verdict is kept in the
 //! platform's blob table, so a start that installs again what an earlier
-//! install proved (a Katagami app's new Temper must serve within 20 s of the
+//! install proved (an app's new Temper must serve within 20 s of the
 //! old one's TERM) reads it instead of walking again, whatever checker made
 //! it: those specs already run. A refusal is kept only while this process runs,
 //! so a later checker decides it again. A walk that did not fit in its

@@ -20,7 +20,7 @@ use crate::state::trajectory::TrajectoryEntry;
 /// `f_bavail`).
 ///
 /// Why 160 MiB, from the full-disk tests on staging (26 Oct 2026). On a
-/// Tensorlake volume a full disk is not a clean failure: the volume's daemon
+/// sandbox host's volume a full disk is not a clean failure: the volume's daemon
 /// (tlfs) stops copying the volume off the sandbox for good while writes still
 /// answer success, so what is written after that is lost; and under a database
 /// its own store fails ("Poisoned"), so every later read and write answers EIO

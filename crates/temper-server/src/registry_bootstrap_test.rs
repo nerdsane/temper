@@ -228,7 +228,7 @@ fn populate_registry_skips_a_stored_spec_that_cannot_be_read() {
     assert!(registry.get_table(&tenant, "Broken").is_none());
 }
 
-/// The platform-store restore TemperPaw runs at boot: an old-syntax spec is
+/// The platform-store restore an embedding server runs at boot: an old-syntax spec is
 /// converted, registered and written back committed, so the next boot reads
 /// it as stored; an unreadable spec stays in the store and only its own type
 /// is unavailable; the rest of the tenant restores.

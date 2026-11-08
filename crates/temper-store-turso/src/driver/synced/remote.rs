@@ -15,7 +15,8 @@ use super::DriverError;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long each step of a timed fresh request may take. Past the 1 s
-/// temper-cli lets a lost DNS answer cost (`RES_OPTIONS`), so one lost answer
+/// a lost DNS answer costs where the resolver asks again after 1 s
+/// (`RES_OPTIONS=timeout:1`), so one lost answer
 /// shows as a slow lookup rather than a failed one; far past a fresh
 /// request's normal 70 ms (lookup 9, connect 15, TLS 30, first byte 15 ms at
 /// the median on 28 Oct 2026).

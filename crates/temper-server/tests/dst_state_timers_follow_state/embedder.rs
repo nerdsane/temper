@@ -1,6 +1,6 @@
 //! DST: a server embedded without `temper serve` gets its timers back.
 //!
-//! An embedder (temperpaw) builds its own startup from kernel calls: a
+//! An embedder builds its own startup from kernel calls: a
 //! registry, a storage stack, then the kernel's runtime start. Workload, per
 //! seed: a record enters `Waiting`, the process stops, and the next one boots
 //! the way an embedder does and leaves the record alone.

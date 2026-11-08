@@ -143,7 +143,7 @@ deprecation on the same server remain effective on the next request, and the
 sequence/status/fields stability check between the credential and type reads is
 unchanged. Sign-out generations and trusted issuers were already read this way.
 Freshness across several servers is a property every entity needs and will be
-solved at the entity layer, not for credentials alone; TemperPaw runs one server.
+solved at the entity layer, not for credentials alone; the deployment this was written for runs one server.
 
 Tenant authorization also fails closed when no tenant policy set is active.
 `ServerState` starts with the default-deny engine, and

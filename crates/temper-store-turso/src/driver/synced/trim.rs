@@ -17,7 +17,7 @@ use super::{Connection, DriverError, SyncCopy};
 const BATCH_TARGET: Duration = Duration::from_millis(50);
 
 /// The first batch's plan. At the slowest rate measured, a cold log on a
-/// Tensorlake drive (10,000 rows in 34.2 s, about 290 rows a second), 12
+/// sandbox host's network drive (10,000 rows in 34.2 s, about 290 rows a second), 12
 /// rows take about 41 ms, within [`BATCH_TARGET`].
 pub(super) const FIRST_PLAN: Plan = Plan {
     rows: 12,
@@ -26,7 +26,7 @@ pub(super) const FIRST_PLAN: Plan = Plan {
 
 /// How often a batch whose DELETE has run past its plan looks for a waiting
 /// write. Short against one commit on a slow drive (about 300 ms on tlfs,
-/// roll3, 26 Oct 2026).
+/// a load test).
 const WRITER_RECHECK: Duration = Duration::from_millis(25);
 
 /// The writers a trim batch shares the database with (the store's write
@@ -339,7 +339,7 @@ async fn one_id(conn: &Connection, sql: &str) -> Result<Option<i64>, DriverError
 ///
 /// A batch costs its commit plus its rows' work. On a slow drive the commit
 /// is mostly a sync that costs the same however many rows it carries: about
-/// 170 ms on a Tensorlake drive and 300 ms on tlfs (roll3, 26 Oct 2026).
+/// 170 ms on a sandbox host's network drive and 300 ms on tlfs (a load test).
 /// Planned by the whole batch's time, a 50 ms batch can never be met there,
 /// so every batch shrank to one row and the trim fell behind the log. So the
 /// rows are planned by the DELETE's own rate, to work as long as the commit
@@ -412,7 +412,7 @@ mod tests {
 
     #[test]
     fn a_slow_commit_grows_the_batch_until_its_rows_work_as_long_as_the_commit() {
-        // roll3's canary: one row a batch, ~170 ms of commit. The rows now grow.
+        // a load test's canary: one row a batch, ~170 ms of commit. The rows now grow.
         assert_eq!(rows(&batch(1, 5, 170)), 2);
         // 50 rows that took 170 ms of work to a 170 ms commit: keep the size.
         assert_eq!(rows(&batch(50, 170, 170)), 50);

@@ -1,4 +1,4 @@
-//! The lines this server prints about an app's install. Katagami's control
+//! The lines this server prints about an app's install. A control
 //! plane reads them to know whether an app is served, so their words are
 //! fixed; tests hold them.
 

@@ -2,7 +2,7 @@
 //! push may name, and what a refused or installed push leaves behind. A push
 //! is the installer's second source, so these also hold the shared install:
 //! checks before anything changes, rollback to the version before, records,
-//! boot restore and adoption.
+//! and boot restore.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -17,7 +17,7 @@ use temper_server::platform_store::{
 };
 use tower::ServiceExt;
 
-use crate::genesis_install::{adopt_catalog_app, restore_genesis_registry_cache_roots};
+use crate::genesis_install::restore_genesis_registry_cache_roots;
 use crate::os_apps::{app_files_seam, tenant_os_app};
 use crate::state::PlatformState;
 use crate::tenant_api::tenant_api_router;
@@ -296,7 +296,7 @@ async fn a_push_naming_a_path_outside_the_app_is_refused() {
 
 /// An install checks at main's level: each spec parses, and the installer's
 /// joint proofs warn. A spec whose own invariant an unguarded move breaks
-/// (an L1 counterexample, the shape of paw-fs's `UsageBelowQuota`) installs
+/// (an L1 counterexample, the shape of a quota invariant such as `UsageBelowQuota`) installs
 /// with 200, as it does on main; the per-spec L0-L3 check is the caller's,
 /// before it sends.
 #[tokio::test]
@@ -509,7 +509,7 @@ async fn a_push_waits_for_the_host_install_turn() {
     );
 }
 
-/// Katagami's control plane reads these lines to know an app is served or
+/// A control plane reads these lines to know an app is served or
 /// waiting; their words are fixed.
 #[test]
 fn the_install_and_waiting_lines_read_as_the_control_plane_reads_them() {
@@ -533,51 +533,8 @@ fn the_install_and_waiting_lines_read_as_the_control_plane_reads_them() {
     );
 }
 
-/// An app served from the boot catalog is adopted as its first pushed
-/// version; pushing the same files again is that version, and a changed push
-/// replaces it.
-#[tokio::test]
-async fn an_adopted_catalog_version_is_the_version_a_push_builds_on() {
-    let tenant = unique_tenant("adopted");
-    let server = server(&tenant);
-    let digest = adopt_catalog_app(&server.state, &tenant, APP)
-        .await
-        .expect("adopt")
-        .expect("the catalog holds the app");
-    let adopted = record(&server.ps, &tenant).await.expect("recorded");
-    assert_eq!(adopted.source_kind, "pushed");
-    assert_eq!(adopted.app_ref, format!("pushed/{APP}@{digest}"));
-    assert_eq!(
-        adopt_catalog_app(&server.state, &tenant, APP)
-            .await
-            .expect("adopt again"),
-        None,
-        "an app with a pushed version is not adopted again"
-    );
-
-    let (status, body) = send(
-        &server.state,
-        push(&tenant, serde_json::json!({ "files": app_files() })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["digest"], digest.as_str());
-
-    let (status, body) = send(
-        &server.state,
-        push(
-            &tenant,
-            serde_json::json!({ "files": with_comment("pushed after adoption") }),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_ne!(body["digest"], digest.as_str());
-    assert!(resolved_spec(&tenant).contains("# pushed after adoption"));
-}
-
 /// The app's files with one spec in the old syntax this kernel refuses: a
-/// bool written as a string, as TemperPaw's paw-patrol has it.
+/// bool written as a string, as some existing apps have it.
 /// The sentinel spec `tenant` has registered with the server.
 fn registered_spec(state: &PlatformState, tenant: &str) -> String {
     state

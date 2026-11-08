@@ -1,7 +1,7 @@
 //! The gauge of timer rows past their due time reads the rows in the store,
 //! not the timers a process armed: a row past due that no process armed shows
 //! on it. Before it, a timer that never fired was seen only when something
-//! touched its record, and 20 Factory Releases sat in Queued for two days.
+//! touched its record, and 20 release records sat in Queued for two days.
 //!
 //! Its own test binary, so the global meter provider is set before anything
 //! in this process records a metric.

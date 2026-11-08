@@ -24,7 +24,7 @@
 //! app needs, a check cannot foresee the app beside it, and it answers 409 with
 //! the app that must be installed first. The install checks at main's level
 //! (each spec parses; joint proofs warn), so `budget_ms` bounds no check yet; it
-//! is still validated, because the caller (Katagami's apps_build) sends it for
+//! is still validated, because the caller (an app builder) sends it for
 //! the per-spec check. Every answer says how long the push waited for this
 //! host's install turn (`waited_ms`); a check's is 0.
 //!

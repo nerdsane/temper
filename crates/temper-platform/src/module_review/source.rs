@@ -20,12 +20,12 @@ pub struct Part {
 /// choice among hundreds.
 const PART_LINES: usize = 6;
 
-/// Lines that say something per window. Jev's answers fall with state it does not need (TypeSafe's model card), and in
-/// the census of Rita's apps on 26 Oct 2026 a 1,000-line module read whole gave no line Jev could point at.
+/// Lines that say something per window. Jev's answers fall with state it does not need (the model card), and in
+/// a census of real apps on 26 Oct 2026 a 1,000-line module read whole gave no line Jev could point at.
 pub const WINDOW_LINES: usize = 160;
 
 /// Characters of a line Jev reads; the rest is cut. A window must fit one ask, and a route that holds the key may hold
-/// an ask to a size made from this (Katagami's: 160 lines of 160 characters and the specs, about 40 KB). A line this
+/// an ask to a size made from this (160 lines of 160 characters and the specs is about 40 KB). A line this
 /// long is data, not logic to point at: rustfmt breaks code at 100.
 pub const LINE_CHARS: usize = 160;
 

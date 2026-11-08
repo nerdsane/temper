@@ -186,7 +186,7 @@ fn captured(profile_type: &'static str) -> Captured {
 fn event_follows_datadogs_native_profile_envelope() {
     with_env(
         &[
-            ("DD_SERVICE", "unikon-user-temper"),
+            ("DD_SERVICE", "app-temper"),
             ("DD_ENV", "staging"),
             ("DD_VERSION", "30feec4"),
             ("DD_TAGS", "app_id:a1,temper_id:t1"),
@@ -205,7 +205,7 @@ fn event_follows_datadogs_native_profile_envelope() {
             assert_eq!(event["info"]["profiler"]["activation"], "auto");
             let tags = event["tags_profiler"].as_str().unwrap();
             for expected in [
-                "service:unikon-user-temper",
+                "service:app-temper",
                 "env:staging",
                 "version:30feec4",
                 "runtime:rust",
@@ -223,9 +223,9 @@ fn event_follows_datadogs_native_profile_envelope() {
 
 #[test]
 fn tags_name_no_environment_or_version_nobody_set() {
-    with_env(&[("OTEL_SERVICE_NAME", "katagami-app")], || {
+    with_env(&[("OTEL_SERVICE_NAME", "my-app")], || {
         let tags = super::upload::profile_tags("cpu", "continuous");
-        assert_eq!(tags[0], "service:katagami-app");
+        assert_eq!(tags[0], "service:my-app");
         assert!(
             !tags
                 .iter()
@@ -235,13 +235,13 @@ fn tags_name_no_environment_or_version_nobody_set() {
     });
     with_env(
         &[
-            ("OTEL_SERVICE_NAME", "katagami-app"),
-            ("DD_SERVICE", "unikon-user-temper"),
+            ("OTEL_SERVICE_NAME", "my-app"),
+            ("DD_SERVICE", "app-temper"),
         ],
         || {
             assert_eq!(
                 super::upload::profile_tags("cpu", "continuous")[0],
-                "service:unikon-user-temper"
+                "service:app-temper"
             )
         },
     );

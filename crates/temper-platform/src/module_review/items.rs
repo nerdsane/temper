@@ -1,4 +1,4 @@
-//! What Jev looks for in a module, in Rita's order (26 Oct 2026). A module may only compute a value between two
+//! What Jev looks for in a module, in order of weight. A module may only compute a value between two
 //! moves: parse, format, score, transform, or call one outside service and return its answer. Each item is a
 //! statement Jev rates 0..1 (`shows`, calibrated on labelled modules: every planted item 0.74 to 0.98, every clean
 //! module 0.34 or less), and the words of its finding (`why`, `instead`).
@@ -83,7 +83,6 @@ pub const ITEMS: [Item; 7] = [
 ];
 
 /// Lines that say something past which a module is a finding of its own (item 7), asking why it is not states.
-/// Rita, 26 Oct 2026: "I don't know if I can even think of cases where it could be a big module and it still
-/// complies." In the census of her apps that day, every module with no finding was under 100 lines and every one over
+/// A big module is rarely one that still complies: in a census of real apps (26 Oct 2026), every module with no finding was under 100 lines and every one over
 /// 400 had three findings or more.
 pub const LARGE_LINES: usize = 200;

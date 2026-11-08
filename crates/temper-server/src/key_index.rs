@@ -274,18 +274,18 @@ mod tests {
             "ParentId".to_string(),
         ];
         // Write side: root entity fields — ParentId genuinely absent.
-        let root_fields = fields(&[("Name", json!("/")), ("WorkspaceId", json!("katagami"))]);
+        let root_fields = fields(&[("Name", json!("/")), ("WorkspaceId", json!("acme"))]);
         let write_hash =
             canonical_key_hash("name_parent", &key, &root_fields).expect("absent ParentId indexes");
 
-        // Read side: `Name eq '/' and WorkspaceId eq 'katagami' and ParentId eq null`.
+        // Read side: `Name eq '/' and WorkspaceId eq 'acme' and ParentId eq null`.
         let decl = vec![DeclaredKey {
             name: "name_parent".to_string(),
             properties: key.clone(),
         }];
         let read_pairs = vec![
             ("Name".to_string(), json!("/")),
-            ("WorkspaceId".to_string(), json!("katagami")),
+            ("WorkspaceId".to_string(), json!("acme")),
             ("ParentId".to_string(), serde_json::Value::Null),
         ];
         let (_, read_hash) = resolve_query_to_key(&decl, &read_pairs).expect("root read resolves");
@@ -390,13 +390,13 @@ mod tests {
         ];
         let write_fields = fields(&[
             ("Name", json!("/")),
-            ("WorkspaceId", json!("katagami")),
+            ("WorkspaceId", json!("acme")),
             ("ParentId", json!(null)),
         ]);
         let write_hash =
             canonical_key_hash("name_parent", &key, &write_fields).expect("null is indexable");
 
-        // Read side: `Name eq '/' and WorkspaceId eq 'katagami' and ParentId eq null`
+        // Read side: `Name eq '/' and WorkspaceId eq 'acme' and ParentId eq null`
         // resolves to the SAME hash — so the root lookup is keyed, not a scan.
         let decl = vec![DeclaredKey {
             name: "name_parent".to_string(),
@@ -404,7 +404,7 @@ mod tests {
         }];
         let read_pairs = vec![
             ("Name".to_string(), json!("/")),
-            ("WorkspaceId".to_string(), json!("katagami")),
+            ("WorkspaceId".to_string(), json!("acme")),
             ("ParentId".to_string(), json!(null)),
         ];
         let (_, read_hash) = resolve_query_to_key(&decl, &read_pairs).expect("null read resolves");
@@ -416,7 +416,7 @@ mod tests {
         // A null component must NOT collide with the empty string.
         let empty_fields = fields(&[
             ("Name", json!("/")),
-            ("WorkspaceId", json!("katagami")),
+            ("WorkspaceId", json!("acme")),
             ("ParentId", json!("")),
         ]);
         assert_ne!(

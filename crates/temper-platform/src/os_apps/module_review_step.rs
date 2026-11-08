@@ -22,7 +22,7 @@ use crate::module_review::{
 };
 use crate::state::PlatformState;
 
-/// Source past this is not read. The largest app module seen was 1,175 lines, about 60 KB (census of Rita's apps, 26
+/// Source past this is not read. The largest app module seen was 1,175 lines, about 60 KB (census of real apps, 26
 /// Oct 2026); each 160 lines is a paid call, so a file many times that is not a module to read line by line.
 const MAX_SOURCE_BYTES: u64 = 512 * 1024;
 

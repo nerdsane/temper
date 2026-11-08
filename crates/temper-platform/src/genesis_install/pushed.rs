@@ -267,68 +267,6 @@ async fn install_in_turn(
     }
 }
 
-/// At boot, make the version of `app` that `tenant` serves from its boot
-/// catalog its first pushed version, when it has no pushed version recorded.
-/// Returns the adopted digest, or `None` when there was nothing to adopt.
-///
-/// Boot calls this only after the version installed: one that did not install
-/// was not served, so it is not adopted. Nothing goes empty that way: a boot
-/// install that fails leaves the specs stored in the database serving, and
-/// Katagami's control plane then sends that commit through the install route,
-/// where a refusal changes nothing.
-///
-/// Why: an app running before pushes existed has only the catalog version it
-/// was started with (for Katagami, the old checkout). Once adopted, the pushed
-/// version is what every later boot restores, whatever the catalog holds then,
-/// until the next push. Adoption runs no checks and refuses nothing: the
-/// version is already serving, and one whose files fail today's checks must
-/// keep serving until its owner pushes a new one. The whole app directory is
-/// copied, so a `COMMIT` file in it (Katagami writes `<app>/COMMIT` into the
-/// checkout it adopts) names the adopted version's commit.
-///
-/// This is a migration path for apps that predate pushes. Delete it, and its
-/// call at boot in temper-cli `serve/bootstrap.rs`, once every production app
-/// has a pushed root (tracked on the Katagami hub as "Remove adoption once
-/// every prod app has a pushed root").
-pub async fn adopt_catalog_app(
-    platform: &PlatformState,
-    tenant: &str,
-    app: &str,
-) -> Result<Option<String>, String> {
-    validate_identity_component("tenant", tenant)?;
-    validate_identity_component("app name", app)?;
-    // Adoption replaces the catalog and its record, just like a new install;
-    // a late recovery must see either side of that replacement, never half.
-    let _turn = temper_server::host_turn::take().await?;
-    if recorded_digest(platform, tenant, app).await.is_some() {
-        return Ok(None);
-    }
-    let Some(app_dir) = tenant_os_app_dir(tenant, app) else {
-        return Ok(None);
-    };
-    let tree = files::read_tree(&app_dir).map_err(|error| {
-        format!(
-            "the files of '{app}' at {} could not be read: {error}",
-            app_dir.display()
-        )
-    })?;
-    if tree.is_empty() {
-        return Ok(None);
-    }
-    let digest = files::digest(&tree);
-    let root = pushed_root(platform, tenant, app, &digest);
-    if !root.is_dir() {
-        files::materialize(&root, app, &tree)
-            .map_err(|error| format!("the files of '{app}' could not be copied: {error}"))?;
-    }
-    let written = AppFileSource::written(root.join(app), tree.keys().cloned());
-    register_written_apps(tenant, root, vec![(app.to_string(), written.clone())]);
-    let app_ref = pushed_ref(app, &digest);
-    let adopted = closure(&app_ref, app, &digest, written);
-    closure_install::record_closure(platform, tenant, &adopted).await?;
-    Ok(Some(digest))
-}
-
 /// Whether `tenant`'s install of `app` that this server stored is a pushed
 /// version: boot then replays it as recorded rather than installing its
 /// catalog files over it.

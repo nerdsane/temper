@@ -13,7 +13,7 @@
 //   SECONDS_BEFORE_KILL  how long writers run before the kill (default 6)
 //   KEEP_LOGS=1       keep the servers' logs after a passing run
 //   REMOTE_DELAY_MS   one-way delay added in front of the local sync server, to stand in for a remote
-//                     at that distance (Tensorlake to Turso aws-us-east-2 is about 15 ms one way)
+//                     at that distance (a sandbox host to Turso aws-us-east-2 is about 15 ms one way)
 //
 // kill: writers send writes with 32 in flight and log every write answered 2xx. The server is killed
 // with SIGKILL mid-burst and its whole data folder deleted. A new server on an empty folder restores

@@ -43,8 +43,7 @@ use cache_paths::{
 use closure_install::CheckRefused;
 use object_lookup::load_genesis_object;
 pub use pushed::{
-    PushMode, PushRefused, PushedFile, PushedInstall, adopt_catalog_app, install_pushed_app,
-    pushed_install_recorded,
+    PushMode, PushRefused, PushedFile, PushedInstall, install_pushed_app, pushed_install_recorded,
 };
 pub(crate) use registry::configured_registry;
 use registry::{RegistryUrl, registry_client};
@@ -1955,24 +1954,24 @@ mod tests {
     #[test]
     fn genesis_object_entity_id_matches_ingest_scheme() {
         // Byte-identical to scm_ingest_pack::object_entity_id, the writer of
-        // these keys. Real durable ids observed in prod Genesis:
+        // these keys. Durable ids in the same shape as production:
         assert_eq!(
             genesis_object_entity_id(
-                "rp-katagami-katagami-curation",
+                "rp-acme-acme-curation",
                 "5a7ae8c0224769fdfc27106329f21a8fcb7b8441"
             ),
-            "rp-katagami-katagami-curation-5a7ae8c0224769fdfc27106329f21a8fcb7b8441"
+            "rp-acme-acme-curation-5a7ae8c0224769fdfc27106329f21a8fcb7b8441"
         );
         // Already-canonical repository ids round-trip unchanged (idempotent).
         assert_eq!(
-            genesis_object_entity_id("rp-temperpaw-paw-foresight", "013224e7"),
-            "rp-temperpaw-paw-foresight-013224e7"
+            genesis_object_entity_id("rp-acme-agent-app", "013224e7"),
+            "rp-acme-agent-app-013224e7"
         );
         // Non-canonical input is sanitized: lowercased, non-alphanumeric runs
         // collapse to a single dash, leading/trailing dashes trimmed.
         assert_eq!(
-            genesis_object_entity_id("Katagami/Katagami Curation", "abc"),
-            "katagami-katagami-curation-abc"
+            genesis_object_entity_id("Acme/Acme Curation", "abc"),
+            "acme-acme-curation-abc"
         );
         // Empty repository id falls back to the `obj-` prefix, never bare sha.
         assert_eq!(genesis_object_entity_id("", "abc"), "obj-abc");
@@ -2384,10 +2383,10 @@ mod tests {
         assert_eq!(
             registry_git_url(
                 &registry::registry_for_test("https://genesis.example/"),
-                "temperpaw",
-                "paw-agent"
+                "acme",
+                "agent-app"
             ),
-            "https://genesis.example/temperpaw/paw-agent.git"
+            "https://genesis.example/acme/agent-app.git"
         );
     }
 
@@ -2395,8 +2394,8 @@ mod tests {
     fn registry_app_id_components_match_genesis_convention() {
         assert_eq!(sanitize_registry_id_component("Acme Labs"), "acme-labs");
         assert_eq!(
-            sanitize_registry_id_component("katagami_commons"),
-            "katagami-commons"
+            sanitize_registry_id_component("design_commons"),
+            "design-commons"
         );
         assert_eq!(sanitize_registry_id_component("../"), "item");
     }
@@ -2477,10 +2476,10 @@ mod tests {
             }
         );
         assert_eq!(
-            parse_dependency_ref("katagami/katagami-commons@abc123", "temperpaw"),
+            parse_dependency_ref("acme/design-commons@abc123", "default-owner"),
             DependencyRef {
-                owner: Some("katagami".to_string()),
-                name: "katagami-commons".to_string(),
+                owner: Some("acme".to_string()),
+                name: "design-commons".to_string(),
                 version_hash: Some("abc123".to_string()),
             }
         );

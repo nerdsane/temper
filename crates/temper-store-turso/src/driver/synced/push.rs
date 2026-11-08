@@ -20,7 +20,7 @@ const REMOTE_READ_TIMEOUT: Duration = Duration::from_secs(8);
 /// How long a push may take before a fresh request to the remote is timed
 /// beside it. A push is two requests to the remote, about 70 ms each on a new
 /// connection and less on the engine's kept one; one lost DNS answer adds 1 s
-/// (temper-cli's `RES_OPTIONS`). A push still waiting at 2 s is past both.
+/// where the resolver asks again after 1 s (`RES_OPTIONS=timeout:1`). A push still waiting at 2 s is past both.
 const SLOW_PUSH: Duration = Duration::from_secs(2);
 
 impl SyncCopy {

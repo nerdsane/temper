@@ -8,7 +8,7 @@ use super::{BootTimers, ServerState};
 
 impl ServerState {
     /// Start this server's background runtime. Every embedder (`temper serve`,
-    /// temperpaw) calls it once at boot, after its specs, Cedar policies and
+    /// an embedding server) calls it once at boot, after its specs, Cedar policies and
     /// WASM modules are loaded and its apps installed, and before requests can
     /// act on records: a timer re-armed here may fire at once.
     ///

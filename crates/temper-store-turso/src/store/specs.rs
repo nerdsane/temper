@@ -110,7 +110,7 @@ impl TursoEventStore {
     /// installs a prebuilt bundle it trusts (`TrustBundle`), which runs no check
     /// that could say otherwise, and an update rewrites the whole row with the
     /// tenant's schema in it: marking every row in a write of its own afterwards
-    /// took 72 commits and about 7 s on a Tensorlake drive (Arni Labs, 1 Nov 2026),
+    /// took 72 commits and about 7 s on a sandbox host's network drive (1 Nov 2026),
     /// against 74 ms for this one transaction.
     #[instrument(skip_all, fields(tenant, app_name, otel.name = "turso.upsert_specs_and_commit"))]
     pub async fn upsert_specs_and_commit(

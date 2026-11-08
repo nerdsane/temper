@@ -1697,7 +1697,7 @@ queue_timeout_seconds = 0
     /// Adversarial burst-load: 300 simultaneous dispatches against cap=2
     /// with a zero-second queue budget. Without admission's FIFO gate, the
     /// flood would hit the shared actor's 1000-deep mailbox and produce
-    /// `MailboxFull` errors (the 2026-04-17 Katagami incident pattern).
+    /// `MailboxFull` errors (an incident pattern seen in production).
     /// With admission active, the contract is: every caller is either
     /// `Granted` (served quickly through the cap) or `Deferred` (503
     /// Retry-After). **Zero 500s under any circumstances.**

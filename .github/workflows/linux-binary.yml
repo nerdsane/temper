@@ -1,10 +1,11 @@
 name: Linux binary
 
 # Every merge to main builds the Linux temper binary once and publishes it with its sha256, so a deploy never builds
-# Temper itself (Katagami's people's Tempers run it from a Tensorlake image and a shared binaries volume). The release
+# Temper itself (a deployment can run it from a prebuilt image and a shared binaries volume). The release
 # is `main-<first 12 of the commit>`, a prerelease holding `temper-x86_64-linux` and `temper-x86_64-linux.sha256`.
-# When KATAGAMI_DISPATCH_TOKEN is set, it then tells arni-labs/katagami (repository_dispatch `temper-binary`), whose
-# image workflow builds the sandbox image from it and publishes a KatagamiRelease.
+# When the repository variable BINARY_DISPATCH_REPO and the secret BINARY_DISPATCH_TOKEN are both set, it then sends
+# that repository a repository_dispatch `temper-binary` with the tag, sha256 and commit, so a downstream image build
+# can start from it.
 #
 # Built on ubuntu-22.04 so its glibc is no newer than the sandbox image's. Tagged releases stay with release.yml.
 #
@@ -99,7 +100,7 @@ jobs:
       - name: Build temper
         if: steps.kept.outputs.kept != 'true'
         # /version answers this build-time commit (temper-platform router.rs); without it a
-        # people's Temper, which has no Railway variable, says "unknown".
+        # Temper started without a commit in its environment says "unknown".
         env:
           GIT_COMMIT_SHA: ${{ github.sha }}
         run: cargo build --release --locked -p temper-cli
@@ -172,17 +173,18 @@ jobs:
           echo "### temper $tag" >> "$GITHUB_STEP_SUMMARY"
           echo "sha256 \`$sha\`" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Tell Katagami
+      - name: Tell the downstream repository
         env:
-          GH_TOKEN: ${{ secrets.KATAGAMI_DISPATCH_TOKEN }}
+          GH_TOKEN: ${{ secrets.BINARY_DISPATCH_TOKEN }}
+          REPO: ${{ vars.BINARY_DISPATCH_REPO }}
         run: |
           set -euo pipefail
-          if [ -z "$GH_TOKEN" ]; then
-            echo "KATAGAMI_DISPATCH_TOKEN is not set: Katagami is not told (its image workflow can be run by hand with this tag)"
+          if [ -z "$GH_TOKEN" ] || [ -z "$REPO" ]; then
+            echo "BINARY_DISPATCH_REPO or BINARY_DISPATCH_TOKEN is not set: no repository is told"
             exit 0
           fi
-          gh api repos/arni-labs/katagami/dispatches -f event_type=temper-binary \
+          gh api "repos/$REPO/dispatches" -f event_type=temper-binary \
             -f "client_payload[tag]=${{ steps.publish.outputs.tag }}" \
             -f "client_payload[sha256]=${{ steps.publish.outputs.sha256 }}" \
             -f "client_payload[commit]=$GITHUB_SHA"
-          echo "told arni-labs/katagami: temper-binary ${{ steps.publish.outputs.tag }}"
+          echo "told $REPO: temper-binary ${{ steps.publish.outputs.tag }}"

@@ -210,7 +210,7 @@ mod tests {
         let mut during_reaction = crate::SecurityContext::from_verified_jwt(
             "hook-1",
             crate::PrincipalKind::Agent,
-            Some("katagami-hook"),
+            Some("app-hook"),
             Some("owner-1"),
             None,
             None,

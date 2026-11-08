@@ -945,7 +945,7 @@ fn resource_role_cannot_satisfy_role_scoped_permit() {
 /// self-declare admin at the ingress.
 #[test]
 fn operator_credential_can_manage_identity_entities_under_app_policies() {
-    // An app bundle like katagami's: permits for its own entities, nothing for
+    // An app bundle like a downstream one: permits for its own entities, nothing for
     // TrustedIssuer or PrincipalGeneration.
     let engine = AuthzEngine::new("permit(principal, action, resource is DesignLanguage);")
         .expect("policy parses");
@@ -1164,7 +1164,7 @@ fn http_endpoint_routes_are_managed_only_by_the_platform() {
     for action in [
         "create", "Create", "update", "delete", "Pause", "Resume", "Delete",
     ] {
-        // The known writers: the platform, temper-git's admin and Katagami's
+        // The known writers: the platform, temper-git's admin and a control plane's
         // route script with the operator key.
         assert!(
             manage(&SecurityContext::system(), action),

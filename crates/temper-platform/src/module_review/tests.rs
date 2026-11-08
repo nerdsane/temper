@@ -340,8 +340,68 @@ async fn test_jev_down_is_tried_at_most_twice() {
 
 #[test]
 fn test_jev_debug_never_shows_the_key() {
-    let judge = JevJudge::new(Some("secret-key-value".to_string()));
+    let judge = JevJudge::at(
+        "https://judge.example.test",
+        Some("secret-key-value".to_string()),
+    );
     assert!(!format!("{judge:?}").contains("secret-key-value"));
+}
+
+/// Serialises the tests that change the Jev settings in the process environment.
+static JEV_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Runs `check` with the Jev settings set to `url` and `key` (`None` removes one), then removes both.
+fn with_jev_env(url: Option<&str>, key: Option<&str>, check: impl FnOnce()) {
+    let _guard = JEV_ENV
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (name, value) in [(JEV_URL_ENV, url), (JEV_KEY_ENV, key)] {
+        // SAFETY: the lock above keeps the tests that touch these settings from running at once.
+        unsafe {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
+    check();
+    // SAFETY: as above.
+    unsafe {
+        std::env::remove_var(JEV_URL_ENV);
+        std::env::remove_var(JEV_KEY_ENV);
+    }
+}
+
+#[test]
+fn test_jev_from_env_needs_both_url_and_key() {
+    with_jev_env(
+        Some("https://judge.example.test"),
+        Some("secret-key-value"),
+        || {
+            let judge = JevJudge::from_env().expect("both settings name a judge");
+            let shown = format!("{judge:?}");
+            assert!(shown.contains("https://judge.example.test"), "{shown}");
+            assert!(!shown.contains("secret-key-value"), "{shown}");
+        },
+    );
+    // Without both settings there is no judge: the kernel names no endpoint of its own.
+    let missing = [
+        (None, None),
+        (None, Some("secret-key-value")),
+        (Some("https://judge.example.test"), None),
+        (Some(""), Some("secret-key-value")),
+        (Some("https://judge.example.test"), Some("")),
+        (Some("  "), Some("secret-key-value")),
+        (Some("https://judge.example.test"), Some(" \t")),
+    ];
+    for (url, key) in missing {
+        with_jev_env(url, key, || {
+            assert!(
+                JevJudge::from_env().is_none(),
+                "url {url:?} and key {key:?} must give no judge"
+            )
+        });
+    }
 }
 
 /// An Order whose `Advance` runs `steps`: `Advanced` takes its answer, `Ship` leaves the state it reaches, `Archive`

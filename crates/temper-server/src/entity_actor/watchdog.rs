@@ -2,7 +2,7 @@
 //!
 //! A record handles one message at a time, so a message that never finishes
 //! leaves every later ask to time out, and nothing in the log said why: on
-//! 3 Nov 2026 KatagamiApp a6s03ju74p52 on the main Temper answered no ask for
+//! 3 Nov 2026 one record on a busy server answered no ask for
 //! 19 minutes, and no line named the await it was in. While a message (or the
 //! record's start) runs past the dispatch layer's ask deadline, this logs
 //! `handler still running` with the record, the message, the await it is in

@@ -154,7 +154,7 @@ const POLICY: &str = r#"
 permit(principal, action, resource);
 
 forbid(principal, action, resource)
-when { principal has agent_type && principal.agent_type == "katagami-hook" }
+when { principal has agent_type && principal.agent_type == "app-hook" }
 unless {
   action == Action::"Watch" || action == Action::"Heard" || action == Action::"Nudge" ||
   (context has via && context.via != "request")
@@ -169,12 +169,12 @@ unless {
 "#;
 
 /// The webhook's principal, as a verified GitHub delivery reaches the app:
-/// an agent of type `katagami-hook` acting for the app's owner.
+/// an agent of type `app-hook` acting for the app's owner.
 fn hook() -> SecurityContext {
     SecurityContext::from_verified_jwt(
         "hook-github",
         PrincipalKind::Agent,
-        Some("katagami-hook"),
+        Some("app-hook"),
         Some("owner-1"),
         None,
         None,

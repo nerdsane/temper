@@ -13,7 +13,7 @@
 //! keeps the sandbox awake. The sandbox is suspended exactly 900 s plus up to
 //! a minute after the last request; the process is told it stays awake 600 s.
 //! The control plane wakes it for the due time it was told last, the wake
-//! landing from a second before that time (katagami-control asks a second
+//! landing from a second before that time (a control plane asks a second
 //! early) to three after, and fails up to three report sends in a row. Half its wakes are `GET /healthz`, which
 //! `temper serve` answers outside the kernel's routes, so the process never
 //! sees them as inbound; the other half reach the kernel's routes.

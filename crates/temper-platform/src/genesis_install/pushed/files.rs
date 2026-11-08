@@ -148,29 +148,3 @@ pub(super) fn materialize(
     let _ = staging.keep();
     Ok(())
 }
-
-/// Every regular file under `dir`, by its `/`-separated path relative to it.
-pub(super) fn read_tree(dir: &Path) -> std::io::Result<BTreeMap<String, Vec<u8>>> {
-    let mut tree = BTreeMap::new();
-    let mut dirs = vec![dir.to_path_buf()];
-    while let Some(next) = dirs.pop() {
-        for entry in std::fs::read_dir(&next)? {
-            let path = entry?.path();
-            let metadata = std::fs::metadata(&path)?;
-            if metadata.is_dir() {
-                dirs.push(path);
-                continue;
-            }
-            if !metadata.is_file() {
-                continue;
-            }
-            let relative = path.strip_prefix(dir).map_err(std::io::Error::other)?;
-            let parts: Vec<String> = relative
-                .components()
-                .map(|part| part.as_os_str().to_string_lossy().into_owned())
-                .collect();
-            tree.insert(parts.join("/"), std::fs::read(&path)?);
-        }
-    }
-    Ok(tree)
-}

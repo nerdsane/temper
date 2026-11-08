@@ -9,7 +9,7 @@ use super::{EntityState, ProcessedIdempotencyKey, StatusClock};
 
 /// One past move as a module reads it: what moved and when, without what it was told. A move's parameters are as big as
 /// what it was sent, and a record's recent events keep them, so a record that takes large values holds many copies of
-/// them. A Katagami app's module was handed 17 MB for an app of 642 KB, and ran out of memory (1 Nov 2026).
+/// them. An app's module was handed 17 MB for an app of 642 KB, and ran out of memory.
 #[derive(Serialize)]
 struct ModuleEvent<'a> {
     action: &'a str,

@@ -1,7 +1,8 @@
-//! Jev (TypeSafe System One): one bounded call per state, a textual state and typed questions answered together.
+//! Jev: one bounded call per state, a textual state and typed questions answered together.
+//! Configured by [`JEV_URL_ENV`] and [`JEV_KEY_ENV`]; with either unset, no module is reviewed.
 //!
-//! Jev answers in well under three seconds nearly every time (Katagami, 2026-09: fit calls averaged 0.3 s, the slowest
-//! of 169 took 2.1 s), but now and then a request hangs until its timeout. So a second request starts when the first
+//! Jev answers in well under three seconds nearly every time (2026-09: fit calls averaged 0.3 s, the slowest of 169
+//! took 2.1 s), but now and then a request hangs until its timeout. So a second request starts when the first
 //! fails in a way worth retrying or has not answered after [`HEDGE`], and the first answer wins: at most two requests,
 //! never a retry loop. Out of credit (HTTP 402) is said, not retried.
 
@@ -12,9 +13,6 @@ use serde::{Deserialize, Serialize};
 
 use super::types::{Answer, Answers, Judge, JudgeUnavailable, Question};
 
-/// TypeSafe's System One endpoint.
-pub const JEV_URL: &str = "https://api.typesafe.ai/v1/systemone";
-
 /// The Jev release the item statements were calibrated on (26 Oct 2026).
 pub const JEV_MODEL: &str = "jev-1.13.0";
 
@@ -24,15 +22,15 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// When a second request starts if the first has not answered: past the slowest answer seen.
 const HEDGE: Duration = Duration::from_millis(2_500);
 
-/// Where Jev is asked, when not TypeSafe itself: a route that holds the key and its budgets, so a Temper that should
-/// not hold the key (one in a person's sandbox) asks with a pass of its own.
+/// Where Jev is asked: the service's own endpoint, or a route that holds the key and its budgets, so a Temper that
+/// should not hold the key asks with a pass of its own.
 pub const JEV_URL_ENV: &str = "TEMPER_JEV_URL";
 
-/// The bearer sent to [`JEV_URL_ENV`]: TypeSafe's key, or the route's pass. Never logged.
+/// The bearer sent to [`JEV_URL_ENV`]: the service's key, or the route's pass. Never logged.
 pub const JEV_KEY_ENV: &str = "TEMPER_JEV_KEY";
 
 /// The module an ask is about (its kernel name), sent beside it so a route that holds the key can refuse an ask about
-/// a module the app does not have. TypeSafe ignores it.
+/// a module the app does not have. The service itself ignores it.
 pub const MODULE_HEADER: &str = "temper-review-module";
 
 /// Jev over HTTPS. The key is never logged or shown: `Debug` leaves it out.
@@ -60,7 +58,7 @@ struct Request<'a> {
     questions: &'a BTreeMap<String, Question>,
 }
 
-/// TypeSafe's answer, or a route's in TypeSafe's shape: the route says the tokens at the top (`input_tokens`).
+/// The service's answer, or a route's in the same shape: the route says the tokens at the top (`input_tokens`).
 #[derive(Deserialize)]
 struct Response {
     answers: BTreeMap<String, Answer>,
@@ -83,23 +81,20 @@ enum Sent {
 }
 
 impl JevJudge {
-    /// Jev at its endpoint with `key`; no key makes every ask [`JudgeUnavailable::NoKey`].
-    pub fn new(key: Option<String>) -> Self {
-        Self::at(JEV_URL, key)
+    /// Jev as the process environment names it ([`JEV_URL_ENV`], [`JEV_KEY_ENV`]), or `None` when either is unset:
+    /// there is no default endpoint.
+    pub fn from_env() -> Option<Self> {
+        let set = |name: &str| {
+            std::env::var(name)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        };
+        let url = set(JEV_URL_ENV)?;
+        let key = set(JEV_KEY_ENV)?;
+        Some(Self::at(&url, Some(key)))
     }
 
-    /// Jev as the process environment names it ([`JEV_URL_ENV`], [`JEV_KEY_ENV`]).
-    pub fn from_env() -> Self {
-        let url = std::env::var(JEV_URL_ENV)
-            .ok()
-            .filter(|url| !url.trim().is_empty());
-        Self::at(
-            url.as_deref().unwrap_or(JEV_URL),
-            std::env::var(JEV_KEY_ENV).ok(),
-        )
-    }
-
-    /// Jev at another endpoint, for tests that stand a stub server in for the service.
+    /// Jev at `url` with `key`; no key makes every ask [`JudgeUnavailable::NoKey`].
     pub fn at(url: &str, key: Option<String>) -> Self {
         Self {
             client: reqwest::Client::builder()

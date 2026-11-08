@@ -82,9 +82,8 @@ fn is_backend_not_supported_error(err: &str) -> bool {
 
 /// The condition a PUT's `If-None-Match` or `If-Match` header puts on the write.
 ///
-/// The agreed API contract in PR #114 restricts conditional PUTs to
-/// `If-None-Match: *` and one strong `If-Match` etag:
-/// https://github.com/arni-labs/temper/pull/114
+/// The agreed API contract restricts conditional PUTs to
+/// `If-None-Match: *` and one strong `If-Match` etag.
 /// That contract explicitly chooses 400 for `If-Match: *`, etag lists, weak
 /// etags, non-wildcard `If-None-Match`, and both headers together. These checks
 /// preserve that settled restriction; supporting existence or version-set

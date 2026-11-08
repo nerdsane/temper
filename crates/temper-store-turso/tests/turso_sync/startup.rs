@@ -8,7 +8,7 @@ use temper_store_turso::{CopyState, SyncCopy, TursoEventStore};
 
 #[tokio::test]
 async fn a_start_without_the_remote_serves_reads_and_confirms_writes_once_it_answers() {
-    // Rita, 17 Oct: "Read only". Whether the file is behind the remote can be
+    // Read only until the remote answers. Whether the file is behind the remote can be
     // told only by asking the remote, so until then nothing is pushed.
     let Some(server) = SyncServer::start() else {
         return;
