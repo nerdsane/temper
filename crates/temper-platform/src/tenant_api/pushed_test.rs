@@ -2,7 +2,7 @@
 //! push may name, and what a refused or installed push leaves behind. A push
 //! is the installer's second source, so these also hold the shared install:
 //! checks before anything changes, rollback to the version before, records,
-//! boot restore and adoption.
+//! and boot restore.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -17,7 +17,7 @@ use temper_server::platform_store::{
 };
 use tower::ServiceExt;
 
-use crate::genesis_install::{adopt_catalog_app, restore_genesis_registry_cache_roots};
+use crate::genesis_install::restore_genesis_registry_cache_roots;
 use crate::os_apps::{app_files_seam, tenant_os_app};
 use crate::state::PlatformState;
 use crate::tenant_api::tenant_api_router;
@@ -531,49 +531,6 @@ fn the_install_and_waiting_lines_read_as_the_control_plane_reads_them() {
         crate::os_apps::stored_line("shop", "default"),
         "  App 'shop' serves its stored specs for 'default'; no files to install"
     );
-}
-
-/// An app served from the boot catalog is adopted as its first pushed
-/// version; pushing the same files again is that version, and a changed push
-/// replaces it.
-#[tokio::test]
-async fn an_adopted_catalog_version_is_the_version_a_push_builds_on() {
-    let tenant = unique_tenant("adopted");
-    let server = server(&tenant);
-    let digest = adopt_catalog_app(&server.state, &tenant, APP)
-        .await
-        .expect("adopt")
-        .expect("the catalog holds the app");
-    let adopted = record(&server.ps, &tenant).await.expect("recorded");
-    assert_eq!(adopted.source_kind, "pushed");
-    assert_eq!(adopted.app_ref, format!("pushed/{APP}@{digest}"));
-    assert_eq!(
-        adopt_catalog_app(&server.state, &tenant, APP)
-            .await
-            .expect("adopt again"),
-        None,
-        "an app with a pushed version is not adopted again"
-    );
-
-    let (status, body) = send(
-        &server.state,
-        push(&tenant, serde_json::json!({ "files": app_files() })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["digest"], digest.as_str());
-
-    let (status, body) = send(
-        &server.state,
-        push(
-            &tenant,
-            serde_json::json!({ "files": with_comment("pushed after adoption") }),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_ne!(body["digest"], digest.as_str());
-    assert!(resolved_spec(&tenant).contains("# pushed after adoption"));
 }
 
 /// The app's files with one spec in the old syntax this kernel refuses: a

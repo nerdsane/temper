@@ -221,29 +221,6 @@ async fn replay(
                         "{}",
                         temper_platform::os_apps::installed_line(&app_name, &tenant, &result)
                     );
-                    // The version just served from the boot catalog becomes the
-                    // app's first pushed version when it has none, so every
-                    // later boot serves it until the next push, whatever the
-                    // catalog holds then (see `adopt_catalog_app`).
-                    match temper_platform::genesis_install::adopt_catalog_app(
-                        state, &tenant, &app_name,
-                    )
-                    .await
-                    {
-                        Ok(Some(digest)) => tracing::info!(
-                            tenant = %tenant,
-                            app = %app_name,
-                            %digest,
-                            "adopted the boot catalog's version as the first pushed version"
-                        ),
-                        Ok(None) => {}
-                        Err(error) => tracing::error!(
-                            tenant = %tenant,
-                            app = %app_name,
-                            %error,
-                            "the served version was not adopted; the next boot serves the catalog's"
-                        ),
-                    }
                 }
             },
             Err(e) => {

@@ -43,8 +43,7 @@ use cache_paths::{
 use closure_install::CheckRefused;
 use object_lookup::load_genesis_object;
 pub use pushed::{
-    PushMode, PushRefused, PushedFile, PushedInstall, adopt_catalog_app, install_pushed_app,
-    pushed_install_recorded,
+    PushMode, PushRefused, PushedFile, PushedInstall, install_pushed_app, pushed_install_recorded,
 };
 pub(crate) use registry::configured_registry;
 use registry::{RegistryUrl, registry_client};
