@@ -25,5 +25,8 @@ futures-util = "0.3"
 # HTTP server (webhook listener for reply delivery)
 axum = { workspace = true }
 
+# Capability token generation (per-run CSPRNG secret for the reply callback)
+uuid = { workspace = true }
+
 # Logging
 tracing = { workspace = true }
