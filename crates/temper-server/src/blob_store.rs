@@ -19,6 +19,7 @@ mod keys;
 mod limits;
 mod local;
 mod raw_ingest;
+mod s3_transport;
 mod state;
 mod streaming;
 pub(crate) use endpoint::{LocalInternalBlobEndpoint, is_local_internal_blob_endpoint};
@@ -31,6 +32,7 @@ pub(crate) use raw_ingest::BlobIngestProgressPolicy;
 pub(crate) use raw_ingest::{
     BlobIngestAdmissionError, BlobIngestBudget, BlobStageError, MAX_RAW_BLOB_BYTES,
 };
+use s3_transport::S3Http;
 pub(crate) use streaming::BlobReadBounded;
 pub use streaming::{BlobObjectStream, BlobStreamRead, decode_json_base64_stream};
 
@@ -53,7 +55,7 @@ struct S3BlobStore {
     key_prefix: Option<String>,
     access_key: Option<String>,
     secret_key: Option<String>,
-    client: reqwest::Client,
+    http: S3Http,
 }
 
 impl BlobStore {
@@ -81,10 +83,27 @@ impl BlobStore {
                 key_prefix,
                 access_key,
                 secret_key,
-                client: reqwest::Client::builder()
-                    .connect_timeout(std::time::Duration::from_secs(10))
-                    .build()
-                    .expect("static blob HTTP client configuration must be valid"), // ci-ok: static reqwest builder options
+                http: S3Http::production(),
+            }),
+        }
+    }
+
+    /// S3 store whose GET retry budget is short enough for a unit test.
+    #[cfg(test)]
+    pub(crate) fn s3_with_get_retry(
+        endpoint: impl Into<String>,
+        attempt_timeout: Duration,
+        total_budget: Duration,
+    ) -> Self {
+        Self {
+            staging_root: PathBuf::from("target/blob-get-retry-test"),
+            backend: BlobStoreBackend::S3(S3BlobStore {
+                endpoint: endpoint.into().trim_end_matches('/').to_string(),
+                bucket: "bucket".to_string(),
+                key_prefix: None,
+                access_key: None,
+                secret_key: None,
+                http: S3Http::for_test(attempt_timeout, 2, total_budget),
             }),
         }
     }
@@ -214,7 +233,7 @@ impl S3BlobStore {
         let span = blob_transport_span(operation, "s3", request_bytes);
         let result = async {
             let url = self.object_url(key);
-            let mut request = self.client.put(&url).body(body.to_vec());
+            let mut request = self.http.client().put(&url).body(body.to_vec());
             let headers = self
                 .signed_headers(Method::PUT, &url)
                 .map_err(BlobTransportError::message)?;
@@ -279,7 +298,8 @@ impl S3BlobStore {
         let result = async {
             let url = self.object_url(key);
             let mut request = self
-                .client
+                .http
+                .client()
                 .put(&url)
                 .header(reqwest::header::CONTENT_LENGTH, content_len)
                 .timeout(raw_ingest::BLOB_BACKEND_OPERATION_TIMEOUT)
@@ -341,37 +361,7 @@ impl S3BlobStore {
     async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
         let started_at = Instant::now(); // determinism-ok: production blob transport metric only
         let span = blob_transport_span("get", "s3", 0);
-        let result = async {
-            let url = self.object_url(key);
-            let mut request = self.client.get(&url);
-            let headers = self
-                .signed_headers(Method::GET, &url)
-                .map_err(BlobTransportError::message)?;
-            for (header_name, header_value) in &headers {
-                request = request.header(header_name, header_value);
-            }
-
-            let response = request.send().await.map_err(|e| {
-                BlobTransportError::message(format!("blob GET request failed for '{key}': {e}"))
-            })?;
-            let status = response.status();
-            if status == StatusCode::NOT_FOUND {
-                return Ok((status, None));
-            }
-            if !status.is_success() {
-                return Err(BlobTransportError::status(
-                    format!("blob GET failed for '{key}' with HTTP {status}"),
-                    status,
-                ));
-            }
-
-            let bytes = response.bytes().await.map_err(|e| {
-                BlobTransportError::message(format!("blob GET body read failed for '{key}': {e}"))
-            })?;
-            Ok((status, Some(bytes.to_vec())))
-        }
-        .instrument(span.clone())
-        .await;
+        let result = self.read_object(key).instrument(span.clone()).await;
 
         match result {
             Ok((status, bytes)) => {
@@ -410,7 +400,7 @@ impl S3BlobStore {
         let span = blob_transport_span("head", "s3", 0);
         let result = async {
             let url = self.object_url(key);
-            let mut request = self.client.head(&url);
+            let mut request = self.http.client().head(&url);
             let headers = self
                 .signed_headers(Method::HEAD, &url)
                 .map_err(BlobTransportError::message)?;

@@ -201,7 +201,11 @@ impl S3BlobStore {
         let span = blob_transport_span("get_bounded", "s3", 0);
         let result = async {
             let url = self.object_url(key);
-            let mut request = self.client.get(&url).timeout(BLOB_BOUNDED_READ_TIMEOUT);
+            let mut request = self
+                .http
+                .client()
+                .get(&url)
+                .timeout(BLOB_BOUNDED_READ_TIMEOUT);
             let headers = self
                 .signed_headers(Method::GET, &url)
                 .map_err(BlobTransportError::message)?;
@@ -290,7 +294,11 @@ impl S3BlobStore {
 
     async fn get_stream(&self, key: &str, max_bytes: u64) -> Result<BlobStreamRead, String> {
         let url = self.object_url(key);
-        let mut request = self.client.get(&url).timeout(BLOB_STREAM_TOTAL_TIMEOUT);
+        let mut request = self
+            .http
+            .client()
+            .get(&url)
+            .timeout(BLOB_STREAM_TOTAL_TIMEOUT);
         let headers = self.signed_headers(Method::GET, &url)?;
         for (header_name, header_value) in &headers {
             request = request.header(header_name, header_value);
